@@ -1,0 +1,586 @@
+// `1git stash`: git's grammar and git's bytes over `GIT_stash`, the library the
+// TUI uses. See docs/GIT-COMPAT.md for what differs.
+
+import io;
+import os;
+import fs;
+import core.GIT_gitcommon;
+import core.GIT_gitdiffcmd;
+import core.GIT_gitstatus;
+import core.GIT_gitstore;
+import core.GIT_gitwrite;
+import core.GIT_refs;
+import core.GIT_revparse;
+import core.GIT_object;
+import diff.GIT_stash;
+
+str usage_text() {
+    return "usage: git stash list [<log-options>]\n   or: git stash show [-u | --include-untracked | --only-untracked] [<diff-options>] [<stash>]\n   or: git stash drop [-q | --quiet] [<stash>]\n   or: git stash pop [--index] [-q | --quiet] [<stash>]\n   or: git stash apply [--index] [-q | --quiet] [<stash>]\n   or: git stash branch <branchname> [<stash>]\n   or: git stash [push [-p | --patch] [-S | --staged] [-k | --[no-]keep-index] [-q | --quiet]\n          [-u | --include-untracked] [-a | --all] [(-m | --message) <message>]\n          [--pathspec-from-file=<file> [--pathspec-file-nul]]\n          [--] [<pathspec>...]]\n   or: git stash save [-p | --patch] [-S | --staged] [-k | --[no-]keep-index] [-q | --quiet]\n          [-u | --include-untracked] [-a | --all] [<message>]\n   or: git stash clear";
+}
+
+/// `stash@{n}`, a bare number, or nothing (0); -1 when it is something else.
+int stash_number(str word) {
+    if (word == "") {
+        return 0;
+    }
+    str digits = word;
+    if (word.starts_with("stash@{") && word.ends_with("}")) {
+        digits = word.substr(7, word.size() - 1);
+    } else if (word.starts_with("refs/stash@{") && word.ends_with("}")) {
+        digits = word.substr(12, word.size() - 1);
+    }
+    if (digits == "") {
+        return -1;
+    }
+    for (int i in 0 .. digits.size()) {
+        int byte = digits.byte_at(i);
+        if (byte < '0' || byte > '9') {
+            return -1;
+        }
+    }
+    match (digits.parse_int()) {
+        case Some(int found): {
+            return found;
+        }
+        case None: {
+            return -1;
+        }
+    }
+}
+
+/// How git names the entry in "Dropped ...": as typed, else `refs/stash@{n}`.
+str stash_label(str word, int number) {
+    if (word.starts_with("stash@{") || word.starts_with("refs/stash@{")) {
+        return word;
+    }
+    return "refs/stash@{" + number.to_str() + "}";
+}
+
+int no_entries() {
+    io.eprint("error: No stash entries found.");
+    return 1;
+}
+
+/// An entry that is not there: nothing at all on the stack is 1, a number past
+/// the end is git's `fatal: log for 'stash' only has N entries`.
+int missing_status(GIT_gitcommon.Ctx ctx, str spec) {
+    match (GIT_stash.list(ctx.gitdir)) {
+        case Ok(List<GIT_stash.Item> items): {
+            if (items.size() == 0) {
+                return no_entries();
+            }
+            str name = "refs/stash";
+            if (spec.starts_with("stash@{")) {
+                name = "stash";
+            }
+            io.eprint("fatal: log for '" + name + "' only has " + items.size().to_str() + " entries");
+            return 128;
+        }
+        case Err(_): {
+            return no_entries();
+        }
+    }
+}
+
+void print_status(str start, List<str> overrides) {
+    GIT_gitstatus.run(start, overrides, []);
+}
+
+pub int run_stash(str start, List<str> overrides, List<str> argv) {
+    GIT_gitcommon.Opened opened = GIT_gitcommon.open(start, overrides);
+    if (!opened.ok) {
+        return 128;
+    }
+    GIT_gitcommon.Ctx ctx = opened.ctx;
+    str sub = "push";
+    List<str> rest = argv;
+    bool is_legacy_save = false;
+    if (argv.size() > 0 && !argv[0].starts_with("-")) {
+        sub = argv[0];
+        rest = argv.slice(1, argv.size());
+        if (sub == "save") {
+            sub = "push";
+            is_legacy_save = true;
+        }
+    }
+    List<str> known = ["push", "list", "show", "apply", "pop", "drop", "clear", "branch", "create", "store"];
+    bool is_known = false;
+    for (str name in known) {
+        if (name == sub) {
+            is_known = true;
+        }
+    }
+    if (!is_known) {
+        io.eprint("error: unknown subcommand: " + sub);
+        io.eprint(usage_text());
+        return 128;
+    }
+    if (sub == "push") {
+        return run_push(ctx, start, rest, is_legacy_save);
+    }
+    if (sub == "create") {
+        return run_create(ctx, rest);
+    }
+    if (sub == "store") {
+        return run_store(ctx, rest);
+    }
+    if (sub == "list") {
+        return run_list(ctx, start, overrides, rest);
+    }
+    if (sub == "show") {
+        return run_show(ctx, start, overrides, rest);
+    }
+    if (sub == "clear") {
+        return run_clear(ctx, rest);
+    }
+    if (sub == "branch") {
+        return run_branch(ctx, start, overrides, rest);
+    }
+    return run_entry(ctx, start, overrides, sub, rest);
+}
+
+int run_push(GIT_gitcommon.Ctx ctx, str start, List<str> argv, bool is_legacy_save) {
+    GIT_gitwrite.Opts opts = GIT_gitwrite.parse_opts(argv, ["-p --patch", "-S --staged", "-k --keep-index", "-u --include-untracked", "-a --all", "-q --quiet", "-m --message=", "--pathspec-from-file=", "--pathspec-file-nul"]);
+    int bad = GIT_gitwrite.check_opts(opts, usage_text());
+    if (bad >= 0) {
+        return bad;
+    }
+    if (opts.flag("patch") || opts.flag("staged") || opts.flag("all") || opts.has("pathspec-from-file")) {
+        io.eprint("error: this option of stash is not in 1git (see docs/GIT-COMPAT.md)");
+        return 129;
+    }
+    str message = opts.value("message", "");
+    List<str> words = opts.paths();
+    if (is_legacy_save) {
+        message = words.join(" ");
+    } else if (words.size() > 0) {
+        io.eprint("error: stash push with a pathspec is not in 1git (see docs/GIT-COMPAT.md)");
+        return 129;
+    }
+    bool is_quiet = opts.flag("quiet");
+    match (GIT_stash.push(ctx.gitdir, ctx.root, should_include_untracked: opts.flag("include-untracked"), should_keep_index: opts.flag("keep-index"), message: message)) {
+        case Ok(GIT_stash.Saved saved): {
+            if (!is_quiet) {
+                GIT_gitwrite.say("Saved working directory and index state " + saved.message);
+            }
+            return 0;
+        }
+        case Err(GIT_stash.Error error): {
+            return report_push_kind(kind_of(error), error, ctx.gitdir);
+        }
+    }
+}
+
+/// The error's own name, for a caller that wants one case.
+str kind_of(GIT_stash.Error error) {
+    match (error) {
+        case NoInitialCommit: {
+            return "NoInitialCommit";
+        }
+        case NoChanges: {
+            return "NoChanges";
+        }
+        case Unmerged: {
+            return "Unmerged";
+        }
+        case NoSuchStash: {
+            return "NoSuchStash";
+        }
+        case NotAStash: {
+            return "NotAStash";
+        }
+        case Conflicts(_): {
+            return "Conflicts";
+        }
+        case Dirty: {
+            return "Dirty";
+        }
+        case UntrackedExists(_): {
+            return "UntrackedExists";
+        }
+        case IndexConflict(_): {
+            return "IndexConflict";
+        }
+        case BranchExists: {
+            return "BranchExists";
+        }
+        case BadName: {
+            return "BadName";
+        }
+        case Io(_): {
+            return "Io";
+        }
+        case Failed(_): {
+            return "Failed";
+        }
+    }
+}
+
+int report_push_error(GIT_stash.Error error) {
+    str kind = kind_of(error);
+    return report_push_kind(kind, error, "");
+}
+
+int report_push_kind(str kind, GIT_stash.Error error, str gitdir) {
+    if (kind == "NoChanges") {
+        GIT_gitwrite.say("No local changes to save");
+        return 0;
+    }
+    if (kind == "NoInitialCommit") {
+        io.eprint("You do not have the initial commit yet");
+        return 1;
+    }
+    if (kind == "Unmerged") {
+        if (gitdir != "") {
+            GIT_gitwrite.IdxLoaded loaded = GIT_gitwrite.read_idx(gitdir);
+            if (loaded.ok) {
+                for (str path in loaded.idx.conflicted_paths()) {
+                    GIT_gitwrite.say(path + ": needs merge");
+                }
+            }
+        }
+        io.eprint("error: could not write index");
+        return 1;
+    }
+    io.eprint("fatal: " + error.to_str());
+    return 128;
+}
+
+int run_create(GIT_gitcommon.Ctx ctx, List<str> argv) {
+    str message = argv.join(" ");
+    match (GIT_stash.push(ctx.gitdir, ctx.root, message: message, should_store: false, is_create_only: true)) {
+        case Ok(GIT_stash.Saved saved): {
+            GIT_gitwrite.say(saved.commit);
+            return 0;
+        }
+        case Err(GIT_stash.Error error): {
+            if (kind_of(error) == "NoChanges") {
+                return 0;
+            }
+            return report_push_error(error);
+        }
+    }
+}
+
+int run_store(GIT_gitcommon.Ctx ctx, List<str> argv) {
+    GIT_gitwrite.Opts opts = GIT_gitwrite.parse_opts(argv, ["-m --message=", "-q --quiet"]);
+    int bad = GIT_gitwrite.check_opts(opts, usage_text());
+    if (bad >= 0) {
+        return bad;
+    }
+    List<str> words = opts.paths();
+    if (words.size() != 1) {
+        io.eprint(usage_text());
+        return 129;
+    }
+    str id = "";
+    match (GIT_revparse.commit_id(ctx.gitdir, words[0])) {
+        case Ok(str found): {
+            id = found;
+        }
+        case Err(_): {
+            io.eprint("fatal: not a valid object name: '" + words[0] + "'");
+            return 1;
+        }
+    }
+    str text = opts.value("message", "Created via \"git stash store\".");
+    match (GIT_stash.put_on_stack(ctx.gitdir, id, text)) {
+        case Ok(_): {
+            return 0;
+        }
+        case Err(GIT_stash.Error error): {
+            io.eprint("fatal: " + error.to_str());
+            return 1;
+        }
+    }
+}
+
+int run_list(GIT_gitcommon.Ctx ctx, str start, List<str> overrides, List<str> argv) {
+    if (argv.size() > 0) {
+        io.eprint("error: stash list options are not in 1git (see docs/GIT-COMPAT.md)");
+        return 129;
+    }
+    for (str label in GIT_stash.labels(ctx.gitdir)) {
+        GIT_gitwrite.say(label);
+    }
+    return 0;
+}
+
+int run_clear(GIT_gitcommon.Ctx ctx, List<str> argv) {
+    if (argv.size() > 0) {
+        io.eprint("error: git stash clear with arguments is unimplemented");
+        return 1;
+    }
+    match (GIT_stash.clear(ctx.gitdir)) {
+        case Ok(_): {
+            return 0;
+        }
+        case Err(_): {
+            io.eprint("error: failed to clear the stash");
+            return 1;
+        }
+    }
+}
+
+int run_show(GIT_gitcommon.Ctx ctx, str start, List<str> overrides, List<str> argv) {
+    List<str> diff_args = [];
+    str spec = "";
+    bool is_untracked = false;
+    bool is_only_untracked = false;
+    bool is_patch = false;
+    bool is_stat = false;
+    bool is_format_given = false;
+    for (str word in argv) {
+        if (word == "-u" || word == "--include-untracked") {
+            is_untracked = true;
+        } else if (word == "--only-untracked") {
+            is_only_untracked = true;
+        } else if (word == "--no-include-untracked") {
+            is_untracked = false;
+        } else if (word.starts_with("-")) {
+            if (word == "-p" || word == "--patch" || word == "-u") {
+                is_patch = true;
+            }
+            if (word == "--stat") {
+                is_stat = true;
+            }
+            is_format_given = true;
+            diff_args.push(word);
+        } else {
+            spec = word;
+        }
+    }
+    int number = stash_number(spec);
+    if (number < 0) {
+        io.eprint("fatal: '" + spec + "' is not a stash-like commit");
+        return 128;
+    }
+    str id = "";
+    match (GIT_stash.resolve(ctx.gitdir, number)) {
+        case Ok(str found): {
+            id = found;
+        }
+        case Err(_): {
+            return missing_status(ctx, spec);
+        }
+    }
+    if (!is_format_given) {
+        bool want_patch = GIT_gitcommon.cfg_bool(ctx, "stash", "", "showPatch", false);
+        bool want_stat = GIT_gitcommon.cfg_bool(ctx, "stash", "", "showStat", true);
+        if (want_patch) {
+            diff_args.push("-p");
+            is_patch = true;
+        }
+        if (want_stat) {
+            diff_args.push("--stat");
+            is_stat = true;
+        }
+        if (!want_patch && !want_stat) {
+            return 0;
+        }
+        if (GIT_gitcommon.cfg_bool(ctx, "stash", "", "showIncludeUntracked", false)) {
+            is_untracked = true;
+        }
+    }
+    match (GIT_stash.parts_of(ctx.gitdir, id)) {
+        case Ok(GIT_stash.Parts parts): {
+            if ((is_untracked || is_only_untracked) && parts.untracked_tree != "") {
+                // the untracked files are a tree of their own: lay it over W
+                GIT_gitstore.Store store = GIT_gitstore.open(ctx.gitdir);
+                Map<str, GIT_gitwrite.Flat> files = {};
+                if (!is_only_untracked) {
+                    GIT_gitwrite.flatten(store, parts.tree, "", files);
+                }
+                GIT_gitwrite.flatten(store, parts.untracked_tree, "", files);
+                str over = GIT_gitwrite.build_tree(ctx.gitdir, files);
+                str under = parts.base_tree;
+                if (is_only_untracked) {
+                    Map<str, GIT_gitwrite.Flat> nothing = {};
+                    under = GIT_gitwrite.build_tree(ctx.gitdir, nothing);
+                }
+                List<str> args = diff_args;
+                args.push(under);
+                args.push(over);
+                return GIT_gitdiffcmd.run(start, overrides, args);
+            }
+            if (is_only_untracked) {
+                return 0;
+            }
+            List<str> args = diff_args;
+            args.push(parts.base);
+            args.push(id);
+            return GIT_gitdiffcmd.run(start, overrides, args);
+        }
+        case Err(GIT_stash.Error error): {
+            io.eprint("fatal: " + error.to_str());
+            return 128;
+        }
+    }
+}
+
+int run_branch(GIT_gitcommon.Ctx ctx, str start, List<str> overrides, List<str> argv) {
+    if (argv.size() == 0 || argv.size() > 2) {
+        io.eprint("error: No branch name specified");
+        return 1;
+    }
+    str spec = "";
+    if (argv.size() == 2) {
+        spec = argv[1];
+    }
+    int number = stash_number(spec);
+    if (number < 0) {
+        io.eprint("fatal: '" + spec + "' is not a stash-like commit");
+        return 128;
+    }
+    str id = "";
+    match (GIT_stash.resolve(ctx.gitdir, number)) {
+        case Ok(str found): {
+            id = found;
+        }
+        case Err(_): {
+            return missing_status(ctx, spec);
+        }
+    }
+    match (GIT_stash.branch(ctx.gitdir, ctx.root, argv[0], number)) {
+        case Ok(_): {
+            io.eprint("Switched to a new branch '" + argv[0] + "'");
+            if (did_restore_index(ctx, id)) {
+                log_head_reset(ctx.gitdir);
+            }
+            print_status(start, overrides);
+            GIT_gitwrite.say("Dropped " + stash_label(spec, number) + " (" + id + ")");
+            return 0;
+        }
+        case Err(GIT_stash.Error error): {
+            if (kind_of(error) == "Conflicts") {
+                print_status(start, overrides);
+                GIT_gitwrite.say("The stash entry is kept in case you need it again.");
+                return 1;
+            }
+            io.eprint("fatal: " + error.to_str());
+            return 1;
+        }
+    }
+}
+
+/// apply, pop and drop
+int run_entry(GIT_gitcommon.Ctx ctx, str start, List<str> overrides, str sub, List<str> argv) {
+    GIT_gitwrite.Opts opts = GIT_gitwrite.parse_opts(argv, ["--index", "-q --quiet"]);
+    int bad = GIT_gitwrite.check_opts(opts, usage_text());
+    if (bad >= 0) {
+        return bad;
+    }
+    if (sub == "drop" && opts.flag("index")) {
+        io.eprint(usage_text());
+        return 129;
+    }
+    List<str> words = opts.paths();
+    if (words.size() > 1) {
+        io.eprint("error: Too many revisions specified: " + words.join(" "));
+        return 1;
+    }
+    str spec = "";
+    if (words.size() == 1) {
+        spec = words[0];
+    }
+    int number = stash_number(spec);
+    if (number < 0) {
+        io.eprint("error: " + spec + " is not a valid reference");
+        return 1;
+    }
+    bool is_quiet = opts.flag("quiet");
+    str id = "";
+    match (GIT_stash.resolve(ctx.gitdir, number)) {
+        case Ok(str found): {
+            id = found;
+        }
+        case Err(_): {
+            return missing_status(ctx, spec);
+        }
+    }
+    if (sub == "drop") {
+        match (GIT_stash.drop(ctx.gitdir, number)) {
+            case Ok(_): {
+                if (!is_quiet) {
+                    GIT_gitwrite.say("Dropped " + stash_label(spec, number) + " (" + id + ")");
+                }
+                return 0;
+            }
+            case Err(GIT_stash.Error error): {
+                io.eprint("error: " + error.to_str());
+                return 1;
+            }
+        }
+    }
+    List<str> report = [];
+    match (GIT_stash.apply_reporting(ctx.gitdir, ctx.root, id, opts.flag("index"), report)) {
+        case Ok(_): {
+            for (str line in report) {
+                GIT_gitwrite.say(line);
+            }
+            if (opts.flag("index") && did_restore_index(ctx, id)) {
+                log_head_reset(ctx.gitdir);
+            }
+            if (!is_quiet) {
+                print_status(start, overrides);
+            }
+            if (sub == "pop") {
+                match (GIT_stash.drop(ctx.gitdir, number)) {
+                    case Ok(_): {
+                        if (!is_quiet) {
+                            GIT_gitwrite.say("Dropped " + stash_label(spec, number) + " (" + id + ")");
+                        }
+                    }
+                    case Err(GIT_stash.Error error): {
+                        io.eprint("error: " + error.to_str());
+                        return 1;
+                    }
+                }
+            }
+            return 0;
+        }
+        case Err(GIT_stash.Error error): {
+            for (str line in report) {
+                GIT_gitwrite.say(line);
+            }
+            if (kind_of(error) != "Conflicts") {
+                io.eprint("error: " + error.to_str());
+            }
+            if (!is_quiet) {
+                print_status(start, overrides);
+            }
+            if (sub == "pop") {
+                GIT_gitwrite.say("The stash entry is kept in case you need it again.");
+            }
+            return 1;
+        }
+    }
+}
+
+/// git's `apply --index` leaves a `reset: moving to HEAD` line in HEAD's log
+/// (when HEAD is a branch) whenever it had an index to restore.
+bool did_restore_index(GIT_gitcommon.Ctx ctx, str id) {
+    match (GIT_stash.parts_of(ctx.gitdir, id)) {
+        case Ok(GIT_stash.Parts parts): {
+            return parts.index_tree != parts.base_tree;
+        }
+        case Err(_): {
+            return false;
+        }
+    }
+}
+
+void log_head_reset(str gitdir) {
+    GIT_gitwrite.HeadInfo head = GIT_gitwrite.read_head(gitdir);
+    if (head.is_born) {
+        match (GIT_refs.update(gitdir, "ORIG_HEAD", head.id, Option<str>.None, reflog_message: "updating ORIG_HEAD")) {
+            case Ok(_): {
+            }
+            case Err(_): {
+            }
+        }
+    }
+    if (head.is_born && !head.is_detached) {
+        GIT_gitwrite.log_only(gitdir, "HEAD", head.id, head.id, "reset: moving to HEAD");
+    }
+}
