@@ -633,7 +633,7 @@ GIT_object.Commit stash_commit(str tree, List<str> parents, GIT_object.Ident aut
 /// Save the work tree and index as a stash: the W commit goes on `refs/stash`
 /// and its reflog, and the work tree and index go back to HEAD (the index and
 /// files of the index with `keep_index`). See the module header.
-pub Result<Saved, Error> push(str gitdir, str worktree, bool should_include_untracked = false, bool should_keep_index = false, str message = "", bool should_store = true) {
+pub Result<Saved, Error> push(str gitdir, str worktree, bool should_include_untracked = false, bool should_keep_index = false, str message = "", bool should_store = true, bool is_create_only = false) {
     HeadInfo head = head_info(gitdir)?;
     GIT_index.Index index = read_index(gitdir)?;
     for (GIT_index.Entry entry in index.entries) {
@@ -729,13 +729,33 @@ pub Result<Saved, Error> push(str gitdir, str worktree, bool should_include_untr
     if (should_store) {
         put_on_stack(gitdir, commit, text)?;
     }
+    if (is_create_only) {
+        // `git stash create`: the commit and nothing else
+        return Result<Saved, Error>.Ok(Saved(commit, text, untracked.size()));
+    }
     // the work tree and index back to HEAD
     if (should_store) {
-        match (GIT_checkout.reset_hard(gitdir, worktree, head.id)) {
+        // git runs `reset --hard` here: the files and index go back, ORIG_HEAD is
+        // written and HEAD's log (only) says `reset: moving to HEAD`
+        match (GIT_checkout.reset_files(gitdir, worktree, head.id)) {
             case Ok: {
             }
             case Err(GIT_checkout.Error error): {
                 return Result<Saved, Error>.Err(from_checkout(error));
+            }
+        }
+        match (GIT_refs.update(gitdir, "ORIG_HEAD", head.id, Option<str>.None, reflog_message: "updating ORIG_HEAD")) {
+            case Ok: {
+            }
+            case Err(_): {
+            }
+        }
+        if (head.branch != "(no branch)" && GIT_reflog.should_log(gitdir, "HEAD")) {
+            match (GIT_reflog.append(gitdir, "HEAD", head.id, head.id, GIT_reflog.default_ident(gitdir), "reset: moving to HEAD")) {
+                case Ok: {
+                }
+                case Err(_): {
+                }
             }
         }
     } else {
@@ -886,6 +906,11 @@ Result<bool, Error> delete_ref(str gitdir, str name) {
         }
     }
     return Result<bool, Error>.Ok(true);
+}
+
+/// `git stash clear`: `refs/stash` and its log.
+pub Result<bool, Error> clear(str gitdir) {
+    return delete_ref(gitdir, STASH_REF);
 }
 
 // --- the stack -------------------------------------------------------------------
@@ -1125,6 +1150,23 @@ pub Result<GIT_merge.Applied, Error> stash_apply_merge(str gitdir, str worktree,
     return Result<GIT_merge.Applied, Error>.Ok(merged);
 }
 
+/// An entry for a file the index now matches: its real stat, so git does not
+/// have to look at the content again.
+GIT_index.Entry stat_entry(str worktree, str path, int mode, str id) {
+    if (mode >> 12 != 0o12) {
+        match (fs.stat(fs.join(worktree, path))) {
+            case Ok(fs.Stat stat): {
+                GIT_index.Entry entry = GIT_index.from_stat(path.to_bytes(), stat, false, id);
+                entry.mode = mode;
+                return entry;
+            }
+            case Err(_): {
+            }
+        }
+    }
+    return unknown_stat(mode, id, path.to_bytes());
+}
+
 GIT_index.Entry unknown_stat(int mode, str id, bytes path) {
     return GIT_index.Entry(0, 0, 0, 0, 0, 0, mode, 0, 0, -1, id, 0, false, path);
 }
@@ -1203,8 +1245,19 @@ Result<GIT_merge.TreeMerge, Error> merge_index_changes(str gitdir, Parts parts, 
     }
 }
 
+GIT_index.Entry opaque_blank() {
+    return GIT_index.Entry(0, 0, 0, 0, 0, 0, 0, 0, 0, -1, "", 0, false, "".to_bytes());
+}
+
 /// `git stash apply` for the stash commit `id`. See the module header.
 pub Result<Applied, Error> apply(str gitdir, str worktree, str id, bool should_restore_index = false) {
+    List<str> sink = [];
+    return apply_reporting(gitdir, worktree, id, should_restore_index, sink);
+}
+
+/// `apply`, appending the merge's own report (`Auto-merging f`, `CONFLICT
+/// (content): ...`, what git prints on standard output) to `sink`.
+pub Result<Applied, Error> apply_reporting(str gitdir, str worktree, str id, bool should_restore_index, List<str> sink) {
     Parts parts = parts_of(gitdir, id)?;
     GIT_index.Index index = read_index(gitdir)?;
     for (GIT_index.Entry entry in index.entries) {
@@ -1226,10 +1279,13 @@ pub Result<Applied, Error> apply(str gitdir, str worktree, str id, bool should_r
         untracked_paths.push(path);
     }
     untracked_paths.sort();
+    // git applies the tracked changes and restores the untracked files that are
+    // not in the way; the first one that is makes the apply fail at the end
+    List<str> blocked = [];
     for (str path in untracked_paths) {
         str full = fs.join(worktree, path);
         if (fs.is_present(full) || fs.is_link(full)) {
-            return Result<Applied, Error>.Err(Error.UntrackedExists(path));
+            blocked.push(path);
         }
     }
     List<str> touched = GIT_udiff.changed_paths(base, work);
@@ -1290,9 +1346,14 @@ pub Result<Applied, Error> apply(str gitdir, str worktree, str id, bool should_r
     int removed = 0;
     if (needs_merge) {
         GIT_merge.Applied merged = stash_apply_merge(gitdir, worktree, parts)?;
+        for (str line in merged.messages) {
+            sink.push(line);
+        }
         if (merged.conflicts.size() > 0) {
             for (str path in untracked_paths) {
-                write_untracked(gitdir, worktree, path, leaf_at(untracked, path))?;
+                if (!blocked.contains(path)) {
+                    write_untracked(gitdir, worktree, path, leaf_at(untracked, path))?;
+                }
             }
             List<str> conflicted = [];
             for (GIT_merge.Conflicted each in merged.conflicts) {
@@ -1364,8 +1425,10 @@ pub Result<Applied, Error> apply(str gitdir, str worktree, str id, bool should_r
         GIT_udiff.Leaf now = leaf_at(work, path);
         if (want.id == "") {
             final_entries.remove(path);
-        } else if (final_entries.contains(path) && is_same_leaf(want, now)) {
+        } else if (final_entries.contains(path) && final_entries.get(path).or(opaque_blank()).id == want.id && is_same_leaf(want, now)) {
             continue;
+        } else if (is_same_leaf(want, now)) {
+            final_entries.set(path, stat_entry(worktree, path, want.mode, want.id));
         } else {
             final_entries.set(path, unknown_stat(want.mode, want.id, path.to_bytes()));
         }
@@ -1377,7 +1440,12 @@ pub Result<Applied, Error> apply(str gitdir, str worktree, str id, bool should_r
     rebuilt.sort();
     write_index(gitdir, GIT_index.Index(rebuilt))?;
     for (str path in untracked_paths) {
-        write_untracked(gitdir, worktree, path, leaf_at(untracked, path))?;
+        if (!blocked.contains(path)) {
+            write_untracked(gitdir, worktree, path, leaf_at(untracked, path))?;
+        }
+    }
+    if (blocked.size() > 0) {
+        return Result<Applied, Error>.Err(Error.UntrackedExists(blocked[0]));
     }
     return Result<Applied, Error>.Ok(Applied(written, removed, untracked_paths.size()));
 }

@@ -1,0 +1,344 @@
+#!/usr/bin/env bash
+# The history-changing commands of `1git` (`stash`, `cherry-pick`, `revert`,
+# `merge`, `rebase`, `clean`, `worktree`) beside the real `git`, on pairs of
+# identical disposable repositories. Same method as compare_write.sh.
+#
+#   bash scripts/compare_merge.sh <1git-binary> [workdir] [group...]
+#
+# groups: stash pick revert merge rebase clean worktree  (default: all)
+#
+# A case is a fixture (built twice from the same script with fixed identities
+# and dates, so every object id is the same in both), some setup lines run
+# with real git on both, and the commands under test, written as `G <args>`:
+# `G` is real `git` in the first repository and `1git` in the second. After
+# the commands both repositories are dumped and compared:
+#
+#   - stdout and exit status of every `G` call;
+#   - `ls-files -s`, `for-each-ref`, HEAD, `status --porcelain=v2 -b`, the
+#     reflogs (bytes: identity and dates are fixed), the work tree (names,
+#     modes, content hashes), and the state files (MERGE_HEAD, ...);
+#   - `git fsck --strict` clean on ours.
+#
+# Because dates and identities are fixed, a commit or tree id that differs is
+# a real difference: the object ids must be IDENTICAL. stderr is not compared
+# (hints are shorter on purpose); its presence is shown on a failure.
+set -uo pipefail
+
+OURS=$(cd "$(dirname "$1")" && pwd)/$(basename "$1")
+HERE=$(cd "$(dirname "$0")" && pwd)
+WORK=${2:-$(mktemp -d)}
+mkdir -p "$WORK"
+WORK=$(cd "$WORK" && pwd)
+shift
+shift || true
+GROUPS_WANTED=${*:-stash pick revert merge rebase clean worktree}
+
+# shellcheck source=fixtures_look.sh
+. "$HERE/fixtures_look.sh"
+export GIT_AUTHOR_DATE="1800000000 +0000" GIT_COMMITTER_DATE="1800000000 +0000"
+umask 022
+
+bad=0
+n=0
+
+# --- fixtures -------------------------------------------------------------------------
+
+fx_base() {
+    new_repo "$1"
+    printf 'alpha\nbeta\ngamma\n' > a.txt
+    printf 'one\n' > b.txt
+    mkdir -p dir/sub
+    printf 'cee\n' > dir/c.txt
+    printf 'dee\n' > dir/sub/d.txt
+    printf 'with space\n' > 'sp ace.txt'
+    printf 'uni\n' > 'ünï.txt'
+    printf '#!/bin/sh\necho hi\n' > exec.sh
+    chmod +x exec.sh
+    g add -A
+    commit_at "first"
+    printf 'alpha\nbeta\ngamma\ndelta\n' > a.txt
+    printf 'one\ntwo\n' > b.txt
+    g add -A
+    commit_at "second"
+    g branch side HEAD~1
+}
+
+fx_empty() {
+    new_repo "$1"
+    printf 'x\n' > x.txt
+}
+
+fx_linear() {
+    new_repo "$1"
+    printf 'l1\n' > f.txt
+    g add f.txt
+    commit_at "c1"
+    printf 'l1\nl2\n' > f.txt
+    g commit -qam "c2"
+    printf 'l1\nl2\nl3\n' > f.txt
+    tick
+    g commit -qam "c3"
+    g branch topic
+    g tag v1 HEAD~1
+}
+
+# a merge with a conflict left in the index
+fx_conflict() {
+    new_repo "$1"
+    printf 'base\nline\n' > f.txt
+    printf 'keep\n' > k.txt
+    g add -A
+    commit_at "base"
+    g checkout -q -b other
+    printf 'base\nother\n' > f.txt
+    g commit -qam "other side"
+    g checkout -q main
+    printf 'base\nmain\n' > f.txt
+    g commit -qam "main side"
+    g merge other > /dev/null 2>&1
+    true
+}
+
+fx_merge() {
+    new_repo "$1"
+    printf 'a\n' > a.txt
+    g add -A
+    commit_at "root"
+    g checkout -q -b feat
+    printf 'f\n' > f.txt
+    g add -A
+    commit_at "feat work"
+    g checkout -q main
+    printf 'm\n' > m.txt
+    g add -A
+    commit_at "main work"
+    tick
+    g merge --no-ff -m "merge feat" feat > /dev/null
+}
+
+fx_crlf() {
+    new_repo "$1"
+    printf 'one\r\ntwo\r\n' > win.txt
+    printf 'mixed\r\nline\n' > mix.txt
+    g add -A
+    commit_at "crlf"
+}
+
+fx_unicode() {
+    new_repo "$1"
+    mkdir -p 'dír ectory'
+    printf 'x\n' > 'dír ectory/fïle one.txt'
+    printf 'y\n' > 'tab	name.txt' 2>/dev/null || printf 'y\n' > 'tab_name.txt'
+    printf 'z\n' > '日本語.txt'
+    g add -A
+    commit_at "unicode"
+}
+
+fx_ignore() {
+    new_repo "$1"
+    printf '*.log\nbuild/\n' > .gitignore
+    printf 'k\n' > keep.txt
+    g add -A
+    commit_at "ignore"
+    printf 'l\n' > debug.log
+    mkdir -p build
+    printf 'o\n' > build/out.o
+    printf 'n\n' > new.txt
+}
+
+# symlinks: one tracked, and a branch that points it elsewhere
+fx_links() {
+    new_repo "$1"
+    printf 'target\n' > real.txt
+    ln -s real.txt link
+    ln -s missing dangling
+    mkdir sub
+    ln -s ../real.txt sub/up
+    g add -A
+    commit_at "links"
+    g switch -q -c other
+    rm link
+    ln -s sub/up link
+    g add -A
+    commit_at "retarget"
+    g switch -q main
+}
+
+# a cherry-pick stopped on a conflict
+fx_pick() {
+    new_repo "$1"
+    printf 'base\nline\n' > f.txt
+    g add -A
+    commit_at "base"
+    g checkout -q -b other
+    printf 'base\nother\n' > f.txt
+    printf 'new\n' > o.txt
+    g add -A
+    GIT_AUTHOR_NAME="Pick Author" GIT_AUTHOR_EMAIL="pick@example.com" GIT_AUTHOR_DATE="1600000000 +0300" g commit -qm "other side"
+    g checkout -q main
+    printf 'base\nmain\n' > f.txt
+    g commit -qam "main side"
+    g cherry-pick other > /dev/null 2>&1
+    true
+}
+
+# --- harness ---
+# --- the harness ----------------------------------------------------------------------
+
+dump_state() {
+    local repo=$1
+    (
+        cd "$repo" || exit 1
+        echo "## ls-files -s"
+        git ls-files -s
+        echo "## refs"
+        git for-each-ref
+        echo "## HEAD"
+        git symbolic-ref -q HEAD || true
+        git rev-parse -q --verify HEAD || true
+        echo "## config"
+        git config --local --list | grep -vi '^gerrit\.' | LC_ALL=C sort
+        echo "## status"
+        git status --porcelain=v2 -b 2>&1
+        echo "## logs"
+        if [ -d .git/logs ]; then
+            (cd .git/logs && find . -type f | LC_ALL=C sort | while read -r f; do echo "-- $f"; cat "$f"; done)
+        fi
+        echo "## state"
+        for f in MERGE_HEAD MERGE_MSG MERGE_MODE ORIG_HEAD CHERRY_PICK_HEAD REVERT_HEAD SQUASH_MSG AUTO_MERGE; do
+            if [ -e ".git/$f" ]; then echo "$f: $(cat ".git/$f" | head -c 400 | tr '\n' '|')"; fi
+        done
+        for d in sequencer rebase-merge rebase-apply worktrees; do
+            if [ -d ".git/$d" ]; then
+                (cd ".git/$d" && find . -type f | LC_ALL=C sort | while read -r f; do echo "$d/$f: $(head -c 600 "$f" | tr '\n' '|')"; done)
+            fi
+        done
+        echo "## unmerged"
+        git ls-files -u
+        echo "## tree"
+        find . -path ./.git -prune -o \( -type f -o -type l \) -print | LC_ALL=C sort | while read -r f; do
+            if [ -L "$f" ]; then echo "L $f"; else printf '%s %s %s\n' "$(stat -c %a "$f")" "$f" "$(sha1sum < "$f" | cut -c1-12)"; fi
+        done
+        echo "## dirs"
+        find . -path ./.git -prune -o -type d -print | LC_ALL=C sort
+    )
+}
+
+run_side() {
+    local bin=$1 repo=$2 fixture=$3 setup=$4 script=$5 log=$6
+    : > "$log"
+    : > "$log.err"
+    (
+        cd "$WORK" || exit 1
+        "$fixture" "$repo" > /dev/null 2>&1
+        cd "$repo" || exit 1
+        export GIT_AUTHOR_DATE="1800000000 +0000" GIT_COMMITTER_DATE="1800000000 +0000"
+        # which program the case runs: some cases differ per side (the Gerrit
+        # hook is installed for git, `gerrit.createChangeId` set for 1git)
+        if [ "$bin" = git ]; then SIDE=git; else SIDE=ours; fi
+        export SIDE
+        mkdir -p .git/hooks
+        eval "$setup" > /dev/null 2>&1
+        T=$(mktemp -d)
+        G() {
+            "$bin" "$@" > "$T/o" 2> "$T/e"
+            local rc=$?
+            { local shown="$*"; printf '$ %s\n' "${shown//--change-id /}"; cat "$T/o"; printf 'rc=%s\n' "$rc"; } >> "$log"
+            { printf '$ %s\n' "$*"; cat "$T/e"; } >> "$log.err"
+            return $rc
+        }
+        eval "$script"
+        rm -rf "$T"
+    ) > /dev/null 2>&1
+}
+
+# case_ <label> <fixture> <setup> <script>
+case_() {
+    local label=$1 fixture=$2 setup=$3 script=$4
+    # ONLY=<text> runs the cases whose label contains it; SHOW=1 prints both
+    # logs and state dumps of each
+    if [ -n "${ONLY:-}" ] && [[ "$label" != *"$ONLY"* ]]; then
+        return 0
+    fi
+    n=$((n + 1))
+    local a=$WORK/case-a b=$WORK/case-b
+    rm -rf "$a" "$b"
+    run_side git "$a" "$fixture" "$setup" "$script" "$WORK/log-a"
+    run_side "$OURS" "$b" "$fixture" "$setup" "$script" "$WORK/log-b"
+    dump_state "$a" > "$WORK/dump-a" 2>&1
+    dump_state "$b" > "$WORK/dump-b" 2>&1
+    local failed=0
+    if [ -n "${SHOW:-}" ]; then
+        echo "=== $label"; echo "--- git"; cat "$WORK/log-a"; echo "--- ours"; cat "$WORK/log-b"; echo "--- stderr"; cat "$WORK/log-b.err"
+    fi
+    if ! cmp -s "$WORK/log-a" "$WORK/log-b"; then
+        failed=1
+        printf '\033[31mdiffer\033[0m %s: output\n' "$label"
+        diff "$WORK/log-a" "$WORK/log-b" | head -14 | sed 's/^/       /'
+        head -6 "$WORK/log-b.err" | sed 's/^/       stderr: /'
+    fi
+    if ! cmp -s "$WORK/dump-a" "$WORK/dump-b"; then
+        failed=1
+        printf '\033[31mdiffer\033[0m %s: state\n' "$label"
+        diff "$WORK/dump-a" "$WORK/dump-b" | head -14 | sed 's/^/       /'
+    fi
+    local fsck
+    fsck=$(cd "$b" && git fsck --strict --no-dangling 2>&1)
+    if [ -n "$fsck" ] && echo "$fsck" | grep -qiE 'error|missing|broken|invalid|corrupt'; then
+        failed=1
+        printf '\033[31mfsck\033[0m %s: %s\n' "$label" "$(echo "$fsck" | head -3)"
+    fi
+    [ $failed -eq 0 ] || bad=$((bad + 1))
+}
+
+wanted() {
+    case " $GROUPS_WANTED " in *" $1 "*) return 0 ;; esac
+    return 1
+}
+
+
+# --- more fixtures --------------------------------------------------------------------
+
+# a repository with an index change, a work tree change and untracked files
+fx_dirty() {
+    fx_base "$1"
+    echo staged >> b.txt
+    git add b.txt
+    echo local >> a.txt
+    echo untracked > un.txt
+    mkdir -p dir/nu
+    echo n > dir/nu/n.txt
+}
+
+# two branches that change different files, and one that conflicts with main
+fx_branches() {
+    new_repo "$1"
+    printf 'l1\nl2\nl3\nl4\nl5\nl6\nl7\nl8\n' > f.txt
+    printf 'g1\n' > g.txt
+    printf 'h1\n' > h.txt
+    g add -A
+    commit_at "base"
+    g checkout -q -b feat
+    printf 'l1\nl2\nl3\nl4\nl5\nl6\nl7\nF8\n' > f.txt
+    g commit -qam "feat: f"
+    printf 'g1\ng2\n' > g.txt
+    g commit -qam "feat: g"
+    printf 'new\n' > n.txt
+    g add n.txt
+    commit_at "feat: n"
+    g checkout -q -b clash main
+    printf 'l1\nl2\nl3\nl4\nl5\nl6\nl7\nC8\n' > f.txt
+    g commit -qam "clash: f"
+    g checkout -q main
+    printf 'H1\nh1\n' > h.txt
+    g commit -qam "main: h"
+    printf 'l0\nl1\nl2\nl3\nl4\nl5\nl6\nl7\nl8\n' > f.txt
+    g commit -qam "main: f top"
+}
+
+for more in "$HERE"/compare_merge_*.sh; do
+    . "$more"
+done
+
+echo "compare_merge: $n cases, $bad differing"
+[ $bad -eq 0 ]
