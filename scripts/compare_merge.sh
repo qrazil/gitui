@@ -368,6 +368,48 @@ fx_mergecommit() {
     g checkout -q main
 }
 
+# a base with a few sizeable files, to rename and edit on two branches
+fx_rbase() {
+    new_repo "$1"
+    mkdir -p src docs
+    for i in 1 2 3 4 5 6 7 8 9 10 11 12; do printf 'line %s of alpha\n' "$i"; done > a.txt
+    for i in 1 2 3 4 5 6 7 8 9 10 11 12; do printf 'line %s of beta\n' "$i"; done > b.txt
+    for i in 1 2 3 4 5 6 7 8; do printf 'src %s\n' "$i"; done > src/s.txt
+    for i in 1 2 3 4 5 6 7 8; do printf 'doc %s\n' "$i"; done > docs/d.txt
+    printf 'keep\n' > k.txt
+    g add -A
+    commit_at "base"
+    g branch other
+}
+
+# a criss-cross history: a and b merged into each other, then both move on
+fx_crisscross() {
+    new_repo "$1"
+    printf 'one\ntwo\nthree\nfour\nfive\n' > f.txt
+    printf 'g\n' > g.txt
+    g add -A
+    commit_at "root"
+    g checkout -q -b a
+    printf 'one\nA2\nthree\nfour\nfive\n' > f.txt
+    g commit -qam "a: two"
+    g checkout -q -b b main
+    printf 'one\ntwo\nthree\nfour\nB5\n' > f.txt
+    g commit -qam "b: five"
+    g checkout -q a
+    tick
+    g merge -q --no-edit b > /dev/null
+    git branch a1
+    g checkout -q b
+    tick
+    g merge -q --no-edit a1~1 > /dev/null 2>&1
+    printf 'g\nG2\n' > g.txt
+    g commit -qam "b: g"
+    g checkout -q a
+    printf 'one\nA2\nthree\nA4\nB5\n' > f.txt
+    g commit -qam "a: four"
+    g branch -q -D a1
+}
+
 for more in "$HERE"/compare_merge_*.sh; do
     . "$more"
 done

@@ -1,0 +1,569 @@
+// `1git merge`: git's grammar and git's bytes over `GIT_merge`, the library
+// the TUI uses. See docs/GIT-COMPAT.md for what differs.
+
+import io;
+import os;
+import fs;
+import term;
+import core.GIT_object;
+import core.GIT_refs;
+import core.GIT_graph;
+import core.GIT_revparse;
+import core.GIT_gitcommon;
+import core.GIT_gitcommit;
+import core.GIT_gitdiffcmd;
+import core.GIT_gitstatus;
+import core.GIT_gitstore;
+import core.GIT_gitwrite;
+import diff.GIT_diff3;
+import diff.GIT_gitdiff;
+import diff.GIT_merge;
+
+str usage_text() {
+    return "usage: git merge [<options>] [<commit>...]\n   or: git merge --abort\n   or: git merge --continue";
+}
+
+/// The diffstat and the `create mode` lines `git merge` prints after a
+/// fast-forward or a merge commit: `old` to `new` with renames.
+void print_stat(GIT_gitcommon.Ctx ctx, str old_tree, str new_tree) {
+    GIT_gitstore.Store store = GIT_gitstore.open(ctx.gitdir);
+    GIT_gitdiff.DOpts dopts = GIT_gitdiff.DOpts();
+    dopts.is_stat = true;
+    dopts.is_summary = true;
+    dopts.is_renames = true;
+    List<GIT_gitdiff.Item> items = GIT_gitdiff.tree_vs_tree(store, old_tree, new_tree, []);
+    items = GIT_gitdiffcmd.finish_items(store, items, dopts);
+    GIT_gitwrite.put_bytes(GIT_gitdiff.render(store, items, dopts));
+}
+
+str tree_of(str gitdir, str commit) {
+    match (GIT_merge.tree_of(gitdir, commit)) {
+        case Ok(str tree): {
+            return tree;
+        }
+        case Err(_): {
+            return "";
+        }
+    }
+}
+
+/// `SQUASH_MSG`: `Squashed commit of the following:` and each commit of
+/// `ours..theirs` in `git log` form, newest first.
+str squash_text(GIT_gitcommon.Ctx ctx, str ours, str theirs) {
+    List<str> ids = [];
+    match (GIT_graph.rev_list(ctx.gitdir, [theirs], [ours])) {
+        case Ok(List<str> found): {
+            ids = found;
+        }
+        case Err(_): {
+        }
+    }
+    str text = "Squashed commit of the following:\n";
+    for (str id in ids) {
+        match (GIT_merge.read_commit(ctx.gitdir, id)) {
+            case Ok(GIT_object.Commit commit): {
+                if (commit.parents.size() > 1) {
+                    continue;
+                }
+                text = text + "\ncommit " + id + "\n";
+                text = text + "Author: " + GIT_gitwrite.ident_text(commit.author) + "\n";
+                text = text + "Date:   " + GIT_gitcommon.format_date(commit.author.when, commit.author.offset, "default") + "\n\n";
+                str body = commit.message.utf8().or("");
+                for (str line in body_lines(body)) {
+                    text = text + "    " + line + "\n";
+                }
+            }
+            case Err(_): {
+            }
+        }
+    }
+    return text;
+}
+
+/// A message's lines, without the final newline's empty remainder.
+List<str> body_lines(str body) {
+    List<str> lines = body.split("\n");
+    if (lines.size() > 0 && lines[lines.size() - 1] == "") {
+        lines.pop();
+    }
+    return lines;
+}
+
+/// The error as git says it; returns the exit status.
+int report_error(GIT_gitcommon.Ctx ctx, GIT_merge.Error error) {
+    match (error) {
+        case NotFastForward: {
+            io.eprint("fatal: Not possible to fast-forward, aborting.");
+            return 128;
+        }
+        case InProgress: {
+            io.eprint("fatal: You have not concluded your merge (MERGE_HEAD exists).");
+            io.eprint("Please, commit your changes before you merge.");
+            return 128;
+        }
+        case Unrelated: {
+            io.eprint("fatal: refusing to merge unrelated histories");
+            return 128;
+        }
+        case LocalChanges(List<str> paths): {
+            return dirty(paths);
+        }
+        case IndexDirty(List<str> paths): {
+            return dirty(paths);
+        }
+        case Unborn: {
+            io.eprint("fatal: HEAD is not a commit: nothing to merge into");
+            return 128;
+        }
+        case NotACommit: {
+            io.eprint("fatal: not something we can merge");
+            return 128;
+        }
+        case NoMerge: {
+            io.eprint("fatal: There is no merge in progress (MERGE_HEAD missing).");
+            return 128;
+        }
+        case UnmergedPaths: {
+            io.eprint("error: Committing is not possible because you have unmerged files.");
+            io.eprint("fatal: Exiting because of an unresolved conflict.");
+            return 128;
+        }
+        case EmptyMessage: {
+            io.eprint("Aborting commit due to empty commit message.");
+            return 1;
+        }
+        case Unsupported(_): {
+            io.eprint("fatal: " + error.to_str());
+            return 128;
+        }
+        case Io: {
+            io.eprint("fatal: " + error.to_str());
+            return 128;
+        }
+        case Object(_): {
+            io.eprint("fatal: " + error.to_str());
+            return 128;
+        }
+        case Index(_): {
+            io.eprint("fatal: " + error.to_str());
+            return 128;
+        }
+        case Refs(_): {
+            io.eprint("fatal: " + error.to_str());
+            return 128;
+        }
+        case Graph(_): {
+            io.eprint("fatal: " + error.to_str());
+            return 128;
+        }
+        case Checkout(_): {
+            io.eprint("error: " + error.to_str());
+            return 2;
+        }
+        case Status(_): {
+            io.eprint("fatal: " + error.to_str());
+            return 128;
+        }
+        case Rev(_): {
+            io.eprint("fatal: " + error.to_str());
+            return 128;
+        }
+    }
+}
+
+int dirty(List<str> paths) {
+    io.eprint("error: Your local changes to the following files would be overwritten by merge:");
+    for (str path in paths) {
+        io.eprint("\t" + path);
+    }
+    io.eprint("Please commit your changes or stash them before you merge.");
+    io.eprint("Aborting");
+    return 2;
+}
+
+/// A short name for the merged thing in messages: the typed word.
+pub int run_merge(str start, List<str> overrides, List<str> argv) {
+    GIT_gitcommon.Opened opened = GIT_gitcommon.open(start, overrides);
+    if (!opened.ok) {
+        return 128;
+    }
+    GIT_gitcommon.Ctx ctx = opened.ctx;
+    GIT_gitwrite.Opts opts = GIT_gitwrite.parse_opts(argv, ["--ff", "--ff-only", "--squash", "--commit", "-m --message=", "-F --file=", "-e --edit", "-s --strategy=", "-X --strategy-option=", "-q --quiet", "-v --verbose", "--stat", "-n", "--log=?", "--signoff", "--allow-unrelated-histories", "--abort", "--continue", "--quit", "--autostash", "--verify-signatures", "--no-verify", "--progress", "--summary", "--rerere-autoupdate", "-S --gpg-sign=?", "--cleanup=", "--into-name=", "--overwrite-ignore", "--verify", "--compact-summary"]);
+    int bad = GIT_gitwrite.check_opts(opts, usage_text());
+    if (bad >= 0) {
+        return bad;
+    }
+    if (ctx.is_bare) {
+        return GIT_gitcommon.fatal("this operation must be run in a work tree");
+    }
+    List<str> unsupported = ["signoff", "autostash", "verify-signatures", "rerere-autoupdate", "gpg-sign", "cleanup", "into-name", "log", "compact-summary"];
+    for (str name in unsupported) {
+        if (opts.has(name)) {
+            io.eprint("error: option '" + name + "' of merge is not in 1git (see docs/GIT-COMPAT.md)");
+            return 129;
+        }
+    }
+    bool is_quiet = opts.flag("quiet");
+    List<str> words = opts.paths();
+    int modes = 0;
+    List<str> mode_names = ["abort", "continue", "quit"];
+    for (str name in mode_names) {
+        if (opts.flag(name)) {
+            modes = modes + 1;
+        }
+    }
+    if (modes > 1) {
+        io.eprint("fatal: options '--abort', '--continue' and '--quit' cannot be used together");
+        return 128;
+    }
+    if (modes == 1) {
+        if (words.size() > 0) {
+            io.eprint("fatal: --" + mode_names[0] + " expects no arguments");
+            return 128;
+        }
+        return run_mode(ctx, start, overrides, opts);
+    }
+    if (GIT_merge.is_in_progress(ctx.gitdir)) {
+        io.eprint("error: You have not concluded your merge (MERGE_HEAD exists).");
+        io.eprint("fatal: Please, commit your changes before you merge.");
+        return 128;
+    }
+    GIT_gitwrite.HeadInfo head = GIT_gitwrite.read_head(ctx.gitdir);
+    if (words.size() == 0) {
+        io.eprint("fatal: No remote for the current branch.");
+        return 128;
+    }
+    if (words.size() > 1) {
+        io.eprint("error: merging several heads (octopus) is not in 1git (see docs/GIT-COMPAT.md)");
+        return 129;
+    }
+    str strategy = opts.value("strategy", "ort");
+    if (strategy == "recursive" || strategy == "resolve") {
+        strategy = "ort";
+    }
+    if (strategy != "ort" && strategy != "ours") {
+        io.eprint("error: merge strategy '" + strategy + "' is not in 1git (see docs/GIT-COMPAT.md)");
+        return 129;
+    }
+    int favor = 0;
+    for (str option in opts.all("strategy-option")) {
+        if (option == "ours") {
+            favor = 1;
+        } else if (option == "theirs") {
+            favor = 2;
+        } else if (option == "no-renames" || option == "find-renames" || option.starts_with("find-renames=") || option == "renormalize" || option == "diff-algorithm=myers" || option == "ignore-space-change" || option == "ignore-all-space" || option == "ignore-space-at-eol" || option == "patience" || option == "histogram" || option == "minimal") {
+            io.eprint("error: merge option '" + option + "' is not in 1git (see docs/GIT-COMPAT.md)");
+            return 129;
+        } else {
+            io.eprint("error: unknown strategy option: -X" + option);
+            return 128;
+        }
+    }
+    GIT_merge.StartOpts sopts = GIT_merge.StartOpts();
+    sopts.is_unrelated_allowed = opts.flag("allow-unrelated-histories");
+    sopts.style = GIT_merge.configured_style(ctx.gitdir);
+    sopts.favor = favor;
+    // fast-forward policy: the options, else `merge.ff`
+    str configured = GIT_gitcommon.cfg(ctx, "merge", "", "ff").or("").to_lower();
+    if (configured == "false" || configured == "no" || configured == "off" || configured == "0") {
+        sopts.fast_forward = GIT_merge.FastForward.Never;
+    } else if (configured == "only") {
+        sopts.fast_forward = GIT_merge.FastForward.Only;
+    }
+    if (opts.has("ff")) {
+        if (opts.flag("ff")) {
+            sopts.fast_forward = GIT_merge.FastForward.Allow;
+        } else {
+            sopts.fast_forward = GIT_merge.FastForward.Never;
+        }
+    }
+    if (opts.flag("ff-only")) {
+        sopts.fast_forward = GIT_merge.FastForward.Only;
+    }
+    bool is_squash = opts.flag("squash");
+    if (is_squash && sopts.fast_forward.eq(GIT_merge.FastForward.Never)) {
+        if (opts.has("ff")) {
+            io.eprint("fatal: options '--squash' and '--no-ff' cannot be used together");
+            return 128;
+        }
+        sopts.fast_forward = GIT_merge.FastForward.Allow;
+    }
+    bool should_commit = true;
+    if (opts.has("commit") && !opts.flag("commit")) {
+        should_commit = false;
+    }
+    if (is_squash) {
+        should_commit = false;
+    }
+    sopts.should_commit = should_commit;
+    sopts.is_squash = is_squash;
+    if (opts.has("message")) {
+        // several -m are paragraphs
+        sopts.message = opts.all("message").join("\n\n");
+    }
+    if (opts.has("file")) {
+        match (io.read(opts.value("file", ""))) {
+            case Ok(str body): {
+                sopts.message = body;
+            }
+            case Err(_): {
+                return GIT_gitcommon.fatal("could not read file '" + opts.value("file", "") + "'");
+            }
+        }
+    }
+    str spec = words[0];
+    str theirs = "";
+    match (GIT_revparse.commit_id(ctx.gitdir, spec)) {
+        case Ok(str found): {
+            theirs = found;
+        }
+        case Err(_): {
+            io.eprint("merge: " + spec + " - not something we can merge");
+            return 1;
+        }
+    }
+    if (!head.is_born) {
+        // git merges into an unborn branch by checking the commit out
+        io.eprint("fatal: merging into an unborn branch is not in 1git (see docs/GIT-COMPAT.md)");
+        return 128;
+    }
+    str ours = head.id;
+    if (is_squash) {
+        sopts.squash_text = squash_text(ctx, ours, theirs);
+    }
+    if (strategy == "ours") {
+        return merge_ours(ctx, head, spec, theirs, sopts, is_quiet);
+    }
+    bool has_edit_flag = opts.has("edit");
+    bool is_editing = false;
+    if (has_edit_flag) {
+        is_editing = opts.flag("edit");
+    } else if (term.is_terminal(0) && term.is_terminal(1)) {
+        is_editing = os.env("GIT_MERGE_AUTOEDIT").or("") != "no";
+    }
+    if (should_commit && is_editing) {
+        // run the merge up to its commit, edit the message, then commit it
+        sopts.should_commit = false;
+    }
+    GIT_gitstore.Store store = GIT_gitstore.open(ctx.gitdir);
+    str old_tree = tree_of(ctx.gitdir, ours);
+    match (GIT_merge.start_commit(ctx.gitdir, ctx.root, theirs, spec, sopts)) {
+        case Ok(GIT_merge.Report report): {
+            return finish(ctx, store, report, ours, theirs, spec, old_tree, is_quiet, should_commit, is_editing, sopts);
+        }
+        case Err(GIT_merge.Error error): {
+            return report_error(ctx, error);
+        }
+    }
+}
+
+int finish(GIT_gitcommon.Ctx ctx, GIT_gitstore.Store store, GIT_merge.Report report, str ours, str theirs, str spec, str old_tree, bool is_quiet, bool should_commit, bool is_editing, GIT_merge.StartOpts sopts) {
+    if (report.ending.eq(GIT_merge.Ending.UpToDate)) {
+        if (sopts.is_squash) {
+            GIT_gitwrite.say("Already up to date. (nothing to squash)");
+        } else {
+            GIT_gitwrite.say("Already up to date.");
+        }
+        return 0;
+    }
+    if (report.ending.eq(GIT_merge.Ending.FastForwarded)) {
+        if (!is_quiet) {
+            GIT_gitwrite.say("Updating " + store.unique_abbrev(ours, GIT_gitcommon.default_abbrev(ctx)) + ".." + store.unique_abbrev(theirs, GIT_gitcommon.default_abbrev(ctx)));
+            GIT_gitwrite.say("Fast-forward");
+            if (report.is_squashed) {
+                GIT_gitwrite.say("Squash commit -- not updating HEAD");
+            }
+            print_stat(ctx, old_tree, report.tree);
+        }
+        return 0;
+    }
+    for (str line in report.messages) {
+        GIT_gitwrite.say(line);
+    }
+    if (report.ending.eq(GIT_merge.Ending.Conflicts)) {
+        if (report.is_squashed) {
+            GIT_gitwrite.say("Squash commit -- not updating HEAD");
+        }
+        GIT_gitwrite.say("Automatic merge failed; fix conflicts and then commit the result.");
+        return 1;
+    }
+    // Merged: a commit, or a stop before it
+    if (report.is_squashed) {
+        io.eprint("Automatic merge went well; stopped before committing as requested");
+        GIT_gitwrite.say("Squash commit -- not updating HEAD");
+        return 0;
+    }
+    if (report.is_stopped) {
+        if (should_commit && is_editing) {
+            return commit_edited(ctx, report, ours, spec, old_tree, is_quiet);
+        }
+        io.eprint("Automatic merge went well; stopped before committing as requested");
+        return 0;
+    }
+    if (!is_quiet) {
+        GIT_gitwrite.say("Merge made by the 'ort' strategy.");
+        print_stat(ctx, old_tree, report.tree);
+    }
+    return 0;
+}
+
+/// A clean merge that stopped before its commit so the message can be edited.
+int commit_edited(GIT_gitcommon.Ctx ctx, GIT_merge.Report report, str ours, str spec, str old_tree, bool is_quiet) {
+    str message_path = fs.join(ctx.gitdir, "MERGE_MSG");
+    str message = GIT_merge.merge_message_text(ctx.gitdir);
+    str edit_path = fs.join(ctx.gitdir, "MERGE_MSG");
+    str text = message + "\n# Please enter a commit message to explain why this merge is necessary,\n# especially if it merges an updated upstream into a topic branch.\n#\n# Lines starting with '#' will be ignored, and an empty message aborts\n# the commit.\n";
+    match (io.write(edit_path, text)) {
+        case Ok: {
+        }
+        case Err(_): {
+            return GIT_gitcommon.fatal("could not write MERGE_MSG");
+        }
+    }
+    if (!GIT_gitwrite.run_editor(ctx, edit_path)) {
+        io.eprint("error: there was a problem with the editor 'vi'.");
+        return 1;
+    }
+    str edited = "";
+    match (io.read(message_path)) {
+        case Ok(str body): {
+            edited = body;
+        }
+        case Err(_): {
+            return 1;
+        }
+    }
+    str cleaned = GIT_merge.clean_message(edited);
+    if (cleaned == "") {
+        io.eprint("Empty commit message.");
+        match (io.write(message_path, message)) {
+            case Ok: {
+            }
+            case Err(_): {
+            }
+        }
+        return 1;
+    }
+    match (GIT_merge.commit_prepared(ctx.gitdir, ctx.root, cleaned, "merge " + spec + ": Merge made by the 'ort' strategy.")) {
+        case Ok(GIT_merge.Report done): {
+            if (!is_quiet) {
+                GIT_gitwrite.say("Merge made by the 'ort' strategy.");
+                print_stat(ctx, old_tree, done.tree);
+            }
+            return 0;
+        }
+        case Err(GIT_merge.Error error): {
+            return report_error(ctx, error);
+        }
+    }
+}
+
+/// `-s ours`: a merge commit with HEAD's own tree.
+int merge_ours(GIT_gitcommon.Ctx ctx, GIT_gitwrite.HeadInfo head, str spec, str theirs, GIT_merge.StartOpts sopts, bool is_quiet) {
+    match (GIT_merge.merge_ours(ctx.gitdir, ctx.root, theirs, spec, sopts)) {
+        case Ok(GIT_merge.Report report): {
+            if (report.ending.eq(GIT_merge.Ending.UpToDate)) {
+                GIT_gitwrite.say("Already up to date.");
+                return 0;
+            }
+            if (report.is_stopped) {
+                io.eprint("Automatic merge went well; stopped before committing as requested");
+                return 0;
+            }
+            if (!is_quiet) {
+                GIT_gitwrite.say("Merge made by the 'ours' strategy.");
+            }
+            return 0;
+        }
+        case Err(GIT_merge.Error error): {
+            return report_error(ctx, error);
+        }
+    }
+}
+
+int run_mode(GIT_gitcommon.Ctx ctx, str start, List<str> overrides, GIT_gitwrite.Opts opts) {
+    if (opts.flag("abort")) {
+        if (!GIT_merge.is_in_progress(ctx.gitdir)) {
+            io.eprint("fatal: There is no merge to abort (MERGE_HEAD missing).");
+            return 128;
+        }
+        match (GIT_merge.abort_merge(ctx.gitdir, ctx.root)) {
+            case Ok(_): {
+                return 0;
+            }
+            case Err(GIT_merge.Error error): {
+                match (error) {
+                    case LocalChanges(_): {
+                        io.eprint("error: Entry not uptodate. Cannot merge.");
+                        io.eprint("fatal: Could not reset index file to revision 'HEAD'.");
+                        return 128;
+                    }
+                    case NotFastForward: {
+                        return report_error(ctx, error);
+                    }
+                    case InProgress: {
+                        return report_error(ctx, error);
+                    }
+                    case Unrelated: {
+                        return report_error(ctx, error);
+                    }
+                    case NotACommit: {
+                        return report_error(ctx, error);
+                    }
+                    case NoMerge: {
+                        return report_error(ctx, error);
+                    }
+                    case UnmergedPaths: {
+                        return report_error(ctx, error);
+                    }
+                    case Unborn: {
+                        return report_error(ctx, error);
+                    }
+                    case EmptyMessage: {
+                        return report_error(ctx, error);
+                    }
+                    case IndexDirty(_): {
+                        return report_error(ctx, error);
+                    }
+                    case Unsupported(_): {
+                        return report_error(ctx, error);
+                    }
+                    case Io: {
+                        return report_error(ctx, error);
+                    }
+                    case Object(_): {
+                        return report_error(ctx, error);
+                    }
+                    case Index(_): {
+                        return report_error(ctx, error);
+                    }
+                    case Refs(_): {
+                        return report_error(ctx, error);
+                    }
+                    case Graph(_): {
+                        return report_error(ctx, error);
+                    }
+                    case Checkout(_): {
+                        return report_error(ctx, error);
+                    }
+                    case Status(_): {
+                        return report_error(ctx, error);
+                    }
+                    case Rev(_): {
+                        return report_error(ctx, error);
+                    }
+                }
+            }
+        }
+    }
+    if (opts.flag("quit")) {
+        GIT_merge.clear_state(ctx.gitdir);
+        return 0;
+    }
+    // --continue is `git commit`
+    if (!GIT_merge.is_in_progress(ctx.gitdir)) {
+        io.eprint("fatal: There is no merge in progress (MERGE_HEAD missing).");
+        return 128;
+    }
+    return GIT_gitcommit.run_commit(start, overrides, []);
+}

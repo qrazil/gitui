@@ -81,6 +81,8 @@ import core.GIT_checkout;
 import core.GIT_config;
 import diff.GIT_diff3;
 import core.GIT_graph;
+import core.GIT_gitstore;
+import diff.GIT_gitdiff;
 import core.GIT_ident;
 import core.GIT_index;
 import core.GIT_object;
@@ -128,6 +130,130 @@ pub enum Error {
     Status(GIT_status.Error);
     /// The name given to `start` is not a revision that names a commit.
     Rev(GIT_revparse.Error);
+}
+
+pub bool Error.is_index_dirty() {
+    match (this) {
+        case IndexDirty(_): {
+            return true;
+        }
+        case NotACommit: {
+            return false;
+        }
+        case Unrelated: {
+            return false;
+        }
+        case NotFastForward: {
+            return false;
+        }
+        case InProgress: {
+            return false;
+        }
+        case NoMerge: {
+            return false;
+        }
+        case UnmergedPaths: {
+            return false;
+        }
+        case Unborn: {
+            return false;
+        }
+        case EmptyMessage: {
+            return false;
+        }
+        case LocalChanges(_): {
+            return false;
+        }
+        case Unsupported(_): {
+            return false;
+        }
+        case Io: {
+            return false;
+        }
+        case Object(_): {
+            return false;
+        }
+        case Index(_): {
+            return false;
+        }
+        case Refs(_): {
+            return false;
+        }
+        case Graph(_): {
+            return false;
+        }
+        case Checkout(_): {
+            return false;
+        }
+        case Status(_): {
+            return false;
+        }
+        case Rev(_): {
+            return false;
+        }
+    }
+}
+
+pub bool Error.is_local_changes() {
+    match (this) {
+        case LocalChanges(_): {
+            return true;
+        }
+        case IndexDirty(_): {
+            return false;
+        }
+        case NotACommit: {
+            return false;
+        }
+        case Unrelated: {
+            return false;
+        }
+        case NotFastForward: {
+            return false;
+        }
+        case InProgress: {
+            return false;
+        }
+        case NoMerge: {
+            return false;
+        }
+        case UnmergedPaths: {
+            return false;
+        }
+        case Unborn: {
+            return false;
+        }
+        case EmptyMessage: {
+            return false;
+        }
+        case Unsupported(_): {
+            return false;
+        }
+        case Io: {
+            return false;
+        }
+        case Object(_): {
+            return false;
+        }
+        case Index(_): {
+            return false;
+        }
+        case Refs(_): {
+            return false;
+        }
+        case Graph(_): {
+            return false;
+        }
+        case Checkout(_): {
+            return false;
+        }
+        case Status(_): {
+            return false;
+        }
+        case Rev(_): {
+            return false;
+        }
+    }
 }
 
 pub str Error.to_str() {
@@ -309,6 +435,9 @@ pub type Opts {
     /// short id, or `merged common ancestors`.
     pub str base_label = "";
     pub GIT_diff3.Style style = GIT_diff3.Style.Merge;
+    /// `-X ours` (1) / `-X theirs` (2): a content conflict takes that side's
+    /// lines for the conflicting hunks.
+    pub int favor = 0;
 }
 
 /// What `merge_with_base` leaves behind.
@@ -352,6 +481,16 @@ pub type StartOpts {
     pub GIT_diff3.Style style = GIT_diff3.Style.Merge;
     /// Replaces the generated merge message when not empty.
     pub str message = "";
+    /// `--no-commit`: a clean merge stops before the commit, with the merge
+    /// under way (`MERGE_HEAD` ...) as a conflicted one does.
+    pub bool should_commit = true;
+    /// `--squash`: the changes land in the index and files, nothing is
+    /// recorded as merged: no `MERGE_HEAD`, HEAD stays, `SQUASH_MSG` holds
+    /// `squash_text` (which the caller formats: it is a log of the commits).
+    pub bool is_squash = false;
+    pub str squash_text = "";
+    /// `-X ours` (1) / `-X theirs` (2)
+    pub int favor = 0;
 }
 
 /// How `start` and `continue_merge` ended.
@@ -394,6 +533,10 @@ pub type Report {
     pub str tree;
     pub List<Conflicted> conflicts;
     pub List<str> messages;
+    /// `--squash` was in effect: HEAD did not move.
+    pub bool is_squashed = false;
+    /// `--no-commit` stopped a clean merge before its commit.
+    pub bool is_stopped = false;
 }
 
 /// The `git ls-files -u` lines of a conflict list: `<mode> <id> <stage>\t<path>`.
@@ -620,21 +763,394 @@ type Ctx {
     GIT_diff3.Style style;
     List<Conflicted> conflicts;
     List<str> messages;
+    int favor = 0;
+    // a path that was renamed on one side: its names (ours, base, theirs), for
+    // the `HEAD:path` form of the markers
+    Map<str, List<str>> names = {};
 }
 
 /// Merge three trees (or commits; `""` is the empty tree). See the module header.
-pub Result<TreeMerge, Error> merge_trees(str gitdir, str base_tree, str ours_tree, str theirs_tree, GIT_diff3.Labels labels, GIT_diff3.Style style = GIT_diff3.Style.Merge) {
+pub Result<TreeMerge, Error> merge_trees(str gitdir, str base_tree, str ours_tree, str theirs_tree, GIT_diff3.Labels labels, GIT_diff3.Style style = GIT_diff3.Style.Merge, int favor = 0) {
     str base_tree_id = tree_of(gitdir, base_tree)?;
     str ours_tree_id = tree_of(gitdir, ours_tree)?;
     str theirs_tree_id = tree_of(gitdir, theirs_tree)?;
     Ctx context = Ctx(gitdir, labels, style, [], []);
+    context.favor = favor;
+    // renames: the trees are rewritten so that a renamed file meets its other
+    // side's edits under one name; what cannot be merged that way (a rename
+    // against a delete, two different renames) is recorded as a conflict after
+    List<Conflicted> after = [];
+    List<str> after_messages = [];
+    RenamePlan plan = plan_renames(context, base_tree_id, ours_tree_id, theirs_tree_id)?;
+    if (plan.has_changes) {
+        base_tree_id = plan.base_tree;
+        ours_tree_id = plan.ours_tree;
+        theirs_tree_id = plan.theirs_tree;
+        after = plan.conflicts;
+        after_messages = plan.messages;
+    }
     str merged = merge_directory(context, "", base_tree_id, ours_tree_id, theirs_tree_id)?;
     if (merged == "") {
         List<GIT_object.Entry> none = [];
         merged = write_tree(gitdir, none)?;
     }
+    for (str line in after_messages) {
+        context.messages.push(line);
+    }
+    // a path recorded after the merge replaces what the merge said about it
+    for (Conflicted extra in after) {
+        List<Conflicted> kept = [];
+        for (Conflicted found in context.conflicts) {
+            if (found.path != extra.path) {
+                kept.push(found);
+            }
+        }
+        kept.push(extra);
+        context.conflicts = kept;
+    }
     context.conflicts.sort();
     return Result<TreeMerge, Error>.Ok(TreeMerge(merged, context.conflicts, context.messages));
+}
+
+// --- renames ----------------------------------------------------------------------------
+
+type RenamePlan {
+    bool has_changes = false;
+    str base_tree = "";
+    str ours_tree = "";
+    str theirs_tree = "";
+    List<Conflicted> conflicts = [];
+    List<str> messages = [];
+}
+
+/// git's rename detection (exact, then 50% similar) between two flat trees:
+/// old path -> new path. Only files that went away and files that came in are
+/// looked at.
+Map<str, str> detect_file_renames(str gitdir, Map<str, Side> old_files, Map<str, Side> new_files) {
+    Map<str, str> out = {};
+    bool has_removed = false;
+    for (str path in old_files.keys()) {
+        if (!new_files.contains(path)) {
+            has_removed = true;
+            break;
+        }
+    }
+    bool has_added = false;
+    for (str path in new_files.keys()) {
+        if (!old_files.contains(path)) {
+            has_added = true;
+            break;
+        }
+    }
+    if (!has_removed || !has_added) {
+        return out;
+    }
+    Map<str, GIT_gitdiff.Side> old_map = {};
+    Map<str, GIT_gitdiff.Side> new_map = {};
+    for (str path in old_files.keys()) {
+        Side side = old_files.get(path).or(absent());
+        old_map.set(path, GIT_gitdiff.Side(side.mode, side.id, ""));
+    }
+    for (str path in new_files.keys()) {
+        Side side = new_files.get(path).or(absent());
+        new_map.set(path, GIT_gitdiff.Side(side.mode, side.id, ""));
+    }
+    GIT_gitstore.Store store = GIT_gitstore.open(gitdir);
+    List<GIT_gitdiff.Item> items = GIT_gitdiff.maps_diff(old_map, new_map, []);
+    items = GIT_gitdiff.detect_renames(store, items, 30000);
+    for (GIT_gitdiff.Item item in items) {
+        if (item.status == "R") {
+            out.set(item.old_path, item.path);
+        }
+    }
+    return out;
+}
+
+// A tree object from flat files (`path -> side`), written bottom-up.
+Result<str, Error> tree_from_files(str gitdir, Map<str, Side> files) {
+    List<str> paths = [];
+    for (str path in files.keys()) {
+        paths.push(path);
+    }
+    paths.sort();
+    return tree_from_paths(gitdir, files, paths, 0, paths.size(), 0);
+}
+
+Result<str, Error> tree_from_paths(str gitdir, Map<str, Side> files, List<str> paths, int first, int last, int depth) {
+    List<GIT_object.Entry> out = [];
+    int at = first;
+    while (at < last) {
+        str path = paths[at];
+        str rest = path.substr(depth, path.size());
+        int slash = -1;
+        for (int i in 0 .. rest.size()) {
+            if (rest.byte_at(i) == '/') {
+                slash = i;
+                break;
+            }
+        }
+        if (slash < 0) {
+            Side side = files.get(path).or(absent());
+            out.push(GIT_object.Entry(side.mode, rest.to_bytes(), side.id));
+            at = at + 1;
+            continue;
+        }
+        str head = rest.substr(0, slash);
+        int group_end = at + 1;
+        while (group_end < last) {
+            str other = paths[group_end].substr(depth, paths[group_end].size());
+            if (other.starts_with(head + "/")) {
+                group_end = group_end + 1;
+            } else {
+                break;
+            }
+        }
+        str sub = tree_from_paths(gitdir, files, paths, at, group_end, depth + slash + 1)?;
+        out.push(GIT_object.Entry(0o40000, head.to_bytes(), sub));
+        at = group_end;
+    }
+    return write_tree(gitdir, out);
+}
+
+// The directories of `files` that hold no file in `now`.
+List<str> directories_gone(Map<str, Side> files, Map<str, Side> now) {
+    Map<str, bool> alive = {};
+    for (str path in now.keys()) {
+        str dir = parent_directory(path);
+        while (dir != "") {
+            alive.set(dir, true);
+            dir = parent_directory(dir);
+        }
+    }
+    Map<str, bool> seen = {};
+    List<str> out = [];
+    for (str path in files.keys()) {
+        str dir = parent_directory(path);
+        while (dir != "") {
+            if (!seen.contains(dir)) {
+                seen.set(dir, true);
+                if (!alive.contains(dir)) {
+                    out.push(dir);
+                }
+            }
+            dir = parent_directory(dir);
+        }
+    }
+    out.sort();
+    return out;
+}
+
+// One side renamed whole directories: `old dir -> new dir`, when the files of
+// the old directory that moved went (by majority) to one new directory.
+Map<str, str> directory_renames(Map<str, Side> base, Map<str, Side> side, Map<str, str> renames) {
+    Map<str, str> out = {};
+    List<str> gone = directories_gone(base, side);
+    if (gone.size() == 0) {
+        return out;
+    }
+    Map<str, Map<str, int>> counts = {};
+    for (str old_path in renames.keys()) {
+        str new_path = renames.get(old_path).or("");
+        str old_dir = parent_directory(old_path);
+        str new_dir = parent_directory(new_path);
+        // walk up while the leaf names of both directories agree, as git does
+        while (old_dir != "" && gone.contains(old_dir)) {
+            if (old_dir != new_dir) {
+                Map<str, int> row = counts.get(old_dir).or({});
+                row.set(new_dir, row.get(new_dir).or(0) + 1);
+                counts.set(old_dir, row);
+            }
+            str old_leaf = old_dir.substr(parent_directory(old_dir).size(), old_dir.size());
+            str new_leaf = new_dir.substr(parent_directory(new_dir).size(), new_dir.size());
+            if (old_leaf != new_leaf || new_dir == "") {
+                break;
+            }
+            old_dir = parent_directory(old_dir);
+            new_dir = parent_directory(new_dir);
+        }
+    }
+    for (str dir in counts.keys()) {
+        Map<str, int> row = counts.get(dir).or({});
+        str best = "";
+        int best_count = 0;
+        bool is_tied = false;
+        List<str> targets = [];
+        for (str target in row.keys()) {
+            targets.push(target);
+        }
+        targets.sort();
+        for (str target in targets) {
+            int count = row.get(target).or(0);
+            if (count > best_count) {
+                best = target;
+                best_count = count;
+                is_tied = false;
+            } else if (count == best_count) {
+                is_tied = true;
+            }
+        }
+        if (!is_tied && best_count > 0) {
+            out.set(dir, best);
+        }
+    }
+    return out;
+}
+
+Result<RenamePlan, Error> plan_renames(Ctx context, str base_tree, str ours_tree, str theirs_tree) {
+    RenamePlan plan = RenamePlan();
+    Map<str, Side> base = flatten(context.gitdir, base_tree)?;
+    Map<str, Side> ours = flatten(context.gitdir, ours_tree)?;
+    Map<str, Side> theirs = flatten(context.gitdir, theirs_tree)?;
+    Map<str, str> ours_renames = detect_file_renames(context.gitdir, base, ours);
+    Map<str, str> theirs_renames = detect_file_renames(context.gitdir, base, theirs);
+    if (ours_renames.size() == 0 && theirs_renames.size() == 0) {
+        return Result<RenamePlan, Error>.Ok(plan);
+    }
+    List<str> sources = [];
+    Map<str, bool> listed = {};
+    for (str path in ours_renames.keys()) {
+        sources.push(path);
+        listed.set(path, true);
+    }
+    for (str path in theirs_renames.keys()) {
+        if (!listed.contains(path)) {
+            sources.push(path);
+        }
+    }
+    sources.sort();
+    // the originals, for the stage lines of what is recorded after the merge
+    Map<str, Side> base_original = {};
+    for (str path in base.keys()) {
+        base_original.set(path, base.get(path).or(absent()));
+    }
+    // directory renames, from the sides as they were (before files move)
+    Map<str, str> ours_dirs = directory_renames(base_original, ours, ours_renames);
+    Map<str, str> theirs_dirs = directory_renames(base_original, theirs, theirs_renames);
+    for (str old_path in sources) {
+        bool has_ours = ours_renames.contains(old_path);
+        bool has_theirs = theirs_renames.contains(old_path);
+        Side was = base_original.get(old_path).or(absent());
+        if (has_ours && has_theirs) {
+            str to_ours = ours_renames.get(old_path).or("");
+            str to_theirs = theirs_renames.get(old_path).or("");
+            if (to_ours == to_theirs) {
+                if (!base.contains(to_ours)) {
+                    base.set(to_ours, was);
+                    base.remove(old_path);
+                    plan.has_changes = true;
+                    context.names.set(to_ours, [to_ours, old_path, to_theirs]);
+                }
+            } else {
+                plan.has_changes = true;
+                plan.conflicts.push(Conflicted(old_path, Kind.Content, was, absent(), absent()));
+                plan.conflicts.push(Conflicted(to_ours, Kind.Content, absent(), ours.get(to_ours).or(absent()), absent()));
+                plan.conflicts.push(Conflicted(to_theirs, Kind.Content, absent(), absent(), theirs.get(to_theirs).or(absent())));
+                plan.messages.push("CONFLICT (rename/rename): " + old_path + " renamed to " + to_ours + " in " + context.labels.ours + " and to " + to_theirs + " in " + context.labels.theirs + ".");
+            }
+            continue;
+        }
+        if (has_ours) {
+            str target = ours_renames.get(old_path).or("");
+            if (theirs.contains(old_path) && !theirs.contains(target) && !base.contains(target)) {
+                theirs.set(target, theirs.get(old_path).or(absent()));
+                theirs.remove(old_path);
+                base.set(target, was);
+                base.remove(old_path);
+                plan.has_changes = true;
+                context.names.set(target, [target, old_path, old_path]);
+            } else if (!theirs.contains(old_path)) {
+                plan.has_changes = true;
+                plan.conflicts.push(Conflicted(target, Kind.DeleteModify, was, ours.get(target).or(absent()), absent()));
+                plan.messages.push("CONFLICT (rename/delete): " + old_path + " renamed to " + target + " in " + context.labels.ours + ", but deleted in " + context.labels.theirs + ".");
+            }
+            continue;
+        }
+        str target = theirs_renames.get(old_path).or("");
+        if (ours.contains(old_path) && !ours.contains(target) && !base.contains(target)) {
+            ours.set(target, ours.get(old_path).or(absent()));
+            ours.remove(old_path);
+            base.set(target, was);
+            base.remove(old_path);
+            plan.has_changes = true;
+            context.names.set(target, [old_path, old_path, target]);
+        } else if (!ours.contains(old_path)) {
+            plan.has_changes = true;
+            plan.conflicts.push(Conflicted(target, Kind.ModifyDelete, was, absent(), theirs.get(target).or(absent())));
+            plan.messages.push("CONFLICT (rename/delete): " + old_path + " renamed to " + target + " in " + context.labels.theirs + ", but deleted in " + context.labels.ours + ".");
+        }
+    }
+    // a file added on one side inside a directory the other side renamed moves
+    // with it, and the move is a conflict (merge.directoryRenames=conflict)
+    plan = move_into_renamed(context, plan, base_original, ours, theirs, theirs_dirs, theirs_renames, true);
+    plan = move_into_renamed(context, plan, base_original, theirs, ours, ours_dirs, ours_renames, false);
+    if (!plan.has_changes) {
+        return Result<RenamePlan, Error>.Ok(plan);
+    }
+    plan.base_tree = tree_from_files(context.gitdir, base)?;
+    plan.ours_tree = tree_from_files(context.gitdir, ours)?;
+    plan.theirs_tree = tree_from_files(context.gitdir, theirs)?;
+    return Result<RenamePlan, Error>.Ok(plan);
+}
+
+// `added_side` (ours when `is_ours_added`) has new files in directories that the
+// other side renamed (`dirs`): they move to the new directory, as a conflict.
+RenamePlan move_into_renamed(Ctx context, RenamePlan plan, Map<str, Side> base_original, Map<str, Side> added_side, Map<str, Side> other_side, Map<str, str> dirs, Map<str, str> other_renames, bool is_ours_added) {
+    if (dirs.size() == 0) {
+        return plan;
+    }
+    Map<str, bool> targets_of_renames = {};
+    List<str> paths = [];
+    for (str path in added_side.keys()) {
+        paths.push(path);
+    }
+    paths.sort();
+    str added_label = context.labels.theirs;
+    str other_label = context.labels.ours;
+    if (is_ours_added) {
+        added_label = context.labels.ours;
+        other_label = context.labels.theirs;
+    }
+    for (str path in paths) {
+        if (base_original.contains(path)) {
+            continue;
+        }
+        // the deepest renamed directory holding it
+        str dir = parent_directory(path);
+        str found = "";
+        while (dir != "") {
+            if (dirs.contains(dir)) {
+                found = dir;
+                break;
+            }
+            dir = parent_directory(dir);
+        }
+        if (found == "") {
+            continue;
+        }
+        str moved = dirs.get(found).or("");
+        if (moved != "") {
+            moved = moved + path.substr(found.size(), path.size());
+        } else {
+            moved = path.substr(found.size() + 1, path.size());
+        }
+        if (added_side.contains(moved) || other_side.contains(moved)) {
+            continue;
+        }
+        Side side = added_side.get(path).or(absent());
+        added_side.remove(path);
+        added_side.set(moved, side);
+        plan.has_changes = true;
+        Side ours_side = absent();
+        Side theirs_side = absent();
+        if (is_ours_added) {
+            ours_side = side;
+        } else {
+            theirs_side = side;
+        }
+        plan.conflicts.push(Conflicted(moved, Kind.AddAdd, absent(), ours_side, theirs_side));
+        plan.messages.push("CONFLICT (file location): " + path + " added in " + added_label + " inside a directory that was renamed in " + other_label + ", suggesting it should perhaps be moved to " + moved + ".");
+    }
+    return plan;
 }
 
 // The merged tree of one directory, written; `""` when it came out empty.
@@ -858,11 +1374,28 @@ Result<bool, Error> merge_leaves(Ctx context, str full, str name, Side base_side
             id = ours_side.id;
             is_content_conflict = true;
             context.messages.push("warning: Cannot merge binary files: " + full + " (" + context.labels.ours + " vs. " + context.labels.theirs + ")");
+            context.messages.push("Auto-merging " + full);
         } else {
             context.messages.push("Auto-merging " + full);
-            GIT_diff3.Merged merged = GIT_diff3.merge3(base_content, ours_content, theirs_content, context.labels, style: context.style, level: GIT_diff3.Level.Zealous);
-            id = write_blob(context.gitdir, merged.text)?;
+            GIT_diff3.Labels marks = context.labels;
+            if (context.names.contains(full)) {
+                // a renamed file: git names each side `label:path`
+                List<str> paths = context.names.get(full).or([]);
+                marks = GIT_diff3.Labels(context.labels.ours + ":" + paths[0], context.labels.base + ":" + paths[1], context.labels.theirs + ":" + paths[2]);
+            }
+            GIT_diff3.Merged merged = GIT_diff3.merge3(base_content, ours_content, theirs_content, marks, style: context.style, level: GIT_diff3.Level.Zealous);
+            bytes text = merged.text;
             is_content_conflict = merged.conflicts > 0;
+            if (is_content_conflict && context.favor != 0) {
+                // `-X ours` / `-X theirs`: the conflicting hunks take that side
+                GIT_diff3.Choice choice = GIT_diff3.Choice.Ours;
+                if (context.favor == 2) {
+                    choice = GIT_diff3.Choice.Theirs;
+                }
+                text = GIT_diff3.resolve_all(GIT_diff3.parse_conflicts(merged.text), choice);
+                is_content_conflict = false;
+            }
+            id = write_blob(context.gitdir, text)?;
         }
     }
     out.push(GIT_object.Entry(mode, name.to_bytes(), id));
@@ -1371,7 +1904,7 @@ pub Result<Applied, Error> merge_with_base(str gitdir, str worktree, str base, s
         return Result<Applied, Error>.Err(Error.IndexDirty(dirty));
     }
     GIT_diff3.Labels labels = GIT_diff3.Labels(opts.ours_label, opts.base_label, opts.theirs_label);
-    TreeMerge merged = merge_trees(gitdir, base, ours, theirs, labels, style: opts.style)?;
+    TreeMerge merged = merge_trees(gitdir, base, ours, theirs, labels, style: opts.style, favor: opts.favor)?;
     Map<str, Side> before = flatten(gitdir, ours_tree)?;
     Map<str, Side> after = flatten(gitdir, merged.tree)?;
     List<str> touched = tree_differences(before, after);
@@ -1552,9 +2085,17 @@ pub Result<Report, Error> start_commit(str gitdir, str worktree, str theirs, str
             }
         }
         ref_update(gitdir, "ORIG_HEAD", ours, Option<str>.None, "")?;
+        if (opts.is_squash) {
+            write_state(gitdir, "SQUASH_MSG", opts.squash_text)?;
+            Report squashed = Report(Ending.FastForwarded, theirs, theirs_tree, none, ["Fast-forward"]);
+            squashed.is_squashed = true;
+            return Result<Report, Error>.Ok(squashed);
+        }
         ref_update(gitdir, ref_name, theirs, Option<str>.Some(ours), "merge " + spec + ": Fast-forward")?;
         return Result<Report, Error>.Ok(Report(Ending.FastForwarded, theirs, theirs_tree, none, ["Fast-forward"]));
     }
+    // git writes ORIG_HEAD before it can refuse
+    ref_update(gitdir, "ORIG_HEAD", ours, Option<str>.None, "")?;
     if (opts.fast_forward == FastForward.Only) {
         return Result<Report, Error>.Err(Error.NotFastForward);
     }
@@ -1564,10 +2105,29 @@ pub Result<Report, Error> start_commit(str gitdir, str worktree, str theirs, str
         return Result<Report, Error>.Err(Error.Unrelated);
     }
     BaseTree base = base_for(gitdir, ours, theirs, opts.style)?;
-    Opts merge_opts = Opts(theirs_label: spec, base_label: base.label, style: opts.style);
+    Opts merge_opts = Opts(theirs_label: spec, base_label: base.label, style: opts.style, favor: opts.favor);
     str base_id = base.tree;
-    Applied applied = merge_with_base(gitdir, worktree, base_id, ours, theirs, merge_opts)?;
-    ref_update(gitdir, "ORIG_HEAD", ours, Option<str>.None, "")?;
+    Applied applied = Applied("", [], []);
+    match (merge_with_base(gitdir, worktree, base_id, ours, theirs, merge_opts)) {
+        case Ok(Applied done): {
+            applied = done;
+        }
+        case Err(Error error): {
+            // refused over local changes: for a dirty index git leaves an HEAD log line
+            bool is_index_dirty = error.is_index_dirty();
+            if (is_index_dirty || error.is_local_changes()) {
+                if (is_index_dirty && GIT_reflog.should_log(gitdir, "HEAD")) {
+                    match (GIT_reflog.append(gitdir, "HEAD", ours, ours, GIT_reflog.default_ident(gitdir), "merge " + spec + ": updating HEAD")) {
+                        case Ok: {
+                        }
+                        case Err(_): {
+                        }
+                    }
+                }
+            }
+            return Result<Report, Error>.Err(error);
+        }
+    }
     str text = opts.message;
     if (text == "") {
         text = default_message(gitdir, spec);
@@ -1575,7 +2135,21 @@ pub Result<Report, Error> start_commit(str gitdir, str worktree, str theirs, str
     if (!text.ends_with("\n")) {
         text = text + "\n";
     }
-    if (applied.conflicts.size() == 0) {
+    if (opts.is_squash) {
+        write_state(gitdir, "SQUASH_MSG", opts.squash_text)?;
+        write_state(gitdir, "AUTO_MERGE", applied.tree + "\n")?;
+        if (applied.conflicts.size() > 0) {
+            write_state(gitdir, "MERGE_MSG", conflicts_block(applied.conflicts))?;
+        }
+        Ending ended = Ending.Merged;
+        if (applied.conflicts.size() > 0) {
+            ended = Ending.Conflicts;
+        }
+        Report squashed = Report(ended, "", applied.tree, applied.conflicts, applied.messages);
+        squashed.is_squashed = true;
+        return Result<Report, Error>.Ok(squashed);
+    }
+    if (applied.conflicts.size() == 0 && opts.should_commit) {
         GIT_object.Commit commit = GIT_object.Commit(applied.tree, [ours, theirs], ident(gitdir, "AUTHOR"), ident(gitdir, "COMMITTER"), [], text.to_bytes());
         str id = write_commit(gitdir, commit)?;
         ref_update(gitdir, ref_name, id, Option<str>.Some(ours), "merge " + spec + ": Merge made by the 'ort' strategy.")?;
@@ -1587,9 +2161,76 @@ pub Result<Report, Error> start_commit(str gitdir, str worktree, str theirs, str
         mode = "no-ff";
     }
     write_state(gitdir, "MERGE_MODE", mode)?;
-    write_state(gitdir, "MERGE_MSG", text + conflicts_block(applied.conflicts))?;
+    if (applied.conflicts.size() > 0) {
+        write_state(gitdir, "MERGE_MSG", text + conflicts_block(applied.conflicts))?;
+    } else {
+        write_state(gitdir, "MERGE_MSG", text)?;
+    }
     write_state(gitdir, "AUTO_MERGE", applied.tree + "\n")?;
+    if (applied.conflicts.size() == 0) {
+        Report stopped = Report(Ending.Merged, "", applied.tree, applied.conflicts, applied.messages);
+        stopped.is_stopped = true;
+        return Result<Report, Error>.Ok(stopped);
+    }
     return Result<Report, Error>.Ok(Report(Ending.Conflicts, "", applied.tree, applied.conflicts, applied.messages));
+}
+
+/// `git merge -s ours <theirs>`: a merge commit (or, with `should_commit`
+/// off, the merge left under way) whose tree is HEAD's own.
+pub Result<Report, Error> merge_ours(str gitdir, str worktree, str theirs, str spec, StartOpts opts) {
+    if (is_in_progress(gitdir)) {
+        return Result<Report, Error>.Err(Error.InProgress);
+    }
+    GIT_refs.Head head = GIT_refs.Head.Unborn("");
+    match (GIT_refs.head(gitdir)) {
+        case Ok(GIT_refs.Head found): {
+            head = found;
+        }
+        case Err(GIT_refs.Error error): {
+            return Result<Report, Error>.Err(Error.Refs(error));
+        }
+    }
+    str ours = "";
+    match (head) {
+        case Born(str name, str id): {
+            ours = id;
+        }
+        case Detached(str id): {
+            ours = id;
+        }
+        case Unborn(str name): {
+            return Result<Report, Error>.Err(Error.Unborn);
+        }
+    }
+    str ref_name = head_ref_name(head);
+    read_commit(gitdir, theirs)?;
+    str ours_tree = tree_of(gitdir, ours)?;
+    List<Conflicted> none = [];
+    if (ours == theirs || graph_is_ancestor(gitdir, theirs, ours)?) {
+        ref_update(gitdir, "ORIG_HEAD", ours, Option<str>.None, "")?;
+        return Result<Report, Error>.Ok(Report(Ending.UpToDate, ours, ours_tree, none, ["Already up to date."]));
+    }
+    refuse_signing(gitdir)?;
+    ref_update(gitdir, "ORIG_HEAD", ours, Option<str>.None, "")?;
+    str text = opts.message;
+    if (text == "") {
+        text = default_message(gitdir, spec);
+    }
+    if (!text.ends_with("\n")) {
+        text = text + "\n";
+    }
+    if (opts.should_commit) {
+        GIT_object.Commit commit = GIT_object.Commit(ours_tree, [ours, theirs], ident(gitdir, "AUTHOR"), ident(gitdir, "COMMITTER"), [], text.to_bytes());
+        str id = write_commit(gitdir, commit)?;
+        ref_update(gitdir, ref_name, id, Option<str>.Some(ours), "merge " + spec + ": Merge made by the 'ours' strategy.")?;
+        return Result<Report, Error>.Ok(Report(Ending.Merged, id, ours_tree, none, []));
+    }
+    write_state(gitdir, "MERGE_HEAD", theirs + "\n")?;
+    write_state(gitdir, "MERGE_MODE", "")?;
+    write_state(gitdir, "MERGE_MSG", text)?;
+    Report stopped = Report(Ending.Merged, "", ours_tree, none, []);
+    stopped.is_stopped = true;
+    return Result<Report, Error>.Ok(stopped);
 }
 
 // A merge commit would be signed by git when `commit.gpgsign` is true; this
@@ -1610,6 +2251,16 @@ Result<bool, Error> refuse_signing(str gitdir) {
 /// reflog line `commit (merge): <subject>`, and the merge state files go.
 /// `Error.NoMerge` / `UnmergedPaths` / `EmptyMessage` write nothing.
 pub Result<Report, Error> continue_merge(str gitdir, str worktree, str message) {
+    return commit_merge(gitdir, worktree, message, "");
+}
+
+/// The commit of a merge stopped before it (`--no-commit`, an edited message)
+/// with `log_message` as the reflog line git's own merge writes.
+pub Result<Report, Error> commit_prepared(str gitdir, str worktree, str message, str log_message) {
+    return commit_merge(gitdir, worktree, message, log_message);
+}
+
+Result<Report, Error> commit_merge(str gitdir, str worktree, str message, str log_message) {
     List<str> heads = merge_heads(gitdir);
     if (heads.size() == 0) {
         return Result<Report, Error>.Err(Error.NoMerge);
@@ -1659,7 +2310,7 @@ pub Result<Report, Error> continue_merge(str gitdir, str worktree, str message) 
     }
     GIT_object.Commit commit = GIT_object.Commit(tree, parents, ident(gitdir, "AUTHOR"), ident(gitdir, "COMMITTER"), [], text.to_bytes());
     str id = write_commit(gitdir, commit)?;
-    ref_update(gitdir, head_ref_name(head), id, Option<str>.Some(ours), "")?;
+    ref_update(gitdir, head_ref_name(head), id, Option<str>.Some(ours), log_message)?;
     clear_state(gitdir);
     List<Conflicted> none = [];
     List<str> messages = [];
@@ -1934,11 +2585,14 @@ str parent_directory(str path) {
 }
 
 /// The conflict style `merge.conflictstyle` asks for: `diff3` and `zdiff3`
-/// (written as diff3) give base sections, anything else is the plain style.
+/// give base sections, anything else is the plain style.
 pub GIT_diff3.Style configured_style(str gitdir) {
     str value = GIT_config.get(gitdir, "merge", "", "conflictstyle").or("merge").to_lower();
-    if (value == "diff3" || value == "zdiff3") {
+    if (value == "diff3") {
         return GIT_diff3.Style.Diff3;
+    }
+    if (value == "zdiff3") {
+        return GIT_diff3.Style.ZDiff3;
     }
     return GIT_diff3.Style.Merge;
 }
