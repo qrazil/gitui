@@ -61,6 +61,9 @@ pub enum Style {
     Merge;
     /// `<<<<<<<` ours `|||||||` base `=======` theirs `>>>>>>>`.
     Diff3;
+    /// `merge.conflictStyle=zdiff3`: as `Diff3`, with the lines both sides
+    /// share at the start and end of a conflict moved out of it.
+    ZDiff3;
 }
 
 /// How hard `merge3` works to avoid or shrink conflicts (xdiff's XDL_MERGE_*).
@@ -115,12 +118,29 @@ type Ctx {
     Style style;
 }
 
+bool is_zdiff3(Style style) {
+    match (style) {
+        case ZDiff3: {
+            return true;
+        }
+        case Merge: {
+            return false;
+        }
+        case Diff3: {
+            return false;
+        }
+    }
+}
+
 bool is_diff3(Style style) {
     match (style) {
         case Merge: {
             return false;
         }
         case Diff3: {
+            return true;
+        }
+        case ZDiff3: {
             return true;
         }
     }
@@ -155,7 +175,7 @@ pub Merged merge3(bytes base, bytes ours, bytes theirs, Labels labels, Style sty
         return Merged(ours, 0);
     }
     int rank = level_rank(level);
-    if (is_diff3(style) && rank > 1) {
+    if (is_diff3(style) && !is_zdiff3(style) && rank > 1) {
         rank = 1;
     }
     List<Piece> pieces = combine(context, script_ours, script_theirs, rank);
@@ -295,6 +315,18 @@ void refine_conflicts(Ctx context, List<Piece> pieces) {
         if (script.size() == 0) {
             // Both sides came to the same lines after all.
             piece.mode = 1;
+            out.push(piece);
+            continue;
+        }
+        if (is_zdiff3(context.style)) {
+            // one conflict from the first difference to the last: the lines
+            // both sides share at its ends are moved out of it
+            GIT_xdiff.Edit first = script[0];
+            GIT_xdiff.Edit last = script[script.size() - 1];
+            piece.ours_index = first.a_start + base1;
+            piece.theirs_index = first.b_start + base2;
+            piece.chg1 = last.a_start + last.a_length - first.a_start;
+            piece.chg2 = last.b_start + last.b_length - first.b_start;
             out.push(piece);
             continue;
         }

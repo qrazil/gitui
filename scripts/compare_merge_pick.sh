@@ -47,7 +47,7 @@ if wanted pick; then
     case_ "pick: ranges a..b with a negative" fx_branches ':' 'G cherry-pick feat ^feat~2'
     case_ "pick: --edit with a no-op editor" fx_branches ':' 'GIT_EDITOR=true G cherry-pick --edit feat~1'
     case_ "pick: --edit with an editor that changes the message" fx_branches ':' 'GIT_EDITOR="sed -i.bak 1s/^/EDITED:/" G cherry-pick -e feat~1'
-    case_ "pick: --edit with an empty message" fx_branches ':' 'GIT_EDITOR="sh -c \"echo > \\$0\"" G cherry-pick -e feat~1'
+    case_ "pick: --edit with an empty message" fx_branches ':' 'GIT_EDITOR="cp /dev/null" G cherry-pick -e feat~1'
     case_ "pick: a tag" fx_branches 'git tag t1 feat~1' 'G cherry-pick t1'
     case_ "pick: --continue after commit by hand" fx_branches 'git cherry-pick clash clash feat; printf "r\n" > f.txt; git add f.txt; git commit -qm "by hand"' 'G cherry-pick --continue'
     case_ "pick: a root commit" fx_branches 'git checkout -q -b rooted; git checkout -q --orphan r2; git rm -rfq .; echo r > r.txt; git add r.txt; git commit -qm "second root"; git checkout -q main' 'G cherry-pick r2'
