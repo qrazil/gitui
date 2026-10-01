@@ -32,7 +32,7 @@
 // `update` writes a ref -- `refs/heads/<name>`, `HEAD` detached, or any other
 // full ref name -- to a 40-digit object name, and `update_symbolic` writes
 // `HEAD` (or any ref) as `ref: <target>`. Both write a temporary file beside
-// the real one and rename it over, exactly as `object.src`'s writers do:
+// the real one and rename it over, exactly as `object.m31`'s writers do:
 // never a direct in-place write, so a crash mid-write leaves the old ref
 // intact and a reader never sees a half-written one.
 //
@@ -237,7 +237,7 @@ pub Result<List<Ref>, Error> all(str gitdir) {
     Map<str, str> seen = {};
     List<str> order = [];
     // The shared directory: in a linked worktree `refs` is not under the
-    // worktree's own git directory at all (`repo.src`).
+    // worktree's own git directory at all (`repo.m31`).
     str shared = repo.common(gitdir);
     str root = fs.join(shared, "refs");
     match (fs.walk(root)) {
@@ -378,7 +378,7 @@ Option<str> loose_ref(str gitdir, str name) {
     }
     // HEAD and the handful of pseudo-refs beside it belong to this worktree;
     // every branch, tag and remote lives in the shared directory, which is
-    // the same directory unless this is a linked worktree (`repo.src`).
+    // the same directory unless this is a linked worktree (`repo.m31`).
     str where = gitdir;
     if (!repo.per_worktree(name)) {
         where = repo.common(gitdir);
@@ -552,7 +552,7 @@ Result<str, Error> current_or_empty(str gitdir, str name) {
 
 // The file a ref name is written to: HEAD and the other per-worktree
 // pseudo-refs live beside `gitdir` itself, everything else in the shared
-// directory a linked worktree keeps its branches and tags in (`repo.src`) --
+// directory a linked worktree keeps its branches and tags in (`repo.m31`) --
 // the same split `loose_ref` reads by.
 str where_for(str gitdir, str name) {
     str where = gitdir;

@@ -1,12 +1,12 @@
-// The interactive client's own state and logic, split out of `gitui.src` so
-// it is importable and unit-testable the way `t_status.src`/`t_index_stage.src`
-// test `status.src`/`index.src` directly -- a top-level statement anywhere in
+// The interactive client's own state and logic, split out of `gitui.m31` so
+// it is importable and unit-testable the way `t_status.m31`/`t_index_stage.m31`
+// test `status.m31`/`index.m31` directly -- a top-level statement anywhere in
 // an imported file is refused (`docs/reference.md` §2), so anything this
 // program needs a test harness to call has to live here rather than in the
-// `.src` that actually runs the terminal loop.
+// `.m31` that actually runs the terminal loop.
 //
-// `gitui.src` is the thin driver: parse a path off the command line, build a
-// `State`, and hand it to `tuiapp.Loop` exactly as `apps/tui/browse.src`
+// `gitui.m31` is the thin driver: parse a path off the command line, build a
+// `State`, and hand it to `tuiapp.Loop` exactly as `apps/tui/browse.m31`
 // hands its own `State` to the same loop. Everything a test needs --
 // building the outline from a `status.Status`, staging or unstaging one
 // path, stripping a commit message down to what git would actually commit --
@@ -20,7 +20,7 @@
 //
 // --- launching `$EDITOR`, and the terminal handoff that takes ---------------
 //
-// `lib/os.src` gained `os.run`/`ExitStatus` (`docs/sys-layer.md`'s "Process
+// `lib/os.m31` gained `os.run`/`ExitStatus` (`docs/sys-layer.md`'s "Process
 // launch", added the same day as this) after this client first shipped with
 // only the on-disk contract below -- a message file at a known path
 // (`COMMIT_EDITMSG`, git's own name), edited by *something*, read back and
@@ -33,7 +33,7 @@
 // interactive child can take over the real terminal, but this program has
 // already put that terminal in raw mode with the alternate screen on
 // (`tuiapp.Loop.run`'s own `enter`/`leave` sequences) -- the wrong mode for
-// an editor expecting a normal, cooked terminal to draw on. `lib/term.src`'s
+// an editor expecting a normal, cooked terminal to draw on. `lib/term.m31`'s
 // `Session` is exactly the value that knows how to undo that (`restore()`,
 // idempotent, called from its own destructor), but `Loop.run` holds it in
 // its own function scope and hands a caller only an `Action`
@@ -48,7 +48,7 @@
 // `raw()` snapshotted before it ever touched termios, alternate screen
 // already turned off by the `leave` sequence `Loop.run` registered with
 // `on_exit`. That is the drop half of "drop the Session and re-acquire
-// `raw()` afterward" -- `gitui.src`'s own top-level driver, watching
+// `raw()` afterward" -- `gitui.m31`'s own top-level driver, watching
 // `want_editor`, is what does both: it runs `os.run` for real now that the
 // terminal is cooked and on the normal screen, calls `launch_editor` to
 // interpret the result, and -- unless the loop actually asked to quit --
@@ -107,7 +107,7 @@ int PathRow.cmp(PathRow other) {
     return str_cmp(path, other.path);
 }
 
-// `str` has no ordering operator (`refs.src`'s own `before`, the same
+// `str` has no ordering operator (`refs.m31`'s own `before`, the same
 // reason, written out again here because a type with a `str` field has to
 // supply its own `cmp` and there is nothing to call).
 int str_cmp(str a, str b) {
@@ -241,7 +241,7 @@ bool expanded_for(Map<str, bool> collapsed, str id, bool default_expanded) {
 // `select_id()` and the `Viewport.reveal`/`clamped` scroll math that all
 // currently assume "one row is one line". That is a real feature, but a
 // bigger one than this fix: it would change the widget's row model for
-// every caller (`apps/tui/browse.src` included), not just this one.
+// every caller (`apps/tui/browse.m31` included), not just this one.
 //
 // So this wraps eagerly, here, against `COMMIT_BODY_WRAP_COLS` -- a stand-in
 // for a typical terminal, chosen so it still looks right at the common case
@@ -267,7 +267,7 @@ const int SCROLL_H_STEP = 4;
 
 /// The outline's commit section: one collapsible node per commit, its short
 /// id and first message line as the label, and -- expanded -- its author,
-/// date and full message as leaf rows underneath. See `tuioutline.src`'s own
+/// date and full message as leaf rows underneath. See `tuioutline.m31`'s own
 /// header on why every row needs a stable `id`: folding must not renumber
 /// what the jump list or a saved cursor position names.
 ///
@@ -299,7 +299,7 @@ List<tuioutline.Node> commit_node(gitlog.Entry en, Map<str, bool> collapsed) {
 
 /// The primary document, from a `Status` and a commit walk alone -- no
 /// terminal, no `gitdir`, no I/O of any kind, which is what makes this the
-/// piece `t_gitclient.src` calls directly.
+/// piece `t_gitclient.m31` calls directly.
 ///
 /// Every leaf row this builds is recorded in `out_paths` (row id -> the raw
 /// bytes to stage or unstage), which `State` keeps and `stage_current`/
@@ -381,8 +381,8 @@ type Leaf {
 /// already sorts one directory level and hashes it, so this only has to
 /// group a flat list of paths into the directories git's tree format
 /// actually nests, bottom-up. Grouped by raw `bytes`, not `str`, because
-/// `index.Entry.path` need not be UTF-8 (`index.src`'s own module header)
-/// and dropping a non-UTF-8 path here -- the way `status.src` drops one from
+/// `index.Entry.path` need not be UTF-8 (`index.m31`'s own module header)
+/// and dropping a non-UTF-8 path here -- the way `status.m31` drops one from
 /// a *display* -- would silently leave a real, currently-staged file out of
 /// the commit, which is a correctness bug and not a display gap.
 pub Result<str, object.Error> build_tree(str gitdir, List<index.Entry> entries) {
@@ -437,7 +437,7 @@ int find_dir(List<bytes> dirnames, bytes dir) {
 // --- finding one path in HEAD's tree, for unstaging --------------------------
 
 /// HEAD's tree, or `None` for an unborn branch or a detached HEAD this
-/// cannot read -- `status.src`'s own `head_tree`, minus the `Status`-shaped
+/// cannot read -- `status.m31`'s own `head_tree`, minus the `Status`-shaped
 /// error, since `unstage_path` only needs to know whether there is one.
 pub Option<str> head_tree_id(str gitdir) {
     match (refs.head(gitdir)) {
@@ -535,8 +535,8 @@ pub Option<object.Entry> find_in_tree(str gitdir, str tree_id, bytes path) {
 // --- the client's own state --------------------------------------------------
 
 /// Everything the interactive client is showing and doing right now. One
-/// value, held by `gitui.src`'s top-level driver and reached by the
-/// `draw`/`handle` lambdas the same way `apps/tui/browse.src`'s own `State`
+/// value, held by `gitui.m31`'s top-level driver and reached by the
+/// `draw`/`handle` lambdas the same way `apps/tui/browse.m31`'s own `State`
 /// is -- there is no mutable module state to put it in instead (reference
 /// §2).
 pub type State {
@@ -547,7 +547,7 @@ pub type State {
     pub bool show_jump = false;
     pub bool jump_focused = false;
     pub bool commit_open = false;
-    /// Set by `edit_message` and read by `gitui.src`'s own top-level driver
+    /// Set by `edit_message` and read by `gitui.m31`'s own top-level driver
     /// after `tuiapp.Loop.run` returns: true means the loop stopped so
     /// `$EDITOR` could have the terminal, not because the operator pressed
     /// `q`. See this module's own header, "launching `$EDITOR`, and the
@@ -635,7 +635,7 @@ pub void State.refresh() {
 }
 
 /// Refresh and rebuild the outline, keeping the cursor on the row it was on
-/// (by id, not by position -- `tuioutline.src`'s own reason) and the jump
+/// (by id, not by position -- `tuioutline.m31`'s own reason) and the jump
 /// list in step with it. Called after every action that changes what the
 /// repository looks like: staging, unstaging, committing, and the manual
 /// refresh key.
@@ -752,7 +752,7 @@ pub void State.stage_path(bytes rel) {
 /// has this path, the index entry goes back to exactly what HEAD says (mode
 /// and blob), with its stat fields forced to never match a real file so the
 /// next `status` re-hashes it rather than trusting stale numbers
-/// (`index.src`'s own rule: a mismatch only ever costs a re-hash, never
+/// (`index.m31`'s own rule: a mismatch only ever costs a re-hash, never
 /// wrong). If HEAD has no such path -- the file was newly added -- there is
 /// nothing to go back to, so the entry is dropped from the index outright,
 /// which is what `git reset` does to a new file too (it becomes untracked
@@ -811,22 +811,22 @@ pub void State.unstage_path(bytes rel) {
 }
 
 /// Real, hunk-level diff for the row under the cursor -- the diff-algorithm
-/// track (`lib/diff.src`/`apps/git/hunks.src`) and the rendering widget
+/// track (`lib/diff.m31`/`apps/git/hunks.m31`) and the rendering widget
 /// (`apps/tui/tuidiffview.DiffView`) both already existed; this is the
 /// wiring `apps/git/design.md`'s "Starting the client" section named as the
 /// follow-up once they did. A no-op on anything that is not a path row (a
 /// section heading or a commit).
 ///
 /// The comparison made depends on which section the row is in, matching
-/// `status.src`'s own two-stage model exactly rather than picking a
+/// `status.m31`'s own two-stage model exactly rather than picking a
 /// simplification of it:
 ///
-///   - **unstaged** -- the index's blob for this path (`status.src`'s own
+///   - **unstaged** -- the index's blob for this path (`status.m31`'s own
 ///     "working tree vs index" comparison) against the file's content on
 ///     disk right now. A path missing from disk (staged-deleted-on-disk)
 ///     compares against an empty `new`, an all-removed hunk.
 ///   - **staged** -- HEAD's tree's blob for this path against the index's
-///     blob for it (`status.src`'s "index vs HEAD" comparison). A path
+///     blob for it (`status.m31`'s "index vs HEAD" comparison). A path
 ///     HEAD does not have compares an empty `old` (all-added, the newly
 ///     staged file's whole content); a path the index no longer has (staged
 ///     for deletion, though this client's own `stage`/`unstage` never
@@ -940,7 +940,7 @@ bytes State.read_blob(str id) {
 /// addressable cursor behave identically regardless of which comparison fed
 /// it. `pub`, like `stage_path`/`unstage_path`, so a unit test can drive the
 /// hunks/binary wiring directly with hand-built `bytes` and no repository at
-/// all -- `t_gitclient.src`'s own reason for testing those two directly.
+/// all -- `t_gitclient.m31`'s own reason for testing those two directly.
 pub void State.open_diff(str title, bytes old, bytes new) {
     diff_title = title;
     match (hunks.hunks(old, new)) {
@@ -958,10 +958,10 @@ pub void State.open_diff(str title, bytes old, bytes new) {
 }
 
 /// Back out of the diff view to the outline -- `backspace`, the same "go
-/// back" key `apps/tui/browse.src` already uses for leaving a drilled-into
+/// back" key `apps/tui/browse.m31` already uses for leaving a drilled-into
 /// view, and distinct from `commit_open`'s which-key overlay's `Escape`
 /// (that overlay sits *on top of* the outline; the diff view *replaces* it,
-/// closer to `browse.src`'s directory descent than to a popup).
+/// closer to `browse.m31`'s directory descent than to a popup).
 pub void State.close_diff() {
     diff_open = false;
     diff_binary = false;
@@ -971,7 +971,7 @@ pub void State.close_diff() {
 
 /// Write the commit-message template at `commit_msg_path`, unless something
 /// -- a previous `e`, or a person's own `git commit` in another terminal --
-/// already left one there, and ask `gitui.src`'s own driver to actually
+/// already left one there, and ask `gitui.m31`'s own driver to actually
 /// launch `$EDITOR` on it once the terminal is safe to hand over.
 ///
 /// This cannot call `os.run` itself: the terminal is still in raw mode with
@@ -997,7 +997,7 @@ pub void State.edit_message() {
 }
 
 /// Actually launch `$EDITOR` (or `vi`) on `commit_msg_path` and act on how it
-/// ended -- called by `gitui.src`'s driver after `tuiapp.Loop.run` has
+/// ended -- called by `gitui.m31`'s driver after `tuiapp.Loop.run` has
 /// returned with `want_editor` set, so the terminal `os.run`'s child
 /// inherits is the real, cooked one, not the raw alternate screen this
 /// program draws on.
@@ -1066,7 +1066,7 @@ pub void State.abort_commit() {
 /// unborn branch), and `refs.update` to move the branch -- or `HEAD` itself,
 /// detached -- forward by compare-and-swap against the value just read, so a
 /// second writer racing this one is refused rather than silently overwritten
-/// (`refs.src`'s own guarantee).
+/// (`refs.m31`'s own guarantee).
 pub void State.finish_commit() {
     str raw = "";
     match (io.read(commit_msg_path)) {
@@ -1208,7 +1208,7 @@ List<tuiwidget.Span> State.footer_spans(tuistyle.Theme theme) {
 /// `apps/git/design.md`'s locked layout: one primary document, one optional
 /// jump-list panel, a persistent footer, and overlays drawn over all of it
 /// rather than replacing any of it. The diff view is not an overlay: it
-/// REPLACES the document the way `apps/tui/browse.src`'s preview pane
+/// REPLACES the document the way `apps/tui/browse.m31`'s preview pane
 /// changes with the selection, which is why the jump list (synced to the
 /// outline's own entries) is not shown alongside it.
 pub void State.draw(tuibuf.Buffer buf, tuigeom.Rect area) {
@@ -1263,7 +1263,7 @@ void State.draw_diff(tuibuf.Buffer buf, tuigeom.Rect area) {
     diff_view.render(buf, inner);
 }
 
-/// One decoded key, dispatched exactly as `apps/tui/browse.src`'s own
+/// One decoded key, dispatched exactly as `apps/tui/browse.m31`'s own
 /// `State.handle` is: every `term.Code` variant named, so a key this client
 /// does not use is `Continue` rather than missing from the match entirely
 /// (there is no `default`, reference §5.6).
@@ -1426,7 +1426,7 @@ tuiapp.Action State.handle_commit_key(term.Code code) {
                 edit_message();
                 // `Quit` unwinds `tuiapp.Loop.run`'s own `Session`, which is
                 // what actually leaves raw mode and the alternate screen --
-                // see `edit_message`'s own header. `gitui.src`'s driver
+                // see `edit_message`'s own header. `gitui.m31`'s driver
                 // reads `want_editor` on the way out and calls `Loop.run`
                 // again once `launch_editor` is done.
                 return tuiapp.Action.Quit;
@@ -1497,7 +1497,7 @@ tuiapp.Action State.handle_commit_key(term.Code code) {
 /// (`DiffView.move`, which is what keeps `at()` meaningful), `q` still quits
 /// the whole program, and `Backspace` is the one new key this task adds --
 /// back out to the outline, `close_diff`, the same "go back" key
-/// `apps/tui/browse.src`'s own directory descent already uses (see its `up`)
+/// `apps/tui/browse.m31`'s own directory descent already uses (see its `up`)
 /// rather than inventing a second convention for the same idea. `Escape`
 /// is deliberately left at its top-level meaning (quit) rather than
 /// special-cased into another "back": the diff view is a drilled-into
@@ -1589,8 +1589,8 @@ Option<index.Entry> find_index_entry(index.Index ix, bytes path) {
 /// Which command real git's own editor flow would launch: `$EDITOR` if it is
 /// set, `vi` otherwise -- git's own fallback (`core.editor` and `$VISUAL`
 /// come before `vi` in real git's own chain, but both come from
-/// `.git/config`, which this client already does not read, `object.src`'s
-/// own README names that gap). Pure and total, so `t_gitclient.src` can
+/// `.git/config`, which this client already does not read, `object.m31`'s
+/// own README names that gap). Pure and total, so `t_gitclient.m31` can
 /// check it with no environment and no process at all.
 pub str pick_editor(Option<str> env_editor) {
     return env_editor.or("vi");
@@ -1642,11 +1642,11 @@ void remove_entry(index.Index ix, bytes path) {
 
 // --- committing ---------------------------------------------------------------
 
-// No `.git/config` is read anywhere in this program (`object.src`'s own
+// No `.git/config` is read anywhere in this program (`object.m31`'s own
 // README names this gap); `GIT_AUTHOR_*`/`GIT_COMMITTER_*` are the one
 // identity source this client has, the same environment variables real git
 // itself honours over its config. `date.now()` is UTC-only
-// (`lib/date.src`'s own header), so every commit this client writes is
+// (`lib/date.m31`'s own header), so every commit this client writes is
 // timestamped `+0000`.
 object.Ident author_ident() {
     str who = os.env("GIT_AUTHOR_NAME").or(os.env("USER").or("unknown"));

@@ -6,7 +6,7 @@
 // was staged. That snapshot is the whole reason the file exists: comparing a
 // working-tree file's size and mtime against it is far cheaper than reading
 // and hashing the file, and is safe precisely because a change to either
-// number is what the file system promises on a write (`status.src` is the
+// number is what the file system promises on a write (`status.m31` is the
 // caller that leans on this).
 //
 // Layout (`Documentation/gitformat-index.txt`, version 2, the common case):
@@ -42,7 +42,7 @@
 // falls back from safely. A `dev`/`ino` mismatch, or a zeroed one, only ever
 // costs a re-hash it would otherwise have skipped (`read-cache.c`'s own
 // `ce_match_stat`); it is never trusted on its own to mean "unchanged" the way
-// `mtime` and `size` together are (`status.src` implements exactly that
+// `mtime` and `size` together are (`status.m31` implements exactly that
 // shortcut, and only that one). So an index this module writes is safe for
 // real git to read -- slower on its next `status`, in exchange for every
 // entry it has to re-hash once, never wrong.
@@ -118,7 +118,7 @@ pub str Error.to_str() {
 
 /// One staged path: a blob, the `stat(2)` snapshot from when it was staged,
 /// and the merge machinery's own two bits. `path` is `bytes`, not `str`, for
-/// `object.src`'s reason (its own module header): a path is whatever octets
+/// `object.m31`'s reason (its own module header): a path is whatever octets
 /// the filesystem gave git, and no caller of this one is required to prove
 /// they are UTF-8 before staging them.
 pub type Entry {
@@ -172,7 +172,7 @@ pub type Index {
 
 /// The index of the repository whose git directory is `gitdir`. `NotFound`
 /// for a repository with nothing staged yet -- not an error a caller should
-/// print, just "there is no index", which `status.src` treats as an empty
+/// print, just "there is no index", which `status.m31` treats as an empty
 /// one.
 pub Result<Index, Error> read(str gitdir) {
     str path = fs.join(repo.common(gitdir), "index");
@@ -311,7 +311,7 @@ pub Entry from_stat(bytes path, fs.Stat st, bool is_link, str blob_id) {
 /// The index of the repository whose git directory is `gitdir`, written
 /// atomically: a temporary file beside `.git/index`, written whole, then
 /// renamed over it, so a reader never opens a half-written index and a crash
-/// mid-write leaves the old one intact -- the same discipline `refs.src` uses
+/// mid-write leaves the old one intact -- the same discipline `refs.m31` uses
 /// for a ref.
 pub Result<bool, Error> write(str gitdir, Index ix) {
     bytes out = encode(ix);
@@ -392,7 +392,7 @@ void encode_entry(bytes out, Entry e) {
     }
 }
 
-// --- small helpers, the way object.src and refs.src each write their own ----
+// --- small helpers, the way object.m31 and refs.m31 each write their own ----
 
 int be32(bytes b, int at) {
     return b[at] << 24 | b[at + 1] << 16 | b[at + 2] << 8 | b[at + 3];
@@ -426,7 +426,7 @@ int find(bytes hay, int b, int from, int upto) {
     return -1;
 }
 
-// 40 lowercase hex digits to the 20 octets they spell -- `object.src`'s own
+// 40 lowercase hex digits to the 20 octets they spell -- `object.m31`'s own
 // helper, needed here too and not shared, the way `find`/`ascii`/`decimal`
 // are each written out per module rather than pulled into a shared utility.
 bytes hex_decode(str s) {

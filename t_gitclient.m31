@@ -1,4 +1,4 @@
-// Unit tests for `gitclient.src`'s pure logic -- the pieces that need no
+// Unit tests for `gitclient.m31`'s pure logic -- the pieces that need no
 // repository at all: building the outline from a `status.Status` and a
 // commit walk, and stripping a commit message down to what git would
 // actually commit, empty-message refusal included.
@@ -7,7 +7,7 @@
 //
 // Prints one `<case> ok` or `<case> FAIL ...` line per check; `test.sh`
 // greps for the `ok` lines and fails the suite if any `FAIL` line appears
-// (the same convention `t_write_refs.src` already uses). No repository, no
+// (the same convention `t_write_refs.m31` already uses). No repository, no
 // filesystem, no `gitdir` -- this is exactly what a pure function buys.
 
 import gitclient;
@@ -19,7 +19,7 @@ import tuioutline;
 import tuitext;
 
 // A local of the top-level program body is invisible to a function
-// (`apps/git/FRICTION.md` §6, `git.src`'s own `dispatch` comment) -- so the
+// (`apps/git/FRICTION.md` §6, `git.m31`'s own `dispatch` comment) -- so the
 // running totals live in a small struct, passed to `check` and mutated
 // through it, the way `index.Index.entries` is mutated through every
 // staging function above.
@@ -99,7 +99,7 @@ counter.check("outline: an expanded commit shows its author/date/message rows", 
 // --- commit_node: wrapping a long message line into multiple leaf rows -------
 //
 // `commit_node` wraps each logical message line to `COMMIT_BODY_WRAP_COLS`
-// (72, see its own comment in `gitclient.src`) rather than clipping it --
+// (72, see its own comment in `gitclient.m31`) rather than clipping it --
 // this is the fix itself, so it gets its own commit and its own checks
 // rather than piggybacking on `c1` above.
 
@@ -166,7 +166,7 @@ counter.check("commit message: whitespace-only input strips to empty", gitclient
 // --- open_diff / close_diff: the hunks.hunks/DiffView wiring, no repository ---
 //
 // `open_diff` and the comparison it feeds are `hunks.hunks(old, new)` and
-// `tuidiffview.DiffView`, both already tested elsewhere (`apps/git/t_hunks.src`,
+// `tuidiffview.DiffView`, both already tested elsewhere (`apps/git/t_hunks.m31`,
 // `apps/tui`'s own suite) -- what these checks are actually for is that
 // `gitclient.State` wires the two together correctly: a text change becomes a
 // non-binary `DiffView` with an addressable cursor, and a NUL-bearing buffer
@@ -219,7 +219,7 @@ match (ds.diff_view.at()) {
 }
 ds.close_diff();
 counter.check("close_diff: closing drops back to the outline and clears the view", !ds.diff_open && !ds.diff_binary && ds.diff_view.hunks.size() == 0, "diff_open=" + ds.diff_open.to_str() + " binary=" + ds.diff_binary.to_str() + " hunks=" + ds.diff_view.hunks.size().to_str());
-// A NUL on either side is `diff.is_binary`'s own heuristic (`lib/diff.src`) --
+// A NUL on either side is `diff.is_binary`'s own heuristic (`lib/diff.m31`) --
 // checked here only to confirm `open_diff` reports it as `diff_binary` rather
 // than trying to line-diff it.
 gitclient.State bs = gitclient.State.open("", "");

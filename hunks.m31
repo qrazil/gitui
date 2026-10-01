@@ -9,11 +9,11 @@
 //
 // --- the boundary this sits on -------------------------------------------------
 //
-// `lib/diff.src` computes the generic edit script -- keep, add or remove,
+// `lib/diff.m31` computes the generic edit script -- keep, add or remove,
 // line by line -- and knows nothing about hunks, context, or
 // `tuidiffview.Hunk`/`Line`; it cannot, because `lib/` does not depend on
 // `apps/tui` (`apps/git/design.md`'s "Starting the client" section, and
-// `lib/diff.src`'s own header, say why at more length). Grouping that script
+// `lib/diff.m31`'s own header, say why at more length). Grouping that script
 // into hunks and turning each `diff.Op`'s `bytes` line into the `str`
 // `tuidiffview.Line.text` wants is presentation, not algorithm, so it lives
 // here instead -- `apps/git` is the one place today that needs both
@@ -66,7 +66,7 @@ pub Blob hunks(bytes old, bytes new, int context = DEFAULT_CONTEXT) {
 }
 
 // A maximal run of consecutive ops that are all `Keep` or all NOT `Keep`,
-// over `[start, end)`. `lib/diff.src`'s script alternates between the two --
+// over `[start, end)`. `lib/diff.m31`'s script alternates between the two --
 // a `Keep` never sits between two ops of a run it is not part of -- so
 // splitting it this way, once, is enough to find every hunk boundary without
 // re-scanning.

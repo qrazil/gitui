@@ -4,7 +4,7 @@
 // commit; a persistent footer of the base commands; a which-key overlay for
 // commit's follow-ups; and a synced jump list, toggled on demand.
 //
-//   ./build.sh apps/git/gitui.src -o ourgitui
+//   ./build.sh apps/git/gitui.m31 -o ourgitui
 //   ./ourgitui [path]                      # default: "."
 //
 // `path` is where the repository is, exactly like `git status` run from
@@ -15,13 +15,13 @@
 //
 // This file is deliberately thin: every piece a test needs to call directly
 // -- building the outline, staging or unstaging a path, stripping a commit
-// message -- lives in `gitclient.src`, which has no top-level statements and
-// can be imported. This is `apps/tui/browse.src`'s own shape, one file
+// message -- lives in `gitclient.m31`, which has no top-level statements and
+// can be imported. This is `apps/tui/browse.m31`'s own shape, one file
 // further split because this program, unlike that demo, has a real test
 // obligation for its logic (`apps/git/design.md`'s "how you'll know you're
 // done").
 //
-// See `gitclient.src`'s own header, "launching `$EDITOR`, and the terminal
+// See `gitclient.m31`'s own header, "launching `$EDITOR`, and the terminal
 // handoff that takes", for why the loop below is a `while`, not a single
 // `loop.run` call: `gitclient.State.edit_message` cannot launch `$EDITOR`
 // itself (it has no access to the `term.Session` `tuiapp.Loop.run` owns), so

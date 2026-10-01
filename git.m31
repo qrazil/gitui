@@ -1,7 +1,7 @@
 // A read-only git plumbing client: `cat-file`, `ls-tree`, `log`, `rev-parse`
 // and `refs`, over loose objects only.
 //
-//   ./build.sh apps/git/git.src -o ourgit
+//   ./build.sh apps/git/git.m31 -o ourgit
 //
 //   ourgit -cat-file --type <object>
 //   ourgit -cat-file --size <object>
@@ -258,8 +258,8 @@ int log(str gd, args.Parsed c) {
         case None: {
         }
     }
-    // The walk itself -- git's date-ordered queue -- lives in `gitlog.src`
-    // now, shared with the interactive client (`gitui.src`) so there is one
+    // The walk itself -- git's date-ordered queue -- lives in `gitlog.m31`
+    // now, shared with the interactive client (`gitui.m31`) so there is one
     // implementation of it rather than two (`apps/git/design.md`).
     match (gitlog.walk(gd, spec, limit)) {
         case Ok(List<gitlog.Entry> entries): {
@@ -494,7 +494,7 @@ void write(bytes b) {
     // invisible inside a function, and the alternative was threading one
     // through every function that can print. It is safe -- closing a standard
     // stream's `File` marks that `File` closed and leaves the descriptor
-    // alone (`lib/io.src`, `File.release`).
+    // alone (`lib/io.m31`, `File.release`).
     io.File out = io.stdout();
     match (out.write(b)) {
         case Ok: {

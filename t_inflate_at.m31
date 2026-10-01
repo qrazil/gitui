@@ -1,9 +1,9 @@
 // `zlib.decompress_at`/`zlib.inflate_at` against `oracle_inflate_at.py`'s
-// two concatenated-stream fixtures -- isolated from `pack.src`'s own framing,
+// two concatenated-stream fixtures -- isolated from `pack.m31`'s own framing,
 // exactly as that oracle's own header explains.
 //
 //   python3 apps/git/oracle_inflate_at.py DIR > want
-//   ./build.sh apps/git/t_inflate_at.src -o t_inflate_at
+//   ./build.sh apps/git/t_inflate_at.m31 -o t_inflate_at
 //   ./t_inflate_at DIR > got
 //   diff got want
 //

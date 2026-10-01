@@ -1,4 +1,4 @@
-// `.gitignore` pattern matching: which paths `status.src`'s untracked walk
+// `.gitignore` pattern matching: which paths `status.m31`'s untracked walk
 // should leave out, the way real git's own untracked-file scan does.
 //
 // API
@@ -48,7 +48,7 @@
 //     matching git's own order (`gitignore(5)`);
 //   - a trailing, unescaped `/` means "matches a directory only" (checked
 //     against an ancestor directory in the walk above; a leaf path from
-//     `status.src`'s own walk is always a file, so a directory-only pattern
+//     `status.m31`'s own walk is always a file, so a directory-only pattern
 //     can only ever exclude something ABOVE the leaf, never the leaf
 //     itself);
 //   - a leading `/`, or a `/` anywhere before the last character, anchors
@@ -125,7 +125,7 @@ type IgnoreFile {
 // never both applicable to one candidate (their directories are disjoint),
 // so how ties break does not matter -- except `.git/info/exclude`, pushed
 // before any depth-0 `.gitignore` is found, whose place at the very front
-// `sort()`'s stability (`lib/sort.src`) then preserves.
+// `sort()`'s stability (`lib/sort.m31`) then preserves.
 int IgnoreFile.cmp(IgnoreFile other) {
     return base_segs.size() - other.base_segs.size();
 }
@@ -138,7 +138,7 @@ pub type Ignore {
 }
 
 /// Is `relpath` -- a file, repository-relative, `/`-separated, exactly as
-/// `status.src`'s own walk spells one -- ignored?
+/// `status.m31`'s own walk spells one -- ignored?
 ///
 /// Walks every ancestor directory from the repository root down first: the
 /// moment one of them is itself excluded, the whole path is ignored and
@@ -210,7 +210,7 @@ pub Result<Ignore, Error> load(str gitdir, str worktree) {
 // precedence order (the list is already sorted shallowest first). `is_dir`
 // says whether that candidate is a directory (every ancestor is; the final
 // path itself, checked by `is_ignored`'s own last call, never is -- a leaf
-// from `status.src`'s walk is always a file or a symlink).
+// from `status.m31`'s walk is always a file or a symlink).
 bool matched(List<IgnoreFile> files, List<str> segs, int k, bool is_dir) {
     bool ignored = false;
     for (IgnoreFile f in files) {
@@ -359,7 +359,7 @@ bool match_segments(List<str> pat, int pi, List<str> path, int si) {
 
 // One path component against one pattern component: `*` (any run, zero
 // included) and `?` (exactly one character), in code points. The classic
-// backtracking matcher (`fs.src`'s `matches`, minus its shell-only
+// backtracking matcher (`fs.m31`'s `matches`, minus its shell-only
 // leading-dot rule -- `.gitignore` patterns match a leading dot like any
 // other character -- and minus `[...]` classes, out of scope here).
 bool seg_match(List<int> name, List<int> pat) {
@@ -409,8 +409,8 @@ bool seg_match(List<int> name, List<int> pat) {
     }
 }
 
-// The code points of a str (`fs.src`'s own `chars`, written out again here
-// for the reason `index.src`'s header gives for `hex_decode`: a small
+// The code points of a str (`fs.m31`'s own `chars`, written out again here
+// for the reason `index.m31`'s header gives for `hex_decode`: a small
 // per-module helper, not a shared utility, for a language whose `str` has
 // no built-in code-point indexing).
 List<int> chars_of(str s) {

@@ -2,7 +2,7 @@
 // `git clone` writes instead of loose objects, and that `git gc`/`git repack`
 // collapse a repository's loose objects into later. `apps/git/README.md`'s
 // "What a real repository needs that this cannot do" names this as the whole
-// remaining gap, and `apps/git/object.src` wires this module in underneath
+// remaining gap, and `apps/git/object.m31` wires this module in underneath
 // `object.read` so that everything above it -- `log`, `cat-file`, `ls-tree`,
 // `rev-parse`'s short names, the interactive client -- reads a packed
 // repository exactly as it reads a loose one, with no call site changed.
@@ -40,7 +40,7 @@
 // back to back: a variable-length type+size header (3 type bits and 4 size
 // bits in the first octet, each further octet's top bit a continuation flag
 // and its low 7 bits the next size bits, least-significant group first), then
-// one zlib stream (RFC 1950 -- the exact format `zlib.src` already reads for a
+// one zlib stream (RFC 1950 -- the exact format `zlib.m31` already reads for a
 // loose object, which is why `zlib.decompress_at` exists: this is that
 // decoder, started at an offset instead of at the front of its own buffer).
 //
@@ -153,7 +153,7 @@ pub str Error.to_str() {
 }
 
 /// A packed object, resolved all the way down to its plain content: the same
-/// two things `object.src`'s loose reading already has by the time it calls
+/// two things `object.m31`'s loose reading already has by the time it calls
 /// `object.parse` -- `object.read` reassembles `<kind> <size>\0<content>` from
 /// this and hands it to `parse` exactly as it would for a loose object, so the
 /// SHA-1 check, the tree/commit/tag parsing and everything above it are
@@ -258,7 +258,7 @@ List<PackFile> discover(str gitdir) {
 // --- the loose fallback, for a delta base a thin pack leaves outside it ------
 
 // `id`'s loose object, read down to its kind and content only -- not through
-// `object.parse`, which this module does not depend on (object.src depends on
+// `object.parse`, which this module does not depend on (object.m31 depends on
 // this one; the other way would be a cycle). No SHA-1 check and no structural
 // validation: a delta base found this way is about to be fed straight into
 // `apply_delta`, and the RESULT still goes through `object.parse` exactly as
@@ -293,9 +293,9 @@ Option<Found> loose_raw(str gitdir, str id) {
     }
 }
 
-// The index of octet `b` at or after `from`, or -1 -- `object.src`'s own
+// The index of octet `b` at or after `from`, or -1 -- `object.m31`'s own
 // private helper, duplicated rather than imported (that module imports this
-// one, not the other way around; see the header on why, and `object.src`'s
+// one, not the other way around; see the header on why, and `object.m31`'s
 // own copy of this same helper for the established house pattern of not
 // sharing a four-line scan across modules).
 int find(bytes hay, int b, int from) {
@@ -789,7 +789,7 @@ int u64be(bytes b, int at) {
 }
 
 // Lexicographic comparison of the 20 octets at `data[off .. off+20]` against
-// `id20`, negative/zero/positive -- `object.src`'s `cmp_bytes` over a fixed
+// `id20`, negative/zero/positive -- `object.m31`'s `cmp_bytes` over a fixed
 // width and without the `bytes.substr` copy a general comparison would need,
 // since this runs once per binary-search step.
 int cmp20(bytes data, int off, bytes id20) {
@@ -804,8 +804,8 @@ int cmp20(bytes data, int off, bytes id20) {
     return 0;
 }
 
-// 40 lowercase hex digits to the 20 octets they spell -- `object.src`'s and
-// `index.src`'s own private helper, duplicated for the same reason `find`
+// 40 lowercase hex digits to the 20 octets they spell -- `object.m31`'s and
+// `index.m31`'s own private helper, duplicated for the same reason `find`
 // above is: this module does not import either.
 bytes hex_decode(str s) {
     bytes out = [];

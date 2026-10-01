@@ -1,7 +1,7 @@
 // Drives `gitclient.State`'s staging, unstaging, committing and diffing
 // directly -- no terminal, no `tuiapp.Loop` -- against a real, disposable
 // fixture, so `test_gitui.sh` can check each action's on-disk effect against
-// real git the same way `t_index_stage.src` and `t_write_refs.src` already
+// real git the same way `t_index_stage.m31` and `t_write_refs.m31` already
 // do for the plumbing underneath this client.
 //
 //   ./t_gitclient_ops <gitdir> <worktree> stage <relative-path>
@@ -18,7 +18,7 @@
 // `diff` moves the outline's cursor onto the named row (`select_id`, the
 // same lookup `State.reload()` itself uses to keep the cursor on a rebuild)
 // and calls `show_diff_current()`, then prints the result the same way
-// `apps/git/t_hunks.src` prints `hunks.hunks`'s own output -- one `@@ ...`
+// `apps/git/t_hunks.m31` prints `hunks.hunks`'s own output -- one `@@ ...`
 // header line per hunk, one marker-prefixed line per body row -- so a shell
 // test can diff this against real `git diff`/`git diff --cached`'s body
 // exactly as `test_hunks.sh` already does against `diff -u`'s. `Binary files
@@ -26,7 +26,7 @@
 // if the row could not be found at all (a bad section/path argument).
 //
 // `edit` calls `edit_message()` then `launch_editor()` exactly as
-// `gitui.src`'s own driver does once `tuiapp.Loop.run` has handed the
+// `gitui.m31`'s own driver does once `tuiapp.Loop.run` has handed the
 // terminal back -- there is no terminal or `Session` in this harness at all,
 // which is exactly what makes it able to drive `os.run`'s every outcome
 // (success, nonzero exit, signal, `$EDITOR` unset or not found)

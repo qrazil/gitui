@@ -49,7 +49,7 @@
 // happens to occupy its path.
 //
 // **A path that is not valid UTF-8** -- in the index or in HEAD's tree --
-// is left out of both comparisons. `object.src`'s own module header notes
+// is left out of both comparisons. `object.m31`'s own module header notes
 // that a tree's names are octets and need not be UTF-8; this module's
 // internal comparisons are keyed by `str` (a `Map`'s key, and `bytes` cannot
 // be one, reference §3.9), and `fs.walk` itself cannot enumerate such a name
@@ -58,13 +58,13 @@
 // otherwise. Every path this program itself ever writes is UTF-8, so this
 // only bites a working tree built by something else.
 //
-// **`.gitignore` filtering is `gitignore.src`'s job, not this module's.**
+// **`.gitignore` filtering is `gitignore.m31`'s job, not this module's.**
 // A candidate path that is on disk and not in the index used to be reported
 // untracked unconditionally; now `gitignore.Ignore.is_ignored` is asked
 // about each one first, and an ignored path is left out, matching what
 // `git status`'s own untracked-file scan does. The pattern matching, the
 // nested-`.gitignore` precedence and the negated-pattern-inside-an-excluded-
-// directory exception all live in `gitignore.src`'s own module header --
+// directory exception all live in `gitignore.m31`'s own module header --
 // this module only calls it.
 
 import io;

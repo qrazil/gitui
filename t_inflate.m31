@@ -2,7 +2,7 @@
 // `oracle_inflate.py` writes.
 //
 //   python3 apps/git/oracle_inflate.py DIR > want
-//   ./build.sh apps/git/t_inflate.src -o t_inflate && ./t_inflate DIR > got
+//   ./build.sh apps/git/t_inflate.m31 -o t_inflate && ./t_inflate DIR > got
 //   diff got want
 //
 // One line per `.z` file in DIR, sorted by name:
@@ -12,7 +12,7 @@
 //
 // The digest rather than the octets, because the fixtures include a two-
 // megabyte case and a diff of two megabytes of binary is not a diagnostic.
-// `t_object.src` compares real objects octet for octet.
+// `t_object.m31` compares real objects octet for octet.
 
 import zlib;
 import sha1;

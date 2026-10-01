@@ -3,7 +3,7 @@
 // diff this output directly against a real `diff -u`'s (with its `---`/`+++`
 // file-header lines stripped) as an oracle for hunk boundaries and line
 // classification. Not part of `apps/git`'s command surface: a throwaway
-// harness for `hunks.src`'s own tests, the same role `t_object.src` and
+// harness for `hunks.m31`'s own tests, the same role `t_object.m31` and
 // friends play for the rest of this program.
 //
 //   t_hunks <old-file> <new-file>

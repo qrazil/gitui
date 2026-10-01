@@ -3,7 +3,7 @@
 // there is no expectation written down here that could drift from the
 // standard -- the standard is the other program.
 //
-//   ./build.sh apps/git/t_sha1.src -o t_sha1 && ./t_sha1 [bigfile]
+//   ./build.sh apps/git/t_sha1.m31 -o t_sha1 && ./t_sha1 [bigfile]
 //
 // With a file named on the command line it hashes that too, and reports the
 // throughput on stderr, which is deliberately not on stdout: a timing is not

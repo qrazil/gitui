@@ -1,5 +1,5 @@
 // Git's smart HTTP protocol, protocol v0 only: enough to fetch a real
-// packfile from a real server over `lib/http.src`. See
+// packfile from a real server over `lib/http.m31`. See
 // `apps/git/design.md`'s "Going remote, 2026-09-29" for where this sits: a
 // fetched pack is written to disk here, verified byte for byte against its
 // own trailing checksum, and handed to nothing else in this program. Turning
@@ -15,7 +15,7 @@
 //   ad.service, ad.capabilities, ad.refs, ad.object_format
 //   summary.pack_bytes, summary.object_count
 //
-// The seam, testable with no socket in sight (`lib/http.src`'s own reason,
+// The seam, testable with no socket in sight (`lib/http.m31`'s own reason,
 // quoted in its header, holds here too):
 //   httpfetch.read_packet(buf, at)      -> Result<Packet, Error>   Part 1
 //   httpfetch.pkt_line(payload)         -> bytes                  Part 1
@@ -25,11 +25,11 @@
 //
 // `discover` and `fetch` are the only two functions that touch a socket, and
 // they do it by building a `http.Request` and calling `http.fetch` --
-// exactly the same two calls a caller of `lib/http.src` would write by hand.
+// exactly the same two calls a caller of `lib/http.m31` would write by hand.
 // Everything else is a pure function over `bytes`, in memory, so the whole
 // wire format is unit-testable against fixed byte strings and the two real
 // exchanges are tested only for "does a real server's answer parse", not for
-// "does the parser work" -- the same split `object.src` draws between
+// "does the parser work" -- the same split `object.m31` draws between
 // `read` (I/O) and `parse` (none).
 //
 // --- protocol version: v0, not v2 -------------------------------------------
@@ -61,7 +61,7 @@
 // and anything else is `NotSmart`, refused rather than misparsed.
 //
 // A capabilities line advertising an object format other than SHA-1 --
-// `object-format=sha256` -- is `UnsupportedFormat`: `sha1.src`'s own header
+// `object-format=sha256` -- is `UnsupportedFormat`: `sha1.m31`'s own header
 // gives the reason there is no second digest in this program, and it holds
 // here too.
 //
@@ -136,13 +136,13 @@
 // --- verification: the one thing that must never be skipped -----------------
 //
 // Every packfile ends with a 20-byte SHA-1 of everything before it.
-// `verify_pack` computes that digest itself (`sha1.src`) and refuses to
+// `verify_pack` computes that digest itself (`sha1.m31`) and refuses to
 // write anything to disk if it does not match, or if fewer than 32 bytes
 // arrived, or if the first four are not `PACK` -- a truncated or corrupted
 // transfer is `Truncated`, `BadPack` or `ChecksumMismatch`, never a pack on
 // disk that looks fine and is not. The write itself never touches the
 // target path directly: a temporary file beside it, written whole, then
-// renamed over -- the same discipline `refs.src` and `object.src` already
+// renamed over -- the same discipline `refs.m31` and `object.m31` already
 // use, for the same reason.
 //
 // --- what is NOT here ---------------------------------------------------------
@@ -156,7 +156,7 @@
 //   - **Push**, and the capabilities that only matter for it
 //     (`report-status`, `delete-refs`, `push-options`, ...).
 //   - **Protocol v2** -- see above.
-//   - **SSH**, and TLS: `lib/http.src`'s own `parse_url` already refuses
+//   - **SSH**, and TLS: `lib/http.m31`'s own `parse_url` already refuses
 //     `https://` before a socket exists, for the reason its header gives,
 //     and that refusal is inherited here rather than repeated.
 //   - **`multi_ack`/`multi_ack_detailed`** -- see "negotiation" above.
@@ -175,7 +175,7 @@ import sha1;
 /// caller already has when it reports.
 pub enum Error {
     /// The HTTP exchange itself failed -- a bad URL, a refused, reset or
-    /// timed-out connection, or a malformed HTTP message. `lib/http.src`'s
+    /// timed-out connection, or a malformed HTTP message. `lib/http.m31`'s
     /// own `Error` already said which; there is nothing more specific to add
     /// at this layer.
     Http;
@@ -196,7 +196,7 @@ pub enum Error {
     /// A pkt-line's length prefix names more bytes than actually arrived --
     /// a message cut off in the middle.
     Truncated;
-    /// The server's object format is not SHA-1. See `sha1.src`'s own note on
+    /// The server's object format is not SHA-1. See `sha1.m31`'s own note on
     /// why there is no second digest here.
     UnsupportedFormat;
     /// The ref advertisement does not offer `side-band-64k`, which this
@@ -673,7 +673,7 @@ bytes negotiation_body(Advertisement ad, List<str> wants, List<str> haves) {
     if (has_cap(ad.capabilities, "ofs-delta")) {
         use.push("ofs-delta");
     }
-    use.push("agent=lang-httpfetch/1");
+    use.push("agent=m31-httpfetch/1");
     str first_caps = use.join(" ");
     bytes out = [];
     bool first = true;
@@ -753,7 +753,7 @@ bool is_ack_or_nak(bytes payload) {
 // --- verification (Part 5) ---------------------------------------------------
 
 /// Check `pack`'s trailing 20-byte SHA-1 against the SHA-1 of everything
-/// before it (`sha1.src`), and only then write it to `out_path`. Exposed on
+/// before it (`sha1.m31`), and only then write it to `out_path`. Exposed on
 /// its own -- given bytes, not a URL -- so a truncated or corrupted transfer
 /// can be tested by handing this function a byte string that was never near
 /// a socket: a real pack with its tail cut off, or with one byte of its
@@ -797,8 +797,8 @@ str base_of(str url) {
 
 // Write `content` to `path` without ever leaving a half-written file there --
 // a freshly named temporary file beside it, written whole, then renamed over
-// the target. The same discipline `refs.src`'s own `write_atomic` uses, for
-// the same reason; duplicated here rather than imported, since `refs.src`'s
+// the target. The same discipline `refs.m31`'s own `write_atomic` uses, for
+// the same reason; duplicated here rather than imported, since `refs.m31`'s
 // copy is private to that module (`apps/git/FRICTION.md`'s `before`/`str_cmp`
 // are the same trade already made twice in this program).
 Result<bool, io.Error> write_atomic(str path, bytes content) {

@@ -1,4 +1,4 @@
-// Git's object store: loose objects, and -- `apps/git/pack.src` -- packed
+// Git's object store: loose objects, and -- `apps/git/pack.m31` -- packed
 // ones, read through exactly the same API.
 //
 // An object lives at `.git/objects/ab/cdef...` -- the first two hex digits of
@@ -9,12 +9,12 @@
 //
 // where `<type>` is `blob`, `tree`, `commit` or `tag` and `<size>` is the
 // decimal length of `<content>`. The object's NAME is the SHA-1 of that whole
-// plaintext, header included, which is why `sha1.src` and `zlib.src` had to
+// plaintext, header included, which is why `sha1.m31` and `zlib.m31` had to
 // come first. Reading an object here always recomputes it: an object store is
 // content-addressed or it is just a directory of files.
 //
 // Or it lives in a `.idx`/`.pack` pair under `.git/objects/pack/` instead --
-// `pack.src`'s problem, not this module's, except that `read` has to ask it
+// `pack.m31`'s problem, not this module's, except that `read` has to ask it
 // when the loose file is not there. `pack.read` hands back the same `<kind>,
 // content` pair a loose read has by the time it reaches `parse`, so `read`
 // rebuilds the identical `<type> <size>\0<content>` plaintext and calls
@@ -48,7 +48,7 @@
 // already there, the write is skipped rather than redone, the same object
 // under the same name either way. The write itself is a temporary file
 // beside the target, written whole, then renamed over it, so nothing ever
-// reads a half-written zlib stream -- the same discipline `refs.src` uses for
+// reads a half-written zlib stream -- the same discipline `refs.m31` uses for
 // a ref file, for the same reason.
 //
 // `write_tree` sorts its entries into git's own tree order first, so a
@@ -82,7 +82,7 @@
 //
 // `object.loose(gitdir)` is deliberately unchanged by any of this: it answers
 // "every LOOSE object", exactly as its own doc comment always said, and
-// `t_object.src`'s existing oracle test still means what it always meant on
+// `t_object.m31`'s existing oracle test still means what it always meant on
 // the all-loose fixtures it runs against. `object.all(gitdir)` is the new,
 // separate answer to "every object regardless of where it lives" -- the one
 // callers that must see the whole store (an oracle walking every object, or a
@@ -125,7 +125,7 @@ pub enum Error {
     BadName;
     /// A short name that several objects begin with.
     Ambiguous;
-    /// Named by a `.idx` under `objects/pack/`, but `pack.src` could not read
+    /// Named by a `.idx` under `objects/pack/`, but `pack.m31` could not read
     /// it out: a corrupt or truncated pack, a malformed delta, a chain too
     /// deep to be real. Never `NotFound` for a genuinely missing object --
     /// that stays `Error.NotFound`, exactly as for a loose one.
@@ -361,7 +361,7 @@ pub Result<Object, Error> read(str gitdir, str id) {
         }
         case Err(pack.Error e): {
             // `NotFound` alone means genuinely missing -- everything else
-            // pack.src can say means it found the id but could not read the
+            // pack.m31 can say means it found the id but could not read the
             // object out, which is `Error.Packed` here.
             match (e) {
                 case NotFound: {
@@ -442,7 +442,7 @@ pub Result<Object, Error> parse(str id, bytes plain) {
 ///
 /// A full forty-digit name is checked for on disk like any other prefix, so
 /// this answers "is it here" as well as "which is it". `rev_parse`'s DWIM
-/// (`refs.src`) calls this for a short object name, so a packed repository's
+/// (`refs.m31`) calls this for a short object name, so a packed repository's
 /// abbreviated hashes resolve exactly as a loose repository's do -- one more
 /// reader that does not have to know which kind of store it is looking at.
 pub List<str> matching(str gitdir, str prefix) {
@@ -1059,7 +1059,7 @@ int hex_val(int c) {
     return 0;
 }
 
-// Byte comparison of two runs, negative/zero/positive -- `refs.src`'s
+// Byte comparison of two runs, negative/zero/positive -- `refs.m31`'s
 // `before`, over `bytes` rather than `str`, needed here for `Entry.cmp`.
 int cmp_bytes(bytes a, bytes b) {
     int n = a.size();

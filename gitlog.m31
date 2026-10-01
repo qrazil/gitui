@@ -1,9 +1,9 @@
-// The commit-history walk, factored out of `git.src`'s own `-log` command so
+// The commit-history walk, factored out of `git.m31`'s own `-log` command so
 // it is written exactly once. See `apps/git/design.md`, "Starting the
 // client": the interactive client's commit section is populated "from the
 // existing log/object read side" and is told to "reuse that logic rather
 // than re-deriving it" -- this module is that logic, moved rather than
-// copied. `git.src`'s `-log` command now calls `walk` too, so there is one
+// copied. `git.m31`'s `-log` command now calls `walk` too, so there is one
 // implementation of git's own date-ordered queue, not two that drift apart.
 //
 // API
@@ -49,7 +49,7 @@ pub type Entry {
 
 /// Every commit reachable from `rev`, newest committer date first.
 ///
-/// git's own queue, moved here verbatim from `git.src`'s original `log`: a
+/// git's own queue, moved here verbatim from `git.m31`'s original `log`: a
 /// list kept in descending committer-date order, pop the front, keep it,
 /// insert its parents by date -- equal dates keeping the order they were
 /// inserted in, which is `commit_list_insert_by_date`'s own tie-break and is
@@ -117,7 +117,7 @@ pub Result<List<Entry>, Error> walk(str gitdir, str rev, int limit) {
 }
 
 // `id` and `when` into the two parallel lists, before the first entry whose
-// date is strictly older -- `git.src`'s original comment on this, unchanged:
+// date is strictly older -- `git.m31`'s original comment on this, unchanged:
 // two lists rather than a list of pairs because a struct here would be a
 // third type for four lines of code, and `remove_at` on both is the pop.
 void insert(List<str> queue, List<int> dates, str id, int when) {
