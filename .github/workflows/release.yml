@@ -1,0 +1,217 @@
+name: Release
+
+# Build ourgit (the read-only CLI) and ourgitui (the interactive client)
+# release binaries for each platform and attach them to the GitHub Release
+# for a pushed version tag -- the same pattern qrazil/httpserver and
+# qrazil/term-markdown's own release.yml use, against a pinned release of
+# qrazil/m31 (for the compiler + runtime SDK) and a pinned commit of
+# qrazil/tui (for gitui.m31's own widget dependencies -- see
+# build-gitui.sh's own header, and test.yml's for why TUI_REF is a commit,
+# not a tag).
+#
+#   git tag v0.1.0 && git push origin v0.1.0
+#
+# test.yml is a hard precondition, exactly as qrazil/m31's own release.yml
+# treats its gates job: a broken build must never produce a release.
+env:
+  M31_REF: v0.1.1
+  TUI_REF: b475ecb8a771785754f9c2bbd5fc3f2e02f060e1
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write # softprops/action-gh-release needs this to create the release and upload assets
+
+jobs:
+  test:
+    name: Test (precondition)
+    uses: ./.github/workflows/test.yml
+
+  build-linux-x86_64:
+    name: Build — Linux x86-64
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download and extract the m31 release (${{ env.M31_REF }})
+        run: |
+          set -euo pipefail
+          curl -fsSL -o m31.tar.gz \
+            "https://github.com/qrazil/m31/releases/download/${{ env.M31_REF }}/m31-linux-x86_64.tar.gz"
+          mkdir -p m31
+          tar -C m31 -xzf m31.tar.gz
+          chmod +x m31/m31c
+          echo "LANGC=$PWD/m31/m31c" >> "$GITHUB_ENV"
+          echo "M31_ROOT=$PWD/m31" >> "$GITHUB_ENV"
+
+      - name: Fetch the pinned qrazil/tui commit (${{ env.TUI_REF }})
+        run: |
+          set -euo pipefail
+          mkdir -p tui
+          git -C tui init -q
+          git -C tui remote add origin https://github.com/qrazil/tui.git
+          git -C tui fetch -q --depth 1 origin "${{ env.TUI_REF }}"
+          git -C tui checkout -q FETCH_HEAD
+          echo "TUI_ROOT=$PWD/tui" >> "$GITHUB_ENV"
+
+      - name: Build
+        run: |
+          set -euo pipefail
+          OUT=dist/gitui-linux-x86_64
+          mkdir -p "$OUT"
+          bash build.sh git.m31 -o "$OUT/ourgit"
+          bash build-gitui.sh -o "$OUT/ourgitui"
+          cp README.md design.md FRICTION.md "$OUT/" 2>/dev/null || true
+          sed 's/^ *//' > "$OUT/NOTES.txt" <<EOF
+          gitui — Linux x86-64 release build
+          Built from commit: ${GITHUB_SHA}
+          Tag: ${GITHUB_REF_NAME}
+          Built against m31 ${{ env.M31_REF }}, tui ${{ env.TUI_REF }}
+
+          ourgit                        ./ourgit -log --max 5
+          ourgitui                      ./ourgitui  (run from a repository's own top level)
+          EOF
+
+      - name: Package
+        run: tar -C "dist/gitui-linux-x86_64" -czf gitui-linux-x86_64.tar.gz .
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: gitui-linux-x86_64
+          path: gitui-linux-x86_64.tar.gz
+          if-no-files-found: error
+
+  build-linux-aarch64:
+    name: Build — Linux aarch64
+    needs: test
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download and extract the m31 release (${{ env.M31_REF }})
+        run: |
+          set -euo pipefail
+          curl -fsSL -o m31.tar.gz \
+            "https://github.com/qrazil/m31/releases/download/${{ env.M31_REF }}/m31-linux-aarch64.tar.gz"
+          mkdir -p m31
+          tar -C m31 -xzf m31.tar.gz
+          chmod +x m31/m31c
+          echo "LANGC=$PWD/m31/m31c" >> "$GITHUB_ENV"
+          echo "M31_ROOT=$PWD/m31" >> "$GITHUB_ENV"
+
+      - name: Fetch the pinned qrazil/tui commit (${{ env.TUI_REF }})
+        run: |
+          set -euo pipefail
+          mkdir -p tui
+          git -C tui init -q
+          git -C tui remote add origin https://github.com/qrazil/tui.git
+          git -C tui fetch -q --depth 1 origin "${{ env.TUI_REF }}"
+          git -C tui checkout -q FETCH_HEAD
+          echo "TUI_ROOT=$PWD/tui" >> "$GITHUB_ENV"
+
+      - name: Build
+        run: |
+          set -euo pipefail
+          OUT=dist/gitui-linux-aarch64
+          mkdir -p "$OUT"
+          bash build.sh git.m31 -o "$OUT/ourgit"
+          bash build-gitui.sh -o "$OUT/ourgitui"
+          cp README.md design.md FRICTION.md "$OUT/" 2>/dev/null || true
+          sed 's/^ *//' > "$OUT/NOTES.txt" <<EOF
+          gitui — Linux aarch64 release build
+          Built from commit: ${GITHUB_SHA}
+          Tag: ${GITHUB_REF_NAME}
+          Built against m31 ${{ env.M31_REF }}, tui ${{ env.TUI_REF }}
+
+          ourgit                        ./ourgit -log --max 5
+          ourgitui                      ./ourgitui  (run from a repository's own top level)
+          EOF
+
+      - name: Package
+        run: tar -C "dist/gitui-linux-aarch64" -czf gitui-linux-aarch64.tar.gz .
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: gitui-linux-aarch64
+          path: gitui-linux-aarch64.tar.gz
+          if-no-files-found: error
+
+  build-macos-arm64:
+    name: Build — macOS (arm64)
+    needs: test
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download and extract the m31 release (${{ env.M31_REF }})
+        run: |
+          set -euo pipefail
+          curl -fsSL -o m31.tar.gz \
+            "https://github.com/qrazil/m31/releases/download/${{ env.M31_REF }}/m31-macos-arm64.tar.gz"
+          mkdir -p m31
+          tar -C m31 -xzf m31.tar.gz
+          chmod +x m31/m31c
+          echo "LANGC=$PWD/m31/m31c" >> "$GITHUB_ENV"
+          echo "M31_ROOT=$PWD/m31" >> "$GITHUB_ENV"
+
+      - name: Fetch the pinned qrazil/tui commit (${{ env.TUI_REF }})
+        run: |
+          set -euo pipefail
+          mkdir -p tui
+          git -C tui init -q
+          git -C tui remote add origin https://github.com/qrazil/tui.git
+          git -C tui fetch -q --depth 1 origin "${{ env.TUI_REF }}"
+          git -C tui checkout -q FETCH_HEAD
+          echo "TUI_ROOT=$PWD/tui" >> "$GITHUB_ENV"
+
+      - name: Build
+        run: |
+          set -euo pipefail
+          OUT=dist/gitui-macos-arm64
+          mkdir -p "$OUT"
+          bash build.sh git.m31 -o "$OUT/ourgit"
+          bash build-gitui.sh -o "$OUT/ourgitui"
+          cp README.md design.md FRICTION.md "$OUT/" 2>/dev/null || true
+          sed 's/^ *//' > "$OUT/NOTES.txt" <<EOF
+          gitui — macOS arm64 (Apple Silicon) release build
+          Built from commit: ${GITHUB_SHA}
+          Tag: ${GITHUB_REF_NAME}
+          Built against m31 ${{ env.M31_REF }}, tui ${{ env.TUI_REF }}
+
+          ourgit                        ./ourgit -log --max 5
+          ourgitui                      ./ourgitui  (run from a repository's own top level)
+          EOF
+
+      - name: Package
+        run: tar -C "dist/gitui-macos-arm64" -czf gitui-macos-arm64.tar.gz .
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: gitui-macos-arm64
+          path: gitui-macos-arm64.tar.gz
+          if-no-files-found: error
+
+  release:
+    name: Publish release
+    needs:
+      - test
+      - build-linux-x86_64
+      - build-linux-aarch64
+      - build-macos-arm64
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Publish to GitHub Releases
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*.tar.gz
+          fail_on_unmatched_files: true
+          generate_release_notes: true
