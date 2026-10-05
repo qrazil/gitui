@@ -1,21 +1,24 @@
-# `apps/git` — a terminal git client
+# gitui — a terminal git client
 
-Git plumbing and an interactive client, written entirely in this language:
-SHA-1, zlib inflate, the loose-object format, refs, the index, working-tree
-status, and both a read-only CLI (`git.m31`) and a `tuiapp.Loop`-driven
-interactive client (`gitui.m31`) over `apps/tui`. Nothing here is a binding
-to anything; the only C in the program is the runtime every program links.
+Git plumbing and an interactive client, written entirely in m31 (the
+language at github.com/qrazil/m31): SHA-1, zlib inflate, the loose-object
+format, refs, the index, working-tree status, and both a read-only CLI
+(`git.m31`) and a `tuiapp.Loop`-driven interactive client (`gitui.m31`) over
+github.com/qrazil/tui. Nothing here is a binding to anything; the only C in
+the program is the runtime every program links.
 
 ```
-cargo build
-bash apps/git/test.sh                    # the built-in fixtures
-bash apps/git/test.sh <repo> [<repo>…]   # those, and each repository named
+export M31_ROOT=/path/to/m31      # a checkout, or an extracted release's runtime SDK
+export TUI_ROOT=/path/to/tui      # a checkout, pinned to the commit test.yml names
 
-./build.sh apps/git/git.m31 -o ourgit
+bash test.sh                    # the built-in fixtures
+bash test.sh <repo> [<repo>…]   # those, and each repository named
+
+bash build.sh git.m31 -o ourgit
 ./ourgit -log --max 5
 
-./apps/git/build-gitui.sh -o ourgitui    # not build.sh -- see build-gitui.sh
-./ourgitui                               # run from a repository's own top level
+bash build-gitui.sh -o ourgitui    # not build.sh -- see build-gitui.sh's own header
+./ourgitui                         # run from a repository's own top level
 ```
 
 | file | what it is |
@@ -29,12 +32,12 @@ bash apps/git/test.sh <repo> [<repo>…]   # those, and each repository named
 | `git.m31` | the read-only CLI |
 | `index.m31` | `.git/index`: read, write, a fresh entry from `fs.stat` |
 | `status.m31` | working-tree status: staged, unstaged, untracked |
-| `hunks.m31` | `lib/diff.m31`'s edit script, grouped into `apps/tui/tuidiffview.Hunk`/`Line` with context |
+| `hunks.m31` | `lib/diff.m31`'s edit script, grouped into qrazil/tui's `tuidiffview.Hunk`/`Line` with context |
 | `gitlog.m31` | the commit-history walk, shared by `git.m31 -log` and `gitui.m31` |
 | `gitclient.m31` | the interactive client's state and logic (no top-level statements, so it is importable and testable) |
 | `gitui.m31` | the interactive client's thin driver: parses a path, runs `tuiapp.Loop` |
 | `httpfetch.m31` | git's smart-HTTP protocol, v0 fetch/clone only: pkt-line framing, the ref advertisement, want/have negotiation, side-band-64k demultiplexing, and pack checksum verification, over `lib/http.m31` |
-| `build-gitui.sh` | builds `gitui.m31`: this compiler resolves every `import` against the entry file's own directory (`src/modules.rs`'s `load`), not a search path, so `gitui.m31`'s `apps/tui/` dependencies are staged into a temporary directory at build time rather than copied into this one -- see the script's own header |
+| `build-gitui.sh` | builds `gitui.m31`: this compiler resolves every `import` against the entry file's own directory (`src/modules.rs`'s `load`), not a search path, so `gitui.m31`'s qrazil/tui dependencies are staged into a temporary directory at build time rather than copied into this one -- see the script's own header |
 | `t_*.m31` | test programs, each printing what a Python oracle prints, or asserting against its own expectations |
 | `oracle_*.py` | the oracles: `hashlib`, `zlib`, and a from-scratch format reader |
 | `pty_e2e.py` | drives `ourgitui` under a real pty against disposable fixtures, real `git` as the oracle |

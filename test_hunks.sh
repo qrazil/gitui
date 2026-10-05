@@ -1,36 +1,35 @@
 #!/usr/bin/env bash
 # `hunks.m31`: the generic edit script from `lib/diff.m31`, grouped into
-# `apps/tui/tuidiffview.Hunk`/`Line` with context -- checked against real
+# qrazil/tui's `tuidiffview.Hunk`/`Line` with context -- checked against real
 # `diff -u` (hunk boundaries and line classification) and real `git diff`
 # (the binary-file case, since git's own NUL heuristic is what
 # `lib/diff.m31`'s `is_binary` matches).
 #
 # Sourced from `test.sh`, on the same terms as `test_write.sh`: no `set`, no
-# `cd`, no `trap` here, and `$WORK`, `$LANGC`, `note`/`bad` and the
-# `pass`/`fail` counters are all `test.sh`'s.
+# `cd`, no `trap` here, and `$WORK`, `$LANGC`, `$M31_ROOT`, `$TUI_ROOT`,
+# `note`/`bad` and the `pass`/`fail` counters are all `test.sh`'s.
 #
-# `hunks.m31` imports `apps/tui/tuidiffview`, which this program's own
-# module loader resolves relative to the ENTRY file's directory only
-# (docs/modules-decision.md §1: one flat namespace, no search path) -- so a
-# program built straight out of `apps/git` can never see `apps/tui`'s files.
-# `build_tui` below is the version of `test.sh`'s own `build` that stages
-# both directories' sources into one place first, the same fix
-# `gates.sh`'s formatter check already uses for a module and the sibling
-# files it needs (`cp "$(dirname "$f")"/*.$LANG_EXT`).
+# `hunks.m31` imports `tuidiffview`, which this program's own module loader
+# resolves relative to the ENTRY file's directory only (qrazil/m31's own
+# docs/modules-decision.md §1: one flat namespace, no search path) -- so a
+# program built straight out of this repo can never see TUI_ROOT's files
+# sitting in a different checkout. `build_tui` below is the version of
+# `test.sh`'s own `build` that stages both directories' sources into one
+# place first, the same fix `build-gitui.sh` uses for the real binary.
 
 build_tui() {
     local name=$1
     local stage="$WORK/tui-stage"
     mkdir -p "$stage"
-    cp apps/tui/tuibuf.m31 apps/tui/tuigeom.m31 apps/tui/tuiscroll.m31 \
-        apps/tui/tuistyle.m31 apps/tui/tuitext.m31 apps/tui/tuidiffview.m31 \
-        apps/git/hunks.m31 "apps/git/$name.m31" "$stage/"
+    cp "$TUI_ROOT/tuibuf.m31" "$TUI_ROOT/tuigeom.m31" "$TUI_ROOT/tuiscroll.m31" \
+        "$TUI_ROOT/tuistyle.m31" "$TUI_ROOT/tuitext.m31" "$TUI_ROOT/tuidiffview.m31" \
+        hunks.m31 "$name.m31" "$stage/"
     if ! "$LANGC" --emit-c "$stage/$name.m31" -o "$WORK/$name.c" 2>"$WORK/$name.diag"; then
-        bad "compile $name (staged with apps/tui)" "$(head -5 "$WORK/$name.diag")"
+        bad "compile $name (staged with qrazil/tui)" "$(head -5 "$WORK/$name.diag")"
         return 1
     fi
-    if ! cc -O2 -Wall -Wextra -I runtime -pthread -o "$WORK/$name" "$WORK/$name.c" \
-           runtime/rt.c runtime/scheduler.c "$RT_REACTOR_C" "$RT_CTX_ASM" \
+    if ! cc -O2 -Wall -Wextra -I "$M31_ROOT/runtime" -pthread -o "$WORK/$name" "$WORK/$name.c" \
+           "$M31_ROOT/runtime/rt.c" "$M31_ROOT/runtime/scheduler.c" "$M31_ROOT/$RT_REACTOR_C" "$M31_ROOT/$RT_CTX_ASM" \
            2>"$WORK/$name.cc"; then
         bad "cc $name" "$(head -5 "$WORK/$name.cc")"
         return 1

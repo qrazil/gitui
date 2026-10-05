@@ -1,8 +1,10 @@
 #!/usr/bin/env bash
-# Every check for apps/git, against an oracle that is not this program.
+# Every check for this repo, against an oracle that is not this program.
 #
-#   bash apps/git/test.sh               the built-in fixtures
-#   bash apps/git/test.sh <repo> ...    those, and each repository named
+#   M31_ROOT=/path/to/m31 TUI_ROOT=/path/to/tui bash test.sh
+#       the built-in fixtures
+#   M31_ROOT=/path/to/m31 TUI_ROOT=/path/to/tui bash test.sh <repo> ...
+#       those, and each repository named
 #
 # The oracles are Python's `hashlib` and `zlib` for the two codecs, a
 # from-scratch Python reader of the loose-object format for the layer above
@@ -12,12 +14,31 @@
 # `git` is used READ-ONLY throughout, except inside the scratch fixture
 # repositories this script builds under its own temporary directory.
 #
-# Run from the repository root, with the compiler built (`cargo build`).
+# M31_ROOT (a checkout of github.com/qrazil/m31, or an extracted release's
+# bundled runtime SDK, containing config.sh and runtime/) and TUI_ROOT (a
+# checkout of github.com/qrazil/tui, pinned to whatever commit this repo's
+# own CI/docs name) stand in for this repo's own former monorepo
+# neighbours -- see build-gitui.sh's own header for the full reasoning,
+# which this mirrors. Only test_gitui.sh/test_hunks.sh need TUI_ROOT; the
+# rest of this suite needs only M31_ROOT.
 set -uo pipefail
-cd "$(dirname "$0")/../.."
-. ./runtime/arch.sh
+cd "$(dirname "$0")"
 
-LANGC=./target/debug/m31c
+if [ -z "${M31_ROOT:-}" ]; then
+    echo "M31_ROOT is not set -- point it at a checkout of github.com/qrazil/m31" \
+         "(or an extracted release's runtime SDK) matching the m31c version" \
+         "you're building with. See build-gitui.sh's own header comment." >&2
+    exit 1
+fi
+if [ ! -f "$M31_ROOT/config.sh" ] || [ ! -d "$M31_ROOT/runtime" ]; then
+    echo "M31_ROOT=$M31_ROOT does not look like an m31 checkout" \
+         "(expected $M31_ROOT/config.sh and $M31_ROOT/runtime/)" >&2
+    exit 1
+fi
+
+. "$M31_ROOT/runtime/arch.sh"
+
+LANGC=${LANGC:-./m31c}
 WORK=$(mktemp -d)
 trap 'rm -rf "$WORK"' EXIT
 pass=0
@@ -28,12 +49,12 @@ bad()  { printf '\033[31mFAIL\033[0m %s\n' "$1"; shift; printf '%s\n' "$@" | sed
 
 build() {
     local name=$1
-    if ! "$LANGC" --emit-c "apps/git/$name.m31" -o "$WORK/$name.c" 2>"$WORK/$name.diag"; then
+    if ! "$LANGC" --emit-c "$name.m31" -o "$WORK/$name.c" 2>"$WORK/$name.diag"; then
         bad "compile $name" "$(head -5 "$WORK/$name.diag")"
         return 1
     fi
-    if ! cc -O2 -Wall -Wextra -I runtime -pthread -o "$WORK/$name" "$WORK/$name.c" \
-           runtime/rt.c runtime/scheduler.c "$RT_REACTOR_C" "$RT_CTX_ASM" \
+    if ! cc -O2 -Wall -Wextra -I "$M31_ROOT/runtime" -pthread -o "$WORK/$name" "$WORK/$name.c" \
+           "$M31_ROOT/runtime/rt.c" "$M31_ROOT/runtime/scheduler.c" "$M31_ROOT/$RT_REACTOR_C" "$M31_ROOT/$RT_CTX_ASM" \
            2>"$WORK/$name.cc"; then
         bad "cc $name" "$(head -5 "$WORK/$name.cc")"
         return 1
@@ -47,10 +68,10 @@ build() {
 # not look at `apps/`, so this source would drift out of the house layout with
 # nothing to notice. The same check, here, over this directory.
 
-if out=$(for f in apps/git/*.m31; do "$LANGC" fmt --check "$f" || echo "$f"; done 2>&1) && [ -z "$out" ]; then
+if out=$(for f in *.m31; do "$LANGC" fmt --check "$f" || echo "$f"; done 2>&1) && [ -z "$out" ]; then
     note "source is formatted"
 else
-    bad "source is not formatted (run: m31c fmt apps/git/<file>.m31)" "$out"
+    bad "source is not formatted (run: m31c fmt <file>.m31)" "$out"
 fi
 
 # --- SHA-1 --------------------------------------------------------------------
@@ -63,7 +84,7 @@ PY
 
 if build t_sha1; then
     "$WORK/t_sha1" "$WORK/random.bin" >"$WORK/sha1.got" 2>"$WORK/sha1.time"
-    python3 apps/git/oracle_sha1.py "$WORK/random.bin" >"$WORK/sha1.want"
+    python3 oracle_sha1.py "$WORK/random.bin" >"$WORK/sha1.want"
     if cmp -s "$WORK/sha1.got" "$WORK/sha1.want"; then
         note "sha1: $(wc -l <"$WORK/sha1.got") digests match hashlib"
     else
@@ -75,7 +96,7 @@ fi
 # --- inflate ------------------------------------------------------------------
 
 if build t_inflate; then
-    python3 apps/git/oracle_inflate.py "$WORK/z" >"$WORK/z.want"
+    python3 oracle_inflate.py "$WORK/z" >"$WORK/z.want"
     "$WORK/t_inflate" "$WORK/z" >"$WORK/z.got" 2>"$WORK/z.time"
     if cmp -s "$WORK/z.got" "$WORK/z.want"; then
         note "inflate: $(wc -l <"$WORK/z.got") streams match zlib, refusals included"
@@ -85,10 +106,10 @@ if build t_inflate; then
     grep '^inflate:' "$WORK/z.time" | sed 's/^/     /'
 fi
 
-# --- inflate from a mid-file offset, isolated from apps/git/pack.m31 -----------
+# --- inflate from a mid-file offset, isolated from pack.m31 -----------
 
 if build t_inflate_at; then
-    python3 apps/git/oracle_inflate_at.py "$WORK/za" >"$WORK/za.want"
+    python3 oracle_inflate_at.py "$WORK/za" >"$WORK/za.want"
     "$WORK/t_inflate_at" "$WORK/za" >"$WORK/za.got" 2>"$WORK/za.err"
     if cmp -s "$WORK/za.got" "$WORK/za.want"; then
         note "inflate_at/decompress_at: $(wc -l <"$WORK/za.got") mid-offset streams match zlib"
@@ -172,7 +193,7 @@ with a body'
 
 # --- a packed fixture, with real OBJ_OFS_DELTA and OBJ_REF_DELTA chains --------
 #
-# `apps/git/README.md`'s whole remaining gap: every repository above is
+# `README.md`'s whole remaining gap: every repository above is
 # entirely loose, and everything from here on runs against one that is
 # entirely packed instead, the same "walk every object, compare canonically"
 # and "every command, compared to real git" discipline, unchanged, applied to
@@ -225,7 +246,7 @@ if build t_object; then
     for repo in "${repos[@]}"; do
         common=$(cd "$repo" && git rev-parse --path-format=absolute --git-common-dir)
         "$WORK/t_object" "$common" >"$WORK/obj.got" 2>"$WORK/obj.err"
-        python3 apps/git/oracle_object.py "$common" >"$WORK/obj.want" 2>"$WORK/obj.oracle"
+        python3 oracle_object.py "$common" >"$WORK/obj.want" 2>"$WORK/obj.oracle"
         if cmp -s "$WORK/obj.got" "$WORK/obj.want"; then
             note "objects: $(wc -l <"$WORK/obj.got") lines match the Python reader on $repo"
         else
@@ -240,7 +261,7 @@ fi
 
 if build git; then
     for repo in "${repos[@]}"; do
-        if out=$(bash apps/git/compare.sh "$WORK/git" "$repo" "$WORK/cmp" 2>&1); then
+        if out=$(bash compare.sh "$WORK/git" "$repo" "$WORK/cmp" 2>&1); then
             note "commands on $repo: ${out## }"
         else
             bad "commands on $repo" "$out"
@@ -254,34 +275,34 @@ fi
 # `note`/`bad` and the `pass`/`fail` counters, and builds its own disposable
 # fixtures under `$WORK` -- see its own header.
 
-source apps/git/test_write.sh
+source test_write.sh
 
 # --- .gitignore filtering, against real 'git status --short --untracked-files=all'
 
-source apps/git/test_gitignore.sh
+source test_gitignore.sh
 
 # --- the line diff, against real diff -u and git diff --------------------------
 
-source apps/git/test_hunks.sh
+source test_hunks.sh
 
 # --- the interactive client: unit, oracle and pty-driven end-to-end --------
 #
 # `test_gitui.sh` shares this script's shell the same way `test_write.sh`
 # does -- see its own header.
 
-source apps/git/test_gitui.sh
+source test_gitui.sh
 
 # --- smart-HTTP fetch/clone, against a real 'git http-backend' -------------
 #
 # `test_httpfetch.sh` shares this script's shell the same way the others do
 # -- see its own header for why it is the one file here that sets a `trap`.
 
-source apps/git/test_httpfetch.sh
+source test_httpfetch.sh
 
 echo
 if [ $fail -eq 0 ]; then
-    printf '\033[32mall %d apps/git checks passed\033[0m\n' "$pass"
+    printf '\033[32mall %d checks passed\033[0m\n' "$pass"
 else
-    printf '\033[31m%d of %d apps/git checks FAILED\033[0m\n' "$fail" "$((pass + fail))"
+    printf '\033[31m%d of %d checks FAILED\033[0m\n' "$fail" "$((pass + fail))"
 fi
 exit $fail

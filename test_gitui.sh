@@ -1,49 +1,50 @@
 # The interactive client (`gitui.m31`/`gitclient.m31`) -- unit-level,
 # oracle-level and pty-driven end-to-end checks, the three tiers
-# `apps/git/design.md`'s "how you'll know you're done and correct" names.
+# `design.md`'s "how you'll know you're done and correct" names.
 #
 # Sourced from `test.sh`, which is why there is no `set`, no `cd` and no
 # `trap` here -- see `test_write.sh`'s own header for why: it runs in
-# `test.sh`'s own shell, sharing its `WORK`, `build`, `note`/`bad` and
-# `pass`/`fail` counters. `bash apps/git/test.sh` is still the one command
-# that runs everything, this included.
+# `test.sh`'s own shell, sharing its `WORK`, `M31_ROOT`, `TUI_ROOT`, `build`,
+# `note`/`bad` and `pass`/`fail` counters. `bash test.sh` is still the one
+# command that runs everything, this included.
 #
 # Every fixture below is built fresh under `$WORK` and real `git` is used
 # only to build them and to read them back as the oracle -- never against a
-# real repository, exactly as `apps/git/design.md`'s own "Safety" section
-# requires for this client specifically.
+# real repository, exactly as `design.md`'s own "Safety" section requires
+# for this client specifically.
 #
 # `gitclient.m31` (and so every test harness below that imports it) reaches
-# into `apps/tui/`, which this program's own module loader resolves relative
-# to the ENTRY file's directory only (`docs/modules-decision.md` §1: one flat
-# namespace, no search path) -- so a harness built straight out of `apps/git`
-# can never see `apps/tui`'s files. `build_tui` is `test.sh`'s own `build`,
+# into qrazil/tui, which this program's own module loader resolves relative
+# to the ENTRY file's directory only (qrazil/m31's own
+# docs/modules-decision.md §1: one flat namespace, no search path) -- so a
+# harness built straight out of this repo can never see TUI_ROOT's files
+# sitting in a different checkout. `build_tui` is `test.sh`'s own `build`,
 # staging both directories' sources into one throwaway place first -- the
-# same fix `apps/git/test_hunks.sh` already uses for `hunks.m31`'s own
-# dependency on `tuidiffview`, and what `apps/git/build-gitui.sh` (the real,
-# user-facing build) does too. Nothing here duplicates an `apps/tui` file
-# into the repository itself; the staging directory is `$WORK`'s own and is
-# gone when `test.sh` is.
+# same fix `test_hunks.sh` already uses for `hunks.m31`'s own dependency on
+# `tuidiffview`, and what `build-gitui.sh` (the real, user-facing build)
+# does too. Nothing here duplicates a qrazil/tui file into this repository
+# itself; the staging directory is `$WORK`'s own and is gone when `test.sh`
+# is.
 
 build_tui() {
     local name=$1
     local stage="$WORK/tui-stage"
     mkdir -p "$stage"
-    cp apps/tui/tuiapp.m31 apps/tui/tuibuf.m31 apps/tui/tuidiff.m31 \
-        apps/tui/tuidiffview.m31 \
-        apps/tui/tuifooter.m31 apps/tui/tuigeom.m31 apps/tui/tuijump.m31 \
-        apps/tui/tuimenu.m31 apps/tui/tuioutline.m31 apps/tui/tuiscroll.m31 \
-        apps/tui/tuistyle.m31 apps/tui/tuitext.m31 apps/tui/tuiwidget.m31 \
-        apps/git/repo.m31 apps/git/sha1.m31 apps/git/zlib.m31 apps/git/pack.m31 apps/git/object.m31 \
-        apps/git/refs.m31 apps/git/index.m31 apps/git/gitignore.m31 apps/git/status.m31 \
-        apps/git/gitlog.m31 apps/git/hunks.m31 \
-        apps/git/gitclient.m31 "apps/git/$name.m31" "$stage/"
+    cp "$TUI_ROOT/tuiapp.m31" "$TUI_ROOT/tuibuf.m31" "$TUI_ROOT/tuidiff.m31" \
+        "$TUI_ROOT/tuidiffview.m31" \
+        "$TUI_ROOT/tuifooter.m31" "$TUI_ROOT/tuigeom.m31" "$TUI_ROOT/tuijump.m31" \
+        "$TUI_ROOT/tuimenu.m31" "$TUI_ROOT/tuioutline.m31" "$TUI_ROOT/tuiscroll.m31" \
+        "$TUI_ROOT/tuistyle.m31" "$TUI_ROOT/tuitext.m31" "$TUI_ROOT/tuiwidget.m31" \
+        repo.m31 sha1.m31 zlib.m31 pack.m31 object.m31 \
+        refs.m31 index.m31 gitignore.m31 status.m31 \
+        gitlog.m31 hunks.m31 \
+        gitclient.m31 "$name.m31" "$stage/"
     if ! "$LANGC" --emit-c "$stage/$name.m31" -o "$WORK/$name.c" 2>"$WORK/$name.diag"; then
-        bad "compile $name (staged with apps/tui)" "$(head -5 "$WORK/$name.diag")"
+        bad "compile $name (staged with qrazil/tui)" "$(head -5 "$WORK/$name.diag")"
         return 1
     fi
-    if ! cc -O2 -Wall -Wextra -I runtime -pthread -o "$WORK/$name" "$WORK/$name.c" \
-           runtime/rt.c runtime/scheduler.c "$RT_REACTOR_C" "$RT_CTX_ASM" \
+    if ! cc -O2 -Wall -Wextra -I "$M31_ROOT/runtime" -pthread -o "$WORK/$name" "$WORK/$name.c" \
+           "$M31_ROOT/runtime/rt.c" "$M31_ROOT/runtime/scheduler.c" "$M31_ROOT/$RT_REACTOR_C" "$M31_ROOT/$RT_CTX_ASM" \
            2>"$WORK/$name.cc"; then
         bad "cc $name" "$(head -5 "$WORK/$name.cc")"
         return 1
@@ -119,7 +120,7 @@ if build_tui t_gitclient_ops; then
 
     # A blob written by a stage that a later unstage (of a never-committed
     # path) or reset walked away from is expected garbage, not corruption --
-    # `apps/git/test_write.sh`'s own `t_write_object` check treats a
+    # `test_write.sh`'s own `t_write_object` check treats a
     # dangling *commit* the same way. Only a line that is not one of those is
     # a real problem.
     fsck_out=$(git -C "$opsfx" fsck --full 2>&1)
@@ -176,7 +177,7 @@ if build_tui t_gitclient_ops; then
         git add f.txt
         # unstaged: a further change on top of the staged version (disk vs
         # index) -- exactly the two-comparisons-on-one-file scenario
-        # `apps/git/design.md`'s own "how you'll know you're done" names.
+        # `design.md`'s own "how you'll know you're done" names.
         printf 'a\nB\nC\n' >f.txt
         printf 'brand\nnew\n' >new.txt
         printf 'hello\000world\n' >bin.dat
@@ -364,10 +365,10 @@ fi
 # given; `$WORK/pty` is `test.sh`'s own scratch directory, removed with
 # everything else on exit.
 
-if bash apps/git/build-gitui.sh -o "$WORK/gitui" >"$WORK/gitui_build.log" 2>&1; then
+if bash build-gitui.sh -o "$WORK/gitui" >"$WORK/gitui_build.log" 2>&1; then
     note "gitui: build-gitui.sh produces a working executable"
     if command -v python3 >/dev/null; then
-        if out=$(python3 apps/git/pty_e2e.py "$WORK/gitui" "$WORK/pty" 2>&1); then
+        if out=$(python3 pty_e2e.py "$WORK/gitui" "$WORK/pty" 2>&1); then
             note "gitui pty: $(echo "$out" | grep -c '^ok') end-to-end checks passed under a real pty"
         else
             bad "gitui pty end-to-end" "$out"
