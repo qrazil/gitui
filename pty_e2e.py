@@ -421,6 +421,74 @@ def main():
             "cached=%r plain=%r" % (cached_diff, plain_diff),
         )
 
+    # --- commit log: a commit's own "Files changed" list and per-file diff --
+    #
+    # Two commits -- the second changes one file and adds another -- so
+    # `commit_changes`'s added/modified split and its exact insertion/
+    # deletion counts (not just that *something* changed) have two real,
+    # different cases to get right in one fixture. `git diff --numstat` is
+    # the oracle for the counts, `git diff -- <path>` for the hunk a file
+    # row's own `Enter` pops -- the one row `Enter` opens a diff on directly
+    # rather than folding, since a commit's own file row has nothing to fold
+    # (gitclient.m31's `State.handle_enter`).
+    fx9 = make_fixture(root, "commitlog")
+    with open(os.path.join(fx9, "a.txt"), "w") as f:
+        f.write("line1\nline2\nline3\n")
+    with open(os.path.join(fx9, "b.txt"), "w") as f:
+        f.write("hello\n")
+    git(fx9, "add", "-A", env=GIT_ENV)
+    git(fx9, "commit", "-q", "-m", "first", env=GIT_ENV)
+    with open(os.path.join(fx9, "a.txt"), "w") as f:
+        f.write("line1\nCHANGED\nline3\nline4\n")
+    with open(os.path.join(fx9, "c.txt"), "w") as f:
+        f.write("world\n")
+    git(fx9, "add", "-A", env=GIT_ENV)
+    git(fx9, "commit", "-q", "-m", "second", env=GIT_ENV)
+
+    want_numstat, _, _ = git(fx9, "diff", "--numstat", "HEAD~1", "HEAD")
+    want_a_diff, _, _ = git(fx9, "diff", "--no-color", "HEAD~1", "HEAD", "--", "a.txt")
+
+    # rows: untracked section(0), unstaged section(0), staged section(0),
+    # commits section(1) -- row0 untracked, row1 unstaged, row2 staged,
+    # row3 commits section (already expanded), row4 "second" (collapsed).
+    s9 = Session(binpath, fx9)
+    s9.send("jjj")  # row3: commits section
+    s9.send("j")  # row4: "second", the most recent commit
+    out = s9.send("\r")  # expand it: author, date, message, Files changed
+    if b"Files changed (2)" in out:
+        ok("commit log: expanding a commit shows its own Files changed count")
+    else:
+        fail("commit log: expanding a commit shows its own Files changed count", repr(out))
+
+    s9.send("jjjj")  # author, date, message ("second"), Files changed section
+    out = s9.send("\r")  # expand Files changed
+    if b"M  a.txt  +2 -1" in out and b"A  c.txt  +1 -0" in out:
+        ok("commit log: file rows' +insertions -deletions match git diff --numstat")
+    else:
+        fail("commit log: file rows' +insertions -deletions match git diff --numstat", repr(out))
+
+    s9.send("j")  # the "M  a.txt  +2 -1" row
+    out = s9.send("\r")  # Enter pops the diff directly -- no `d` needed here
+    if b"diff: M  a.txt" in out and b"-line2" in out and b"+CHANGED" in out and b"+line4" in out:
+        ok("commit log: Enter on a file row pops its diff, matching git diff HEAD~1 HEAD")
+    else:
+        fail("commit log: Enter on a file row pops its diff, matching git diff HEAD~1 HEAD", repr(out))
+
+    out = s9.send("\x7f")  # Backspace returns to the outline, same as any other diff
+    if b"Files changed" in out and b"diff: M  a.txt" not in out:
+        ok("commit log: Backspace from a commit-file diff returns to the outline")
+    else:
+        fail("commit log: Backspace from a commit-file diff returns to the outline", repr(out))
+    s9.quit()
+
+    if "2\t1\ta.txt" in want_numstat and "1\t0\tc.txt" in want_numstat and "-line2" in want_a_diff and "+CHANGED" in want_a_diff:
+        ok("commit log: the fixture's own git diff --numstat/git diff confirm the expected counts and lines")
+    else:
+        fail(
+            "commit log: the fixture's own git diff --numstat/git diff confirm the expected counts and lines",
+            "numstat=%r a_diff=%r" % (want_numstat, want_a_diff),
+        )
+
     # --- the terminal handoff itself, under a genuinely interactive editor --
     #
     # Everything above proves `os.run`'s outcomes are handled correctly with

@@ -107,6 +107,27 @@ int PathRow.cmp(PathRow other) {
     return str_cmp(path, other.path);
 }
 
+/// One file a commit changed against its first parent (`commit_changes`,
+/// below): `old_id`/`new_id` are the two blob ids `show_diff_current`'s own
+/// commit-file branch reads to build the diff, `None` on whichever side the
+/// path did not exist (an add has no `old_id`, a delete has no `new_id`).
+/// `insertions`/`deletions` are exact line counts from the same
+/// `hunks.hunks` call `show_diff_current` itself would make -- computed once
+/// here, in `commit_changes`, rather than lazily, so the stat the outline
+/// shows next to a collapsed file never disagrees with the diff `Enter`
+/// opens on it. `binary` is `hunks.hunks` reporting `Binary` for this pair;
+/// `insertions`/`deletions` are both 0 then, the same "nothing to count"
+/// `open_diff`'s own `diff_binary` path already means elsewhere.
+pub type CommitFileDiff {
+    pub bytes path;
+    pub status.Change kind;
+    pub Option<str> old_id;
+    pub Option<str> new_id;
+    pub bool binary;
+    pub int insertions;
+    pub int deletions;
+}
+
 // `str` has no ordering operator (`refs.m31`'s own `before`, the same
 // reason, written out again here because a type with a `str` field has to
 // supply its own `cmp` and there is nothing to call).
@@ -154,6 +175,24 @@ int find_byte(bytes hay, int b, int from) {
     return -1;
 }
 
+/// `status.Change` to the same character `mark_str` already turns into a
+/// letter -- `rows_from_deltas`'s own `status.Change` -> `int` mapping,
+/// pulled out so `commit_node`'s file rows can share it instead of
+/// repeating the match.
+int change_mark(status.Change k) {
+    match (k) {
+        case Added: {
+            return 'A';
+        }
+        case Modified: {
+            return 'M';
+        }
+        case Deleted: {
+            return 'D';
+        }
+    }
+}
+
 str mark_str(int m) {
     if (m == 'A') {
         return "A";
@@ -170,19 +209,7 @@ pub List<PathRow> rows_from_deltas(List<status.Delta> deltas) {
     List<PathRow> out = [];
     for (status.Delta d in deltas) {
         str p = d.path.utf8().or("<non-utf8 path>");
-        int m = 'M';
-        match (d.kind) {
-            case Added: {
-                m = 'A';
-            }
-            case Modified: {
-                m = 'M';
-            }
-            case Deleted: {
-                m = 'D';
-            }
-        }
-        out.push(PathRow(p, d.path, m));
+        out.push(PathRow(p, d.path, change_mark(d.kind)));
     }
     out.sort();
     return out;
@@ -265,6 +292,132 @@ const int COMMIT_BODY_WRAP_COLS = 72;
 /// long line clears in a handful of presses.
 const int SCROLL_H_STEP = 4;
 
+/// `id`'s blob, or empty if it has none (the add/delete side of a
+/// `CommitFileDiff`) -- the commit-history equivalent of `State.read_blob`,
+/// free rather than a method since `commit_changes` runs before a `State`
+/// exists for the commits it is building rows for (`reload`'s own order:
+/// `refresh` first, then this, then `build_outline`).
+bytes commit_blob(str gitdir, Option<str> id) {
+    match (id) {
+        case Some(str oid): {
+            match (object.read(gitdir, oid)) {
+                case Ok(object.Object o): {
+                    return o.raw;
+                }
+                case Err: {
+                    return [];
+                }
+            }
+        }
+        case None: {
+            return [];
+        }
+    }
+}
+
+/// Every file `c` changed against its first parent -- the empty tree, for a
+/// root commit, matching git's own treatment of the initial commit as
+/// entirely additions, since there is nothing to diff it against. First
+/// parent only for a merge, the simpler choice `git log --first-parent -p`
+/// and GitHub's own PR view make, not git's full combined-diff format: this
+/// client is for stepping through history, not auditing a merge's conflict
+/// resolution.
+///
+/// Two trees flattened to `path -> blob id` (`object.flatten_tree`) and
+/// compared by path, the exact three-way split `status.status` already
+/// makes between the index and HEAD's tree (added/modified/deleted) --
+/// unchanged paths (`old_id == new_id`) are left out entirely, the same way
+/// `status.status` only ever reports what actually differs.
+Result<List<CommitFileDiff>, object.Error> commit_changes(str gitdir, object.Commit c) {
+    Map<str, str> new_tree = object.flatten_tree(gitdir, c.tree)?;
+    Map<str, str> old_tree = {};
+    if (c.parents.size() > 0) {
+        match (object.read(gitdir, c.parents[0])) {
+            case Ok(object.Object o): {
+                match (o.body) {
+                    case Commit(object.Commit pc): {
+                        old_tree = object.flatten_tree(gitdir, pc.tree)?;
+                    }
+                    case Blob: {
+                    }
+                    case Tree(List<object.Entry> ignored): {
+                    }
+                    case Tag: {
+                    }
+                }
+            }
+            case Err(object.Error e): {
+                return Result<List<CommitFileDiff>, object.Error>.Err(e);
+            }
+        }
+    }
+    List<str> paths = [];
+    for (str p in new_tree.keys()) {
+        paths.push(p);
+    }
+    for (str p in old_tree.keys()) {
+        if (!new_tree.contains(p)) {
+            paths.push(p);
+        }
+    }
+    paths.sort();
+    List<CommitFileDiff> out = [];
+    for (str p in paths) {
+        Option<str> oid = old_tree.get(p);
+        Option<str> nid = new_tree.get(p);
+        status.Change kind = status.Change.Modified;
+        bool skip = false;
+        match (oid) {
+            case Some(str o): {
+                match (nid) {
+                    case Some(str n): {
+                        if (o == n) {
+                            skip = true;
+                        }
+                    }
+                    case None: {
+                        kind = status.Change.Deleted;
+                    }
+                }
+            }
+            case None: {
+                kind = status.Change.Added;
+            }
+        }
+        if (skip) {
+            continue;
+        }
+        bytes old_bytes = commit_blob(gitdir, oid);
+        bytes new_bytes = commit_blob(gitdir, nid);
+        bool binary = false;
+        int insertions = 0;
+        int deletions = 0;
+        match (hunks.hunks(old_bytes, new_bytes)) {
+            case Binary: {
+                binary = true;
+            }
+            case Hunks(List<tuidiffview.Hunk> hs): {
+                for (tuidiffview.Hunk h in hs) {
+                    for (tuidiffview.Line l in h.lines) {
+                        match (l.kind) {
+                            case Add: {
+                                insertions = insertions + 1;
+                            }
+                            case Remove: {
+                                deletions = deletions + 1;
+                            }
+                            case Context: {
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        out.push(CommitFileDiff(p.to_bytes(), kind, oid, nid, binary, insertions, deletions));
+    }
+    return Result<List<CommitFileDiff>, object.Error>.Ok(out);
+}
+
 /// The outline's commit section: one collapsible node per commit, its short
 /// id and first message line as the label, and -- expanded -- its author,
 /// date and full message as leaf rows underneath. See `tuioutline.m31`'s own
@@ -277,7 +430,17 @@ const int SCROLL_H_STEP = 4;
 /// a message line longer than the available width is wrapped across
 /// multiple leaf rows here rather than left for `Outline.render` to clip
 /// silently. A short line still yields exactly one leaf row.
-List<tuioutline.Node> commit_node(gitlog.Entry en, Map<str, bool> collapsed) {
+///
+/// A nested "Files changed" subsection follows the message, one addressable
+/// row per `CommitFileDiff` in `changes` -- `show_diff_current`'s own
+/// commit-file branch is what `Enter` on one of these reaches, through
+/// `out_file_diffs`, the same "every leaf row recorded in an out-param"
+/// convention `build_outline`'s own header documents for `out_paths`.
+/// Collapsed by default, like the commit itself: a 200-commit log already
+/// renders every message eagerly (`build_outline`'s own doc comment), and a
+/// file list per commit on top of that would make the initial screen very
+/// tall if it started open.
+List<tuioutline.Node> commit_node(gitlog.Entry en, List<CommitFileDiff> changes, Map<str, bool> collapsed, Map<str, CommitFileDiff> out_file_diffs) {
     str id = "commit:" + en.id;
     str label = en.id.substr(0, 7) + "  " + first_line(en.commit.message);
     List<tuioutline.Node> body = [];
@@ -294,6 +457,21 @@ List<tuioutline.Node> commit_node(gitlog.Entry en, Map<str, bool> collapsed) {
         }
         i = i + 1;
     }
+    List<tuioutline.Node> file_nodes = [];
+    int k = 0;
+    for (CommitFileDiff ch in changes) {
+        str file_id = id + ":file:" + k.to_str();
+        str p = ch.path.utf8().or("<non-utf8 path>");
+        str stat = "+" + ch.insertions.to_str() + " -" + ch.deletions.to_str();
+        if (ch.binary) {
+            stat = "(binary)";
+        }
+        file_nodes.push(tuioutline.Node.leaf(file_id, mark_str(change_mark(ch.kind)) + "  " + p + "  " + stat));
+        out_file_diffs.set(file_id, ch);
+        k = k + 1;
+    }
+    str files_id = id + ":files";
+    body.push(tuioutline.Node.section(files_id, "Files changed (" + file_nodes.size().to_str() + ")", file_nodes, expanded: expanded_for(collapsed, files_id, false)));
     return [tuioutline.Node.section(id, label, body, expanded: expanded_for(collapsed, id, false))];
 }
 
@@ -305,9 +483,22 @@ List<tuioutline.Node> commit_node(gitlog.Entry en, Map<str, bool> collapsed) {
 /// bytes to stage or unstage), which `State` keeps and `stage_current`/
 /// `unstage_current` read from -- there is no other way to get from "the
 /// cursor is on this row" back to a path, since `tuioutline.Row` only knows
-/// the label it was given.
-pub tuioutline.Outline build_outline(status.Status st, List<gitlog.Entry> log, Map<str, bool> collapsed, Map<str, bytes> out_paths) {
+/// the label it was given. A commit's own file rows are recorded a second
+/// time in `out_file_diffs` (row id -> the `CommitFileDiff` `commit_changes`
+/// already computed for it), which `show_diff_current`'s commit-file branch
+/// reads instead of re-deriving blob ids from a bare path the way the
+/// working-tree sections' rows do -- there is no index or working tree to
+/// fall back on for a path that existed only in some past commit.
+///
+/// `changes_by_commit` is `commit_changes(gitdir, en.commit)`'s result for
+/// every `en` in `log`, keyed by `en.id` -- computed by `State.reload`,
+/// before this runs, which is what keeps this function itself free of I/O
+/// (this doc comment's own first line, true before commit file lists
+/// existed and still true now: the computing happens elsewhere, this only
+/// ever renders what it is handed).
+pub tuioutline.Outline build_outline(status.Status st, List<gitlog.Entry> log, Map<str, List<CommitFileDiff>> changes_by_commit, Map<str, bool> collapsed, Map<str, bytes> out_paths, Map<str, CommitFileDiff> out_file_diffs) {
     out_paths.clear();
+    out_file_diffs.clear();
     List<tuioutline.Node> roots = [];
     List<tuioutline.Node> untracked_children = [];
     for (PathRow row in rows_from_untracked(st.untracked)) {
@@ -332,7 +523,8 @@ pub tuioutline.Outline build_outline(status.Status st, List<gitlog.Entry> log, M
     roots.push(tuioutline.Node.section("staged", "Staged changes (" + staged_children.size().to_str() + ")", staged_children, expanded: expanded_for(collapsed, "staged", true)));
     List<tuioutline.Node> commit_children = [];
     for (gitlog.Entry en in log) {
-        for (tuioutline.Node n in commit_node(en, collapsed)) {
+        List<CommitFileDiff> changes = changes_by_commit.get(en.id).or([]);
+        for (tuioutline.Node n in commit_node(en, changes, collapsed, out_file_diffs)) {
             commit_children.push(n);
         }
     }
@@ -577,6 +769,7 @@ pub type State {
     pub tuidiffview.DiffView diff_view = tuidiffview.DiffView([]);
     Map<str, bool> collapsed = {};
     Map<str, bytes> paths = {};
+    Map<str, CommitFileDiff> file_diffs = {};
     status.Status last_status = status.Status([], [], []);
     List<gitlog.Entry> log = [];
 }
@@ -634,6 +827,28 @@ pub void State.refresh() {
     }
 }
 
+/// `commit_changes(gitdir, en.commit)` for every entry `refresh()` just put
+/// in `log`, keyed by commit id -- `build_outline`'s own `changes_by_commit`
+/// parameter. A commit whose tree or parent's tree cannot be read (a
+/// truncated history, a shallow clone's boundary) gets an empty file list
+/// rather than failing the whole reload -- the same "a read that fails
+/// reads as nothing" choice `read_worktree`/`index_blob`/`head_blob` already
+/// make elsewhere in this file.
+Map<str, List<CommitFileDiff>> State.commit_file_changes() {
+    Map<str, List<CommitFileDiff>> out = {};
+    for (gitlog.Entry en in log) {
+        match (commit_changes(gitdir, en.commit)) {
+            case Ok(List<CommitFileDiff> cs): {
+                out.set(en.id, cs);
+            }
+            case Err: {
+                out.set(en.id, []);
+            }
+        }
+    }
+    return out;
+}
+
 /// Refresh and rebuild the outline, keeping the cursor on the row it was on
 /// (by id, not by position -- `tuioutline.m31`'s own reason) and the jump
 /// list in step with it. Called after every action that changes what the
@@ -649,7 +864,8 @@ pub void State.reload() {
         }
     }
     refresh();
-    outline = build_outline(last_status, log, collapsed, paths);
+    Map<str, List<CommitFileDiff>> changes_by_commit = commit_file_changes();
+    outline = build_outline(last_status, log, changes_by_commit, collapsed, paths, file_diffs);
     if (keep_id != "") {
         outline.select_id(keep_id);
     }
@@ -839,6 +1055,13 @@ pub void State.unstage_path(bytes rel) {
 ///     scrollable exactly like any other, and it matches what `git diff`
 ///     itself shows for an intent-to-add path (`git add -N`) -- the closest
 ///     real-git analogue to "tracked, nothing committed yet".
+///   - **a commit's own file row** -- `commit_changes`'s `old_id`/`new_id`
+///     for that path, directly (`file_diffs`, not `paths`: there is no disk
+///     or index to fall back on for a path that only ever existed in some
+///     past commit, unlike the three cases above). Either side missing
+///     (an add or a delete) is `commit_blob`'s own empty-bytes default, the
+///     same "no blob there" shape `head_blob` already uses for a path HEAD
+///     does not have.
 ///
 /// `hunks.hunks` reporting `Binary` (either side trips `diff.is_binary`'s
 /// NUL heuristic) sets `diff_binary` instead of populating `diff_view`,
@@ -847,6 +1070,17 @@ pub void State.unstage_path(bytes rel) {
 pub void State.show_diff_current() {
     match (outline.current()) {
         case Some(tuioutline.Row r): {
+            if (r.node.id.contains(":file:")) {
+                match (file_diffs.get(r.node.id)) {
+                    case Some(CommitFileDiff d): {
+                        open_diff(r.node.label, commit_blob(gitdir, d.old_id), commit_blob(gitdir, d.new_id));
+                    }
+                    case None: {
+                        message = "diff: nothing to show here";
+                    }
+                }
+                return;
+            }
             match (paths.get(r.node.id)) {
                 case Some(bytes p): {
                     if (r.node.id.starts_with("untracked:")) {
@@ -1410,11 +1644,29 @@ void State.step_or_move(int delta) {
     }
 }
 
+/// `Enter` folds or unfolds the row under the cursor everywhere else
+/// (`toggle_current`) -- a leaf row has nothing to fold, so that is already
+/// a no-op on an author/date/message line. A commit's own file row is the
+/// one leaf where `Enter` means something: pop its diff view directly,
+/// the same one `d` opens for a staged/unstaged/untracked row, rather than
+/// doing nothing. Checked by id, not by `r.node.has_children()`, so an
+/// empty "Files changed (0)" section itself (there is nothing to diff a
+/// merge whose first-parent diff touched no files) still just folds.
 void State.handle_enter() {
     if (jump_focused && show_jump) {
         jump.activate(outline);
         jump_focused = false;
         return;
+    }
+    match (outline.current()) {
+        case Some(tuioutline.Row r): {
+            if (r.node.id.contains(":file:")) {
+                show_diff_current();
+                return;
+            }
+        }
+        case None: {
+        }
     }
     toggle_current();
 }

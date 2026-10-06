@@ -48,7 +48,10 @@ object.Commit c1 = object.Commit("0000000000000000000000000000000000000000", [],
 List<gitlog.Entry> log = [gitlog.Entry("1111111111111111111111111111111111111111", c1)];
 Map<str, bool> collapsed = {};
 Map<str, bytes> paths = {};
-tuioutline.Outline o = gitclient.build_outline(st, log, collapsed, paths);
+Map<str, List<gitclient.CommitFileDiff>> changes = {};
+changes.set("1111111111111111111111111111111111111111", [gitclient.CommitFileDiff("x.txt".to_bytes(), status.Change.Modified, Option<str>.Some("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"), Option<str>.Some("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"), false, 3, 1)]);
+Map<str, gitclient.CommitFileDiff> file_diffs = {};
+tuioutline.Outline o = gitclient.build_outline(st, log, changes, collapsed, paths, file_diffs);
 List<tuioutline.Row> rows = o.rows();
 List<str> ids = [];
 for (tuioutline.Row r in rows) {
@@ -87,7 +90,7 @@ for (str id in ids) {
 counter.check("outline: a commit's body is hidden until expanded", !saw_body, "body row leaked into the collapsed view");
 // Recorded as expanded (via `collapsed`), the same build must show it.
 collapsed.set("commit:1111111111111111111111111111111111111111", false);
-tuioutline.Outline o2 = gitclient.build_outline(st, log, collapsed, paths);
+tuioutline.Outline o2 = gitclient.build_outline(st, log, changes, collapsed, paths, file_diffs);
 bool saw_body2 = false;
 for (tuioutline.Row r in o2.rows()) {
     if (r.node.id == "commit:1111111111111111111111111111111111111111:author") {
@@ -95,6 +98,36 @@ for (tuioutline.Row r in o2.rows()) {
     }
 }
 counter.check("outline: an expanded commit shows its author/date/message rows", saw_body2, "author row missing after expanding");
+str files_label = "";
+bool saw_file_row = false;
+for (tuioutline.Row r in o2.rows()) {
+    if (r.node.id == "commit:1111111111111111111111111111111111111111:files") {
+        files_label = r.node.label;
+    }
+    if (r.node.id == "commit:1111111111111111111111111111111111111111:file:0") {
+        saw_file_row = true;
+    }
+}
+counter.check("outline: an expanded commit shows its own Files changed section, counting changes' entries", files_label == "Files changed (1)", files_label);
+counter.check("outline: a commit's Files changed section is itself collapsed by default", !saw_file_row, "file row leaked before Files changed was expanded");
+// Recorded as expanded too, the same build must show the file row itself.
+collapsed.set("commit:1111111111111111111111111111111111111111:files", false);
+tuioutline.Outline o2b = gitclient.build_outline(st, log, changes, collapsed, paths, file_diffs);
+str file_label = "";
+for (tuioutline.Row r in o2b.rows()) {
+    if (r.node.id == "commit:1111111111111111111111111111111111111111:file:0") {
+        file_label = r.node.label;
+    }
+}
+counter.check("outline: a commit's file row shows mark, path and +insertions -deletions", file_label == "M  x.txt  +3 -1", file_label);
+match (file_diffs.get("commit:1111111111111111111111111111111111111111:file:0")) {
+    case Some(gitclient.CommitFileDiff d): {
+        counter.check("outline: file_diffs recovers the same CommitFileDiff show_diff_current reads on Enter", d.path.utf8().or("") == "x.txt", d.path.utf8().or("<none>"));
+    }
+    case None: {
+        counter.check("outline: file_diffs recovers the same CommitFileDiff show_diff_current reads on Enter", false, "no entry for the file row");
+    }
+}
 
 // --- commit_node: wrapping a long message line into multiple leaf rows -------
 //
@@ -110,7 +143,9 @@ List<gitlog.Entry> log2 = [gitlog.Entry("222222222222222222222222222222222222222
 Map<str, bool> collapsed2 = {};
 collapsed2.set("commit:2222222222222222222222222222222222222222", false);
 Map<str, bytes> paths2 = {};
-tuioutline.Outline o3 = gitclient.build_outline(st, log2, collapsed2, paths2);
+Map<str, List<gitclient.CommitFileDiff>> changes2 = {};
+Map<str, gitclient.CommitFileDiff> file_diffs2 = {};
+tuioutline.Outline o3 = gitclient.build_outline(st, log2, changes2, collapsed2, paths2, file_diffs2);
 List<str> m0_rows = [];
 List<str> m2_rows = [];
 bool saw_blank_line_row = false;
@@ -148,7 +183,9 @@ List<gitlog.Entry> log3 = [gitlog.Entry("333333333333333333333333333333333333333
 Map<str, bool> collapsed3 = {};
 collapsed3.set("commit:3333333333333333333333333333333333333333", false);
 Map<str, bytes> paths3 = {};
-tuioutline.Outline o4 = gitclient.build_outline(st, log3, collapsed3, paths3);
+Map<str, List<gitclient.CommitFileDiff>> changes3 = {};
+Map<str, gitclient.CommitFileDiff> file_diffs3 = {};
+tuioutline.Outline o4 = gitclient.build_outline(st, log3, changes3, collapsed3, paths3, file_diffs3);
 bool saw_any_message_row = false;
 for (tuioutline.Row r in o4.rows()) {
     if (r.node.id.starts_with("commit:3333333333333333333333333333333333333333:m")) {

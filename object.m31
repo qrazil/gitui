@@ -393,6 +393,67 @@ pub Result<Object, Error> read(str gitdir, str id) {
     }
 }
 
+/// Every blob a tree reaches, recursively, keyed by its full path from the
+/// tree's own root -- `gitclient.m31`'s own `commit_changes` diffs two of
+/// these (a commit's tree against its first parent's) by comparing paths
+/// and blob ids, the same shape `status.m31`'s own (unexported) `walk_tree`
+/// already uses for "every blob HEAD's tree reaches" against the working
+/// tree. That one stays private to status.m31's own HEAD-vs-worktree
+/// comparison; this is the general version, for comparing any two trees. A
+/// name that is not UTF-8 is left out, the same skip `walk_tree` makes.
+pub Result<Map<str, str>, Error> flatten_tree(str gitdir, str id) {
+    Map<str, str> out = {};
+    match (flatten_tree_into(gitdir, id, "", out)) {
+        case Ok: {
+            return Result<Map<str, str>, Error>.Ok(out);
+        }
+        case Err(Error e): {
+            return Result<Map<str, str>, Error>.Err(e);
+        }
+    }
+}
+
+Result<bool, Error> flatten_tree_into(str gitdir, str id, str prefix, Map<str, str> out) {
+    match (read(gitdir, id)) {
+        case Ok(Object o): {
+            match (o.body) {
+                case Tree(List<Entry> es): {
+                    for (Entry e in es) {
+                        match (e.name.utf8()) {
+                            case Some(str name): {
+                                str full = name;
+                                if (prefix != "") {
+                                    full = prefix + "/" + name;
+                                }
+                                if (e.is_tree()) {
+                                    flatten_tree_into(gitdir, e.id, full, out)?;
+                                } else {
+                                    out.set(full, e.id);
+                                }
+                            }
+                            case None: {
+                            }
+                        }
+                    }
+                    return Result<bool, Error>.Ok(true);
+                }
+                case Blob: {
+                    return Result<bool, Error>.Err(Error.BadTree);
+                }
+                case Commit: {
+                    return Result<bool, Error>.Err(Error.BadTree);
+                }
+                case Tag: {
+                    return Result<bool, Error>.Err(Error.BadTree);
+                }
+            }
+        }
+        case Err(Error e): {
+            return Result<bool, Error>.Err(e);
+        }
+    }
+}
+
 /// An object from its plaintext -- the `<type> <size>\0<content>` a loose
 /// object's zlib stream holds. `id` is the name it is expected to have, and
 /// the content is hashed and checked against it.

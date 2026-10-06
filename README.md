@@ -63,16 +63,31 @@ fixtures (`test_write.sh`).
 
 The interactive client (`gitui.m31`, `apps/git/design.md`'s locked design):
 a collapsible outline of untracked files, unstaged changes, staged changes
-and recent commits; whole-file staging and unstaging (`s`/`u`); a commit,
-via a message file at `COMMIT_EDITMSG` read back and refused if empty
-(`c` opens a which-key overlay: `e` launches `$EDITOR` (`vi` if unset) on
-the message file, falling back to writing the template and naming the path
-if no editor can be launched at all; `f` finishes; `a` aborts -- see
+and recent commits; whole-file staging and unstaging (`s`/`u`); a hunk-level
+diff view (`d` on a staged/unstaged/untracked row; `Enter` directly on one
+of a commit's own changed files, below) with an addressable cursor; a
+commit, via a message file at `COMMIT_EDITMSG` read back and refused if
+empty (`c` opens a which-key overlay: `e` launches `$EDITOR` (`vi` if unset)
+on the message file, falling back to writing the template and naming the
+path if no editor can be launched at all; `f` finishes; `a` aborts -- see
 `gitclient.m31`'s own header, "launching `$EDITOR`, and the terminal handoff
 that takes", for how the terminal is handed to the editor and back); a
 persistent footer of the base commands; and a synced jump list toggled with
-`J`. Hunk-level diff display and staging, push/pull, checkout and rebase are
-each a named, deliberate gap in `apps/git/design.md`, not an oversight here.
+`J`. Hunk-level *staging* (as opposed to display), push/pull, checkout and
+rebase are each a named, deliberate gap in `apps/git/design.md`, not an
+oversight here.
+
+Each commit in the log also expands into its own "Files changed" list --
+one row per path changed against the commit's first parent (the empty tree,
+for the very first commit), with exact `+insertions -deletions` counts
+(`(binary)` instead, for a file `git diff` itself would call binary) from
+the same hunk-diff engine the working-tree rows use. `Enter` on one of
+these pops its diff directly, the same view `d` opens elsewhere -- a commit
+leaf row has nothing to fold, so `Enter` means "show the diff" there
+specifically rather than the no-op it is on an author/date/message row. A
+merge commit diffs against its first parent only (`git log --first-parent
+-p`'s own simplification, not git's full combined-diff format) -- this is
+for stepping through history, not auditing a merge's conflict resolution.
 
 Everything is checked against something that is not this program:
 
