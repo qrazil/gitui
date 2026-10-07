@@ -47,7 +47,8 @@ bash build-gitui.sh -o ourgitui    # not build.sh -- see build-gitui.sh's own he
 | `oracle_*.py` | the oracles: `hashlib`, `zlib`, and a from-scratch format reader |
 | `pty_e2e.py` | drives `ourgitui` under a real pty against disposable fixtures, real `git` as the oracle |
 | `compare.sh` | every command beside the real `git`, compared octet for octet |
-| `test.sh` | all of the above (sources `test_write.sh`, `test_gitignore.sh`, `test_hunks.sh`, `test_patch.sh`, `test_gitui.sh`, `test_httpfetch.sh`, `test_discard_amend.sh` and `test_push.sh`) |
+| `pull.m31` | fast-forward-only pull: fetches over smart HTTP (`httpfetch.m31`), unpacks the pack with `pack.read_pack`, refuses a dirty tree and anything but a fast-forward, then `checkout.m31` moves the working tree and the ref |
+| `test.sh` | all of the above (sources `test_write.sh`, `test_gitignore.sh`, `test_hunks.sh`, `test_patch.sh`, `test_gitui.sh`, `test_httpfetch.sh`, `test_discard_amend.sh`, `test_push.sh` and `test_pull.sh`) |
 | `FRICTION.md` | **the other half of this**: what the language made hard, and what it made easy |
 
 ## What works
@@ -86,7 +87,8 @@ is built by `patch.m31` over the real `diff.Op` bytes, never the rendered
 text, and checked against real `git apply --cached` byte for byte
 (`test_gitui.sh`). `P` opens a push which-key; `p` pushes the current branch to the
 same-named branch on `origin` over smart HTTP, fast-forward only (see
-"Push" below). Pull and rebase are each a named,
+"Push" below). `F` opens a pull which-key; `p` fast-forwards the current branch
+from `origin` (see "Pull" below). Merge and rebase are each a named,
 deliberate gap in `apps/git/design.md`, not an oversight here.
 
 Discarding and amending, both checked against the real git command each
@@ -311,3 +313,32 @@ byte-for-byte comparison of the pushed objects. A non-fast-forward is refused
 with nothing sent, a server-side refusal (a `pre-receive` hook) is reported
 with its `ng` reason, and the Basic-auth paths (URL, environment, none,
 wrong) are covered against an authenticating server.
+
+## Pull (`pull.m31`, `pack.read_pack`)
+
+`F` then `p` in `ourgitui` pulls the current branch from the same-named
+branch on `origin`, fast-forward only. `pull.m31` reads the advertisement
+(`httpfetch.discover`), and a remote tip that is the local tip or one of its
+ancestors is "already up to date". Anything else is fetched with the local tip
+as a `have`; the pack is unpacked by `pack.read_pack` (whole objects, OFS and
+REF deltas, and thin packs, whose missing bases come from the repository) and
+each object is written loose with `object.write`. The pull is then refused when
+the working tree or index is dirty, when HEAD is detached or unborn, when the
+remote has no such branch, and when the local tip is not an ancestor of the
+remote one (`not a fast-forward; merge/rebase not supported yet`). The fetched
+objects are kept in that last case.
+
+The order of the two writes matters: `checkout.checkout` diffs HEAD's tree
+against the target's, so it runs first, writing the files and index; only then
+is the branch ref advanced (compare-and-swap on the old tip) and
+`refs/remotes/origin/<branch>` updated. Moving the ref first would leave
+checkout an empty diff. Authentication and `https://` behave as for push.
+
+`test_pull.sh` uses real git as the oracle: packs from `git pack-objects`
+(OFS, REF, thin) and from `packwrite.m31` unpack to an object set equal to
+`git rev-list --objects` with `git fsck --full` clean; pulls come from a real
+`git http-backend`, repacked so the packs delta, and are judged by `git
+status`, `git ls-files -s`, a tree diff against the pushing clone and `git
+fsck`. The dirty-tree (staged and unstaged), diverged, ahead, detached,
+missing-branch and Basic-auth cases are covered, and `pty_e2e.py` presses `F`
+and `p` for real.

@@ -385,11 +385,14 @@ pub type Advertisement {
 /// not `200` with `Content-Type: application/x-git-upload-pack-advertisement`
 /// -- see the module note on why a dumb-HTTP answer must never reach the
 /// pkt-line parser.
-pub Result<Advertisement, Error> discover(str url) {
+pub Result<Advertisement, Error> discover(str url, str authorization = "") {
     str target = base_of(url) + "/info/refs?service=git-upload-pack";
     match (http.request("GET", target)) {
         case Ok(http.Request req): {
             req.set("accept", "application/x-git-upload-pack-advertisement");
+            if (authorization != "") {
+                req.set("authorization", authorization);
+            }
             match (http.fetch(req)) {
                 case Ok(http.Response resp): {
                     return after_refs_response(resp);
@@ -625,7 +628,7 @@ pub type Summary {
 /// offered; `side-band-64k` always, and `NoSideBand` if the server never
 /// offered it). Every `want` and `have` must be a 40-digit lowercase hex
 /// object name, and there must be at least one `want`.
-pub Result<Summary, Error> fetch(str url, Advertisement ad, List<str> wants, List<str> haves, str out_path) {
+pub Result<Summary, Error> fetch(str url, Advertisement ad, List<str> wants, List<str> haves, str out_path, str authorization = "") {
     if (wants.size() == 0) {
         return Result<Summary, Error>.Err(Error.NoWant);
     }
@@ -648,6 +651,9 @@ pub Result<Summary, Error> fetch(str url, Advertisement ad, List<str> wants, Lis
         case Ok(http.Request req): {
             req.set("content-type", "application/x-git-upload-pack-request");
             req.set("accept", "application/x-git-upload-pack-result");
+            if (authorization != "") {
+                req.set("authorization", authorization);
+            }
             req.set_body(body);
             match (http.fetch(req)) {
                 case Ok(http.Response resp): {

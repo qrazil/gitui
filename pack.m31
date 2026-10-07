@@ -89,6 +89,7 @@
 import io;
 import fs;
 import repo;
+import sha1;
 import zlib;
 
 /// Why an object could not be read out of a `.idx`/`.pack` pair. Payload-free
@@ -175,6 +176,160 @@ const int MAX_DELTA_DEPTH = 1000;
 pub Result<Found, Error> read(str gitdir, str id) {
     List<PackFile> packs = discover(gitdir);
     return resolve_id(gitdir, packs, id, MAX_DELTA_DEPTH);
+}
+
+/// One object of a pack read front to back: its resolved kind and content,
+/// and its object name.
+pub type Unpacked {
+    pub str id;
+    pub str kind;
+    pub bytes content;
+}
+
+// One entry as the front-to-back walk finds it, before any delta is applied.
+type Raw {
+    int kind;
+    int base_offset;
+    bytes base_id;
+    bytes data;
+}
+
+/// Every object in `pack` (a whole packfile's bytes), deltas resolved, in
+/// pack order -- the `.idx`-less way to read a pack just fetched, which
+/// `read` cannot do because it goes through an index. An `OBJ_REF_DELTA`
+/// whose base is not in the pack (a thin pack) is resolved from `gitdir`.
+/// The trailing checksum is not checked here; `httpfetch.verify_pack` has
+/// already done that for anything it wrote.
+pub Result<List<Unpacked>, Error> read_pack(str gitdir, bytes pack) {
+    if (pack.size() < 32 || pack.substr(0, 4) != "PACK".to_bytes() || u32be(pack, 4) != 2) {
+        return Result<List<Unpacked>, Error>.Err(Error.BadPack);
+    }
+    int count = u32be(pack, 8);
+    List<Raw> raws = [];
+    Map<int, int> index_at = {};
+    int cur = 12;
+    for (int i in 0 .. count) {
+        ObjHeader hdr = read_obj_header(pack, cur)?;
+        int p = cur + hdr.header_len;
+        int base_off = -1;
+        bytes base_id = [];
+        if (hdr.kind == 6) {
+            if (p >= pack.size()) {
+                return Result<List<Unpacked>, Error>.Err(Error.BadPack);
+            }
+            int c = pack[p];
+            p = p + 1;
+            int value = c & 0x7F;
+            int guard = 0;
+            while ((c & 0x80) != 0) {
+                guard = guard + 1;
+                if (guard > 8 || p >= pack.size()) {
+                    return Result<List<Unpacked>, Error>.Err(Error.BadPack);
+                }
+                c = pack[p];
+                p = p + 1;
+                value = (value + 1) << 7 | (c & 0x7F);
+            }
+            base_off = cur - value;
+            if (base_off < 0 || base_off >= cur) {
+                return Result<List<Unpacked>, Error>.Err(Error.BadPack);
+            }
+        } else if (hdr.kind == 7) {
+            if (p + 20 > pack.size()) {
+                return Result<List<Unpacked>, Error>.Err(Error.BadPack);
+            }
+            base_id = pack.substr(p, p + 20);
+            p = p + 20;
+        } else if (hdr.kind < 1 || hdr.kind > 4) {
+            return Result<List<Unpacked>, Error>.Err(Error.BadPack);
+        }
+        zlib.Decoded d = inflate_pack_zlib(pack, p)?;
+        index_at.set(cur, raws.size());
+        raws.push(Raw(hdr.kind, base_off, base_id, d.data));
+        cur = p + d.used;
+    }
+    List<Option<Unpacked>> done = [];
+    for (Raw r in raws) {
+        done.push(Option<Unpacked>.None);
+    }
+    Map<str, Unpacked> by_id = {};
+    int left = raws.size();
+    while (left > 0) {
+        int before = left;
+        for (int i in 0 .. raws.size()) {
+            if (done[i].is_some()) {
+                continue;
+            }
+            Raw r = raws[i];
+            str kind = "";
+            bytes content = [];
+            if (r.kind <= 4) {
+                kind = kind_name(r.kind);
+                content = r.data;
+            } else {
+                Option<Unpacked> base = Option<Unpacked>.None;
+                if (r.kind == 6) {
+                    int bi = index_at.get(r.base_offset).or(-1);
+                    if (bi >= 0) {
+                        base = done[bi];
+                    }
+                } else {
+                    base = by_id.get(r.base_id.hex());
+                }
+                if (!base.is_some()) {
+                    continue;
+                }
+                Unpacked b = base.or(Unpacked("", "", []));
+                kind = b.kind;
+                content = apply_delta(b.content, r.data)?;
+            }
+            Unpacked u = Unpacked(object_name(kind, content), kind, content);
+            by_id.set(u.id, u);
+            done[i] = Option<Unpacked>.Some(u);
+            left = left - 1;
+        }
+        if (left == before) {
+            // Only a base outside the pack (a thin pack's) can unblock what
+            // is left.
+            List<PackFile> packs = discover(gitdir);
+            int fetched = 0;
+            for (int i in 0 .. raws.size()) {
+                if (done[i].is_some() || raws[i].kind != 7) {
+                    continue;
+                }
+                str want = raws[i].base_id.hex();
+                if (by_id.contains(want)) {
+                    continue;
+                }
+                match (resolve_id(gitdir, packs, want, MAX_DELTA_DEPTH)) {
+                    case Ok(Found f): {
+                        by_id.set(want, Unpacked(want, f.kind, f.content));
+                        fetched = fetched + 1;
+                    }
+                    case Err(Error e): {
+                    }
+                }
+            }
+            if (fetched == 0) {
+                return Result<List<Unpacked>, Error>.Err(Error.NotFound);
+            }
+        }
+    }
+    List<Unpacked> out = [];
+    for (int i in 0 .. raws.size()) {
+        out.push(done[i].or(Unpacked("", "", [])));
+    }
+    return Result<List<Unpacked>, Error>.Ok(out);
+}
+
+// An object's name: the SHA-1 of `<kind> <size>\0<content>`.
+str object_name(str kind, bytes content) {
+    bytes framed = kind.to_bytes();
+    framed.push(' ');
+    framed.extend(content.size().to_str().to_bytes());
+    framed.push(0);
+    framed.extend(content);
+    return sha1.hex(framed);
 }
 
 /// Every object named by a `.idx` under `objects/pack/`, sorted and

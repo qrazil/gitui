@@ -875,6 +875,90 @@ def main():
         else:
             fail("push: a second commit fast-forwards the server's main", "want=%r got=%r" % (want, got))
         sp2.quit()
+
+        # --- pull: F opens the which-key, p fast-forwards from origin ---------
+        ps_url = "http://127.0.0.1:%d/cgi-bin/git-http-backend/repo.git" % ps_port
+        pl_client = os.path.join(root, "pull-client")
+        pl_other = os.path.join(root, "pull-other")
+        subprocess.run(["git", "clone", "-q", ps_url, pl_client], check=True)
+        subprocess.run(["git", "clone", "-q", ps_url, pl_other], check=True)
+
+        def other_commit(name, text):
+            with open(os.path.join(pl_other, name), "w") as f:
+                f.write(text)
+            git(pl_other, "add", "-A", env=GIT_ENV)
+            git(pl_other, "commit", "-q", "-m", "upstream " + name, env=GIT_ENV)
+            git(pl_other, "push", "-q", "origin", "main", env=GIT_ENV)
+
+        other_commit("up1.txt", "from upstream\n")
+        old_head, _, _ = git(pl_client, "rev-parse", "HEAD")
+        sl = Session(binpath, pl_client)
+        out = sl.send("F")
+        if b"pull" in out and b"fast-forward" in out:
+            ok("pull: F opens the pull which-key overlay")
+        else:
+            fail("pull: F opens the pull which-key overlay", repr(out))
+        sl.send("\x1b")
+        time.sleep(0.3)
+        sl.drain()
+        now, _, _ = git(pl_client, "rev-parse", "HEAD")
+        if now == old_head:
+            ok("pull: Escape closes the overlay and pulls nothing")
+        else:
+            fail("pull: Escape closes the overlay and pulls nothing", "head moved to %r" % now)
+
+        # A dirty tree is refused: nothing moves, the edit survives.
+        with open(os.path.join(pl_client, "a.txt"), "a") as f:
+            f.write("local edit\n")
+        sl.send("F")
+        sl.send("p")
+        time.sleep(1.0)
+        sl.drain()
+        now, _, _ = git(pl_client, "rev-parse", "HEAD")
+        with open(os.path.join(pl_client, "a.txt")) as f:
+            edited = f.read().endswith("local edit\n")
+        if now == old_head and edited and not os.path.exists(os.path.join(pl_client, "up1.txt")):
+            ok("pull: F then p on a dirty tree is refused; HEAD and the edit are untouched")
+        else:
+            fail("pull: F then p on a dirty tree is refused", "head=%r edited=%r" % (now, edited))
+
+        git(pl_client, "checkout", "--", "a.txt", env=GIT_ENV)
+        sl.send("F")
+        sl.send("p")
+        time.sleep(1.5)
+        sl.drain()
+        want, _, _ = git(pl_other, "rev-parse", "HEAD")
+        got, _, _ = git(pl_client, "rev-parse", "HEAD")
+        status_out, _, _ = git(pl_client, "status", "--porcelain")
+        fsck_out, _, fsck_rc = git(pl_client, "fsck", "--full")
+        if got == want and os.path.exists(os.path.join(pl_client, "up1.txt")) and status_out == "" and fsck_rc == 0:
+            ok("pull: F then p fast-forwards HEAD, the branch and the working tree to origin's tip; status and fsck are clean")
+        else:
+            fail("pull: F then p fast-forwards", "want=%r got=%r status=%r fsck=%r" % (want, got, status_out, fsck_out))
+        rc = sl.quit()
+        if rc == 0:
+            ok("pull: the client is still responsive and exits cleanly after a pull")
+        else:
+            fail("pull: the client is still responsive and exits cleanly after a pull", "returncode=%r" % rc)
+
+        # Diverged: a local commit plus a new upstream one is refused.
+        with open(os.path.join(pl_client, "mine.txt"), "w") as f:
+            f.write("mine\n")
+        git(pl_client, "add", "-A", env=GIT_ENV)
+        git(pl_client, "commit", "-q", "-m", "mine", env=GIT_ENV)
+        local_head, _, _ = git(pl_client, "rev-parse", "HEAD")
+        other_commit("up2.txt", "more upstream\n")
+        sl2 = Session(binpath, pl_client)
+        sl2.send("F")
+        sl2.send("p")
+        time.sleep(1.5)
+        sl2.drain()
+        now, _, _ = git(pl_client, "rev-parse", "HEAD")
+        if now == local_head and not os.path.exists(os.path.join(pl_client, "up2.txt")):
+            ok("pull: a diverged branch is refused; HEAD and the working tree are untouched")
+        else:
+            fail("pull: a diverged branch is refused", "head=%r want=%r" % (now, local_head))
+        sl2.quit()
         httpd.shutdown()
 
     return failures
