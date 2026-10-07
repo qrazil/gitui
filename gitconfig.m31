@@ -1,0 +1,175 @@
+// The one thing this program reads out of `.git/config`: a remote's URL.
+//
+//   gitconfig.get(gitdir, "remote", "origin", "url")  -> Option<str>
+//
+// Nothing else in this program reads the config file at all (`object.m31`'s
+// own header, `gitclient.m31`'s identity note) -- author identity comes from
+// the environment exactly as real git's own `GIT_AUTHOR_*` override does,
+// and the object store needs nothing from it. `push` is the first feature
+// that genuinely cannot do without it: where `origin` lives is written
+// nowhere else. So this is the smallest reader that answers that one
+// question honestly, not a general config library:
+//
+//   - `[section "subsection"]` and the deprecated `[section.subsection]`
+//     header shapes both resolve; the section and key names compare
+//     case-insensitively and the subsection case-sensitively, which is
+//     git-config(1)'s own rule;
+//   - `key = value`, trimmed, with a surrounding pair of double quotes
+//     removed and `\"`/`\\` inside them unescaped;
+//   - `#`/`;` comment lines and blank lines are skipped. A comment *after*
+//     a value on the same line is not stripped -- a URL is the only value
+//     asked for and none contains ` #` or ` ;`, and getting quoted-versus-
+//     unquoted comment rules right is a config parser, which this is not.
+//
+// The last assignment wins, as in git. Includes (`[include]`,
+// `[includeIf]`) are not followed; a remote configured only through one
+// reads as absent, and the message the client shows says exactly that.
+
+import fs;
+import io;
+import repo;
+
+/// `key`'s value under `[section "subsection"]` (`subsection` may be `""`
+/// for a bare `[section]`), or `None` if the config file, the section or the
+/// key is not there.
+pub Option<str> get(str gitdir, str section, str subsection, str key) {
+    str path = fs.join(repo.common(gitdir), "config");
+    match (io.read(path)) {
+        case Ok(str text): {
+            return find(text, section, subsection, key);
+        }
+        case Err: {
+            return Option<str>.None;
+        }
+    }
+}
+
+/// `get`, over config text already in memory -- the parser on its own, for a
+/// test with no repository.
+pub Option<str> find(str text, str section, str subsection, str key) {
+    str want_section = section.to_lower();
+    str want_key = key.to_lower();
+    bool in_section = false;
+    Option<str> found = Option<str>.None;
+    for (str raw in text.split("\n")) {
+        str line = raw.trim();
+        if (line == "" || line.starts_with("#") || line.starts_with(";")) {
+            continue;
+        }
+        if (line.starts_with("[")) {
+            in_section = header_matches(close_header(line), want_section, subsection);
+            continue;
+        }
+        if (!in_section) {
+            continue;
+        }
+        match (line.index_of("=")) {
+            case Some(int eq): {
+                str k = line.substr(0, eq).trim().to_lower();
+                if (k == want_key) {
+                    found = Option<str>.Some(unquote(strip_comment(line.substr(eq + 1, line.size()).trim())));
+                }
+            }
+            case None: {
+                // `key` alone means `key = true`; nothing this reader asks
+                // for is boolean, so the line is simply not a match.
+            }
+        }
+    }
+    return found;
+}
+
+// A header line up to and including its last `]`, dropping a trailing
+// comment (`[remote "x"] ; note`).
+str close_header(str line) {
+    int i = line.size();
+    while (i > 0) {
+        i = i - 1;
+        if (line.substr(i, i + 1) == "]") {
+            return line.substr(0, i + 1);
+        }
+    }
+    return line;
+}
+
+// A value without a trailing `#`/`;` comment that sits outside double quotes.
+str strip_comment(str v) {
+    bool quoted = false;
+    int i = 0;
+    while (i < v.size()) {
+        str ch = v.substr(i, i + 1);
+        if (ch == "\\") {
+            i = i + 2;
+            continue;
+        }
+        if (ch == "\"") {
+            quoted = !quoted;
+        } else if (!quoted && (ch == "#" || ch == ";")) {
+            return v.substr(0, i).trim();
+        }
+        i = i + 1;
+    }
+    return v;
+}
+
+// Does a `[...]` header line name `section`/`subsection`?
+bool header_matches(str line, str want_section, str want_sub) {
+    if (!line.ends_with("]")) {
+        return false;
+    }
+    str inner = line.substr(1, line.size() - 1).trim();
+    str name = inner;
+    str sub = "";
+    match (inner.index_of("\"")) {
+        case Some(int q): {
+            name = inner.substr(0, q).trim();
+            str quoted = inner.substr(q, inner.size());
+            if (quoted.size() >= 2 && quoted.ends_with("\"")) {
+                sub = unescape(quoted.substr(1, quoted.size() - 1));
+            } else {
+                return false;
+            }
+        }
+        case None: {
+            match (inner.index_of(".")) {
+                case Some(int dot): {
+                    name = inner.substr(0, dot);
+                    sub = inner.substr(dot + 1, inner.size());
+                }
+                case None: {
+                }
+            }
+        }
+    }
+    return name.to_lower() == want_section && sub == want_sub;
+}
+
+// A value with its surrounding double quotes removed and unescaped, or
+// itself if it is not quoted.
+str unquote(str v) {
+    if (v.size() >= 2 && v.starts_with("\"") && v.ends_with("\"")) {
+        return unescape(v.substr(1, v.size() - 1));
+    }
+    return v;
+}
+
+// `\"` -> `"`, `\\` -> `\`; any other escape is left as written.
+str unescape(str s) {
+    if (!s.contains("\\")) {
+        return s;
+    }
+    List<int> out = [];
+    List<int> cs = s.chars();
+    int i = 0;
+    while (i < cs.size()) {
+        int c = cs[i];
+        if (c == '\\' && i + 1 < cs.size() && (cs[i + 1] == '"' || cs[i + 1] == '\\')) {
+            out.push(cs[i + 1]);
+            i = i + 2;
+            continue;
+        }
+        out.push(c);
+        i = i + 1;
+    }
+    return str.from_chars(out);
+}

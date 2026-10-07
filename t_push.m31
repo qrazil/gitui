@@ -1,0 +1,193 @@
+// Drives `httppush.m31` (and `gitconfig.m31`) for `test_push.sh`, against a
+// real `git http-backend` for the exchange itself and against hand-built
+// bytes for the parts that need no server.
+//
+//   ./t_push objects <gitdir> <tip> [<known> ...]
+//       `packwrite.objects_to_send`, one id per line, sorted -- the same set
+//       `git rev-list --objects <tip> ^<known>...` names, for diffing.
+//
+//   ./t_push push <gitdir> <url> <refname>
+//       Pushes `<refname>`'s current local value to `<url>`. Prints
+//       "ok <refname>" when the server updated the ref, "ng <refname>
+//       <reason>" when the server refused it (exit 1), or "error: <message>"
+//       on standard error (exit 1) when the push never happened -- a
+//       non-fast-forward is one of those: refused here, nothing sent.
+//
+//   ./t_push origin <gitdir>
+//       `remote.origin.url` from `.git/config`, or "none".
+//
+//   ./t_push remote <url>
+//       `httppush.parse_remote`: prints "url <credential-free url>" and
+//       "user <name>" or "user -". The password is never printed.
+//
+//   ./t_push report <file> <refname>
+//       `httppush.parse_report` over the file's bytes: prints
+//       "unpacked <bool> ok <bool> reason <text>".
+//
+//   ./t_push config <file> <section> <subsection> <key>
+//       `gitconfig.find` over the file's text: the value, or "none".
+//
+//   ./t_push ancestor <gitdir> <anc> <desc>
+//       "yes" or "no".
+
+import gitconfig;
+import httppush;
+import io;
+import os;
+import packwrite;
+import refs;
+
+List<str> argv = os.args();
+if (argv.size() < 2) {
+    usage();
+}
+str cmd = argv[1];
+if (cmd == "objects" && argv.size() >= 4) {
+    do_objects(argv[2], argv[3], argv.slice(4, argv.size()));
+} else if (cmd == "push" && argv.size() == 5) {
+    do_push(argv[2], argv[3], argv[4]);
+} else if (cmd == "origin" && argv.size() == 3) {
+    do_origin(argv[2]);
+} else if (cmd == "remote" && argv.size() == 3) {
+    do_remote(argv[2]);
+} else if (cmd == "report" && argv.size() == 4) {
+    do_report(argv[2], argv[3]);
+} else if (cmd == "config" && argv.size() == 6) {
+    do_config(argv[2], argv[3], argv[4], argv[5]);
+} else if (cmd == "ancestor" && argv.size() == 5) {
+    do_ancestor(argv[2], argv[3], argv[4]);
+} else {
+    usage();
+}
+
+void usage() {
+    io.eprint("usage: t_push objects <gitdir> <tip> [<known> ...]");
+    io.eprint("       t_push push <gitdir> <url> <refname>");
+    io.eprint("       t_push origin <gitdir>");
+    io.eprint("       t_push remote <url>");
+    io.eprint("       t_push report <file> <refname>");
+    io.eprint("       t_push config <file> <section> <subsection> <key>");
+    io.eprint("       t_push ancestor <gitdir> <anc> <desc>");
+    os.exit(2);
+}
+
+void fail(str msg) {
+    io.eprint("error: " + msg);
+    os.exit(1);
+}
+
+void do_objects(str gitdir, str tip, List<str> known) {
+    match (packwrite.objects_to_send(gitdir, [tip], known)) {
+        case Ok(List<str> ids): {
+            List<str> sorted = clone(ids);
+            sorted.sort();
+            for (str id in sorted) {
+                print(id);
+            }
+        }
+        case Err(packwrite.Error e): {
+            fail(e.to_str());
+        }
+    }
+}
+
+void do_push(str gitdir, str url, str refname) {
+    str id = "";
+    match (refs.resolve(gitdir, refname)) {
+        case Ok(str v): {
+            id = v;
+        }
+        case Err(refs.Error e): {
+            fail("resolve " + refname + ": " + e.to_str());
+        }
+    }
+    httppush.Remote r = httppush.Remote("", Option<httppush.Credentials>.None);
+    match (httppush.parse_remote(url)) {
+        case Ok(httppush.Remote v): {
+            r = v;
+        }
+        case Err(httppush.Error e): {
+            fail(e.to_str());
+        }
+    }
+    match (httppush.push(gitdir, r, refname, id)) {
+        case Ok(httppush.Report rep): {
+            if (rep.ok) {
+                print("ok " + rep.refname);
+            } else {
+                print("ng " + rep.refname + " " + rep.reason);
+                os.exit(1);
+            }
+        }
+        case Err(httppush.Error e): {
+            fail(e.to_str());
+        }
+    }
+}
+
+void do_origin(str gitdir) {
+    print(gitconfig.get(gitdir, "remote", "origin", "url").or("none"));
+}
+
+void do_remote(str url) {
+    match (httppush.parse_remote(url)) {
+        case Ok(httppush.Remote r): {
+            print("url " + r.url);
+            match (r.auth) {
+                case Some(httppush.Credentials c): {
+                    print("user " + c.user);
+                }
+                case None: {
+                    print("user -");
+                }
+            }
+        }
+        case Err(httppush.Error e): {
+            fail(e.to_str());
+        }
+    }
+}
+
+void do_report(str path, str refname) {
+    match (io.read_bytes(path)) {
+        case Ok(bytes body): {
+            match (httppush.parse_report(body, refname)) {
+                case Ok(httppush.Report rep): {
+                    print("unpacked " + bool_text(rep.unpacked) + " ok " + bool_text(rep.ok) + " reason " + rep.reason);
+                }
+                case Err(httppush.Error e): {
+                    fail(e.to_str());
+                }
+            }
+        }
+        case Err(io.Error e): {
+            fail("cannot read " + path + ": " + e.to_str());
+        }
+    }
+}
+
+void do_config(str path, str section, str subsection, str key) {
+    match (io.read(path)) {
+        case Ok(str text): {
+            print(gitconfig.find(text, section, subsection, key).or("none"));
+        }
+        case Err(io.Error e): {
+            fail("cannot read " + path + ": " + e.to_str());
+        }
+    }
+}
+
+void do_ancestor(str gitdir, str anc, str desc) {
+    if (httppush.is_ancestor(gitdir, anc, desc)) {
+        print("yes");
+    } else {
+        print("no");
+    }
+}
+
+str bool_text(bool b) {
+    if (b) {
+        return "true";
+    }
+    return "false";
+}

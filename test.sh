@@ -299,6 +299,13 @@ source test_gitui.sh
 
 source test_httpfetch.sh
 
+# --- push over smart HTTP, against a real 'git http-backend' ----------------
+#
+# `test_push.sh` is the second sourced script that starts servers, and
+# composes its own EXIT trap on top of the one above.
+
+source test_push.sh
+
 echo
 if [ $fail -eq 0 ]; then
     printf '\033[32mall %d checks passed\033[0m\n' "$pass"

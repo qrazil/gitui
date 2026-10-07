@@ -37,12 +37,15 @@ bash build-gitui.sh -o ourgitui    # not build.sh -- see build-gitui.sh's own he
 | `gitclient.m31` | the interactive client's state and logic (no top-level statements, so it is importable and testable) |
 | `gitui.m31` | the interactive client's thin driver: parses a path, runs `tuiapp.Loop` |
 | `httpfetch.m31` | git's smart-HTTP protocol, v0 fetch/clone only: pkt-line framing, the ref advertisement, want/have negotiation, side-band-64k demultiplexing, and pack checksum verification, over `lib/http.m31` |
+| `packwrite.m31` | writes packfiles (whole objects, stored-zlib) and computes the object set a push must send, like `git rev-list --objects tips ^known` |
+| `httppush.m31` | smart-HTTP v0 push (`git-receive-pack`): fast-forward-only, `report-status`, HTTP Basic auth from the URL's userinfo or `GITUI_HTTP_USER`/`GITUI_HTTP_PASSWORD` |
+| `gitconfig.m31` | a minimal `.git/config` reader (`remote.origin.url` and friends) |
 | `build-gitui.sh` | builds `gitui.m31`: this compiler resolves every `import` against the entry file's own directory (`src/modules.rs`'s `load`), not a search path, so `gitui.m31`'s qrazil/tui dependencies are staged into a temporary directory at build time rather than copied into this one -- see the script's own header |
 | `t_*.m31` | test programs, each printing what a Python oracle prints, or asserting against its own expectations |
 | `oracle_*.py` | the oracles: `hashlib`, `zlib`, and a from-scratch format reader |
 | `pty_e2e.py` | drives `ourgitui` under a real pty against disposable fixtures, real `git` as the oracle |
 | `compare.sh` | every command beside the real `git`, compared octet for octet |
-| `test.sh` | all of the above (sources `test_write.sh`, `test_gitignore.sh`, `test_hunks.sh`, `test_gitui.sh` and `test_httpfetch.sh`) |
+| `test.sh` | all of the above (sources `test_write.sh`, `test_gitignore.sh`, `test_hunks.sh`, `test_gitui.sh`, `test_httpfetch.sh` and `test_push.sh`) |
 | `FRICTION.md` | **the other half of this**: what the language made hard, and what it made easy |
 
 ## What works
@@ -73,9 +76,10 @@ path if no editor can be launched at all; `f` finishes; `a` aborts -- see
 `gitclient.m31`'s own header, "launching `$EDITOR`, and the terminal handoff
 that takes", for how the terminal is handed to the editor and back); a
 persistent footer of the base commands; and a synced jump list toggled with
-`J`. Hunk-level *staging* (as opposed to display), push/pull, checkout and
-rebase are each a named, deliberate gap in `apps/git/design.md`, not an
-oversight here.
+`J`. `P` opens a push which-key; `p` pushes the current branch to the
+same-named branch on `origin` over smart HTTP, fast-forward only (see
+"Push" below). Pull, rebase and the like are named gaps in
+`apps/git/design.md`, not oversights here.
 
 Each commit in the log also expands into its own "Files changed" list --
 one row per path changed against the commit's first parent (the empty tree,
@@ -181,10 +185,7 @@ with real `OBJ_OFS_DELTA` chains, one with real `OBJ_REF_DELTA` ones -- so
 every command comparison in this file's own test suite runs against a packed
 repository as well as a loose one.
 
-Packfile *writing* remains out of scope here -- it is what `push` needs, and
-`apps/git/design.md`'s "Going remote" holds it as later, separate work, the
-same read-before-write split the index/object/ref write path already went
-through.
+Packfile *writing* lives in `packwrite.m31` (see "Push" below).
 
 ## Smart-HTTP fetch (`httpfetch.m31`): a verified pack on disk, and no further
 
@@ -211,7 +212,7 @@ needs the same `OBJ_OFS_DELTA`/`OBJ_REF_DELTA` machinery stage 2 (above) is
 for, and duplicating an incomplete piece of that here was explicitly out of
 scope. Turning a fetched pack into a repository this program can `log` or
 `cat-file` is therefore stage 2's own follow-up, not a gap in this file.
-Push, SSH and protocol v2 are named, separate gaps, not oversights: v0 is
+SSH and protocol v2 are named, separate gaps, not oversights: v0 is
 universally supported as a fallback even where v2 is preferred, and
 `lib/http.m31` itself already refuses `https://` before a socket exists, for
 the reason its own header gives.
@@ -239,3 +240,30 @@ the reason its own header gives.
     would be refused by the length check rather than misread.
   - **`git log`'s other orderings.** The walk is git's date-ordered queue.
     `--topo-order`, `--reverse`, path limiting and `--graph` are not there.
+
+## Push (`packwrite.m31`, `httppush.m31`, `gitconfig.m31`)
+
+`P` then `p` in `ourgitui` pushes the current branch to the same-named
+branch on `origin`: `gitconfig.m31` reads `remote.origin.url` from
+`.git/config`, `httppush.m31` fetches the receive-pack advertisement, refuses
+anything but a fast-forward (the remote tip must be an ancestor of what is
+pushed; no force push), `packwrite.m31` packs exactly what the server lacks,
+and the server's `report-status` answer becomes the status-line message.
+The UI then reloads. The push is synchronous: the screen does not repaint
+while it runs.
+
+Authentication is HTTP Basic, from `http://user:pass@host/...` in the remote
+URL or, when the URL carries none, `GITUI_HTTP_USER`/`GITUI_HTTP_PASSWORD`.
+The userinfo is stripped from the URL before anything is displayed, and the
+password is never part of any message or error. `https://` is refused (the
+standard library has no TLS), so GitHub itself is out of reach; an `http://`
+git server, such as orogit, is the target.
+
+`test_push.sh` uses real git as the oracle: every pack `packwrite` writes is
+accepted by `git index-pack --strict` and read back through `pack.m31`; the
+object set equals `git rev-list --objects`; pushes go to a real `git
+http-backend` and are judged by the server's refs, `git fsck --full` and a
+byte-for-byte comparison of the pushed objects. A non-fast-forward is refused
+with nothing sent, a server-side refusal (a `pre-receive` hook) is reported
+with its `ng` reason, and the Basic-auth paths (URL, environment, none,
+wrong) are covered against an authenticating server.

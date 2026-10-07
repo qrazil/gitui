@@ -1,0 +1,384 @@
+// Writing a packfile -- the half of the pack format `pack.m31` deliberately
+// left alone ("reading only -- writing one, for `push`, is later, separate
+// work", `apps/git/design.md`'s "Going remote"). This is that later work, and
+// it is the simplest packfile git accepts, on purpose:
+//
+//   `PACK`, version 2, the object count -- then every object as a FULL
+//   entry (its type and size in the varint header, its content as one zlib
+//   stream), then the SHA-1 of everything before it.
+//
+// No deltas. `OBJ_OFS_DELTA`/`OBJ_REF_DELTA` are a sender's optimisation,
+// never a requirement: a pack of whole objects is exactly what
+// `git unpack-objects` and `index-pack --strict` are happy to receive, it is
+// what git itself sends when `pack.window=0`, and it means the only thing
+// this module can get wrong is framing, which `test_push.sh` checks against
+// real `index-pack --strict` and against `pack.m31`'s own reader. The zlib
+// stream is `zlib.compress`'s stored-block one -- bigger on the wire than
+// git's, never different in meaning; a Huffman encoder can replace it later
+// without this file changing (zlib.m31's own note).
+//
+// --- which objects to send ---------------------------------------------------
+//
+// `objects_to_send` answers `git rev-list --objects <tips> ^<known>`, the
+// same way git does for a push: every commit reachable from `tips` that is
+// not reachable from `known` (the remote's advertised refs), plus every tree
+// and blob those commits' trees reach, MINUS the trees and blobs reachable
+// from the *boundary* -- the known commits the interesting walk ran into as
+// parents. Objects the remote already has but that sit outside the boundary
+// trees get sent again; that is harmless (git deduplicates on receipt) and
+// it is the trade git itself makes rather than walking the remote's whole
+// history. A `known` id this repository does not have at all (the remote is
+// ahead) is simply not a stopping point -- `httppush.push` refuses that case
+// before this is ever asked.
+
+import object;
+import sha1;
+import zlib;
+
+/// Why a pack could not be built or an object set computed. Payload-free
+/// (`docs/errors-decision.md` §4): the id involved is context the caller
+/// already has.
+pub enum Error {
+    /// An object to pack, or to walk through, could not be read.
+    Object;
+    /// A tip (after peeling any tag) is not a commit.
+    NotCommit;
+}
+
+pub str Error.to_str() {
+    match (this) {
+        case Object: {
+            return "an object could not be read from the repository";
+        }
+        case NotCommit: {
+            return "a tip does not name a commit";
+        }
+    }
+}
+
+pub const int OBJ_COMMIT = 1;
+pub const int OBJ_TREE = 2;
+pub const int OBJ_BLOB = 3;
+pub const int OBJ_TAG = 4;
+
+/// The pack's own number for a kind word, `0` for a word that is none of
+/// the four.
+pub int type_number(str kind) {
+    if (kind == "commit") {
+        return OBJ_COMMIT;
+    }
+    if (kind == "tree") {
+        return OBJ_TREE;
+    }
+    if (kind == "blob") {
+        return OBJ_BLOB;
+    }
+    if (kind == "tag") {
+        return OBJ_TAG;
+    }
+    return 0;
+}
+
+/// One entry's header: the type in bits 4-6 of the first byte and the low
+/// four bits of the size below it, then the rest of the size seven bits a
+/// byte, least significant first, every byte but the last with its top bit
+/// set -- `pack.m31`'s own reader, inverted.
+pub bytes entry_header(int type_num, int size) {
+    bytes out = [];
+    int rest = size >> 4;
+    int first = type_num << 4 | size & 0x0F;
+    if (rest > 0) {
+        first = first | 0x80;
+    }
+    out.push(first);
+    while (rest > 0) {
+        int b = rest & 0x7F;
+        rest = rest >> 7;
+        if (rest > 0) {
+            b = b | 0x80;
+        }
+        out.push(b);
+    }
+    return out;
+}
+
+/// A packfile holding exactly `ids`, in that order, each as a whole object.
+/// Zero ids is a legal, empty pack (header and trailer only), which is what
+/// a push that updates a ref to an object the remote already has sends.
+pub Result<bytes, Error> build(str gitdir, List<str> ids) {
+    bytes out = "PACK".to_bytes();
+    be32(out, 2);
+    be32(out, ids.size());
+    for (str id in ids) {
+        match (object.read(gitdir, id)) {
+            case Ok(object.Object o): {
+                out.extend(entry_header(type_number(o.kind()), o.raw.size()));
+                out.extend(zlib.compress(o.raw));
+            }
+            case Err(object.Error e): {
+                return Result<bytes, Error>.Err(Error.Object);
+            }
+        }
+    }
+    bytes trailer = sha1.sum(out);
+    out.extend(trailer);
+    return Result<bytes, Error>.Ok(out);
+}
+
+void be32(bytes out, int v) {
+    out.push(v >> 24 & 0xFF);
+    out.push(v >> 16 & 0xFF);
+    out.push(v >> 8 & 0xFF);
+    out.push(v & 0xFF);
+}
+
+/// `git rev-list --objects <tips> ^<known>` -- see the module note. Commits
+/// first (newest-visited first), then trees, then blobs, then any annotated
+/// tag a tip named; the order inside a pack is nothing git relies on.
+pub Result<List<str>, Error> objects_to_send(str gitdir, List<str> tips, List<str> known) {
+    // Every commit reachable from a known ref this repository actually has.
+    Map<str, bool> stop = {};
+    for (str k in known) {
+        match (peel(gitdir, k)) {
+            case Ok(str c): {
+                reachable_commits(gitdir, c, stop);
+            }
+            case Err(Error e): {
+                // Not here at all: the remote is ahead of us somewhere, which
+                // is not this function's problem (module note).
+            }
+        }
+    }
+    // The interesting commits, and the boundary they ran into.
+    Map<str, bool> seen = {};
+    List<str> commits = [];
+    List<str> tags = [];
+    Map<str, bool> boundary = {};
+    List<str> queue = [];
+    for (str t in tips) {
+        str c = peel_collecting(gitdir, t, tags)?;
+        if (stop.contains(c) || seen.contains(c)) {
+            continue;
+        }
+        seen.set(c, true);
+        queue.push(c);
+    }
+    int at = 0;
+    while (at < queue.size()) {
+        str id = queue[at];
+        at = at + 1;
+        match (object.read(gitdir, id)) {
+            case Ok(object.Object o): {
+                match (o.body) {
+                    case Commit(object.Commit cm): {
+                        commits.push(id);
+                        for (str p in cm.parents) {
+                            if (stop.contains(p)) {
+                                boundary.set(p, true);
+                                continue;
+                            }
+                            if (!seen.contains(p)) {
+                                seen.set(p, true);
+                                queue.push(p);
+                            }
+                        }
+                    }
+                    case Blob: {
+                        return Result<List<str>, Error>.Err(Error.NotCommit);
+                    }
+                    case Tree: {
+                        return Result<List<str>, Error>.Err(Error.NotCommit);
+                    }
+                    case Tag: {
+                        return Result<List<str>, Error>.Err(Error.NotCommit);
+                    }
+                }
+            }
+            case Err(object.Error e): {
+                return Result<List<str>, Error>.Err(Error.Object);
+            }
+        }
+    }
+    // What the boundary already has, then what the interesting commits need
+    // beyond it.
+    Map<str, bool> have = {};
+    List<str> ignored = [];
+    for (str b in boundary.keys()) {
+        match (object.read(gitdir, b)) {
+            case Ok(object.Object o): {
+                match (o.body) {
+                    case Commit(object.Commit cm): {
+                        tree_objects(gitdir, cm.tree, have, ignored, ignored)?;
+                    }
+                    case Blob: {
+                    }
+                    case Tree: {
+                    }
+                    case Tag: {
+                    }
+                }
+            }
+            case Err(object.Error e): {
+                return Result<List<str>, Error>.Err(Error.Object);
+            }
+        }
+    }
+    List<str> trees = [];
+    List<str> blobs = [];
+    for (str c in commits) {
+        match (object.read(gitdir, c)) {
+            case Ok(object.Object o): {
+                match (o.body) {
+                    case Commit(object.Commit cm): {
+                        tree_objects(gitdir, cm.tree, have, trees, blobs)?;
+                    }
+                    case Blob: {
+                    }
+                    case Tree: {
+                    }
+                    case Tag: {
+                    }
+                }
+            }
+            case Err(object.Error e): {
+                return Result<List<str>, Error>.Err(Error.Object);
+            }
+        }
+    }
+    List<str> out = [];
+    for (str c in commits) {
+        out.push(c);
+    }
+    for (str t in trees) {
+        out.push(t);
+    }
+    for (str b in blobs) {
+        out.push(b);
+    }
+    for (str t in tags) {
+        out.push(t);
+    }
+    return Result<List<str>, Error>.Ok(out);
+}
+
+// The commit `id` names: itself, or -- for an annotated tag -- what the tag
+// (chain) finally points at.
+Result<str, Error> peel(str gitdir, str id) {
+    List<str> ignored = [];
+    return peel_collecting(gitdir, id, ignored);
+}
+
+// `peel`, recording every tag object passed through in `tags` -- a pushed
+// tag has to travel in the pack along with what it points at.
+Result<str, Error> peel_collecting(str gitdir, str id, List<str> tags) {
+    str at = id;
+    for (int depth in 0 .. 16) {
+        match (object.read(gitdir, at)) {
+            case Ok(object.Object o): {
+                match (o.body) {
+                    case Commit: {
+                        return Result<str, Error>.Ok(at);
+                    }
+                    case Tag(object.Tag t): {
+                        tags.push(at);
+                        at = t.object;
+                    }
+                    case Blob: {
+                        return Result<str, Error>.Err(Error.NotCommit);
+                    }
+                    case Tree: {
+                        return Result<str, Error>.Err(Error.NotCommit);
+                    }
+                }
+            }
+            case Err(object.Error e): {
+                return Result<str, Error>.Err(Error.Object);
+            }
+        }
+    }
+    return Result<str, Error>.Err(Error.NotCommit);
+}
+
+// Mark every commit reachable from `start` in `out`. An unreadable parent
+// ends that line of the walk rather than failing it: a known ref whose
+// history is partly missing here still stops the interesting walk wherever
+// it can.
+void reachable_commits(str gitdir, str start, Map<str, bool> out) {
+    if (out.contains(start)) {
+        return;
+    }
+    List<str> queue = [start];
+    out.set(start, true);
+    int at = 0;
+    while (at < queue.size()) {
+        str id = queue[at];
+        at = at + 1;
+        match (object.read(gitdir, id)) {
+            case Ok(object.Object o): {
+                match (o.body) {
+                    case Commit(object.Commit cm): {
+                        for (str p in cm.parents) {
+                            if (!out.contains(p)) {
+                                out.set(p, true);
+                                queue.push(p);
+                            }
+                        }
+                    }
+                    case Blob: {
+                    }
+                    case Tree: {
+                    }
+                    case Tag: {
+                    }
+                }
+            }
+            case Err: {
+            }
+        }
+    }
+}
+
+// Every tree and blob under `tree_id` not already in `have`, appended to
+// `trees`/`blobs` and added to `have` -- so a second call over a tree that
+// shares subtrees with the first visits each shared subtree once.
+Result<bool, Error> tree_objects(str gitdir, str tree_id, Map<str, bool> have, List<str> trees, List<str> blobs) {
+    if (have.contains(tree_id)) {
+        return Result<bool, Error>.Ok(true);
+    }
+    have.set(tree_id, true);
+    trees.push(tree_id);
+    match (object.read(gitdir, tree_id)) {
+        case Ok(object.Object o): {
+            match (o.body) {
+                case Tree(List<object.Entry> es): {
+                    for (object.Entry e in es) {
+                        if (e.is_commit()) {
+                            // A submodule: a commit in another repository,
+                            // never an object of this one.
+                            continue;
+                        }
+                        if (e.is_tree()) {
+                            tree_objects(gitdir, e.id, have, trees, blobs)?;
+                        } else if (!have.contains(e.id)) {
+                            have.set(e.id, true);
+                            blobs.push(e.id);
+                        }
+                    }
+                    return Result<bool, Error>.Ok(true);
+                }
+                case Blob: {
+                    return Result<bool, Error>.Err(Error.Object);
+                }
+                case Commit: {
+                    return Result<bool, Error>.Err(Error.Object);
+                }
+                case Tag: {
+                    return Result<bool, Error>.Err(Error.Object);
+                }
+            }
+        }
+        case Err(object.Error e): {
+            return Result<bool, Error>.Err(Error.Object);
+        }
+    }
+}

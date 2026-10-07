@@ -540,6 +540,99 @@ def main():
                 "log=%r rc=%d" % (log_out, log_rc),
             )
 
+    # --- push: P opens the which-key, p pushes over smart HTTP ----------------
+    #
+    # A real `git http-backend` served from a thread of this very script, as a
+    # CGI behind `http.server`; the bare repository behind it is the oracle.
+    import http.server
+    import threading
+
+    backend = os.path.join(subprocess.run(["git", "--exec-path"], capture_output=True, text=True).stdout.strip(), "git-http-backend")
+    if not os.path.exists(backend):
+        print("gitui pty: push check skipped, no git-http-backend", file=sys.stderr)
+    else:
+        ps_root = os.path.join(root, "push-e2e")
+        os.makedirs(os.path.join(ps_root, "www", "cgi-bin"))
+        os.makedirs(os.path.join(ps_root, "srv"))
+        ps_srv = os.path.join(ps_root, "srv", "repo.git")
+        subprocess.run(["git", "init", "-q", "--bare", "-b", "main", ps_srv], check=True)
+        git(ps_srv, "config", "http.receivepack", "true")
+        wrapper = os.path.join(ps_root, "www", "cgi-bin", "git-http-backend")
+        with open(wrapper, "w") as f:
+            f.write("#!/bin/sh\nexport GIT_PROJECT_ROOT=%s\nexport GIT_HTTP_EXPORT_ALL=1\nexec %s\n" % (os.path.join(ps_root, "srv"), backend))
+        os.chmod(wrapper, 0o755)
+
+        class PushHandler(http.server.CGIHTTPRequestHandler):
+            cgi_directories = ["/cgi-bin"]
+
+            def log_message(self, fmt, *args):
+                pass
+
+        import functools
+
+        httpd = http.server.ThreadingHTTPServer(
+            ("127.0.0.1", 0), functools.partial(PushHandler, directory=os.path.join(ps_root, "www"))
+        )
+        ps_port = httpd.server_address[1]
+        threading.Thread(target=httpd.serve_forever, daemon=True).start()
+
+        fx_push = make_fixture(root, "push-client")
+        with open(os.path.join(fx_push, "a.txt"), "w") as f:
+            f.write("one\n")
+        git(fx_push, "add", "-A", env=GIT_ENV)
+        git(fx_push, "commit", "-q", "-m", "first", env=GIT_ENV)
+        git(fx_push, "remote", "add", "origin", "http://127.0.0.1:%d/cgi-bin/git-http-backend/repo.git" % ps_port)
+
+        sp = Session(binpath, fx_push)
+        out = sp.send("P")
+        if b"push" in out and b"fast-forward" in out:
+            ok("push: P opens the push which-key overlay")
+        else:
+            fail("push: P opens the push which-key overlay", repr(out))
+        sp.send("\x1b")
+        time.sleep(0.3)
+        sp.drain()
+        before, _, _ = git(ps_srv, "rev-parse", "-q", "--verify", "refs/heads/main")
+        if before == "":
+            ok("push: Escape closes the overlay and pushes nothing")
+        else:
+            fail("push: Escape closes the overlay and pushes nothing", "server main = %r" % before)
+        sp.send("P")
+        sp.send("p")
+        time.sleep(1.0)
+        sp.drain()
+        want, _, _ = git(fx_push, "rev-parse", "HEAD")
+        got, _, _ = git(ps_srv, "rev-parse", "-q", "--verify", "refs/heads/main")
+        fsck_out, _, fsck_rc = git(ps_srv, "fsck", "--full")
+        if want != "" and got == want and fsck_rc == 0:
+            ok("push: P then p pushes the current branch; the server's main equals HEAD and fsck is clean")
+        else:
+            fail("push: P then p pushes the current branch", "want=%r got=%r fsck=%r" % (want, got, fsck_out))
+        rc = sp.quit()
+        if rc == 0:
+            ok("push: the client is still responsive and exits cleanly after a push")
+        else:
+            fail("push: the client is still responsive and exits cleanly after a push", "returncode=%r" % rc)
+
+        # A second commit, pushed again: only a fast-forward goes through.
+        with open(os.path.join(fx_push, "a.txt"), "a") as f:
+            f.write("two\n")
+        git(fx_push, "add", "-A", env=GIT_ENV)
+        git(fx_push, "commit", "-q", "-m", "second", env=GIT_ENV)
+        sp2 = Session(binpath, fx_push)
+        sp2.send("P")
+        sp2.send("p")
+        time.sleep(1.0)
+        sp2.drain()
+        want, _, _ = git(fx_push, "rev-parse", "HEAD")
+        got, _, _ = git(ps_srv, "rev-parse", "refs/heads/main")
+        if got == want:
+            ok("push: a second commit fast-forwards the server's main")
+        else:
+            fail("push: a second commit fast-forwards the server's main", "want=%r got=%r" % (want, got))
+        sp2.quit()
+        httpd.shutdown()
+
     return failures
 
 
