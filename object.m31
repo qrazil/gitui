@@ -77,7 +77,7 @@
 // is otherwise packed. That is correct, not an oversight: git itself does the
 // same (a new object is always loose; only `git gc`/`repack` ever collapses
 // loose objects into a pack), and packfile *writing* is out of scope here for
-// the reason `apps/git/design.md`'s "Going remote" gives -- it is what `push`
+// the reason `docs/design.md`'s "Going remote" gives -- it is what `push`
 // needs, and `push` is later, separate work.
 //
 // `object.loose(gitdir)` is deliberately unchanged by any of this: it answers
@@ -858,7 +858,7 @@ Ident ident(bytes v) {
 
 // The index of octet `b` at or after `from`, or -1. `bytes.index_of` takes a
 // needle and has no starting offset, so every scan over a structured buffer
-// has to be written out; see apps/git/FRICTION.md.
+// has to be written out; see docs/FRICTION.md.
 int find(bytes hay, int b, int from) {
     int i = from;
     int n = hay.size();

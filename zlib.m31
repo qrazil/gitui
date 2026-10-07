@@ -77,7 +77,7 @@
 // ten times more code, and it pays for its table in a fixed cost per block --
 // the wrong trade for git, whose objects are mostly a few hundred octets and
 // whose blocks are therefore mostly tiny. The throughput note in
-// `apps/git/FRICTION.md` says what this costs.
+// `docs/FRICTION.md` says what this costs.
 
 /// Why a stream was refused. Payload-free (docs/errors-decision.md §4): the
 /// octet count, the table name, the symbol -- everything a variant used to

@@ -16,7 +16,7 @@
 # The trap composes with `test.sh`'s own (`rm -rf "$WORK"`) rather than
 # replacing its effect: it is rewritten, once, to do both.
 #
-# What each check proves, in the order `apps/git/design.md`'s task asks for:
+# What each check proves, in the order `docs/design.md`'s task asks for:
 #
 #   1. the ref advertisement matches `git ls-remote` byte for byte;
 #   2. a full clone (no `have`s) produces a verified pack that is byte for

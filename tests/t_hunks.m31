@@ -11,7 +11,7 @@
 import os;
 import io;
 import hunks;
-import tuidiffview;
+import tui.tuidiffview;
 
 List<str> argv = os.args();
 if (argv.size() != 3) {

@@ -5,14 +5,14 @@
 # --no-edit`. Nothing here compares this program with itself.
 #
 # Sourced from `test.sh` after `test_gitui.sh`, sharing its shell, `$WORK`,
-# `build_tui`, `note`/`bad` and the `pass`/`fail` counters -- `$WORK/
+# `build`, `note`/`bad` and the `pass`/`fail` counters -- `$WORK/
 # t_gitclient_ops` is the harness `test_gitui.sh` already built; it is
 # rebuilt here only if that step was skipped.
 #
 # Every fixture is disposable, under `$WORK`, never a real repository.
 
 if [ ! -x "$WORK/t_gitclient_ops" ]; then
-    build_tui t_gitclient_ops || true
+    build t_gitclient_ops || true
 fi
 
 if [ -x "$WORK/t_gitclient_ops" ]; then

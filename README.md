@@ -7,17 +7,22 @@ format, refs, the index, working-tree status, and both a read-only CLI
 github.com/qrazil/tui. Nothing here is a binding to anything; the only C in
 the program is the runtime every program links.
 
+The repo is an m31 project: the `deps` file names it (`gitui`, its version) and pins
+github.com/qrazil/tui by commit; m31c fetches that into `.m31-deps/` on the first
+build and records it in `deps.lock`. Library modules and the two entry points stay
+at the root; `tests/`, `tests/oracles/`, `scripts/` and `docs/` hold the rest.
+
 ```
-export M31_ROOT=/path/to/m31      # a checkout, or an extracted release's runtime SDK
-export TUI_ROOT=/path/to/tui      # a checkout, pinned to the commit test.yml names
+export M31_ROOT=/path/to/m31      # a checkout, or an extracted release's runtime SDK (m31 v0.2.0+)
+export LANGC=/path/to/m31c        # the matching compiler
 
-bash test.sh                    # the built-in fixtures
-bash test.sh <repo> [<repo>…]   # those, and each repository named
+bash tests/test.sh                    # the built-in fixtures
+bash tests/test.sh <repo> [<repo>…]   # those, and each repository named
 
-bash build.sh git.m31 -o ourgit
+bash scripts/build.sh git.m31 -o ourgit
 ./ourgit -log --max 5
 
-bash build-gitui.sh -o ourgitui    # not build.sh -- see build-gitui.sh's own header
+bash scripts/build-gitui.sh -o ourgitui    # not build.sh -- it is the one with a dependency
 ./ourgitui                         # run from a repository's own top level
 ```
 
@@ -42,14 +47,15 @@ bash build-gitui.sh -o ourgitui    # not build.sh -- see build-gitui.sh's own he
 | `packwrite.m31` | writes packfiles (whole objects, stored-zlib) and computes the object set a push must send, like `git rev-list --objects tips ^known` |
 | `httppush.m31` | smart-HTTP v0 push (`git-receive-pack`): fast-forward-only, `report-status`, HTTP Basic auth from the URL's userinfo or `GITUI_HTTP_USER`/`GITUI_HTTP_PASSWORD` |
 | `gitconfig.m31` | a minimal `.git/config` reader (`remote.origin.url` and friends) |
-| `build-gitui.sh` | builds `gitui.m31`: this compiler resolves every `import` against the entry file's own directory (`src/modules.rs`'s `load`), not a search path, so `gitui.m31`'s qrazil/tui dependencies are staged into a temporary directory at build time rather than copied into this one -- see the script's own header |
-| `t_*.m31` | test programs, each printing what a Python oracle prints, or asserting against its own expectations |
-| `oracle_*.py` | the oracles: `hashlib`, `zlib`, and a from-scratch format reader |
-| `pty_e2e.py` | drives `ourgitui` under a real pty against disposable fixtures, real `git` as the oracle |
-| `compare.sh` | every command beside the real `git`, compared octet for octet |
+| `deps` | the project manifest: name, version and the pinned qrazil/tui commit (`deps.lock` records what was fetched) |
+| `scripts/build-gitui.sh` | builds `gitui.m31`; its `import tui.tuiapp;` lines resolve through `deps`, so nothing is staged or copied |
+| `tests/t_*.m31` | test programs, each printing what a Python oracle prints, or asserting against its own expectations |
+| `tests/oracles/oracle_*.py` | the oracles: `hashlib`, `zlib`, and a from-scratch format reader |
+| `tests/pty_e2e.py` | drives `ourgitui` under a real pty against disposable fixtures, real `git` as the oracle |
+| `scripts/compare.sh` | every command beside the real `git`, compared octet for octet |
 | `pull.m31` | fast-forward-only pull: fetches over smart HTTP (`httpfetch.m31`), unpacks the pack with `pack.read_pack`, refuses a dirty tree and anything but a fast-forward, then `checkout.m31` moves the working tree and the ref |
-| `test.sh` | all of the above (sources `test_write.sh`, `test_gitignore.sh`, `test_hunks.sh`, `test_patch.sh`, `test_gitui.sh`, `test_httpfetch.sh`, `test_discard_amend.sh`, `test_push.sh` and `test_pull.sh`) |
-| `FRICTION.md` | **the other half of this**: what the language made hard, and what it made easy |
+| `tests/test.sh` | all of the above (sources the `tests/test_*.sh` files next to it) |
+| `docs/FRICTION.md` | **the other half of this**: what the language made hard, and what it made easy |
 
 ## What works
 
@@ -67,7 +73,7 @@ tree, commit), ref writing (`update`, `update_symbolic`, compare-and-swap),
 and working-tree status, all checked against real git in disposable
 fixtures (`test_write.sh`).
 
-The interactive client (`gitui.m31`, `apps/git/design.md`'s locked design):
+The interactive client (`gitui.m31`, `docs/design.md`'s locked design):
 a collapsible outline of untracked files, unstaged changes, staged changes
 and recent commits; whole-file staging and unstaging (`s`/`u`); a hunk-level
 diff view (`d` on a staged/unstaged/untracked row; `Enter` directly on one
@@ -89,7 +95,7 @@ text, and checked against real `git apply --cached` byte for byte
 same-named branch on `origin` over smart HTTP, fast-forward only (see
 "Push" below). `F` opens a pull which-key; `p` fast-forwards the current branch
 from `origin` (see "Pull" below). Merge and rebase are each a named,
-deliberate gap in `apps/git/design.md`, not an oversight here.
+deliberate gap in `docs/design.md`, not an oversight here.
 
 Discarding and amending, both checked against the real git command each
 stands in for (`test_discard_amend.sh`): `x` on a path row asks first
@@ -155,7 +161,7 @@ on trailing-whitespace trimming, and on C-style path quoting.
 Throughput, `cc -O2` on x86-64, best of several runs on a busy machine:
 SHA-1 **38–45 MB/s**, inflate **71–102 MB/s** of output, and **10 MB/s** of
 object content end to end (open, inflate, verify the SHA-1, parse).
-`FRICTION.md` §5 takes the SHA-1 figure apart, because it is a language
+`docs/FRICTION.md` §5 takes the SHA-1 figure apart, because it is a language
 datapoint and not a git one.
 
 ## Packfiles
@@ -164,7 +170,7 @@ This used to be the whole of what a real repository needed that this could
 not do, and how much it cost depended entirely on how the repository got
 there -- both still true of the numbers below, which describe the
 repositories this project actually has lying around, not this program's own
-ability to read them any more. `apps/git/design.md`'s "Going remote" names
+ability to read them any more. `docs/design.md`'s "Going remote" names
 packfiles as the first, independent piece of that larger plan (reading only
 -- writing one, for `push`, is later, separate work), and it has landed:
 `pack.m31` reads the `.idx` (format v2; v1 is refused, not guessed at, since
@@ -224,7 +230,7 @@ The line is not "old objects are packed and new ones are loose": it is
 packed, until something repacks". That split used to mean this program was a
 usable tool on a repository you have been committing to and a useless one on
 a fresh clone, with very little in between; `pack.m31` is what closes that
-gap. `apps/git/test.sh`'s own built-in fixture is still an all-loose one on
+gap. `tests/test.sh`'s own built-in fixture is still an all-loose one on
 purpose (a repository this program itself commits to, same as `oro` and
 `lang`), and it now builds two packed fixtures alongside it -- one repacked
 with real `OBJ_OFS_DELTA` chains, one with real `OBJ_REF_DELTA` ones -- so

@@ -19,7 +19,7 @@
 // this at length). So `git cat-file -t X` is spelled `ourgit -cat-file --type
 // X` here. Writing git's own spelling would have meant not using `lib/args`,
 // which was the point of the exercise; what it costs is that no muscle memory
-// transfers. See FRICTION.md.
+// transfers. See docs/FRICTION.md.
 //
 // --- the output is git's, octet for octet -------------------------------------
 //
@@ -85,7 +85,7 @@ match (p.parse(argv.slice(1, argv.size()))) {
 /// The parser is a parameter because it cannot be anything else: it is built
 /// at the top level, and the top level's variables are locals of the program
 /// body that no function can see (reference §2). There is no module state to
-/// put it in. See FRICTION.md.
+/// put it in. See docs/FRICTION.md.
 int dispatch(args.Parser parser, args.Parsed r) {
     str gd = "";
     match (r.value("git-dir")) {
@@ -260,7 +260,7 @@ int log(str gd, args.Parsed c) {
     }
     // The walk itself -- git's date-ordered queue -- lives in `gitlog.m31`
     // now, shared with the interactive client (`gitui.m31`) so there is one
-    // implementation of it rather than two (`apps/git/design.md`).
+    // implementation of it rather than two (`docs/design.md`).
     match (gitlog.walk(gd, spec, limit)) {
         case Ok(List<gitlog.Entry> entries): {
             int shown = 0;

@@ -1,61 +1,21 @@
 # The interactive client (`gitui.m31`/`gitclient.m31`) -- unit-level,
 # oracle-level and pty-driven end-to-end checks, the three tiers
-# `design.md`'s "how you'll know you're done and correct" names.
+# `docs/design.md`'s "how you'll know you're done and correct" names.
 #
 # Sourced from `test.sh`, which is why there is no `set`, no `cd` and no
 # `trap` here -- see `test_write.sh`'s own header for why: it runs in
-# `test.sh`'s own shell, sharing its `WORK`, `M31_ROOT`, `TUI_ROOT`, `build`,
-# `note`/`bad` and `pass`/`fail` counters. `bash test.sh` is still the one
+# `test.sh`'s own shell, sharing its `WORK`, `M31_ROOT`, `build`,
+# `note`/`bad` and `pass`/`fail` counters. `bash tests/test.sh` is still the one
 # command that runs everything, this included.
 #
 # Every fixture below is built fresh under `$WORK` and real `git` is used
 # only to build them and to read them back as the oracle -- never against a
-# real repository, exactly as `design.md`'s own "Safety" section requires
+# real repository, exactly as `docs/design.md`'s own "Safety" section requires
 # for this client specifically.
-#
-# `gitclient.m31` (and so every test harness below that imports it) reaches
-# into qrazil/tui, which this program's own module loader resolves relative
-# to the ENTRY file's directory only (qrazil/m31's own
-# docs/modules-decision.md §1: one flat namespace, no search path) -- so a
-# harness built straight out of this repo can never see TUI_ROOT's files
-# sitting in a different checkout. `build_tui` is `test.sh`'s own `build`,
-# staging both directories' sources into one throwaway place first -- the
-# same fix `test_hunks.sh` already uses for `hunks.m31`'s own dependency on
-# `tuidiffview`, and what `build-gitui.sh` (the real, user-facing build)
-# does too. Nothing here duplicates a qrazil/tui file into this repository
-# itself; the staging directory is `$WORK`'s own and is gone when `test.sh`
-# is.
-
-build_tui() {
-    local name=$1
-    local stage="$WORK/tui-stage"
-    mkdir -p "$stage"
-    cp "$TUI_ROOT/tuiapp.m31" "$TUI_ROOT/tuibuf.m31" "$TUI_ROOT/tuidiff.m31" \
-        "$TUI_ROOT/tuidiffview.m31" \
-        "$TUI_ROOT/tuifooter.m31" "$TUI_ROOT/tuigeom.m31" "$TUI_ROOT/tuijump.m31" \
-        "$TUI_ROOT/tuimenu.m31" "$TUI_ROOT/tuioutline.m31" "$TUI_ROOT/tuiscroll.m31" \
-        "$TUI_ROOT/tuistyle.m31" "$TUI_ROOT/tuitext.m31" "$TUI_ROOT/tuiwidget.m31" \
-        repo.m31 sha1.m31 zlib.m31 pack.m31 object.m31 \
-        gitconfig.m31 packwrite.m31 httpfetch.m31 httppush.m31 pull.m31 \
-        refs.m31 index.m31 gitignore.m31 status.m31 checkout.m31 \
-        gitlog.m31 hunks.m31 patch.m31 \
-        gitclient.m31 "$name.m31" "$stage/"
-    if ! "$LANGC" --emit-c "$stage/$name.m31" -o "$WORK/$name.c" 2>"$WORK/$name.diag"; then
-        bad "compile $name (staged with qrazil/tui)" "$(head -5 "$WORK/$name.diag")"
-        return 1
-    fi
-    if ! cc -O2 -Wall -Wextra -I "$M31_ROOT/runtime" -pthread -o "$WORK/$name" "$WORK/$name.c" \
-           "$M31_ROOT/runtime/rt.c" "$M31_ROOT/runtime/scheduler.c" "$M31_ROOT/$RT_REACTOR_C" "$M31_ROOT/$RT_CTX_ASM" \
-           2>"$WORK/$name.cc"; then
-        bad "cc $name" "$(head -5 "$WORK/$name.cc")"
-        return 1
-    fi
-    return 0
-}
 
 # --- unit: outline building and commit-message stripping, no repository ----
 
-if build_tui t_gitclient; then
+if build t_gitclient; then
     "$WORK/t_gitclient" >"$WORK/gitclient_unit.out" 2>"$WORK/gitclient_unit.err"
     if grep -q '^FAIL' "$WORK/gitclient_unit.out"; then
         bad "gitui: unit tests (t_gitclient)" "$(grep '^FAIL' "$WORK/gitclient_unit.out")" "$(cat "$WORK/gitclient_unit.err")"
@@ -82,7 +42,7 @@ mkdir -p "$opsfx"
     printf 'brand new\n' >new.txt
 ) >"$WORK/gitui_ops.log" 2>&1 || bad "gitui: ops fixture" "$(tail -5 "$WORK/gitui_ops.log")"
 
-if build_tui t_gitclient_ops; then
+if build t_gitclient_ops; then
     "$WORK/t_gitclient_ops" "$opsfx/.git" "$opsfx" stage new.txt >"$WORK/ops1.out" 2>"$WORK/ops1.err"
     got=$(git -C "$opsfx" status --short)
     want=$(printf ' M a.txt\nA  new.txt')
@@ -178,7 +138,7 @@ if build_tui t_gitclient_ops; then
         git add f.txt
         # unstaged: a further change on top of the staged version (disk vs
         # index) -- exactly the two-comparisons-on-one-file scenario
-        # `design.md`'s own "how you'll know you're done" names.
+        # `docs/design.md`'s own "how you'll know you're done" names.
         printf 'a\nB\nC\n' >f.txt
         printf 'brand\nnew\n' >new.txt
         printf 'hello\000world\n' >bin.dat
@@ -467,8 +427,7 @@ fi
 
 # --- end to end: the real interactive loop, driven under a pty -------------
 #
-# The real, user-facing build (`build-gitui.sh` does its own staging, the
-# same way `build_tui` above does for a test harness) rather than a second,
+# The real, user-facing build (`scripts/build-gitui.sh`) rather than a second,
 # slightly different way of compiling the same program -- if the actual build
 # a user runs ever drifted from what this test exercises, this is exactly the
 # kind of gap that would hide.
@@ -477,10 +436,10 @@ fi
 # given; `$WORK/pty` is `test.sh`'s own scratch directory, removed with
 # everything else on exit.
 
-if bash build-gitui.sh -o "$WORK/gitui" >"$WORK/gitui_build.log" 2>&1; then
-    note "gitui: build-gitui.sh produces a working executable"
+if bash scripts/build-gitui.sh -o "$WORK/gitui" >"$WORK/gitui_build.log" 2>&1; then
+    note "gitui: scripts/build-gitui.sh produces a working executable"
     if command -v python3 >/dev/null; then
-        if out=$(python3 pty_e2e.py "$WORK/gitui" "$WORK/pty" 2>&1); then
+        if out=$(python3 tests/pty_e2e.py "$WORK/gitui" "$WORK/pty" 2>&1); then
             note "gitui pty: $(echo "$out" | grep -c '^ok') end-to-end checks passed under a real pty"
         else
             bad "gitui pty end-to-end" "$out"
@@ -489,5 +448,5 @@ if bash build-gitui.sh -o "$WORK/gitui" >"$WORK/gitui_build.log" 2>&1; then
         echo "gitui pty: skipped, no python3" >&2
     fi
 else
-    bad "gitui: build-gitui.sh" "$(cat "$WORK/gitui_build.log")"
+    bad "gitui: scripts/build-gitui.sh" "$(cat "$WORK/gitui_build.log")"
 fi

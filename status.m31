@@ -17,7 +17,7 @@
 // deliberately not shaped like any particular command's output: nothing here
 // prints a `git status --short` line, or groups by directory, or colours
 // anything. That is a future caller's job, and there is no such caller yet
-// (`apps/git/design.md`'s "dependency chain" section). This hands back
+// (`docs/design.md`'s "dependency chain" section). This hands back
 // structure and nothing else.
 //
 // --- the mtime/size shortcut is not optional ---------------------------------

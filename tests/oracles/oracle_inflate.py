@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Fixtures for `t_inflate.m31`, and the expected answers, from Python's zlib.
 
-    python3 apps/git/oracle_inflate.py <dir>
+    python3 tests/oracle_inflate.py <dir>
 
 writes one `.z` file per case into <dir> and prints, for each, the line the
 language program must print:

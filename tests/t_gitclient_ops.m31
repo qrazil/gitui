@@ -52,7 +52,7 @@
 import gitclient;
 import io;
 import os;
-import tuidiffview;
+import tui.tuidiffview;
 
 List<str> argv = os.args();
 if (argv.size() < 4) {

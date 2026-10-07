@@ -170,7 +170,7 @@ pub Result<Head, Error> head(str gitdir) {
         // from the failure afterwards: telling one variant of an error apart
         // from the others needs a `match` over every variant there is
         // (reference §5.6 -- no `default`), which is six arms that all say
-        // the same thing. See FRICTION.md.
+        // the same thing. See docs/FRICTION.md.
         if (!exists(gitdir, target)) {
             return Result<Head, Error>.Ok(Head.Unborn(target));
         }

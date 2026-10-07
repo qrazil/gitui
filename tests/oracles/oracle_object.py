@@ -2,7 +2,7 @@
 """A loose-object AND packfile reader written from the format, not from
 `git`.
 
-    python3 apps/git/oracle_object.py <repo-or-gitdir>
+    python3 tests/oracle_object.py <repo-or-gitdir>
 
 prints one canonical line per object -- loose or packed -- and, for a tree,
 one more per entry, for `t_object.m31` to be diffed against. It uses only

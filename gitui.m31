@@ -1,4 +1,4 @@
-// The interactive client -- `apps/git/design.md`'s locked design, built: one
+// The interactive client -- `docs/design.md`'s locked design, built: one
 // scrollable, collapsible outline of untracked files, unstaged changes,
 // staged changes and recent commits; whole-file staging and unstaging; a
 // commit; a persistent footer of the base commands; a which-key overlay for
@@ -18,7 +18,7 @@
 // message -- lives in `gitclient.m31`, which has no top-level statements and
 // can be imported. This is `apps/tui/browse.m31`'s own shape, one file
 // further split because this program, unlike that demo, has a real test
-// obligation for its logic (`apps/git/design.md`'s "how you'll know you're
+// obligation for its logic (`docs/design.md`'s "how you'll know you're
 // done").
 //
 // See `gitclient.m31`'s own header, "launching `$EDITOR`, and the terminal
@@ -40,9 +40,9 @@ import io;
 import os;
 import repo;
 import term;
-import tuiapp;
-import tuibuf;
-import tuigeom;
+import tui.tuiapp;
+import tui.tuibuf;
+import tui.tuigeom;
 import gitclient;
 
 List<str> argv = os.args();

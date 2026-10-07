@@ -14,12 +14,12 @@
 // `lib/diff.m31` computes the generic edit script -- keep, add or remove,
 // line by line -- and knows nothing about hunks, context, or
 // `tuidiffview.Hunk`/`Line`; it cannot, because `lib/` does not depend on
-// `apps/tui` (`apps/git/design.md`'s "Starting the client" section, and
+// `apps/tui` (`docs/design.md`'s "Starting the client" section, and
 // `lib/diff.m31`'s own header, say why at more length). Grouping that script
 // into hunks and turning each `diff.Op`'s `bytes` line into the `str`
 // `tuidiffview.Line.text` wants is presentation, not algorithm, so it lives
 // here instead -- `apps/git` is the one place today that needs both
-// `lib/diff` and `apps/tui`, and the client this is for (`design.md`) is
+// `lib/diff` and `apps/tui`, and the client this is for (`docs/design.md`) is
 // itself an `apps/git` program.
 //
 // --- grouping into hunks, with context -----------------------------------------
@@ -40,7 +40,7 @@
 // lines regardless.
 
 import diff;
-import tuidiffview;
+import tui.tuidiffview;
 
 /// Three lines of context, `git diff`'s and `diff -u`'s own default.
 pub const int DEFAULT_CONTEXT = 3;
