@@ -320,6 +320,7 @@ source test_discard_amend.sh
 # composes its own EXIT trap on top of the one above.
 
 source test_push.sh
+source test_pull.sh
 
 echo
 if [ $fail -eq 0 ]; then

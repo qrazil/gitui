@@ -1054,6 +1054,13 @@ pub str blob_id(bytes content) {
     return object_id("blob", content);
 }
 
+/// A loose object of any `kind` (`blob`, `tree`, `commit`, `tag`) holding
+/// exactly `content`, already-present objects left alone -- what unpacking a
+/// fetched pack needs.
+pub Result<str, Error> write(str gitdir, str kind, bytes content) {
+    return write_object(gitdir, kind, content);
+}
+
 Result<str, Error> write_object(str gitdir, str kind, bytes content) {
     bytes header = [];
     header.extend(kind.to_bytes());

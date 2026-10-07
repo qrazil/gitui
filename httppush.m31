@@ -251,6 +251,19 @@ Result<str, Error> decode(str s) {
     }
 }
 
+/// The `Authorization` header value for `r` (`Basic ...`), or `""` when it
+/// has no credentials. Handed to `httpfetch` for a pull; never displayed.
+pub str auth_header(Remote r) {
+    match (r.auth) {
+        case Some(Credentials c): {
+            return "Basic " + base64.encode((c.user + ":" + c.password).to_bytes());
+        }
+        case None: {
+            return "";
+        }
+    }
+}
+
 // `Authorization: Basic ...` on `req`, if the remote has credentials.
 void apply_auth(http.Request req, Remote r) {
     match (r.auth) {

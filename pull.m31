@@ -1,0 +1,266 @@
+// Pull the current branch from a smart-HTTP remote, fast-forward only: fetch
+// what the server has that this repository lacks (`httpfetch.m31`), unpack
+// it into loose objects (`pack.read_pack` -- `httpfetch` leaves a verified
+// pack and no `.idx`), and, if the remote tip descends from the local one,
+// move the working tree, the index and the branch there.
+//
+// The order of the last step matters. `checkout.checkout` compares HEAD's
+// tree with the target's, so it must run while the branch still points at the
+// old tip; it re-points HEAD at the same branch (a no-op) and the branch ref
+// is moved to the new tip afterwards, guarded by `expect_old`.
+//
+// Refused, with the working tree and the branch untouched: a detached or
+// unborn HEAD, any staged or unstaged change (checked before the network is
+// touched), and a remote tip that is not a descendant of the local one -- no
+// merge or rebase here. A refused non-fast-forward still leaves the fetched
+// objects in the object store, as `git fetch` would.
+
+import checkout;
+import fs;
+import httpfetch;
+import httppush;
+import io;
+import object;
+import pack;
+import refs;
+import repo;
+import status;
+
+pub enum Error {
+    /// HEAD is not on a branch.
+    Detached;
+    /// The current branch has no commits yet.
+    Unborn;
+    /// Staged or unstaged changes: commit, stash or discard them first.
+    Dirty;
+    /// `status.status` itself failed.
+    Status;
+    /// The remote does not have the current branch.
+    NoRemoteBranch;
+    /// The fetch failed (network, protocol, or a refused request).
+    Fetch(httpfetch.Error);
+    /// The fetched pack could not be read.
+    Unpack(pack.Error);
+    /// A fetched object could not be written.
+    Write;
+    /// The remote tip is not a descendant of the local tip.
+    NonFastForward;
+    /// The working-tree update was refused or failed.
+    Checkout(checkout.Error);
+    /// A ref could not be read or moved.
+    Refs(refs.Error);
+}
+
+pub str Error.to_str() {
+    match (this) {
+        case Detached: {
+            return "HEAD is detached; check out a branch first";
+        }
+        case Unborn: {
+            return "the current branch has no commits yet";
+        }
+        case Dirty: {
+            return "uncommitted changes; commit or discard them before pulling";
+        }
+        case Status: {
+            return "could not read the working-tree status";
+        }
+        case NoRemoteBranch: {
+            return "origin has no branch of that name";
+        }
+        case Fetch(httpfetch.Error e): {
+            return "fetch failed: " + e.to_str();
+        }
+        case Unpack(pack.Error e): {
+            return "unpacking the fetched objects failed: " + e.to_str();
+        }
+        case Write: {
+            return "a fetched object could not be written";
+        }
+        case NonFastForward: {
+            return "not a fast-forward; merge/rebase not supported yet";
+        }
+        case Checkout(checkout.Error e): {
+            return e.to_str();
+        }
+        case Refs(refs.Error e): {
+            return "refs: " + e.to_str();
+        }
+    }
+}
+
+/// What a successful pull did.
+pub type Outcome {
+    /// False when the branch already had the remote's tip (or more).
+    pub bool moved;
+    pub str old_id;
+    pub str new_id;
+    pub int objects;
+}
+
+/// Pull the current branch of `gitdir` from `r`, fast-forward only.
+pub Result<Outcome, Error> pull(str gitdir, str worktree, httppush.Remote r) {
+    str refname = "";
+    str old = "";
+    match (refs.head(gitdir)) {
+        case Ok(refs.Head h): {
+            match (h) {
+                case Born(str name, str id): {
+                    refname = name;
+                    old = id;
+                }
+                case Unborn(str name): {
+                    return Result<Outcome, Error>.Err(Error.Unborn);
+                }
+                case Detached(str id): {
+                    return Result<Outcome, Error>.Err(Error.Detached);
+                }
+            }
+        }
+        case Err(refs.Error e): {
+            return Result<Outcome, Error>.Err(Error.Refs(e));
+        }
+    }
+    match (status.status(gitdir, worktree)) {
+        case Ok(status.Status st): {
+            if (st.staged.size() > 0 || st.unstaged.size() > 0) {
+                return Result<Outcome, Error>.Err(Error.Dirty);
+            }
+        }
+        case Err(status.Error e): {
+            return Result<Outcome, Error>.Err(Error.Status);
+        }
+    }
+    str authz = httppush.auth_header(r);
+    httpfetch.Advertisement ad = httpfetch.Advertisement("", [], [], "");
+    match (httpfetch.discover(r.url, authorization: authz)) {
+        case Ok(httpfetch.Advertisement got): {
+            ad = got;
+        }
+        case Err(httpfetch.Error e): {
+            return Result<Outcome, Error>.Err(Error.Fetch(e));
+        }
+    }
+    str remote_tip = "";
+    for (httpfetch.RemoteRef rr in ad.refs) {
+        if (rr.name == refname) {
+            remote_tip = rr.id;
+        }
+    }
+    if (remote_tip == "") {
+        return Result<Outcome, Error>.Err(Error.NoRemoteBranch);
+    }
+    int objects = 0;
+    if (!have(gitdir, remote_tip)) {
+        match (fetch_into(gitdir, r, ad, remote_tip, authz)) {
+            case Ok(int n): {
+                objects = n;
+            }
+            case Err(Error e): {
+                return Result<Outcome, Error>.Err(e);
+            }
+        }
+    }
+    if (remote_tip == old || httppush.is_ancestor(gitdir, remote_tip, old)) {
+        return Result<Outcome, Error>.Ok(Outcome(false, old, old, objects));
+    }
+    if (!httppush.is_ancestor(gitdir, old, remote_tip)) {
+        return Result<Outcome, Error>.Err(Error.NonFastForward);
+    }
+    match (checkout.checkout(gitdir, worktree, remote_tip, refname)) {
+        case Ok(checkout.Summary s): {
+        }
+        case Err(checkout.Error e): {
+            return Result<Outcome, Error>.Err(Error.Checkout(e));
+        }
+    }
+    match (refs.update(gitdir, refname, remote_tip, Option<str>.Some(old))) {
+        case Ok(bool b): {
+        }
+        case Err(refs.Error e): {
+            return Result<Outcome, Error>.Err(Error.Refs(e));
+        }
+    }
+    if (refname.starts_with("refs/heads/")) {
+        // Best effort: the remote-tracking ref is bookkeeping, not the pull.
+        match (refs.update(gitdir, "refs/remotes/origin/" + refname.substr(11, refname.size()), remote_tip, Option<str>.None)) {
+            case Ok(bool b): {
+            }
+            case Err(refs.Error e): {
+            }
+        }
+    }
+    return Result<Outcome, Error>.Ok(Outcome(true, old, remote_tip, objects));
+}
+
+bool have(str gitdir, str id) {
+    match (object.read(gitdir, id)) {
+        case Ok(object.Object o): {
+            return true;
+        }
+        case Err(object.Error e): {
+            return false;
+        }
+    }
+}
+
+// Fetch `want` (with every local ref tip as a `have`), unpack the pack into
+// loose objects, and delete the pack file. The count of objects written.
+Result<int, Error> fetch_into(str gitdir, httppush.Remote r, httpfetch.Advertisement ad, str want, str authz) {
+    List<str> haves = [];
+    Map<str, bool> seen = {};
+    match (refs.all(gitdir)) {
+        case Ok(List<refs.Ref> all): {
+            for (refs.Ref x in all) {
+                if (!seen.contains(x.id) && haves.size() < 64) {
+                    seen.set(x.id, true);
+                    haves.push(x.id);
+                }
+            }
+        }
+        case Err(refs.Error e): {
+        }
+    }
+    str tmp = fs.join(repo.common(gitdir), "pull-fetch.tmp");
+    match (httpfetch.fetch(r.url, ad, [want], haves, tmp, authorization: authz)) {
+        case Ok(httpfetch.Summary sm): {
+        }
+        case Err(httpfetch.Error e): {
+            return Result<int, Error>.Err(Error.Fetch(e));
+        }
+    }
+    bytes raw = [];
+    match (io.read_bytes(tmp)) {
+        case Ok(bytes b): {
+            raw = b;
+        }
+        case Err(io.Error e): {
+            return Result<int, Error>.Err(Error.Write);
+        }
+    }
+    match (fs.remove(tmp)) {
+        case Ok: {
+        }
+        case Err(io.Error e): {
+        }
+    }
+    List<pack.Unpacked> objs = [];
+    match (pack.read_pack(gitdir, raw)) {
+        case Ok(List<pack.Unpacked> got): {
+            objs = got;
+        }
+        case Err(pack.Error e): {
+            return Result<int, Error>.Err(Error.Unpack(e));
+        }
+    }
+    for (pack.Unpacked u in objs) {
+        match (object.write(gitdir, u.kind, u.content)) {
+            case Ok(str id): {
+            }
+            case Err(object.Error e): {
+                return Result<int, Error>.Err(Error.Write);
+            }
+        }
+    }
+    return Result<int, Error>.Ok(objs.size());
+}

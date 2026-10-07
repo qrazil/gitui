@@ -82,6 +82,7 @@ import index;
 import io;
 import object;
 import os;
+import pull;
 import refs;
 import status;
 import term;
@@ -809,6 +810,8 @@ pub type State {
     List<BranchRow> branch_rows = [];
     /// The `P` which-key overlay (push), open until a choice or `Escape`.
     pub bool push_open = false;
+    /// The `F` which-key overlay (pull), open until a choice or `Escape`.
+    pub bool pull_open = false;
     /// Set by `edit_message` and read by `gitui.m31`'s own top-level driver
     /// after `tuiapp.Loop.run` returns: true means the loop stopped so
     /// `$EDITOR` could have the terminal, not because the operator pressed
@@ -2300,6 +2303,8 @@ List<tuiwidget.Span> State.footer_spans(tuistyle.Theme theme) {
     out.push(tuiwidget.Span(" branch  "));
     out.push(tuiwidget.Span("P", style: theme.accent));
     out.push(tuiwidget.Span(" push  "));
+    out.push(tuiwidget.Span("F", style: theme.accent));
+    out.push(tuiwidget.Span(" pull  "));
     out.push(tuiwidget.Span("J", style: theme.accent));
     out.push(tuiwidget.Span(" jump  "));
     out.push(tuiwidget.Span("w", style: theme.accent));
@@ -2383,6 +2388,10 @@ pub void State.draw(tuibuf.Buffer buf, tuigeom.Rect area) {
         tuimenu.WhichKey wk = tuimenu.WhichKey("push", [tuimenu.Item("p", "push current branch to origin (fast-forward only)")]);
         wk.render(buf, body);
     }
+    if (pull_open) {
+        tuimenu.WhichKey wk = tuimenu.WhichKey("pull", [tuimenu.Item("p", "pull current branch from origin (fast-forward only)")]);
+        wk.render(buf, body);
+    }
 }
 
 /// The diff view, in place of the outline: a bordered block naming the file
@@ -2434,6 +2443,9 @@ tuiapp.Action State.handle_key(term.Code code) {
     }
     if (push_open) {
         return handle_push_key(code);
+    }
+    if (pull_open) {
+        return handle_pull_key(code);
     }
     if (diff_open) {
         return handle_diff_key(code);
@@ -2545,6 +2557,10 @@ tuiapp.Action State.handle_char(int c) {
     }
     if (c == 'P') {
         push_open = true;
+        return tuiapp.Action.Redraw;
+    }
+    if (c == 'F') {
+        pull_open = true;
         return tuiapp.Action.Redraw;
     }
     if (c == 'r') {
@@ -2674,6 +2690,102 @@ tuiapp.Action State.handle_push_key(term.Code code) {
         }
         case Escape: {
             push_open = false;
+            return tuiapp.Action.Redraw;
+        }
+        case Enter: {
+            return tuiapp.Action.Continue;
+        }
+        case Backspace: {
+            return tuiapp.Action.Continue;
+        }
+        case Tab: {
+            return tuiapp.Action.Continue;
+        }
+        case BackTab: {
+            return tuiapp.Action.Continue;
+        }
+        case Up: {
+            return tuiapp.Action.Continue;
+        }
+        case Down: {
+            return tuiapp.Action.Continue;
+        }
+        case Right: {
+            return tuiapp.Action.Continue;
+        }
+        case Left: {
+            return tuiapp.Action.Continue;
+        }
+        case Home: {
+            return tuiapp.Action.Continue;
+        }
+        case End: {
+            return tuiapp.Action.Continue;
+        }
+        case PageUp: {
+            return tuiapp.Action.Continue;
+        }
+        case PageDown: {
+            return tuiapp.Action.Continue;
+        }
+        case Insert: {
+            return tuiapp.Action.Continue;
+        }
+        case Delete: {
+            return tuiapp.Action.Continue;
+        }
+        case F(int n): {
+            return tuiapp.Action.Continue;
+        }
+    }
+}
+
+/// Pull the current branch from `origin`, fast-forward only (`pull.pull`):
+/// refused on a dirty tree and on a diverged branch. The outcome is the
+/// status line's message.
+pub void State.pull_current() {
+    pull_open = false;
+    Option<str> url = gitconfig.get(gitdir, "remote", "origin", "url");
+    if (!url.is_some()) {
+        message = "pull: no remote 'origin' in .git/config";
+        return;
+    }
+    httppush.Remote remote = httppush.Remote("", Option<httppush.Credentials>.None);
+    match (httppush.parse_remote(url.or(""))) {
+        case Ok(httppush.Remote r): {
+            remote = r;
+        }
+        case Err(httppush.Error e): {
+            message = "pull: " + e.to_str();
+            return;
+        }
+    }
+    match (pull.pull(gitdir, worktree, remote)) {
+        case Ok(pull.Outcome o): {
+            if (o.moved) {
+                message = "pulled: fast-forwarded " + o.old_id.substr(0, 7) + ".." + o.new_id.substr(0, 7);
+            } else {
+                message = "pull: already up to date";
+            }
+        }
+        case Err(pull.Error e): {
+            message = "pull: " + e.to_str();
+        }
+    }
+    reload();
+}
+
+tuiapp.Action State.handle_pull_key(term.Code code) {
+    match (code) {
+        case Char(int c): {
+            if (c == 'p') {
+                pull_current();
+                return tuiapp.Action.Redraw;
+            }
+            return tuiapp.Action.Continue;
+        }
+        case Escape: {
+            pull_open = false;
             return tuiapp.Action.Redraw;
         }
         case Enter: {
