@@ -739,6 +739,21 @@ pub type State {
     pub bool show_jump = false;
     pub bool jump_focused = false;
     pub bool commit_open = false;
+    /// The `x` confirmation overlay: discarding is the one destructive thing
+    /// this client does to a working tree, so it never happens on a single
+    /// keypress -- `discard_current` records what `x` was pressed on here and
+    /// opens the prompt, and only `y` (`handle_confirm_key`) actually calls
+    /// `discard_path`. `confirm_kind` is the row's section (`untracked`,
+    /// `unstaged`, `staged`), which decides what "discard" restores from.
+    pub bool confirm_open = false;
+    str confirm_kind = "";
+    bytes confirm_path = [];
+    /// `c` then `A`: the commit overlay is replacing HEAD rather than adding a
+    /// child to it. `start_amend` sets this (and prefills the message file
+    /// with HEAD's own message); `finish_commit` reads it to pick HEAD's
+    /// parents and author instead of HEAD-as-parent and a fresh author.
+    /// Reset whenever the overlay is opened fresh or aborted.
+    pub bool amending = false;
     /// Set by `edit_message` and read by `gitui.m31`'s own top-level driver
     /// after `tuiapp.Loop.run` returns: true means the loop stopped so
     /// `$EDITOR` could have the terminal, not because the operator pressed
@@ -1026,6 +1041,245 @@ pub void State.unstage_path(bytes rel) {
     reload();
 }
 
+/// `x`: ask before discarding the changes to the path under the cursor.
+/// Only a path row in one of the three working-tree sections can be
+/// discarded; a commit, a commit's file row (history is not something this
+/// client rewrites from here) or a section heading just gets a message.
+/// Nothing is touched until `handle_confirm_key` sees `y`.
+pub void State.discard_current() {
+    match (outline.current()) {
+        case Some(tuioutline.Row r): {
+            str kind = "";
+            if (r.node.id.starts_with("untracked:")) {
+                kind = "untracked";
+            } else if (r.node.id.starts_with("unstaged:")) {
+                kind = "unstaged";
+            } else if (r.node.id.starts_with("staged:")) {
+                kind = "staged";
+            }
+            if (kind == "") {
+                message = "discard: nothing to discard here";
+                return;
+            }
+            match (paths.get(r.node.id)) {
+                case Some(bytes p): {
+                    confirm_kind = kind;
+                    confirm_path = p;
+                    confirm_open = true;
+                    message = "";
+                }
+                case None: {
+                    message = "discard: nothing to discard here";
+                }
+            }
+        }
+        case None: {
+        }
+    }
+}
+
+/// Throw away the working-tree (and, for a staged row, index) changes to
+/// `rel`, by section -- each the exact effect of the real git command named,
+/// on that one path and nothing else:
+///
+///   - **untracked** -- `git clean -f -- <path>`: the file is removed, and
+///     so is each parent directory that is left empty by that, up to (never
+///     including) the working tree's root, which is what `git clean` leaves
+///     behind too.
+///   - **unstaged** -- `git checkout -- <path>`: the index's blob for the
+///     path is written back over whatever is on disk (recreated, if it was
+///     deleted), a symlink entry as a symlink. The index entry itself is
+///     left alone: it already names exactly this content, and a stale stat
+///     only ever costs `status.status` one re-hash (`index.m31`'s own rule).
+///   - **staged** -- `git checkout HEAD -- <path>`: both the index entry and
+///     the file go back to HEAD's blob and mode (`unstage_path`'s own
+///     restored-entry shape, with the rewritten file's real stat). A path HEAD does not
+///     have -- a newly added file, staged -- has nothing to go back to, so
+///     the entry is dropped and the file removed: `git checkout HEAD --` on
+///     such a path is an error in real git, and "discard this new file
+///     entirely" is the only meaning the operator can have intended.
+///
+/// A regular file recreated from scratch gets the process's default mode:
+/// there is no `chmod` in `lib/fs.m31` yet, so a deleted-then-discarded
+/// executable comes back without its executable bit (one that still exists
+/// is rewritten in place and keeps it). `pub`, like `stage_path`, so
+/// `t_gitclient_ops.m31` can drive each case against real git.
+pub void State.discard_path(str kind, bytes rel) {
+    str shown = rel.utf8().or("<non-utf8>");
+    str full = fs.join(worktree, rel.utf8().or(""));
+    if (kind == "untracked") {
+        match (fs.remove(full)) {
+            case Ok: {
+            }
+            case Err(io.Error e): {
+                message = "cannot remove " + shown + ": " + e.to_str();
+                return;
+            }
+        }
+        prune_empty_parents(rel);
+        message = "discarded " + shown + " (removed)";
+        reload();
+        return;
+    }
+    if (kind == "unstaged") {
+        index.Index ix = read_index(gitdir);
+        match (find_index_entry(ix, rel)) {
+            case Some(index.Entry e): {
+                if (!write_worktree(rel, e.mode, read_blob(e.id))) {
+                    return;
+                }
+                message = "discarded changes to " + shown;
+                reload();
+            }
+            case None: {
+                message = "discard: " + shown + " is not in the index";
+            }
+        }
+        return;
+    }
+    if (kind == "staged") {
+        index.Index ix = read_index(gitdir);
+        Option<object.Entry> in_head = Option<object.Entry>.None;
+        match (head_tree_id(gitdir)) {
+            case Some(str tid): {
+                in_head = find_in_tree(gitdir, tid, rel);
+            }
+            case None: {
+            }
+        }
+        match (in_head) {
+            case Some(object.Entry e): {
+                if (!write_worktree(rel, e.mode, read_blob(e.id))) {
+                    return;
+                }
+                // The file was just rewritten, so its real stat goes in the
+                // entry (as `stage_path` records it): a zeroed stat makes real
+                // git report the path modified until something refreshes it.
+                fs.Stat st = fs.Stat(0, 0, 0);
+                match (fs.stat(full)) {
+                    case Ok(fs.Stat s): {
+                        st = s;
+                    }
+                    case Err(io.Error err): {
+                        message = "stat: " + err.to_str();
+                        return;
+                    }
+                }
+                index.Entry fresh = index.from_stat(rel, st, fs.is_link(full), e.id);
+                index.Entry restored = index.Entry(fresh.ctime_s, fresh.ctime_ns, fresh.mtime_s, fresh.mtime_ns, 0, 0, e.mode, 0, 0, fresh.size, e.id, 0, false, rel);
+                replace_entry(ix, restored);
+            }
+            case None: {
+                remove_entry(ix, rel);
+                if (fs.exists(full) || fs.is_link(full)) {
+                    match (fs.remove(full)) {
+                        case Ok: {
+                        }
+                        case Err(io.Error e): {
+                            message = "cannot remove " + shown + ": " + e.to_str();
+                            return;
+                        }
+                    }
+                    prune_empty_parents(rel);
+                }
+            }
+        }
+        match (index.write(gitdir, ix)) {
+            case Ok: {
+                message = "discarded staged changes to " + shown;
+            }
+            case Err(index.Error e): {
+                message = "index write: " + e.to_str();
+                return;
+            }
+        }
+        reload();
+        return;
+    }
+    message = "discard: unknown section " + kind;
+}
+
+/// Put `content` at `rel` in the working tree as a blob of `mode` would be
+/// checked out: a symlink (0o120000) whose target is the content, otherwise
+/// a regular file, its parent directories created as needed. A symlink
+/// already there is removed first (`fs.symlink` never replaces). False, with
+/// `message` set, on any failure.
+bool State.write_worktree(bytes rel, int mode, bytes content) {
+    str shown = rel.utf8().or("<non-utf8>");
+    str full = fs.join(worktree, rel.utf8().or(""));
+    str dir = dir_of(full);
+    if (dir != "." && !fs.is_dir(dir)) {
+        match (fs.makedirs(dir)) {
+            case Ok: {
+            }
+            case Err(io.Error e): {
+                message = "cannot create " + dir + ": " + e.to_str();
+                return false;
+            }
+        }
+    }
+    if (mode == 0o120000) {
+        if (fs.exists(full) || fs.is_link(full)) {
+            match (fs.remove(full)) {
+                case Ok: {
+                }
+                case Err(io.Error e): {
+                    message = "cannot replace " + shown + ": " + e.to_str();
+                    return false;
+                }
+            }
+        }
+        match (fs.symlink(content.utf8().or(""), full)) {
+            case Ok: {
+                return true;
+            }
+            case Err(io.Error e): {
+                message = "cannot link " + shown + ": " + e.to_str();
+                return false;
+            }
+        }
+    }
+    if (fs.is_link(full)) {
+        // A regular blob over what is currently a symlink: writing through
+        // the link would overwrite its target instead of replacing the link.
+        match (fs.remove(full)) {
+            case Ok: {
+            }
+            case Err(io.Error e): {
+                message = "cannot replace " + shown + ": " + e.to_str();
+                return false;
+            }
+        }
+    }
+    match (io.write_bytes(full, content)) {
+        case Ok: {
+            return true;
+        }
+        case Err(io.Error e): {
+            message = "cannot write " + shown + ": " + e.to_str();
+            return false;
+        }
+    }
+}
+
+/// After removing `rel`, remove each of its parent directories that is now
+/// empty, deepest first, stopping at the first that is not (or at the
+/// working tree's own root, which is never touched) -- `git clean`'s own
+/// tidying of a directory it emptied.
+void State.prune_empty_parents(bytes rel) {
+    str p = dir_of(rel.utf8().or(""));
+    while (p != "." && p != "") {
+        match (fs.rmdir(fs.join(worktree, p))) {
+            case Ok: {
+            }
+            case Err: {
+                return;
+            }
+        }
+        p = dir_of(p);
+    }
+}
+
 /// Real, hunk-level diff for the row under the cursor -- the diff-algorithm
 /// track (`lib/diff.m31`/`apps/git/hunks.m31`) and the rendering widget
 /// (`apps/tui/tuidiffview.DiffView`) both already existed; this is the
@@ -1290,7 +1544,79 @@ pub void State.abort_commit() {
         }
     }
     commit_open = false;
+    amending = false;
     message = "commit aborted";
+}
+
+/// `c` then `A`: turn the open commit overlay into `git commit --amend`.
+/// HEAD's own message is written to `commit_msg_path` (with the template's
+/// comment lines after it, so `e` opens something a person recognises and
+/// `f` straight away is `--amend --no-edit`), and `amending` tells
+/// `finish_commit` to replace HEAD rather than add to it. Refused, with the
+/// overlay left open on its ordinary meaning, when there is no HEAD to
+/// amend: an unborn branch, or a HEAD whose commit cannot be read.
+pub void State.start_amend() {
+    str head_id = "";
+    match (refs.head(gitdir)) {
+        case Ok(refs.Head h): {
+            match (h) {
+                case Born(str name, str id): {
+                    head_id = id;
+                }
+                case Unborn(str name): {
+                    message = "nothing to amend: no commits yet on " + branch_name(name);
+                    return;
+                }
+                case Detached(str id): {
+                    head_id = id;
+                }
+            }
+        }
+        case Err(refs.Error e): {
+            message = "nothing to amend: refs.head: " + e.to_str();
+            return;
+        }
+    }
+    bytes head_msg = [];
+    match (object.read(gitdir, head_id)) {
+        case Ok(object.Object o): {
+            match (o.body) {
+                case Commit(object.Commit cm): {
+                    head_msg = cm.message;
+                }
+                case Blob: {
+                    message = "nothing to amend: HEAD is not a commit";
+                    return;
+                }
+                case Tree(List<object.Entry> ignored): {
+                    message = "nothing to amend: HEAD is not a commit";
+                    return;
+                }
+                case Tag: {
+                    message = "nothing to amend: HEAD is not a commit";
+                    return;
+                }
+            }
+        }
+        case Err(object.Error e): {
+            message = "nothing to amend: cannot read HEAD's commit: " + e.to_str();
+            return;
+        }
+    }
+    str prefill = head_msg.utf8().or("");
+    if (!prefill.ends_with("\n")) {
+        prefill = prefill + "\n";
+    }
+    match (io.write(commit_msg_path, prefill + commit_template())) {
+        case Ok: {
+        }
+        case Err(io.Error e): {
+            message = "cannot write " + commit_msg_path + ": " + e.to_str();
+            return;
+        }
+    }
+    amending = true;
+    message = "amending " + head_id.substr(0, 7) + ": e to edit its message, f to finish, a to abort";
 }
 
 /// Read `commit_msg_path` back, strip it the way git's default cleanup does,
@@ -1316,6 +1642,7 @@ pub void State.finish_commit() {
     if (msg == "") {
         message = "aborting commit due to empty commit message";
         commit_open = false;
+        amending = false;
         return;
     }
     index.Index ix = read_index(gitdir);
@@ -1360,7 +1687,44 @@ pub void State.finish_commit() {
             return;
         }
     }
-    object.Commit c = object.Commit(tree_id, parents, author_ident(), committer_ident(), [], (msg + "\n").to_bytes());
+    object.Ident author = author_ident();
+    if (amending) {
+        // `--amend`: the new commit takes HEAD's place, so it gets HEAD's own
+        // parents and author (date and zone included -- real git keeps the
+        // original authorship and only the committer is "now"); HEAD itself
+        // is what the compare-and-swap below expects to replace.
+        if (parents.size() == 0) {
+            message = "nothing to amend: no commits yet";
+            return;
+        }
+        match (object.read(gitdir, parents[0])) {
+            case Ok(object.Object o): {
+                match (o.body) {
+                    case Commit(object.Commit cm): {
+                        parents = cm.parents;
+                        author = cm.author;
+                    }
+                    case Blob: {
+                        message = "amend: HEAD is not a commit";
+                        return;
+                    }
+                    case Tree(List<object.Entry> ignored): {
+                        message = "amend: HEAD is not a commit";
+                        return;
+                    }
+                    case Tag: {
+                        message = "amend: HEAD is not a commit";
+                        return;
+                    }
+                }
+            }
+            case Err(object.Error e): {
+                message = "amend: cannot read HEAD's commit: " + e.to_str();
+                return;
+            }
+        }
+    }
+    object.Commit c = object.Commit(tree_id, parents, author, committer_ident(), [], (msg + "\n").to_bytes());
     str commit_id = "";
     match (object.write_commit(gitdir, c)) {
         case Ok(str id): {
@@ -1391,8 +1755,13 @@ pub void State.finish_commit() {
             }
         }
     }
-    message = "committed " + commit_id.substr(0, 7);
+    if (amending) {
+        message = "amended: HEAD is now " + commit_id.substr(0, 7);
+    } else {
+        message = "committed " + commit_id.substr(0, 7);
+    }
     commit_open = false;
+    amending = false;
     reload();
 }
 
@@ -1417,6 +1786,8 @@ List<tuiwidget.Span> State.footer_spans(tuistyle.Theme theme) {
     out.push(tuiwidget.Span(" unstage  "));
     out.push(tuiwidget.Span("d", style: theme.accent));
     out.push(tuiwidget.Span(" diff  "));
+    out.push(tuiwidget.Span("x", style: theme.accent));
+    out.push(tuiwidget.Span(" discard  "));
     if (diff_open) {
         out.push(tuiwidget.Span("backspace", style: theme.accent));
         out.push(tuiwidget.Span(" back  "));
@@ -1476,7 +1847,23 @@ pub void State.draw(tuibuf.Buffer buf, tuigeom.Rect area) {
     status_row.render(buf, tuigeom.Rect(footer_area.x, footer_area.y, footer_area.w, 1));
     tuifooter.Footer(footer_spans(theme)).render(buf, tuigeom.Rect(footer_area.x, footer_area.y + 1, footer_area.w, 1));
     if (commit_open) {
-        tuimenu.WhichKey wk = tuimenu.WhichKey("commit", [tuimenu.Item("e", "edit message in $EDITOR (" + commit_msg_path + ")"), tuimenu.Item("f", "finish: write the commit"), tuimenu.Item("a", "abort")]);
+        str title = "commit";
+        str finish = "finish: write the commit";
+        if (amending) {
+            title = "amend HEAD";
+            finish = "finish: replace HEAD with the amended commit";
+        }
+        tuimenu.WhichKey wk = tuimenu.WhichKey(title, [tuimenu.Item("e", "edit message in $EDITOR (" + commit_msg_path + ")"), tuimenu.Item("f", finish), tuimenu.Item("A", "amend HEAD: its message prefilled, its parents and author kept"), tuimenu.Item("a", "abort")]);
+        wk.render(buf, body);
+    }
+    if (confirm_open) {
+        str what = "changes to " + confirm_path.utf8().or("<non-utf8>");
+        if (confirm_kind == "untracked") {
+            what = "untracked file " + confirm_path.utf8().or("<non-utf8>") + " (it will be removed)";
+        } else if (confirm_kind == "staged") {
+            what = "staged changes to " + confirm_path.utf8().or("<non-utf8>") + " (index and working tree)";
+        }
+        tuimenu.WhichKey wk = tuimenu.WhichKey("discard " + what + "?", [tuimenu.Item("y", "yes, discard"), tuimenu.Item("any other key", "no, keep it")]);
         wk.render(buf, body);
     }
 }
@@ -1519,6 +1906,9 @@ pub tuiapp.Action State.handle(term.Event ev) {
 }
 
 tuiapp.Action State.handle_key(term.Code code) {
+    if (confirm_open) {
+        return handle_confirm_key(code);
+    }
     if (commit_open) {
         return handle_commit_key(code);
     }
@@ -1619,6 +2009,11 @@ tuiapp.Action State.handle_char(int c) {
     }
     if (c == 'c') {
         commit_open = true;
+        amending = false;
+        return tuiapp.Action.Redraw;
+    }
+    if (c == 'x') {
+        discard_current();
         return tuiapp.Action.Redraw;
     }
     if (c == 'r') {
@@ -1691,6 +2086,10 @@ tuiapp.Action State.handle_commit_key(term.Code code) {
                 abort_commit();
                 return tuiapp.Action.Redraw;
             }
+            if (c == 'A') {
+                start_amend();
+                return tuiapp.Action.Redraw;
+            }
             return tuiapp.Action.Continue;
         }
         case Escape: {
@@ -1743,6 +2142,60 @@ tuiapp.Action State.handle_commit_key(term.Code code) {
             return tuiapp.Action.Continue;
         }
     }
+}
+
+/// The `x` confirmation: `y` discards what `discard_current` recorded, and
+/// every other key -- any character, Escape, Enter, an arrow -- cancels.
+/// Deliberately not "n to cancel": a prompt that only acts on one exact key
+/// cannot be fallen into by a keystroke meant for the outline underneath.
+tuiapp.Action State.handle_confirm_key(term.Code code) {
+    str kind = confirm_kind;
+    bytes rel = confirm_path;
+    confirm_open = false;
+    confirm_kind = "";
+    confirm_path = [];
+    match (code) {
+        case Char(int c): {
+            if (c == 'y') {
+                discard_path(kind, rel);
+                return tuiapp.Action.Redraw;
+            }
+        }
+        case Escape: {
+        }
+        case Enter: {
+        }
+        case Backspace: {
+        }
+        case Tab: {
+        }
+        case BackTab: {
+        }
+        case Up: {
+        }
+        case Down: {
+        }
+        case Right: {
+        }
+        case Left: {
+        }
+        case Home: {
+        }
+        case End: {
+        }
+        case PageUp: {
+        }
+        case PageDown: {
+        }
+        case Insert: {
+        }
+        case Delete: {
+        }
+        case F(int n): {
+        }
+    }
+    message = "discard cancelled";
+    return tuiapp.Action.Redraw;
 }
 
 /// Keys while the diff view is showing: `j`/`k`/the arrows move its cursor
@@ -1824,6 +2277,20 @@ tuiapp.Action State.handle_diff_key(term.Code code) {
             return tuiapp.Action.Continue;
         }
     }
+}
+
+/// The directory part of a slash-separated path, `.` for a bare name --
+/// `httpfetch.m31`'s own `dir_of`, private to it, repeated here rather than
+/// exported from a module about the wire protocol.
+str dir_of(str path) {
+    int i = path.size() - 1;
+    while (i >= 0 && path.byte_at(i) != '/') {
+        i = i - 1;
+    }
+    if (i < 0) {
+        return ".";
+    }
+    return path.substr(0, i);
 }
 
 /// `path`'s entry in `ix`, if it has one.

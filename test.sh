@@ -299,6 +299,13 @@ source test_gitui.sh
 
 source test_httpfetch.sh
 
+# --- discarding changes and amending HEAD, against real git ------------------
+#
+# `test_discard_amend.sh` shares this script's shell the same way the
+# others do, and reuses the `t_gitclient_ops` harness `test_gitui.sh` built.
+
+source test_discard_amend.sh
+
 echo
 if [ $fail -eq 0 ]; then
     printf '\033[32mall %d checks passed\033[0m\n' "$pass"
