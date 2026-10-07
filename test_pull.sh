@@ -45,7 +45,7 @@ if build t_pull; then
         # shellcheck disable=SC2086
         echo main | git -C "$pl_src" pack-objects --revs --stdout $pl_flag >"$pl_root/$pl_name.pack" 2>/dev/null
         got=$("$WORK/t_pull" unpack "$pl_dst" "$pl_root/$pl_name.pack" 2>&1)
-        want=$(git -C "$pl_src" rev-list --objects main | wc -l)
+        want=$(git -C "$pl_src" rev-list --objects main | wc -l | tr -d " ")
         git -C "$pl_dst" update-ref refs/heads/main "$(git -C "$pl_src" rev-parse main)"
         if [ "$got" = "$want" ] && git -C "$pl_dst" fsck --full >"$WORK/pull-fsck-$pl_name.log" 2>&1 &&
             [ "$(git -C "$pl_dst" rev-list --objects main | sort | md5sum)" = "$(git -C "$pl_src" rev-list --objects main | sort | md5sum)" ]; then
