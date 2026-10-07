@@ -70,7 +70,6 @@
 import io;
 import fs;
 import text;
-import sha1;
 import object;
 import refs;
 import index;
@@ -247,7 +246,7 @@ pub Result<Status, Error> status(str gitdir, str worktree) {
                 }
                 match (io.read_bytes(full)) {
                     case Ok(bytes content): {
-                        if (sha1.hex(content) != e.id) {
+                        if (object.blob_id(content) != e.id) {
                             unstaged.push(Delta(p.to_bytes(), Change.Modified));
                         }
                     }

@@ -68,6 +68,7 @@
 // before the launch attempt, same as before), and the operator is told to
 // edit it externally and press `f`.
 
+import checkout;
 import date;
 import fs;
 import gitlog;
@@ -105,6 +106,14 @@ type PathRow {
 
 int PathRow.cmp(PathRow other) {
     return str_cmp(path, other.path);
+}
+
+/// One row of the outline's "Branches" section: the branch, and its tip's
+/// short id and first message line -- read once, in `State.refresh`, so
+/// `build_outline` stays free of I/O (its own header's promise).
+pub type BranchRow {
+    pub checkout.Branch branch;
+    pub str subject;
 }
 
 /// One file a commit changed against its first parent (`commit_changes`,
@@ -496,7 +505,7 @@ List<tuioutline.Node> commit_node(gitlog.Entry en, List<CommitFileDiff> changes,
 /// (this doc comment's own first line, true before commit file lists
 /// existed and still true now: the computing happens elsewhere, this only
 /// ever renders what it is handed).
-pub tuioutline.Outline build_outline(status.Status st, List<gitlog.Entry> log, Map<str, List<CommitFileDiff>> changes_by_commit, Map<str, bool> collapsed, Map<str, bytes> out_paths, Map<str, CommitFileDiff> out_file_diffs) {
+pub tuioutline.Outline build_outline(status.Status st, List<gitlog.Entry> log, Map<str, List<CommitFileDiff>> changes_by_commit, Map<str, bool> collapsed, Map<str, bytes> out_paths, Map<str, CommitFileDiff> out_file_diffs, List<BranchRow> branches) {
     out_paths.clear();
     out_file_diffs.clear();
     List<tuioutline.Node> roots = [];
@@ -529,6 +538,20 @@ pub tuioutline.Outline build_outline(status.Status st, List<gitlog.Entry> log, M
         }
     }
     roots.push(tuioutline.Node.section("commits", "Commits (" + commit_children.size().to_str() + ")", commit_children, expanded: expanded_for(collapsed, "commits", true)));
+    // Local branches, the current one starred -- `b` acts on the row under
+    // the cursor (`checkout_current`). Last, after the commits, so the row
+    // positions every existing check counts on (untracked first, commits
+    // fourth) are untouched; design.md's own Magit comparison lists branches
+    // as one more section of the same document, not a panel of its own.
+    List<tuioutline.Node> branch_children = [];
+    for (BranchRow br in branches) {
+        str mark = "  ";
+        if (br.branch.current) {
+            mark = "* ";
+        }
+        branch_children.push(tuioutline.Node.leaf("branch:" + br.branch.name, mark + br.branch.name + "  " + br.branch.id.substr(0, 7) + "  " + br.subject));
+    }
+    roots.push(tuioutline.Node.section("branches", "Branches (" + branch_children.size().to_str() + ")", branch_children, expanded: expanded_for(collapsed, "branches", true)));
     return tuioutline.Outline(roots);
 }
 
@@ -739,6 +762,16 @@ pub type State {
     pub bool show_jump = false;
     pub bool jump_focused = false;
     pub bool commit_open = false;
+    /// The `b` which-key overlay (check out / new branch) is open.
+    pub bool branch_open = false;
+    /// Where `n` (new branch) asks for the name: a file `$EDITOR` is launched
+    /// on, exactly like `commit_msg_path`, since there is no text-input
+    /// widget to type into -- see `new_branch`.
+    pub str branch_name_path = "";
+    /// Which file the pending `$EDITOR` launch is for -- `launch_editor`
+    /// serves both the commit message and the new-branch name.
+    bool editor_for_branch = false;
+    List<BranchRow> branch_rows = [];
     /// Set by `edit_message` and read by `gitui.m31`'s own top-level driver
     /// after `tuiapp.Loop.run` returns: true means the loop stopped so
     /// `$EDITOR` could have the terminal, not because the operator pressed
@@ -781,6 +814,7 @@ pub type State {
 pub static State State.open(str gitdir, str worktree) {
     State s = State(gitdir, worktree);
     s.commit_msg_path = fs.join(gitdir, "COMMIT_EDITMSG");
+    s.branch_name_path = fs.join(gitdir, "GITUI_BRANCH_NAME");
     return s;
 }
 
@@ -805,6 +839,16 @@ pub void State.refresh() {
         }
         case Err: {
             log = [];
+        }
+    }
+    branch_rows = [];
+    match (checkout.branches(gitdir)) {
+        case Ok(List<checkout.Branch> bs): {
+            for (checkout.Branch b in bs) {
+                branch_rows.push(BranchRow(b, tip_subject(b.id)));
+            }
+        }
+        case Err: {
         }
     }
     match (refs.head(gitdir)) {
@@ -865,7 +909,7 @@ pub void State.reload() {
     }
     refresh();
     Map<str, List<CommitFileDiff>> changes_by_commit = commit_file_changes();
-    outline = build_outline(last_status, log, changes_by_commit, collapsed, paths, file_diffs);
+    outline = build_outline(last_status, log, changes_by_commit, collapsed, paths, file_diffs, branch_rows);
     if (keep_id != "") {
         outline.select_id(keep_id);
     }
@@ -1256,6 +1300,11 @@ pub void State.edit_message() {
 ///     template is already on disk (`edit_message` wrote it before setting
 ///     `want_editor`), and the operator is told to edit it externally.
 pub void State.launch_editor() {
+    if (editor_for_branch) {
+        editor_for_branch = false;
+        launch_branch_editor();
+        return;
+    }
     str editor = pick_editor(os.env("EDITOR"));
     match (os.run([editor, commit_msg_path])) {
         case Ok(os.ExitStatus st): {
@@ -1280,6 +1329,167 @@ pub void State.launch_editor() {
 
 /// Discard the commit-in-progress: drop the template (if a person never got
 /// around to editing it, there is nothing to keep) and close the overlay.
+// --- branches: listing, checking out, creating ------------------------------
+
+/// `tip`'s first message line, for a branch row's label -- `""` if the commit
+/// cannot be read (a ref pointing at something this cannot parse is shown by
+/// name and id alone rather than hidden).
+str State.tip_subject(str tip) {
+    match (object.read(gitdir, tip)) {
+        case Ok(object.Object o): {
+            match (o.body) {
+                case Commit(object.Commit c): {
+                    return first_line(c.message);
+                }
+                case Blob: {
+                    return "";
+                }
+                case Tree(List<object.Entry> es): {
+                    return "";
+                }
+                case Tag: {
+                    return "";
+                }
+            }
+        }
+        case Err: {
+            return "";
+        }
+    }
+}
+
+/// Check out the branch under the cursor (`b`, then `c`): `checkout.checkout`
+/// with every refusal it makes shown in the message line, word for word --
+/// a dirty file, an untracked file in the way, a submodule. A no-op with a
+/// message on anything that is not a branch row, or on the current branch.
+pub void State.checkout_current() {
+    str name = "";
+    match (outline.current()) {
+        case Some(tuioutline.Row r): {
+            if (r.node.id.starts_with("branch:")) {
+                name = r.node.id.substr(7, r.node.id.size());
+            }
+        }
+        case None: {
+        }
+    }
+    if (name == "") {
+        message = "checkout: put the cursor on a branch first";
+        return;
+    }
+    checkout_branch(name);
+}
+
+/// `git switch <name>`, by name -- `checkout_current`'s work, callable from a
+/// test harness without an outline.
+pub void State.checkout_branch(str name) {
+    for (BranchRow br in branch_rows) {
+        if (br.branch.name == name) {
+            if (br.branch.current) {
+                message = "already on " + name;
+                return;
+            }
+            match (checkout.checkout(gitdir, worktree, br.branch.id, br.branch.full)) {
+                case Ok(checkout.Summary sm): {
+                    message = "switched to " + name + " (" + sm.written.to_str() + " written, " + sm.removed.to_str() + " removed)";
+                    reload();
+                }
+                case Err(checkout.Error e): {
+                    message = "checkout refused: " + e.to_str();
+                }
+            }
+            return;
+        }
+    }
+    message = "no such branch: " + name;
+}
+
+/// `b`, then `n`: ask for a name the same way `c` asks for a message -- a
+/// file (`branch_name_path`) handed to `$EDITOR` once `tuiapp.Loop.run` has
+/// given the terminal back (see `edit_message`'s own header for why the
+/// launch cannot happen here). `launch_branch_editor` reads it back.
+pub void State.new_branch() {
+    match (io.write(branch_name_path, "\n# Name the new branch on the first line. It starts at HEAD and\n# becomes the current branch. An empty name aborts.\n")) {
+        case Ok: {
+        }
+        case Err(io.Error e): {
+            message = "cannot write " + branch_name_path + ": " + e.to_str();
+            return;
+        }
+    }
+    editor_for_branch = true;
+    want_editor = true;
+    message = "launching editor...";
+}
+
+/// The second half of `new_branch`, after `$EDITOR` has run: the first
+/// non-comment line is the name; `checkout.create_branch` does the rest.
+pub void State.launch_branch_editor() {
+    str editor = pick_editor(os.env("EDITOR"));
+    bool ran = false;
+    match (os.run([editor, branch_name_path])) {
+        case Ok(os.ExitStatus st): {
+            match (st) {
+                case Exited(int code): {
+                    if (code == 0) {
+                        ran = true;
+                    } else {
+                        message = "editor '" + editor + "' exited " + code.to_str() + "; no branch created";
+                    }
+                }
+                case Signaled(int sig): {
+                    message = "editor '" + editor + "' was killed by signal " + sig.to_str() + "; no branch created";
+                }
+            }
+        }
+        case Err(io.Error e): {
+            message = "cannot launch '" + editor + "' (" + e.to_str() + "); no branch created";
+        }
+    }
+    if (ran) {
+        finish_new_branch();
+    }
+    if (fs.exists(branch_name_path)) {
+        match (fs.remove(branch_name_path)) {
+            case Ok: {
+            }
+            case Err: {
+            }
+        }
+    }
+}
+
+/// Create the branch named in `branch_name_path` and switch to it -- split
+/// from `launch_branch_editor` so a harness can write the file itself and
+/// drive this directly, the way `t_gitclient_ops.m31`'s `commit` does for
+/// `finish_commit`.
+pub void State.finish_new_branch() {
+    str raw = "";
+    match (io.read(branch_name_path)) {
+        case Ok(str s): {
+            raw = s;
+        }
+        case Err(io.Error e): {
+            message = "cannot read " + branch_name_path + ": " + e.to_str();
+            return;
+        }
+    }
+    str name = strip_comment_lines(raw).trim();
+    if (name == "") {
+        message = "no branch created (empty name)";
+        return;
+    }
+    match (checkout.create_branch(gitdir, name)) {
+        case Ok: {
+            message = "created and switched to " + name;
+            reload();
+        }
+        case Err(checkout.Error e): {
+            message = "new branch refused: " + e.to_str();
+        }
+    }
+}
+
 pub void State.abort_commit() {
     if (fs.exists(commit_msg_path)) {
         match (fs.remove(commit_msg_path)) {
@@ -1423,6 +1633,8 @@ List<tuiwidget.Span> State.footer_spans(tuistyle.Theme theme) {
     }
     out.push(tuiwidget.Span("c", style: theme.accent));
     out.push(tuiwidget.Span(" commit  "));
+    out.push(tuiwidget.Span("b", style: theme.accent));
+    out.push(tuiwidget.Span(" branch  "));
     out.push(tuiwidget.Span("J", style: theme.accent));
     out.push(tuiwidget.Span(" jump  "));
     out.push(tuiwidget.Span("w", style: theme.accent));
@@ -1479,6 +1691,10 @@ pub void State.draw(tuibuf.Buffer buf, tuigeom.Rect area) {
         tuimenu.WhichKey wk = tuimenu.WhichKey("commit", [tuimenu.Item("e", "edit message in $EDITOR (" + commit_msg_path + ")"), tuimenu.Item("f", "finish: write the commit"), tuimenu.Item("a", "abort")]);
         wk.render(buf, body);
     }
+    if (branch_open) {
+        tuimenu.WhichKey bk = tuimenu.WhichKey("branch", [tuimenu.Item("c", "check out the branch under the cursor"), tuimenu.Item("n", "new branch from HEAD: name it in $EDITOR, then switch to it"), tuimenu.Item("a", "abort")]);
+        bk.render(buf, body);
+    }
 }
 
 /// The diff view, in place of the outline: a bordered block naming the file
@@ -1521,6 +1737,9 @@ pub tuiapp.Action State.handle(term.Event ev) {
 tuiapp.Action State.handle_key(term.Code code) {
     if (commit_open) {
         return handle_commit_key(code);
+    }
+    if (branch_open) {
+        return handle_branch_key(code);
     }
     if (diff_open) {
         return handle_diff_key(code);
@@ -1619,6 +1838,10 @@ tuiapp.Action State.handle_char(int c) {
     }
     if (c == 'c') {
         commit_open = true;
+        return tuiapp.Action.Redraw;
+    }
+    if (c == 'b') {
+        branch_open = true;
         return tuiapp.Action.Redraw;
     }
     if (c == 'r') {
@@ -1756,6 +1979,84 @@ tuiapp.Action State.handle_commit_key(term.Code code) {
 /// document, per `apps/git/design.md`'s "Drill-down as the universal verb",
 /// not a which-key-style overlay like the commit popup, whose `Escape`
 /// aborts it instead.
+/// The `b` overlay's keys: `c` checks out the branch under the cursor, `n`
+/// starts a new one (via `$EDITOR`, the same `Quit`-then-relaunch dance
+/// `handle_commit_key`'s `e` does), `a`/`Escape` close it. Anything else is
+/// swallowed while the overlay is up, exactly like the commit overlay.
+tuiapp.Action State.handle_branch_key(term.Code code) {
+    match (code) {
+        case Char(int c): {
+            if (c == 'c') {
+                branch_open = false;
+                checkout_current();
+                return tuiapp.Action.Redraw;
+            }
+            if (c == 'n') {
+                branch_open = false;
+                new_branch();
+                if (want_editor) {
+                    return tuiapp.Action.Quit;
+                }
+                return tuiapp.Action.Redraw;
+            }
+            if (c == 'a') {
+                branch_open = false;
+                return tuiapp.Action.Redraw;
+            }
+            return tuiapp.Action.Continue;
+        }
+        case Escape: {
+            branch_open = false;
+            return tuiapp.Action.Redraw;
+        }
+        case Enter: {
+            return tuiapp.Action.Continue;
+        }
+        case Backspace: {
+            return tuiapp.Action.Continue;
+        }
+        case Tab: {
+            return tuiapp.Action.Continue;
+        }
+        case BackTab: {
+            return tuiapp.Action.Continue;
+        }
+        case Up: {
+            return tuiapp.Action.Continue;
+        }
+        case Down: {
+            return tuiapp.Action.Continue;
+        }
+        case Right: {
+            return tuiapp.Action.Continue;
+        }
+        case Left: {
+            return tuiapp.Action.Continue;
+        }
+        case Home: {
+            return tuiapp.Action.Continue;
+        }
+        case End: {
+            return tuiapp.Action.Continue;
+        }
+        case PageUp: {
+            return tuiapp.Action.Continue;
+        }
+        case PageDown: {
+            return tuiapp.Action.Continue;
+        }
+        case Insert: {
+            return tuiapp.Action.Continue;
+        }
+        case Delete: {
+            return tuiapp.Action.Continue;
+        }
+        case F(int n): {
+            return tuiapp.Action.Continue;
+        }
+    }
+}
+
 tuiapp.Action State.handle_diff_key(term.Code code) {
     match (code) {
         case Char(int c): {

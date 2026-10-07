@@ -540,6 +540,70 @@ def main():
                 "log=%r rc=%d" % (log_out, log_rc),
             )
 
+    # --- branches: `b` then `c` checks out the branch under the cursor -----
+    fx10 = make_fixture(root, "checkout-branch")
+    with open(os.path.join(fx10, "a.txt"), "w") as f:
+        f.write("one\n")
+    git(fx10, "add", "-A", env=GIT_ENV)
+    git(fx10, "commit", "-q", "-m", "first", env=GIT_ENV)
+    git(fx10, "checkout", "-q", "-b", "feature")
+    with open(os.path.join(fx10, "a.txt"), "w") as f:
+        f.write("two\n")
+    with open(os.path.join(fx10, "f.txt"), "w") as f:
+        f.write("only on feature\n")
+    git(fx10, "add", "-A", env=GIT_ENV)
+    git(fx10, "commit", "-q", "-m", "second", env=GIT_ENV)
+    git(fx10, "checkout", "-q", "main")
+
+    # rows: untracked(0) unstaged(1) staged(2) commits(3) its commit(4, collapsed)
+    # branches(5) feature(6) main(7) -- branches sort by name.
+    s10 = Session(binpath, fx10)
+    out = s10.send("jjjjj")  # row5: the Branches section
+    out += s10.send("j")  # row6: feature (screen updates are diffs, so gather both)
+    if b"Branches (2)" in out and b"feature" in out and b"second" in out:
+        ok("branches: the outline shows a Branches section listing feature and its tip subject")
+    else:
+        fail("branches: the outline shows a Branches section listing feature and its tip subject", repr(out))
+    out = s10.send("b")
+    if b"check out" in out.lower() or b"checkout" in out.lower():
+        ok("branches: `b` opens the branch which-key overlay")
+    else:
+        fail("branches: `b` opens the branch which-key overlay", repr(out))
+    out = s10.send("c")
+    if b"switched to feature" in out:
+        ok("branches: `c` reports the switch in the message line")
+    else:
+        fail("branches: `c` reports the switch in the message line", repr(out))
+    s10.quit()
+    head_out, _, _ = git(fx10, "symbolic-ref", "HEAD")
+    status_out, _, _ = git(fx10, "status", "--short")
+    with open(os.path.join(fx10, "a.txt")) as f:
+        a_txt = f.read()
+    if head_out == "refs/heads/feature" and status_out == "" and a_txt == "two\n" and os.path.exists(os.path.join(fx10, "f.txt")):
+        ok("branches: after `b` `c`, git agrees -- HEAD on feature, status clean, files match")
+    else:
+        fail("branches: after `b` `c`, git agrees", "head=%r status=%r a=%r" % (head_out, status_out, a_txt))
+
+    # a dirty file in the way: refused, message shown, nothing changes
+    with open(os.path.join(fx10, "a.txt"), "w") as f:
+        f.write("dirty\n")
+    s10 = Session(binpath, fx10)
+    s10.send("j" * 40)  # the cursor stops on the last row: main, the last branch
+    out = s10.send("b")
+    out += s10.send("c")
+    if b"refused" in out:
+        ok("branches: a dirty file in the way is refused with a reason in the message line")
+    else:
+        fail("branches: a dirty file in the way is refused with a reason in the message line", repr(out))
+    s10.quit()
+    head_out, _, _ = git(fx10, "symbolic-ref", "HEAD")
+    with open(os.path.join(fx10, "a.txt")) as f:
+        a_txt = f.read()
+    if head_out == "refs/heads/feature" and a_txt == "dirty\n":
+        ok("branches: the refused checkout left HEAD and the dirty file alone")
+    else:
+        fail("branches: the refused checkout left HEAD and the dirty file alone", "head=%r a=%r" % (head_out, a_txt))
+
     return failures
 
 

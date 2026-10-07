@@ -292,6 +292,10 @@ source test_hunks.sh
 
 source test_gitui.sh
 
+# --- branch listing and checkout, against real git as the oracle ----------
+
+source test_checkout.sh
+
 # --- smart-HTTP fetch/clone, against a real 'git http-backend' -------------
 #
 # `test_httpfetch.sh` shares this script's shell the same way the others do

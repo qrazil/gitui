@@ -1,0 +1,106 @@
+// Drives `checkout.m31` directly -- no terminal, no `tuiapp.Loop` -- against
+// a real, disposable fixture, so `test_checkout.sh` can check each switch's
+// on-disk effect against real git the same way `t_gitclient_ops.m31` does
+// for staging and committing.
+//
+//   ./t_checkout <gitdir> <worktree> branches
+//   ./t_checkout <gitdir> <worktree> checkout <branch>
+//   ./t_checkout <gitdir> <worktree> detach <commit-id>
+//   ./t_checkout <gitdir> <worktree> new <branch>
+//
+// `branches` prints one `<mark> <name> <id>` line per local branch, `*` for
+// the current one and `-` otherwise. `checkout`/`detach`/`new` print
+// `ok written=N removed=M` (or just `ok`) and exit 0, or `refused: <why>`
+// and exit 1 -- the shell test checks both the word and the repository.
+
+import checkout;
+import io;
+import os;
+
+List<str> argv = os.args();
+if (argv.size() < 4) {
+    io.eprint("usage: t_checkout <gitdir> <worktree> branches|checkout <branch>|detach <id>|new <branch>");
+    os.exit(2);
+}
+str gd = argv[1];
+str wt = argv[2];
+str op = argv[3];
+if (op == "branches") {
+    match (checkout.branches(gd)) {
+        case Ok(List<checkout.Branch> bs): {
+            for (checkout.Branch b in bs) {
+                str mark = "-";
+                if (b.current) {
+                    mark = "*";
+                }
+                print(mark + " " + b.name + " " + b.id);
+            }
+        }
+        case Err(checkout.Error e): {
+            io.eprint(e.to_str());
+            os.exit(1);
+        }
+    }
+} else if (op == "checkout") {
+    if (argv.size() < 5) {
+        io.eprint("usage: t_checkout <gitdir> <worktree> checkout <branch>");
+        os.exit(2);
+    }
+    str want = argv[4];
+    str id = "";
+    str full = "";
+    match (checkout.branches(gd)) {
+        case Ok(List<checkout.Branch> bs): {
+            for (checkout.Branch b in bs) {
+                if (b.name == want) {
+                    id = b.id;
+                    full = b.full;
+                }
+            }
+        }
+        case Err(checkout.Error e): {
+            io.eprint(e.to_str());
+            os.exit(1);
+        }
+    }
+    if (id == "") {
+        io.eprint("no such branch: " + want);
+        os.exit(2);
+    }
+    report(checkout.checkout(gd, wt, id, full));
+} else if (op == "detach") {
+    if (argv.size() < 5) {
+        io.eprint("usage: t_checkout <gitdir> <worktree> detach <commit-id>");
+        os.exit(2);
+    }
+    report(checkout.checkout(gd, wt, argv[4], ""));
+} else if (op == "new") {
+    if (argv.size() < 5) {
+        io.eprint("usage: t_checkout <gitdir> <worktree> new <branch>");
+        os.exit(2);
+    }
+    match (checkout.create_branch(gd, argv[4])) {
+        case Ok: {
+            print("ok");
+        }
+        case Err(checkout.Error e): {
+            print("refused: " + e.to_str());
+            os.exit(1);
+        }
+    }
+} else {
+    io.eprint("unknown op: " + op);
+    os.exit(2);
+}
+
+void report(Result<checkout.Summary, checkout.Error> r) {
+    match (r) {
+        case Ok(checkout.Summary s): {
+            print("ok written=" + s.written.to_str() + " removed=" + s.removed.to_str());
+        }
+        case Err(checkout.Error e): {
+            print("refused: " + e.to_str());
+            os.exit(1);
+        }
+    }
+}

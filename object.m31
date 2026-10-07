@@ -1031,6 +1031,29 @@ bytes fold_header(bytes line) {
 // addressed, so a name already on disk is left alone: the bytes it holds are
 // already this object's, by construction, or the store was corrupt before
 // this call and rewriting it here would not fix that.
+/// The name an object of `kind` holding `content` has -- the SHA-1 of its
+/// `<kind> <size>\0<content>` plaintext -- without writing anything. This is
+/// what `status.m31` compares a working-tree file against its index entry
+/// with: an index entry's `id` is a BLOB name, so hashing the file's bytes
+/// alone (`sha1.hex(content)`) can never match it, and did not -- every file
+/// whose cached stat had gone stale (a `touch`, a `git read-tree`) was
+/// reported modified until something refreshed the index. `blob_id` is that
+/// comparison done right.
+pub str object_id(str kind, bytes content) {
+    bytes header = [];
+    header.extend(kind.to_bytes());
+    header.push(' ');
+    header.extend(content.size().to_str().to_bytes());
+    header.push(0);
+    header.extend(content);
+    return sha1.hex(header);
+}
+
+/// `object_id("blob", content)`.
+pub str blob_id(bytes content) {
+    return object_id("blob", content);
+}
+
 Result<str, Error> write_object(str gitdir, str kind, bytes content) {
     bytes header = [];
     header.extend(kind.to_bytes());
@@ -1038,7 +1061,7 @@ Result<str, Error> write_object(str gitdir, str kind, bytes content) {
     header.extend(content.size().to_str().to_bytes());
     header.push(0);
     header.extend(content);
-    str id = sha1.hex(header);
+    str id = object_id(kind, content);
     str dir = fs.join(fs.join(repo.common(gitdir), "objects"), id.substr(0, 2));
     str path = fs.join(dir, id.substr(2, 40));
     if (fs.exists(path)) {

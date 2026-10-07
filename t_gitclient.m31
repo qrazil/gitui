@@ -10,6 +10,7 @@
 // (the same convention `t_write_refs.m31` already uses). No repository, no
 // filesystem, no `gitdir` -- this is exactly what a pure function buys.
 
+import checkout;
 import gitclient;
 import gitlog;
 import object;
@@ -51,14 +52,28 @@ Map<str, bytes> paths = {};
 Map<str, List<gitclient.CommitFileDiff>> changes = {};
 changes.set("1111111111111111111111111111111111111111", [gitclient.CommitFileDiff("x.txt".to_bytes(), status.Change.Modified, Option<str>.Some("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"), Option<str>.Some("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"), false, 3, 1)]);
 Map<str, gitclient.CommitFileDiff> file_diffs = {};
-tuioutline.Outline o = gitclient.build_outline(st, log, changes, collapsed, paths, file_diffs);
+tuioutline.Outline o = gitclient.build_outline(st, log, changes, collapsed, paths, file_diffs, []);
 List<tuioutline.Row> rows = o.rows();
 List<str> ids = [];
 for (tuioutline.Row r in rows) {
     ids.push(r.node.id);
 }
 str joined = ids.join(",");
-counter.check("outline: four top-level sections plus their children, commits collapsed by default", joined == "untracked,untracked:c.txt,unstaged,unstaged:b.txt,staged,staged:a.txt,staged:newfile.txt,commits,commit:1111111111111111111111111111111111111111", joined);
+counter.check("outline: five top-level sections plus their children, commits collapsed by default", joined == "untracked,untracked:c.txt,unstaged,unstaged:b.txt,staged,staged:a.txt,staged:newfile.txt,commits,commit:1111111111111111111111111111111111111111,branches", joined);
+List<gitclient.BranchRow> brs = [gitclient.BranchRow(checkout.Branch("feature", "refs/heads/feature", "2222222222222222222222222222222222222222", false), "second thing"), gitclient.BranchRow(checkout.Branch("main", "refs/heads/main", "1111111111111111111111111111111111111111", true), "first commit")];
+tuioutline.Outline bo = gitclient.build_outline(st, log, changes, collapsed, paths, file_diffs, brs);
+List<str> bids = [];
+List<str> blabels = [];
+for (tuioutline.Row r in bo.rows()) {
+    if (r.node.id == "branches" || r.node.id.starts_with("branch:")) {
+        bids.push(r.node.id);
+        blabels.push(r.node.label);
+    }
+}
+counter.check("outline: branches section lists one leaf per branch, expanded by default", bids.join(",") == "branches,branch:feature,branch:main", bids.join(","));
+counter.check("outline: branches header counts the branches", blabels[0] == "Branches (2)", blabels[0]);
+counter.check("outline: a branch row shows name, short tip id and subject", blabels[1] == "  feature  2222222  second thing", blabels[1]);
+counter.check("outline: the current branch is marked with *", blabels[2] == "* main  1111111  first commit", blabels[2]);
 counter.check("outline: staged section counts both staged deltas", rows[4].node.label == "Staged changes (2)", rows[4].node.label);
 counter.check("outline: a staged, modified path is marked M", rows[5].node.label == "M  a.txt", rows[5].node.label);
 counter.check("outline: a staged, newly-added path is marked A", rows[6].node.label == "A  newfile.txt", rows[6].node.label);
@@ -90,7 +105,7 @@ for (str id in ids) {
 counter.check("outline: a commit's body is hidden until expanded", !saw_body, "body row leaked into the collapsed view");
 // Recorded as expanded (via `collapsed`), the same build must show it.
 collapsed.set("commit:1111111111111111111111111111111111111111", false);
-tuioutline.Outline o2 = gitclient.build_outline(st, log, changes, collapsed, paths, file_diffs);
+tuioutline.Outline o2 = gitclient.build_outline(st, log, changes, collapsed, paths, file_diffs, []);
 bool saw_body2 = false;
 for (tuioutline.Row r in o2.rows()) {
     if (r.node.id == "commit:1111111111111111111111111111111111111111:author") {
@@ -112,7 +127,7 @@ counter.check("outline: an expanded commit shows its own Files changed section, 
 counter.check("outline: a commit's Files changed section is itself collapsed by default", !saw_file_row, "file row leaked before Files changed was expanded");
 // Recorded as expanded too, the same build must show the file row itself.
 collapsed.set("commit:1111111111111111111111111111111111111111:files", false);
-tuioutline.Outline o2b = gitclient.build_outline(st, log, changes, collapsed, paths, file_diffs);
+tuioutline.Outline o2b = gitclient.build_outline(st, log, changes, collapsed, paths, file_diffs, []);
 str file_label = "";
 for (tuioutline.Row r in o2b.rows()) {
     if (r.node.id == "commit:1111111111111111111111111111111111111111:file:0") {
@@ -145,7 +160,7 @@ collapsed2.set("commit:2222222222222222222222222222222222222222", false);
 Map<str, bytes> paths2 = {};
 Map<str, List<gitclient.CommitFileDiff>> changes2 = {};
 Map<str, gitclient.CommitFileDiff> file_diffs2 = {};
-tuioutline.Outline o3 = gitclient.build_outline(st, log2, changes2, collapsed2, paths2, file_diffs2);
+tuioutline.Outline o3 = gitclient.build_outline(st, log2, changes2, collapsed2, paths2, file_diffs2, []);
 List<str> m0_rows = [];
 List<str> m2_rows = [];
 bool saw_blank_line_row = false;
@@ -185,7 +200,7 @@ collapsed3.set("commit:3333333333333333333333333333333333333333", false);
 Map<str, bytes> paths3 = {};
 Map<str, List<gitclient.CommitFileDiff>> changes3 = {};
 Map<str, gitclient.CommitFileDiff> file_diffs3 = {};
-tuioutline.Outline o4 = gitclient.build_outline(st, log3, changes3, collapsed3, paths3, file_diffs3);
+tuioutline.Outline o4 = gitclient.build_outline(st, log3, changes3, collapsed3, paths3, file_diffs3, []);
 bool saw_any_message_row = false;
 for (tuioutline.Row r in o4.rows()) {
     if (r.node.id.starts_with("commit:3333333333333333333333333333333333333333:m")) {

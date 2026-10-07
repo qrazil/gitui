@@ -32,6 +32,7 @@ bash build-gitui.sh -o ourgitui    # not build.sh -- see build-gitui.sh's own he
 | `git.m31` | the read-only CLI |
 | `index.m31` | `.git/index`: read, write, a fresh entry from `fs.stat` |
 | `status.m31` | working-tree status: staged, unstaged, untracked |
+| `checkout.m31` | local branches, switching branches (the working-tree-writing primitive: refuses on local changes in the way), creating a branch |
 | `hunks.m31` | `lib/diff.m31`'s edit script, grouped into qrazil/tui's `tuidiffview.Hunk`/`Line` with context |
 | `gitlog.m31` | the commit-history walk, shared by `git.m31 -log` and `gitui.m31` |
 | `gitclient.m31` | the interactive client's state and logic (no top-level statements, so it is importable and testable) |
@@ -73,9 +74,19 @@ path if no editor can be launched at all; `f` finishes; `a` aborts -- see
 `gitclient.m31`'s own header, "launching `$EDITOR`, and the terminal handoff
 that takes", for how the terminal is handed to the editor and back); a
 persistent footer of the base commands; and a synced jump list toggled with
-`J`. Hunk-level *staging* (as opposed to display), push/pull, checkout and
-rebase are each a named, deliberate gap in `apps/git/design.md`, not an
-oversight here.
+`J`. Hunk-level *staging* (as opposed to display), push/pull and rebase are
+each a named, deliberate gap in `apps/git/design.md`, not an oversight here.
+
+Branches: the last outline section lists every local branch (current one
+starred, tip short id and subject). `b` opens a which-key overlay: `c`
+checks out the branch under the cursor, `n` makes a new branch at `HEAD`
+(its name read from a file you edit in `$EDITOR`) and switches to it, `a`
+aborts. A checkout diffs the two trees and writes only the paths that
+differ (modes, symlinks, deletes with empty directories pruned), rewrites
+the index entries to match, and moves `HEAD`. It refuses, writing nothing,
+if a differing path has staged or unstaged changes, if an untracked file is
+in the way, or if either side holds a submodule; the reason shows in the
+message line. Checked against real git in `test_checkout.sh`.
 
 Each commit in the log also expands into its own "Files changed" list --
 one row per path changed against the commit's first parent (the empty tree,
