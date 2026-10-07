@@ -15,9 +15,9 @@ import gitclient;
 import gitlog;
 import object;
 import status;
-import tuidiffview;
-import tuioutline;
-import tuitext;
+import tui.tuidiffview;
+import tui.tuioutline;
+import tui.tuitext;
 
 // A local of the top-level program body is invisible to a function
 // (`apps/git/FRICTION.md` §6, `git.m31`'s own `dispatch` comment) -- so the

@@ -77,7 +77,7 @@
 //
 // --- what is NOT here ---------------------------------------------------------
 //
-// Writing a packfile -- `apps/git/README.md` and `apps/git/design.md`
+// Writing a packfile -- `apps/git/README.md` and `docs/design.md`
 // ("Going remote") both name this as later, separate work, once `push` needs
 // it. Reading a pack's own trailing checksums (the CRC32 per object, the pack
 // and idx SHA-1s) is skipped for the reason the header above gives: the

@@ -1,5 +1,5 @@
 // The commit-history walk, factored out of `git.m31`'s own `-log` command so
-// it is written exactly once. See `apps/git/design.md`, "Starting the
+// it is written exactly once. See `docs/design.md`, "Starting the
 // client": the interactive client's commit section is populated "from the
 // existing log/object read side" and is told to "reuse that logic rather
 // than re-deriving it" -- this module is that logic, moved rather than

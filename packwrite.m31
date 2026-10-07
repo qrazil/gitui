@@ -1,6 +1,6 @@
 // Writing a packfile -- the half of the pack format `pack.m31` deliberately
 // left alone ("reading only -- writing one, for `push`, is later, separate
-// work", `apps/git/design.md`'s "Going remote"). This is that later work, and
+// work", `docs/design.md`'s "Going remote"). This is that later work, and
 // it is the simplest packfile git accepts, on purpose:
 //
 //   `PACK`, version 2, the object count -- then every object as a FULL

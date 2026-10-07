@@ -1,6 +1,6 @@
 // Git's smart HTTP protocol, protocol v0 only: enough to fetch a real
 // packfile from a real server over `lib/http.m31`. See
-// `apps/git/design.md`'s "Going remote, 2026-09-29" for where this sits: a
+// `docs/design.md`'s "Going remote, 2026-09-29" for where this sits: a
 // fetched pack is written to disk here, verified byte for byte against its
 // own trailing checksum, and handed to nothing else in this program. Turning
 // it into loose objects a repository can actually use is a follow-up, once
@@ -42,7 +42,7 @@
 // delimiter (`0001`) and a response-end (`0002`), and this module refuses
 // both as `Syntax` rather than pretending to understand them, since a v0
 // server never sends them and misreading one as a length would be silent
-// corruption. Protocol v2 is a named follow-up (`apps/git/design.md`), not
+// corruption. Protocol v2 is a named follow-up (`docs/design.md`), not
 // an oversight.
 //
 // --- the ref advertisement, and what makes it "smart" ------------------------
@@ -74,7 +74,7 @@
 // between to prune what is sent next. That costs an occasional slightly
 // larger `have` list than a smarter client would send; it does not cost
 // correctness, and "matches what a modern client negotiates by default" was
-// explicitly not the bar (`apps/git/design.md`'s own task note). Computing
+// explicitly not the bar (`docs/design.md`'s own task note). Computing
 // the `have` list itself -- which commits this program already possesses --
 // is the caller's job, not this module's: walk `refs.all(gitdir)` and
 // `gitlog.walk(gitdir, ref.name, -1)` for each, exactly as `apps/git`'s own
@@ -279,7 +279,7 @@ pub str Error.to_str() {
 /// with its payload -- the bytes strictly after the four-hex-digit length
 /// prefix, which counts itself. `next` is the offset just past this packet,
 /// for the caller's next call; there are no tuples in this language
-/// (`apps/git/FRICTION.md` §2), so a small result type carries both answers
+/// (`docs/FRICTION.md` §2), so a small result type carries both answers
 /// out of one call the way `gitlog.Entry` does.
 pub type Packet {
     pub bool flush;
@@ -805,7 +805,7 @@ str base_of(str url) {
 // a freshly named temporary file beside it, written whole, then renamed over
 // the target. The same discipline `refs.m31`'s own `write_atomic` uses, for
 // the same reason; duplicated here rather than imported, since `refs.m31`'s
-// copy is private to that module (`apps/git/FRICTION.md`'s `before`/`str_cmp`
+// copy is private to that module (`docs/FRICTION.md`'s `before`/`str_cmp`
 // are the same trade already made twice in this program).
 Result<bool, io.Error> write_atomic(str path, bytes content) {
     match (fs.makedirs(dir_of(path))) {

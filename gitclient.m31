@@ -12,7 +12,7 @@
 // path, stripping a commit message down to what git would actually commit --
 // is a method or a free function here, callable with no terminal in sight.
 //
-// See `apps/git/design.md`'s "Starting the client" for the scope this
+// See `docs/design.md`'s "Starting the client" for the scope this
 // implements: whole-file staging, a commit via an externally edited message
 // file, and the outline/jump-list/which-key/footer wiring the locked design
 // names, plus hunk-level staging in the diff view (`patch.m31`, the
@@ -87,17 +87,17 @@ import refs;
 import status;
 import term;
 import text;
-import tuibuf;
-import tuidiffview;
-import tuifooter;
-import tuigeom;
-import tuijump;
-import tuimenu;
-import tuioutline;
-import tuitext;
-import tuiwidget;
-import tuistyle;
-import tuiapp;
+import tui.tuibuf;
+import tui.tuidiffview;
+import tui.tuifooter;
+import tui.tuigeom;
+import tui.tuijump;
+import tui.tuimenu;
+import tui.tuioutline;
+import tui.tuitext;
+import tui.tuiwidget;
+import tui.tuistyle;
+import tui.tuiapp;
 
 /// One row of a change list (`status.Status.staged`/`.unstaged`, or
 /// `.untracked`), ready to sort and to show: `path` is what a human reads,
@@ -823,7 +823,7 @@ pub type State {
     pub str message = "";
     /// Whether the primary document is currently showing a hunk-level diff
     /// instead of the outline -- see `show_diff_current`/`close_diff`. One
-    /// view the document can show, per `apps/git/design.md`'s locked "one
+    /// view the document can show, per `docs/design.md`'s locked "one
     /// primary document" layout, not a second panel competing with the
     /// outline for space.
     pub bool diff_open = false;
@@ -1400,7 +1400,7 @@ void State.prune_empty_parents(bytes rel) {
 /// Real, hunk-level diff for the row under the cursor -- the diff-algorithm
 /// track (`lib/diff.m31`/`apps/git/hunks.m31`) and the rendering widget
 /// (`apps/tui/tuidiffview.DiffView`) both already existed; this is the
-/// wiring `apps/git/design.md`'s "Starting the client" section named as the
+/// wiring `docs/design.md`'s "Starting the client" section named as the
 /// follow-up once they did. A no-op on anything that is not a path row (a
 /// section heading or a commit).
 ///
@@ -2324,7 +2324,7 @@ List<tuiwidget.Span> State.footer_spans(tuistyle.Theme theme) {
 /// diff view in its place -- then the two-row footer `tuifooter.split`
 /// reserves -- a status line and the fixed key legend -- and, on top of
 /// everything, the commit which-key overlay when it is open. See
-/// `apps/git/design.md`'s locked layout: one primary document, one optional
+/// `docs/design.md`'s locked layout: one primary document, one optional
 /// jump-list panel, a persistent footer, and overlays drawn over all of it
 /// rather than replacing any of it. The diff view is not an overlay: it
 /// REPLACES the document the way `apps/tui/browse.m31`'s preview pane

@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
 # Build git.m31 (the read-only CLI) into a real executable. Not for
-# gitui.m31 -- see build-gitui.sh's own header for why that one needs a
-# TUI_ROOT and a staging step this file does not.
+# gitui.m31 -- see scripts/build-gitui.sh's own header for why that one needs a
+# dependency on tui (git.m31 has none) and so builds from the project root.
 #
-#   M31_ROOT=/path/to/m31 bash build.sh git.m31           -> ./git
-#   M31_ROOT=/path/to/m31 bash build.sh git.m31 -o ourgit
+#   M31_ROOT=/path/to/m31 bash scripts/build.sh git.m31           -> ./git
+#   M31_ROOT=/path/to/m31 bash scripts/build.sh git.m31 -o ourgit
 #
 # git.m31 is one `.m31` file, compiled by the m31 compiler (m31c) and then
 # linked, as ordinary C, against the m31 RUNTIME's own source files -- there
@@ -19,7 +19,7 @@
 #     matching the version LANGC was built from. No default: a missing
 #     M31_ROOT is a clear error instead of a guess.
 set -uo pipefail
-cd "$(dirname "$0")"
+cd "$(dirname "$0")/.."
 
 if [ -z "${M31_ROOT:-}" ]; then
     echo "M31_ROOT is not set -- point it at a checkout of github.com/qrazil/m31" \
@@ -39,7 +39,7 @@ fi
 LANGC=${LANGC:-./m31c}
 CC=${CC:-cc}
 
-src=${1:?usage: M31_ROOT=/path/to/m31 bash build.sh <source.m31> [-o out]}
+src=${1:?usage: M31_ROOT=/path/to/m31 bash scripts/build.sh <source.m31> [-o out]}
 out=$(basename "$src" ".$LANG_EXT")
 [ "${2:-}" = "-o" ] && out=${3:?-o needs a name}
 

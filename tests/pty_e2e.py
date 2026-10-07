@@ -2,12 +2,12 @@
 """Drive the compiled `ourgitui` binary under a real pty, against disposable
 git fixtures this script builds and destroys itself -- the same discipline
 `apps/git/test.sh`/`test_write.sh` already use for the write-path work, and
-`apps/git/design.md`'s own "Safety" section names for this client
+`docs/design.md`'s own "Safety" section names for this client
 specifically: never a real repository, real `git` as the oracle throughout.
 
 Run from anywhere:
 
-    python3 apps/git/pty_e2e.py <ourgitui-binary> <scratch-dir>
+    python3 tests/pty_e2e.py <ourgitui-binary> <scratch-dir>
 
 `<scratch-dir>` is created fresh (and removed first if it already exists) --
 `test_gitui.sh` passes it a directory under its own `mktemp -d`, never
@@ -16,7 +16,7 @@ anything resembling a real repository.
 Every `ok`/`FAIL` line this prints is one check; the exit code is the number
 of failures, so `test_gitui.sh` can both grep for `FAIL` and trust `$?`. This
 is the "drive it under a pty against a disposable fixture, oracle-checked"
-half of the client's test obligations (`apps/git/design.md`, "how you'll know
+half of the client's test obligations (`docs/design.md`, "how you'll know
 you're done and correct"); `t_gitclient.m31` and `t_gitclient_ops.m31` cover
 the unit- and oracle-level checks a pty adds nothing to.
 """
@@ -365,7 +365,7 @@ def main():
     # --- diff: hunk-level view for a staged row and an unstaged row ----------
     #
     # One file, staged with one change and then changed again on disk -- the
-    # exact "stage a file, modify it further" scenario `apps/git/design.md`
+    # exact "stage a file, modify it further" scenario `docs/design.md`
     # names, so both comparisons are exercised against real `git diff --cached`
     # and `git diff` (plain) in the same session. `Theme.plain` means no SGR
     # colour codes are ever written, so a rendered hunk's `+`/`-` lines and the

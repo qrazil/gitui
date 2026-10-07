@@ -7,7 +7,7 @@ framing (no idx, no object headers, no deltas) around it, so a bug in the
 mid-offset codec and a bug in the packfile format reader cannot hide one
 behind the other.
 
-    python3 apps/git/oracle_inflate_at.py <dir>
+    python3 tests/oracle_inflate_at.py <dir>
 
 Writes `<dir>/streams.zlib` (RFC 1950 zlib streams back to back, for
 `zlib.decompress_at`) and `<dir>/streams.raw` (raw RFC 1951 DEFLATE streams

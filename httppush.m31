@@ -1,7 +1,7 @@
 // Git's smart-HTTP protocol, the push half: `git-receive-pack` over
 // `lib/http.m31`, the sibling of `httpfetch.m31` (which has the fetch half
 // and whose pkt-line framing and advertisement parser this reuses rather
-// than repeats). See `apps/git/design.md`'s "Going remote" for where this
+// than repeats). See `docs/design.md`'s "Going remote" for where this
 // sits: a push is "compute what the remote lacks, pack it, send it with the
 // ref update, read the server's verdict", and each of those is its own
 // pure function here with one I/O-doing `push` tying them together.

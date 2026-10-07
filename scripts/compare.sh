@@ -2,7 +2,7 @@
 # Every command of `git.m31`, beside the real `git`, on a real
 # repository, compared octet for octet.
 #
-#   bash compare.sh <our-binary> <repo> [workdir]
+#   bash scripts/compare.sh <our-binary> <repo> [workdir]
 #
 # `git` is only ever READ from here: `cat-file`, `ls-tree`, `log`,
 # `rev-parse`, `show-ref`. Nothing in this script writes to a repository.
