@@ -1,0 +1,116 @@
+// Applying ONE hunk of a diff, exactly -- the piece `git add -p` and
+// `git reset -p` are built on, for `gitclient.m31`'s hunk-level `s`/`u` in
+// the diff view.
+//
+// API
+// ---
+//   patch.apply_hunk(old, new, k, context:)   -> Option<bytes>
+//       `old` with only the k-th hunk of diff(old, new) applied: the
+//       index's new content when staging hunk k of an unstaged diff.
+//   patch.revert_hunk(old, new, k, context:)  -> Option<bytes>
+//       `new` with only the k-th hunk of diff(old, new) undone: the index's
+//       new content when unstaging hunk k of a staged (HEAD vs index) diff.
+//   patch.hunk_count(old, new, context:)      -> int  (0 for a binary pair)
+//
+// `None` from either: the pair is binary (`diff.is_binary`, no line diff
+// exists to pick a hunk from) or `k` names no hunk.
+//
+// --- why this works on `diff.Op`s, not on `tuidiffview.Hunk`s ------------
+//
+// A rendered `tuidiffview.Line.text` is a `str` with its line terminator
+// stripped, and a line that is not UTF-8 renders as a hex placeholder
+// (`hunks.m31`'s `line_text`) -- fine to look at, lossy to rebuild a file
+// from: `\n` vs `\r\n` vs no terminator on the last line would all come
+// back as the same text. `diff.Op.line` still holds every byte of every
+// line, terminator included (that is what makes `diff.reconstruct_old`/
+// `reconstruct_new` exact), so this re-runs the same `diff.diff` the view
+// was built from and edits the op script instead. `hunks.spans` is the one
+// shared definition of where hunk k starts and ends, so the hunk the cursor
+// is on in a `DiffView` and the span edited here are the same hunk by
+// construction, not two groupings that happen to agree today.
+//
+// Applying hunk k = rebuild the file taking, for every op OUTSIDE span k,
+// the `old` side (Keep and Remove lines), and for every op INSIDE it, the
+// `new` side (Keep and Add lines). Reverting is the mirror image. Both are
+// total over the script, which is why the round-trip property `t_patch.m31`
+// checks holds exactly: apply hunk 0 repeatedly and `old` becomes `new`;
+// revert hunk 0 repeatedly and `new` becomes `old`.
+
+import diff;
+import hunks;
+
+/// `old` with exactly one hunk of diff(old, new) applied.
+pub Option<bytes> apply_hunk(bytes old, bytes new, int k, int context = hunks.DEFAULT_CONTEXT) {
+    match (diff.diff(old, new)) {
+        case Binary: {
+            return Option<bytes>.None;
+        }
+        case Lines(List<diff.Op> ops): {
+            List<hunks.Span> sps = hunks.spans(ops, context: context);
+            if (k < 0 || k >= sps.size()) {
+                return Option<bytes>.None;
+            }
+            return Option<bytes>.Some(rebuild(ops, sps[k], true));
+        }
+    }
+}
+
+/// `new` with exactly one hunk of diff(old, new) undone.
+pub Option<bytes> revert_hunk(bytes old, bytes new, int k, int context = hunks.DEFAULT_CONTEXT) {
+    match (diff.diff(old, new)) {
+        case Binary: {
+            return Option<bytes>.None;
+        }
+        case Lines(List<diff.Op> ops): {
+            List<hunks.Span> sps = hunks.spans(ops, context: context);
+            if (k < 0 || k >= sps.size()) {
+                return Option<bytes>.None;
+            }
+            return Option<bytes>.Some(rebuild(ops, sps[k], false));
+        }
+    }
+}
+
+/// How many hunks diff(old, new) has -- 0 for a binary pair, the same count
+/// `hunks.hunks` would hand a `DiffView`.
+pub int hunk_count(bytes old, bytes new, int context = hunks.DEFAULT_CONTEXT) {
+    match (diff.diff(old, new)) {
+        case Binary: {
+            return 0;
+        }
+        case Lines(List<diff.Op> ops): {
+            return hunks.spans(ops, context: context).size();
+        }
+    }
+}
+
+// `applying`: outside the span take the old side, inside take the new side
+// (the file after staging this one hunk). Otherwise the mirror: outside the
+// span take the new side, inside take the old side (the file after
+// unstaging this one hunk).
+bytes rebuild(List<diff.Op> ops, hunks.Span sp, bool applying) {
+    bytes out = [];
+    int i = 0;
+    int n = ops.size();
+    while (i < n) {
+        bool inside = i >= sp.start && i < sp.end;
+        bool take_new = inside == applying;
+        match (ops[i].kind) {
+            case Keep: {
+                out.extend(ops[i].line);
+            }
+            case Add: {
+                if (take_new) {
+                    out.extend(ops[i].line);
+                }
+            }
+            case Remove: {
+                if (!take_new) {
+                    out.extend(ops[i].line);
+                }
+            }
+        }
+        i = i + 1;
+    }
+    return out;
+}

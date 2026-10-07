@@ -285,6 +285,10 @@ source test_gitignore.sh
 
 source test_hunks.sh
 
+# --- one hunk at a time: patch.m31's apply/revert round trips ---------------
+
+source test_patch.sh
+
 # --- the interactive client: unit, oracle and pty-driven end-to-end --------
 #
 # `test_gitui.sh` shares this script's shell the same way `test_write.sh`

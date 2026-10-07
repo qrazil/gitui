@@ -8,7 +8,7 @@
 #
 # `gitui.m31`'s entry point lives at this repo's root, and imports both this
 # repo's own plumbing (`gitclient`, `gitlog`, `status`, `gitignore`, `index`,
-# `object`, `pack`, `refs`, `repo`, `sha1`, `zlib`, `hunks`) and several
+# `object`, `pack`, `refs`, `repo`, `sha1`, `zlib`, `hunks`, `patch`) and several
 # github.com/qrazil/tui widgets (`tuiapp`, `tuioutline`, `tuijump`,
 # `tuimenu`, `tuifooter`, `tuidiffview`, and what those pull in). The
 # compiler resolves every `import` against the ENTRY file's own directory
@@ -77,7 +77,7 @@ cp "$TUI_ROOT/tuiapp.m31" "$TUI_ROOT/tuibuf.m31" "$TUI_ROOT/tuidiff.m31" \
     "$TUI_ROOT/tuiwidget.m31" \
     repo.m31 sha1.m31 zlib.m31 pack.m31 object.m31 \
     refs.m31 index.m31 gitignore.m31 status.m31 \
-    gitlog.m31 hunks.m31 gitclient.m31 gitui.m31 \
+    gitlog.m31 hunks.m31 patch.m31 gitclient.m31 gitui.m31 \
     "$stage/"
 
 "$LANGC" --emit-c "$stage/gitui.m31" -o "$stage/gitui.c"

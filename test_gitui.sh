@@ -37,7 +37,7 @@ build_tui() {
         "$TUI_ROOT/tuistyle.m31" "$TUI_ROOT/tuitext.m31" "$TUI_ROOT/tuiwidget.m31" \
         repo.m31 sha1.m31 zlib.m31 pack.m31 object.m31 \
         refs.m31 index.m31 gitignore.m31 status.m31 \
-        gitlog.m31 hunks.m31 \
+        gitlog.m31 hunks.m31 patch.m31 \
         gitclient.m31 "$name.m31" "$stage/"
     if ! "$LANGC" --emit-c "$stage/$name.m31" -o "$WORK/$name.c" 2>"$WORK/$name.diag"; then
         bad "compile $name (staged with qrazil/tui)" "$(head -5 "$WORK/$name.diag")"
@@ -350,6 +350,116 @@ EOF
         note "gitui edit: fsck reports nothing but expected dangling blobs after the editor scenarios"
     else
         bad "gitui edit: fsck after the editor scenarios" "$fsck_out"
+    fi
+fi
+
+# --- hunk-level staging, against git add -p / reset -p and git apply --------
+#
+# One file with two changes far enough apart to be two hunks (lines 3 and
+# 27 of 30, each a same-size replacement so both hunks' `@@` headers stay
+# identical across every state below), plus a staged new file and a file
+# deleted from disk, for the two edge rules `stage_hunk`/`unstage_hunk`
+# share with git: "stage deletion" and "unstage addition". A second copy of
+# the fixture is driven by real git -- `git apply --cached` with the very
+# patch text our diff view shows for that hunk -- so the two index blobs
+# can be compared byte for byte, not just the status letters.
+if [ -x "$WORK/t_gitclient_ops" ]; then
+    hfx="$WORK/hunkfx"
+    mkdir -p "$hfx"
+    (
+        set -e
+        cd "$hfx"
+        git init -q -b main .
+        git config user.email h@example.com
+        git config user.name 'Hunk Tester'
+        for i in $(seq 1 30); do echo "line $i"; done >f.txt
+        printf 'going away\n' >gone.txt
+        git add -A
+        GIT_AUTHOR_DATE='1700000000 +0000' GIT_COMMITTER_DATE='1700000000 +0000' \
+            git commit -q -m base
+        sed -i -e 's/^line 3$/THREE/' -e 's/^line 27$/TWENTY-SEVEN/' f.txt
+        printf 'brand new\n' >new.txt
+        git add new.txt
+        rm gone.txt
+    ) >"$WORK/hunkfx.log" 2>&1 || bad "gitui hunk: fixture" "$(tail -5 "$WORK/hunkfx.log")"
+
+    hunk_full=$(git -C "$hfx" diff --no-color -- f.txt)
+    hunk0_want=$(printf '%s\n' "$hunk_full" | awk '/^@@/{n++} n==1')
+    hunk1_want=$(printf '%s\n' "$hunk_full" | awk '/^@@/{n++} n==2')
+    hgit="$WORK/hunkfx_git"
+    cp -a "$hfx" "$hgit"
+
+    ours=$("$WORK/t_gitclient_ops" "$hfx/.git" "$hfx" hunk_patch unstaged f.txt 0 2>"$WORK/hp.err")
+    if [ "$(printf '%s\n' "$ours" | tail -n +3)" = "$hunk0_want" ]; then
+        note "gitui hunk: the view's hunk 0 is byte for byte git diff's own first @@ block"
+    else
+        bad "gitui hunk: hunk_patch text" "ours: $ours" "want: $hunk0_want" "$(cat "$WORK/hp.err")"
+    fi
+    printf '%s\n' "$ours" | git -C "$hgit" apply --cached >"$WORK/happly.log" 2>&1 || bad "gitui hunk: git apply --cached in the oracle copy" "$(cat "$WORK/happly.log")"
+
+    msg=$("$WORK/t_gitclient_ops" "$hfx/.git" "$hfx" stage_hunk f.txt 0 2>"$WORK/hs0.err")
+    got=$(git -C "$hfx" status --short)
+    want=$(git -C "$hgit" status --short)
+    if [ "$got" = "$want" ] && printf '%s' "$got" | grep -q '^MM f.txt$'; then
+        note "gitui hunk: staging hunk 0 leaves f.txt partially staged (MM), matching git apply --cached"
+    else
+        bad "gitui hunk: stage_hunk status" "got:  $got" "want: $want" "msg: $msg" "$(cat "$WORK/hs0.err")"
+    fi
+    if [ "$(git -C "$hfx" show :f.txt)" = "$(git -C "$hgit" show :f.txt)" ] && \
+       [ "$(git -C "$hfx" ls-files --stage f.txt | cut -d' ' -f2)" = "$(git -C "$hgit" ls-files --stage f.txt | cut -d' ' -f2)" ]; then
+        note "gitui hunk: the index blob after stage_hunk is identical to git apply --cached's"
+    else
+        bad "gitui hunk: index blob" "ours: $(git -C "$hfx" ls-files --stage f.txt)" "git:  $(git -C "$hgit" ls-files --stage f.txt)"
+    fi
+    cached_body=$(git -C "$hfx" diff --cached --no-color -- f.txt | awk '/^@@/{n++} n>=1')
+    plain_body=$(git -C "$hfx" diff --no-color -- f.txt | awk '/^@@/{n++} n>=1')
+    if [ "$cached_body" = "$hunk0_want" ] && [ "$plain_body" = "$hunk1_want" ]; then
+        note "gitui hunk: git diff --cached shows exactly hunk 0, git diff exactly hunk 1"
+    else
+        bad "gitui hunk: split" "cached: $cached_body" "plain: $plain_body"
+    fi
+
+    # Now stage everything, then unstage only the second hunk: HEAD vs index
+    # has two hunks again, and `git reset -p`'s "y" on the second one.
+    "$WORK/t_gitclient_ops" "$hfx/.git" "$hfx" stage f.txt >/dev/null 2>&1
+    git -C "$hgit" add f.txt
+    ours=$("$WORK/t_gitclient_ops" "$hfx/.git" "$hfx" hunk_patch staged f.txt 1 2>"$WORK/hp2.err")
+    printf '%s\n' "$ours" | git -C "$hgit" apply --cached -R >"$WORK/happly2.log" 2>&1 || bad "gitui hunk: git apply --cached -R in the oracle copy" "$(cat "$WORK/happly2.log")"
+    msg=$("$WORK/t_gitclient_ops" "$hfx/.git" "$hfx" unstage_hunk f.txt 1 2>"$WORK/hu1.err")
+    got=$(git -C "$hfx" status --short)
+    want=$(git -C "$hgit" status --short)
+    cached_body=$(git -C "$hfx" diff --cached --no-color -- f.txt | awk '/^@@/{n++} n>=1')
+    plain_body=$(git -C "$hfx" diff --no-color -- f.txt | awk '/^@@/{n++} n>=1')
+    if [ "$got" = "$want" ] && [ "$(git -C "$hfx" show :f.txt)" = "$(git -C "$hgit" show :f.txt)" ] && \
+       [ "$cached_body" = "$hunk0_want" ] && [ "$plain_body" = "$hunk1_want" ]; then
+        note "gitui hunk: unstaging hunk 1 of a fully staged file matches git apply --cached -R, hunk 0 stays staged"
+    else
+        bad "gitui hunk: unstage_hunk" "got:  $got" "want: $want" "cached: $cached_body" "plain: $plain_body" "msg: $msg" "$(cat "$WORK/hu1.err")"
+    fi
+
+    msg=$("$WORK/t_gitclient_ops" "$hfx/.git" "$hfx" unstage_hunk new.txt 0 2>&1)
+    if git -C "$hfx" status --short | grep -q '^?? new.txt$'; then
+        note "gitui hunk: unstaging the only hunk of a new file is git's 'unstage addition' -- untracked again"
+    else
+        bad "gitui hunk: unstage addition" "$(git -C "$hfx" status --short)" "msg: $msg"
+    fi
+    msg=$("$WORK/t_gitclient_ops" "$hfx/.git" "$hfx" stage_hunk gone.txt 0 2>&1)
+    if git -C "$hfx" status --short | grep -q '^D  gone.txt$'; then
+        note "gitui hunk: staging the only hunk of a file gone from disk is git's 'stage deletion'"
+    else
+        bad "gitui hunk: stage deletion" "$(git -C "$hfx" status --short)" "msg: $msg"
+    fi
+    msg=$("$WORK/t_gitclient_ops" "$hfx/.git" "$hfx" stage_hunk f.txt 7 2>&1)
+    if [ "$msg" = "no such hunk to stage" ]; then
+        note "gitui hunk: an out-of-range hunk index is refused with a message, index untouched"
+    else
+        bad "gitui hunk: out of range" "msg: $msg"
+    fi
+    fsck_out=$(git -C "$hfx" fsck --full 2>&1)
+    if [ -z "$(echo "$fsck_out" | grep -v '^dangling blob ' || true)" ]; then
+        note "gitui hunk: fsck reports nothing but expected dangling blobs after hunk staging"
+    else
+        bad "gitui hunk: fsck" "$fsck_out"
     fi
 fi
 

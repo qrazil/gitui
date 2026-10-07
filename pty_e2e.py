@@ -540,6 +540,60 @@ def main():
                 "log=%r rc=%d" % (log_out, log_rc),
             )
 
+    # --- hunk-level staging from inside the diff view ------------------------
+    #
+    # One file, two hunks (lines 3 and 27 of 30). `d` opens the unstaged diff
+    # with the cursor on hunk 0's header; `s` stages exactly that hunk, so git
+    # reports the file partially staged (`MM`) and the view stays open on the
+    # one hunk that is left. Then from the staged side: `u` on its only hunk
+    # unstages it again and, with nothing left to show, the view closes back
+    # to the outline. Real `git diff --cached` is the oracle for which hunk
+    # went where; `test_gitui.sh`'s "gitui hunk:" checks compare the index
+    # blob itself against `git apply --cached`.
+    fx10 = make_fixture(root, "hunkstage")
+    with open(os.path.join(fx10, "f.txt"), "w") as f:
+        f.write("".join("line %d\n" % i for i in range(1, 31)))
+    git(fx10, "add", "-A", env=GIT_ENV)
+    git(fx10, "commit", "-q", "-m", "base", env=GIT_ENV)
+    with open(os.path.join(fx10, "f.txt"), "w") as f:
+        f.write("".join(("THREE\n" if i == 3 else "TWENTY-SEVEN\n" if i == 27 else "line %d\n" % i) for i in range(1, 31)))
+
+    # rows: untracked(0), unstaged section(1): M f.txt, staged(0), commits --
+    # row0 untracked, row1 unstaged section, row2 M f.txt.
+    s10 = Session(binpath, fx10)
+    s10.send("j")
+    s10.send("j")  # row2: M f.txt (unstaged)
+    out = s10.send("d")  # open its diff; cursor on hunk 0's @@ header
+    if b"-line 3" in out and b"+THREE" in out and b"+TWENTY-SEVEN" in out and b"stage hunk" in out:
+        ok("hunk: the unstaged diff shows both hunks and the footer offers 's stage hunk'")
+    else:
+        fail("hunk: the unstaged diff shows both hunks and the footer offers 's stage hunk'", repr(out))
+    out = s10.send("s")  # stage hunk 0 only
+    status_out, _, _ = git(fx10, "status", "--short")
+    cached, _, _ = git(fx10, "diff", "--cached", "--no-color", "--", "f.txt")
+    if status_out == "MM f.txt" and "+THREE" in cached and "+TWENTY-SEVEN" not in cached:
+        ok("hunk: 's' in the diff view stages only the hunk under the cursor (git: MM, --cached has hunk 0 alone)")
+    else:
+        fail("hunk: 's' in the diff view stages only the hunk under the cursor", "status=%r cached=%r" % (status_out, cached))
+    if b"+TWENTY-SEVEN" in out and b"staged hunk 1 of f.txt" in out:
+        ok("hunk: the view stays open on the remaining hunk and says what it did")
+    else:
+        fail("hunk: the view stays open on the remaining hunk and says what it did", repr(out))
+    s10.send("\x7f")  # back to the outline
+    # rows now: untracked(0), unstaged(1): M f.txt, staged(1): M f.txt --
+    # row0 untracked, row1 unstaged section, row2 M f.txt, row3 staged
+    # section, row4 M f.txt (staged).
+    s10.send("j")
+    s10.send("j")  # row4: the staged M f.txt
+    s10.send("d")  # its diff: HEAD vs index, one hunk (THREE)
+    out = s10.send("u")  # unstage that only hunk: nothing left, view closes
+    status_out, _, _ = git(fx10, "status", "--short")
+    if status_out == " M f.txt" and b"Unstaged changes" in out and b"unstaged hunk 1 of f.txt" in out:
+        ok("hunk: 'u' on a staged diff's only hunk unstages it and closes the empty view (git: ' M')")
+    else:
+        fail("hunk: 'u' on a staged diff's only hunk unstages it and closes the empty view", "status=%r out=%r" % (status_out, out))
+    s10.quit()
+
     return failures
 
 

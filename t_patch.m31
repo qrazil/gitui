@@ -1,0 +1,118 @@
+// Round-trip checks for `patch.m31`: applying hunk 0 of diff(cur, new) to
+// `cur` repeatedly turns `old` into `new`, exactly; reverting hunk 0 of
+// diff(old, cur) from `cur` repeatedly turns `new` back into `old`. Pairs
+// cover CRLF, a missing final newline, an empty side, several well-separated
+// hunks and two changes close enough to merge into one hunk -- the exact
+// shapes a rendered `Line.text` would lose (see patch.m31's header for why
+// it works on `diff.Op`s instead).
+//
+//   ./t_patch
+//
+// Prints `<case> ok` or `<case> FAIL ...` per check, the convention
+// `t_gitclient.m31` uses; `test_patch.sh` greps for a FAIL line.
+
+import patch;
+import text;
+
+type Counter {
+    int checks = 0;
+    int failed = 0;
+}
+
+void Counter.check(str name, bool ok, str detail) {
+    checks = checks + 1;
+    if (ok) {
+        print(name + " ok");
+    } else {
+        failed = failed + 1;
+        print(name + " FAIL " + detail);
+    }
+}
+
+Counter counter = Counter();
+
+str show(bytes b) {
+    return b.hex();
+}
+
+void round_trip(Counter counter, str name, bytes old, bytes new) {
+    int n = patch.hunk_count(old, new);
+    bytes cur = old;
+    int steps = 0;
+    while (steps < n) {
+        match (patch.apply_hunk(cur, new, 0)) {
+            case Some(bytes next): {
+                cur = next;
+            }
+            case None: {
+                counter.check(name + ": apply step " + steps.to_str(), false, "apply_hunk returned None");
+                return;
+            }
+        }
+        steps = steps + 1;
+    }
+    counter.check(name + ": applying hunk 0 " + n.to_str() + " time(s) reaches new", cur == new, show(cur) + " != " + show(new));
+    counter.check(name + ": nothing left to apply afterwards", patch.hunk_count(cur, new) == 0, patch.hunk_count(cur, new).to_str() + " hunks remain");
+    cur = new;
+    steps = 0;
+    while (steps < n) {
+        match (patch.revert_hunk(old, cur, 0)) {
+            case Some(bytes next): {
+                cur = next;
+            }
+            case None: {
+                counter.check(name + ": revert step " + steps.to_str(), false, "revert_hunk returned None");
+                return;
+            }
+        }
+        steps = steps + 1;
+    }
+    counter.check(name + ": reverting hunk 0 " + n.to_str() + " time(s) reaches old", cur == old, show(cur) + " != " + show(old));
+    // Every single hunk on its own: applied, it must leave exactly the other
+    // n-1 hunks outstanding; so must reverting it from the new side.
+    int k = 0;
+    while (k < n) {
+        match (patch.apply_hunk(old, new, k)) {
+            case Some(bytes one): {
+                counter.check(name + ": applying only hunk " + k.to_str() + " leaves n-1 hunks", patch.hunk_count(one, new) == n - 1, patch.hunk_count(one, new).to_str());
+            }
+            case None: {
+                counter.check(name + ": applying only hunk " + k.to_str(), false, "None");
+            }
+        }
+        match (patch.revert_hunk(old, new, k)) {
+            case Some(bytes one): {
+                counter.check(name + ": reverting only hunk " + k.to_str() + " leaves n-1 hunks", patch.hunk_count(old, one) == n - 1, patch.hunk_count(old, one).to_str());
+            }
+            case None: {
+                counter.check(name + ": reverting only hunk " + k.to_str(), false, "None");
+            }
+        }
+        k = k + 1;
+    }
+}
+
+str many(int n) {
+    str s = "";
+    int i = 1;
+    while (i <= n) {
+        s = s + "line " + i.to_str() + "\n";
+        i = i + 1;
+    }
+    return s;
+}
+
+round_trip(counter, "one change", "a\nb\nc\n".to_bytes(), "a\nB\nc\n".to_bytes());
+round_trip(counter, "two far-apart hunks", (many(10) + "mid\n" + many(10)).to_bytes(), ("line 1\nX\n" + many(10).substr(14, many(10).size()) + "mid\n" + many(9) + "Y\n").to_bytes());
+round_trip(counter, "three hunks in 40 lines", many(40).to_bytes(), text.replace(text.replace(text.replace(many(40), "line 5\n", "FIVE\n"), "line 20\n", ""), "line 35\n", "line 35\nextra\n").to_bytes());
+round_trip(counter, "two changes close enough to merge", many(12).to_bytes(), text.replace(text.replace(many(12), "line 4\n", "four\n"), "line 8\n", "eight\n").to_bytes());
+round_trip(counter, "CRLF lines", "a\r\nb\r\nc\r\n".to_bytes(), "a\r\nB\r\nc\r\nd\r\n".to_bytes());
+round_trip(counter, "no trailing newline, old side", "a\nb\nc".to_bytes(), "a\nb\nC\n".to_bytes());
+round_trip(counter, "no trailing newline, new side", "a\nb\nc\n".to_bytes(), "a\nb\nc".to_bytes());
+round_trip(counter, "empty old (whole file added)", [], "x\ny\n".to_bytes());
+round_trip(counter, "empty new (whole file removed)", "x\ny\n".to_bytes(), []);
+round_trip(counter, "identical", "same\n".to_bytes(), "same\n".to_bytes());
+counter.check("binary pair: apply_hunk is None", patch.apply_hunk([0, 1, 2], [0, 1, 3], 0).is_none(), "got Some");
+counter.check("out of range: apply_hunk is None", patch.apply_hunk("a\n".to_bytes(), "b\n".to_bytes(), 5).is_none(), "got Some");
+counter.check("out of range: revert_hunk is None", patch.revert_hunk("a\n".to_bytes(), "b\n".to_bytes(), -1).is_none(), "got Some");
+print(counter.checks.to_str() + " checks, " + counter.failed.to_str() + " failed");
