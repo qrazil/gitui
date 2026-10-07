@@ -112,10 +112,10 @@ int PathRow.cmp(PathRow other) {
 /// commit-file branch reads to build the diff, `None` on whichever side the
 /// path did not exist (an add has no `old_id`, a delete has no `new_id`).
 /// `insertions`/`deletions` are exact line counts from the same
-/// `hunks.hunks` call `show_diff_current` itself would make -- computed once
-/// here, in `commit_changes`, rather than lazily, so the stat the outline
-/// shows next to a collapsed file never disagrees with the diff `Enter`
-/// opens on it. `binary` is `hunks.hunks` reporting `Binary` for this pair;
+/// `hunks.hunks` call `show_diff_current` itself would make -- computed in
+/// `commit_changes`, once per commit, the first time it is unfolded, so the
+/// stat the outline shows next to a file never disagrees with the diff
+/// `Enter` opens on it. `binary` is `hunks.hunks` reporting `Binary` for this pair;
 /// `insertions`/`deletions` are both 0 then, the same "nothing to count"
 /// `open_diff`'s own `diff_binary` path already means elsewhere.
 pub type CommitFileDiff {
@@ -291,6 +291,12 @@ const int COMMIT_BODY_WRAP_COLS = 72;
 /// scroll per press -- a whole word or two at a time, not one column, so a
 /// long line clears in a handful of presses.
 const int SCROLL_H_STEP = 4;
+/// How many commits one `gitlog.walk` fetches, and by how many the "load
+/// more" row at the bottom of the Commits section grows that each time it
+/// is activated. A `log` at least this long may have more behind it, which
+/// is when `build_outline` appends that row (`LOAD_MORE_ID`).
+const int LOG_PAGE = 200;
+const str LOAD_MORE_ID = "commits:more";
 
 /// `id`'s blob, or empty if it has none (the add/delete side of a
 /// `CommitFileDiff`) -- the commit-history equivalent of `State.read_blob`,
@@ -436,10 +442,11 @@ Result<List<CommitFileDiff>, object.Error> commit_changes(str gitdir, object.Com
 /// commit-file branch is what `Enter` on one of these reaches, through
 /// `out_file_diffs`, the same "every leaf row recorded in an out-param"
 /// convention `build_outline`'s own header documents for `out_paths`.
-/// Collapsed by default, like the commit itself: a 200-commit log already
-/// renders every message eagerly (`build_outline`'s own doc comment), and a
-/// file list per commit on top of that would make the initial screen very
-/// tall if it started open.
+/// Open by default once the commit itself is unfolded -- the commit stays
+/// collapsed until asked, so nothing is tall until the reader asks for it,
+/// and then the files are what they asked for: `Enter` on a commit shows its
+/// files at once, `Enter` on a file shows its diff. A fold recorded in
+/// `collapsed` still wins, as everywhere else.
 List<tuioutline.Node> commit_node(gitlog.Entry en, List<CommitFileDiff> changes, Map<str, bool> collapsed, Map<str, CommitFileDiff> out_file_diffs) {
     str id = "commit:" + en.id;
     str label = en.id.substr(0, 7) + "  " + first_line(en.commit.message);
@@ -471,7 +478,7 @@ List<tuioutline.Node> commit_node(gitlog.Entry en, List<CommitFileDiff> changes,
         k = k + 1;
     }
     str files_id = id + ":files";
-    body.push(tuioutline.Node.section(files_id, "Files changed (" + file_nodes.size().to_str() + ")", file_nodes, expanded: expanded_for(collapsed, files_id, false)));
+    body.push(tuioutline.Node.section(files_id, "Files changed (" + file_nodes.size().to_str() + ")", file_nodes, expanded: expanded_for(collapsed, files_id, true)));
     return [tuioutline.Node.section(id, label, body, expanded: expanded_for(collapsed, id, false))];
 }
 
@@ -490,12 +497,13 @@ List<tuioutline.Node> commit_node(gitlog.Entry en, List<CommitFileDiff> changes,
 /// working-tree sections' rows do -- there is no index or working tree to
 /// fall back on for a path that existed only in some past commit.
 ///
-/// `changes_by_commit` is `commit_changes(gitdir, en.commit)`'s result for
-/// every `en` in `log`, keyed by `en.id` -- computed by `State.reload`,
-/// before this runs, which is what keeps this function itself free of I/O
-/// (this doc comment's own first line, true before commit file lists
-/// existed and still true now: the computing happens elsewhere, this only
-/// ever renders what it is handed).
+/// `changes_by_commit` is `State.commit_changes_cache`: `commit_changes`'s
+/// result for every commit unfolded so far, keyed by commit id. A commit
+/// not in it (never unfolded) renders with an empty file list -- which is
+/// never visible, since it is only ever the unfolding itself that fills the
+/// cache and rebuilds (`State.toggle_current`). The computing happens
+/// elsewhere, this only ever renders what it is handed, which is what keeps
+/// this function itself free of I/O (this doc comment's own first line).
 pub tuioutline.Outline build_outline(status.Status st, List<gitlog.Entry> log, Map<str, List<CommitFileDiff>> changes_by_commit, Map<str, bool> collapsed, Map<str, bytes> out_paths, Map<str, CommitFileDiff> out_file_diffs) {
     out_paths.clear();
     out_file_diffs.clear();
@@ -528,7 +536,14 @@ pub tuioutline.Outline build_outline(status.Status st, List<gitlog.Entry> log, M
             commit_children.push(n);
         }
     }
-    roots.push(tuioutline.Node.section("commits", "Commits (" + commit_children.size().to_str() + ")", commit_children, expanded: expanded_for(collapsed, "commits", true)));
+    str commits_label = "Commits (" + log.size().to_str() + ")";
+    if (log.size() >= LOG_PAGE) {
+        // The walk hit its limit, so there may be more behind it: one last,
+        // addressable row that `handle_enter` turns into a longer walk.
+        commit_children.push(tuioutline.Node.leaf(LOAD_MORE_ID, "… load " + LOG_PAGE.to_str() + " more commits"));
+        commits_label = "Commits (" + log.size().to_str() + "+)";
+    }
+    roots.push(tuioutline.Node.section("commits", commits_label, commit_children, expanded: expanded_for(collapsed, "commits", true)));
     return tuioutline.Outline(roots);
 }
 
@@ -770,6 +785,17 @@ pub type State {
     Map<str, bool> collapsed = {};
     Map<str, bytes> paths = {};
     Map<str, CommitFileDiff> file_diffs = {};
+    /// `commit_changes`'s result per commit id, filled on demand the first
+    /// time that commit is unfolded (`ensure_commit_changes`, from
+    /// `toggle_current`) and never again: a commit is immutable, so what it
+    /// changed against its parent is too. A commit nobody has unfolded costs
+    /// no tree read at all -- `reload` rebuilds the outline from this map as
+    /// it stands, which is what keeps a 200-commit log cheap to refresh.
+    Map<str, List<CommitFileDiff>> commit_changes_cache = {};
+    /// How many commits `refresh` asks `gitlog.walk` for -- LOG_PAGE at
+    /// first, grown by another LOG_PAGE each time the "load more" row at
+    /// the bottom of the Commits section is activated.
+    int log_limit = LOG_PAGE;
     status.Status last_status = status.Status([], [], []);
     List<gitlog.Entry> log = [];
 }
@@ -799,7 +825,7 @@ pub void State.refresh() {
             message = "status: " + e.to_str();
         }
     }
-    match (gitlog.walk(gitdir, "HEAD", 200)) {
+    match (gitlog.walk(gitdir, "HEAD", log_limit)) {
         case Ok(List<gitlog.Entry> es): {
             log = es;
         }
@@ -827,26 +853,33 @@ pub void State.refresh() {
     }
 }
 
-/// `commit_changes(gitdir, en.commit)` for every entry `refresh()` just put
-/// in `log`, keyed by commit id -- `build_outline`'s own `changes_by_commit`
-/// parameter. A commit whose tree or parent's tree cannot be read (a
-/// truncated history, a shallow clone's boundary) gets an empty file list
-/// rather than failing the whole reload -- the same "a read that fails
-/// reads as nothing" choice `read_worktree`/`index_blob`/`head_blob` already
-/// make elsewhere in this file.
-Map<str, List<CommitFileDiff>> State.commit_file_changes() {
-    Map<str, List<CommitFileDiff>> out = {};
+/// Make sure `commit_changes_cache` has an entry for commit `id` -- computed
+/// now if it is the first time this commit is unfolded, a no-op afterwards.
+/// A commit whose tree or parent's tree cannot be read (a truncated history,
+/// a shallow clone's boundary) gets an empty file list rather than failing
+/// the unfold -- the same "a read that fails reads as nothing" choice
+/// `read_worktree`/`index_blob`/`head_blob` already make elsewhere in this
+/// file. Answers whether anything new was computed, so the caller knows the
+/// outline it is looking at was built without this commit's files and needs
+/// rebuilding.
+bool State.ensure_commit_changes(str id) {
+    if (commit_changes_cache.contains(id)) {
+        return false;
+    }
     for (gitlog.Entry en in log) {
-        match (commit_changes(gitdir, en.commit)) {
-            case Ok(List<CommitFileDiff> cs): {
-                out.set(en.id, cs);
+        if (en.id == id) {
+            match (commit_changes(gitdir, en.commit)) {
+                case Ok(List<CommitFileDiff> cs): {
+                    commit_changes_cache.set(id, cs);
+                }
+                case Err: {
+                    commit_changes_cache.set(id, []);
+                }
             }
-            case Err: {
-                out.set(en.id, []);
-            }
+            return true;
         }
     }
-    return out;
+    return false;
 }
 
 /// Refresh and rebuild the outline, keeping the cursor on the row it was on
@@ -864,8 +897,7 @@ pub void State.reload() {
         }
     }
     refresh();
-    Map<str, List<CommitFileDiff>> changes_by_commit = commit_file_changes();
-    outline = build_outline(last_status, log, changes_by_commit, collapsed, paths, file_diffs);
+    outline = build_outline(last_status, log, commit_changes_cache, collapsed, paths, file_diffs);
     if (keep_id != "") {
         outline.select_id(keep_id);
     }
@@ -875,14 +907,38 @@ pub void State.reload() {
 
 /// Fold or unfold the row under the cursor, remembering the choice so the
 /// next `reload()` (which rebuilds the outline from nothing) respects it.
+///
+/// Unfolding a commit (or its "Files changed" subsection) is also the moment
+/// its file list is first computed -- `ensure_commit_changes` -- and when
+/// that actually computed something, the outline is rebuilt in place from
+/// the now-filled cache (the one on screen was built with an empty list for
+/// this commit) with the cursor kept on the same row by id, the same way
+/// `reload` keeps it. No I/O happens for a fold, or for a commit already
+/// unfolded once.
 pub void State.toggle_current() {
     outline.toggle();
+    str keep_id = "";
+    bool rebuild = false;
     match (outline.current()) {
         case Some(tuioutline.Row r): {
             collapsed.set(r.node.id, !r.node.expanded);
+            keep_id = r.node.id;
+            if (r.node.expanded) {
+                match (commit_id_of_unfoldable(r.node.id)) {
+                    case Some(str cid): {
+                        rebuild = ensure_commit_changes(cid);
+                    }
+                    case None: {
+                    }
+                }
+            }
         }
         case None: {
         }
+    }
+    if (rebuild) {
+        outline = build_outline(last_status, log, commit_changes_cache, collapsed, paths, file_diffs);
+        outline.select_id(keep_id);
     }
     jump.sync_from(outline);
     jump.follow(outline);
@@ -1193,9 +1249,7 @@ pub void State.open_diff(str title, bytes old, bytes new) {
 
 /// Back out of the diff view to the outline -- `backspace`, the same "go
 /// back" key `apps/tui/browse.m31` already uses for leaving a drilled-into
-/// view, and distinct from `commit_open`'s which-key overlay's `Escape`
-/// (that overlay sits *on top of* the outline; the diff view *replaces* it,
-/// closer to `browse.m31`'s directory descent than to a popup).
+/// view, and `q`/`Escape` too (`handle_diff_key`'s own comment has why).
 pub void State.close_diff() {
     diff_open = false;
     diff_binary = false;
@@ -1418,7 +1472,7 @@ List<tuiwidget.Span> State.footer_spans(tuistyle.Theme theme) {
     out.push(tuiwidget.Span("d", style: theme.accent));
     out.push(tuiwidget.Span(" diff  "));
     if (diff_open) {
-        out.push(tuiwidget.Span("backspace", style: theme.accent));
+        out.push(tuiwidget.Span("q/esc/backspace", style: theme.accent));
         out.push(tuiwidget.Span(" back  "));
     }
     out.push(tuiwidget.Span("c", style: theme.accent));
@@ -1428,9 +1482,12 @@ List<tuiwidget.Span> State.footer_spans(tuistyle.Theme theme) {
     out.push(tuiwidget.Span("w", style: theme.accent));
     out.push(tuiwidget.Span(" focus  "));
     out.push(tuiwidget.Span("r", style: theme.accent));
-    out.push(tuiwidget.Span(" refresh  "));
-    out.push(tuiwidget.Span("q", style: theme.accent));
-    out.push(tuiwidget.Span(" quit"));
+    out.push(tuiwidget.Span(" refresh"));
+    if (!diff_open) {
+        out.push(tuiwidget.Span("  "));
+        out.push(tuiwidget.Span("q", style: theme.accent));
+        out.push(tuiwidget.Span(" quit"));
+    }
     return out;
 }
 
@@ -1664,6 +1721,11 @@ void State.handle_enter() {
                 show_diff_current();
                 return;
             }
+            if (r.node.id == LOAD_MORE_ID) {
+                log_limit = log_limit + LOG_PAGE;
+                reload();
+                return;
+            }
         }
         case None: {
         }
@@ -1746,21 +1808,21 @@ tuiapp.Action State.handle_commit_key(term.Code code) {
 }
 
 /// Keys while the diff view is showing: `j`/`k`/the arrows move its cursor
-/// (`DiffView.move`, which is what keeps `at()` meaningful), `q` still quits
-/// the whole program, and `Backspace` is the one new key this task adds --
-/// back out to the outline, `close_diff`, the same "go back" key
-/// `apps/tui/browse.m31`'s own directory descent already uses (see its `up`)
-/// rather than inventing a second convention for the same idea. `Escape`
-/// is deliberately left at its top-level meaning (quit) rather than
-/// special-cased into another "back": the diff view is a drilled-into
-/// document, per `apps/git/design.md`'s "Drill-down as the universal verb",
-/// not a which-key-style overlay like the commit popup, whose `Escape`
-/// aborts it instead.
+/// (`DiffView.move`, which is what keeps `at()` meaningful), and `q`,
+/// `Escape` and `Backspace` all back out to the outline (`close_diff`).
+/// `Backspace` is the "go back" key `apps/tui/browse.m31`'s own directory
+/// descent already uses (see its `up`); `q` and `Escape` join it because a
+/// drilled-into diff is what a reader stepping through history opens and
+/// closes most, and the key that closes everything else they open here (the
+/// commit popup's `Escape`, the program's own `q`) is what their hands reach
+/// for -- quitting the whole program from inside a diff was the one place
+/// that surprised. `q` in the outline still quits.
 tuiapp.Action State.handle_diff_key(term.Code code) {
     match (code) {
         case Char(int c): {
             if (c == 'q') {
-                return tuiapp.Action.Quit;
+                close_diff();
+                return tuiapp.Action.Redraw;
             }
             if (c == 'j') {
                 diff_view.move(1);
@@ -1777,7 +1839,8 @@ tuiapp.Action State.handle_diff_key(term.Code code) {
             return tuiapp.Action.Redraw;
         }
         case Escape: {
-            return tuiapp.Action.Quit;
+            close_diff();
+            return tuiapp.Action.Redraw;
         }
         case Up: {
             diff_view.move(-1);
@@ -1824,6 +1887,22 @@ tuiapp.Action State.handle_diff_key(term.Code code) {
             return tuiapp.Action.Continue;
         }
     }
+}
+
+/// The commit a row id belongs to, if it is a commit's own section row or
+/// its "Files changed" subsection -- the two rows whose unfolding is what
+/// first needs that commit's file list. `commit:<40 hex>` or
+/// `commit:<40 hex>:files`; every other id (a file row, an author/date/
+/// message leaf, any other section) answers `None`.
+Option<str> commit_id_of_unfoldable(str id) {
+    if (!id.starts_with("commit:") || id.size() < 47) {
+        return Option<str>.None;
+    }
+    str cid = id.substr(7, 47);
+    if (id == "commit:" + cid || id == "commit:" + cid + ":files") {
+        return Option<str>.Some(cid);
+    }
+    return Option<str>.None;
 }
 
 /// `path`'s entry in `ix`, if it has one.
