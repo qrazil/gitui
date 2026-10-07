@@ -88,6 +88,13 @@ specifically rather than the no-op it is on an author/date/message row. A
 merge commit diffs against its first parent only (`git log --first-parent
 -p`'s own simplification, not git's full combined-diff format) -- this is
 for stepping through history, not auditing a merge's conflict resolution.
+A commit's file list is computed the first time that commit is unfolded
+and cached for the rest of the session (a commit never changes), so a
+200-commit log costs no tree reads until you ask; the subsection opens
+with the commit, so the review flow is `Enter` on a commit, `Enter` on a
+file, read, and `q`/`Esc`/`Backspace` back to where you were -- inside a
+diff, `q` closes the diff; only the outline's `q` quits. When the log is a
+full page long, a final `… load 200 more commits` row extends it on `Enter`.
 
 Everything is checked against something that is not this program:
 

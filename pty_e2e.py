@@ -454,19 +454,21 @@ def main():
     s9 = Session(binpath, fx9)
     s9.send("jjj")  # row3: commits section
     s9.send("j")  # row4: "second", the most recent commit
-    out = s9.send("\r")  # expand it: author, date, message, Files changed
+    # Unfolding a commit is also what first computes its file list (lazily,
+    # cached per commit -- gitclient.m31's `ensure_commit_changes`), and its
+    # "Files changed" subsection opens with it by default, so one Enter shows
+    # author, date, message, the subsection heading and the file rows.
+    out = s9.send("\r")
     if b"Files changed (2)" in out:
         ok("commit log: expanding a commit shows its own Files changed count")
     else:
         fail("commit log: expanding a commit shows its own Files changed count", repr(out))
-
-    s9.send("jjjj")  # author, date, message ("second"), Files changed section
-    out = s9.send("\r")  # expand Files changed
     if b"M  a.txt  +2 -1" in out and b"A  c.txt  +1 -0" in out:
         ok("commit log: file rows' +insertions -deletions match git diff --numstat")
     else:
         fail("commit log: file rows' +insertions -deletions match git diff --numstat", repr(out))
 
+    s9.send("jjjj")  # author, date, message ("second"), Files changed section
     s9.send("j")  # the "M  a.txt  +2 -1" row
     out = s9.send("\r")  # Enter pops the diff directly -- no `d` needed here
     if b"diff: M  a.txt" in out and b"-line2" in out and b"+CHANGED" in out and b"+line4" in out:
@@ -539,6 +541,57 @@ def main():
                 "commit: a message written by a real interactive editor (ed) over the handed-off terminal is committed",
                 "log=%r rc=%d" % (log_out, log_rc),
             )
+
+    # --- leaving a diff: q and Escape back out, only the outline's q quits --
+    #
+    # One unstaged change is all this needs. The point is the key, not the
+    # diff: `q`/`Escape` inside an open diff used to quit the whole program,
+    # which is the one place a reader stepping through diffs gets surprised
+    # (gitclient.m31's `handle_diff_key`). The session's own exit code at
+    # the end proves the outline's `q` still quits -- `Session.quit` sends
+    # it and waits, and a process that ignored it would be killed instead
+    # and report a nonzero code.
+    fx10 = make_fixture(root, "diffexit")
+    with open(os.path.join(fx10, "f.txt"), "w") as f:
+        f.write("a\nb\n")
+    git(fx10, "add", "-A", env=GIT_ENV)
+    git(fx10, "commit", "-q", "-m", "first", env=GIT_ENV)
+    with open(os.path.join(fx10, "f.txt"), "w") as f:
+        f.write("a\nB\n")
+    # rows: untracked(0), unstaged(1): M f.txt -> row1 unstaged section,
+    # row2 M f.txt.
+    s10 = Session(binpath, fx10)
+    s10.send("j")
+    s10.send("j")
+    out = s10.send("d")
+    if b"diff: M  f.txt" in out and b"+B" in out:
+        ok("diff exit: d opens the diff (setup)")
+    else:
+        fail("diff exit: d opens the diff (setup)", repr(out))
+    out = s10.send("q")
+    if s10.proc.poll() is None and b"Unstaged changes" in out and b"diff: M  f.txt" not in out:
+        ok("diff exit: q closes the diff and returns to the outline instead of quitting")
+    else:
+        fail("diff exit: q closes the diff and returns to the outline instead of quitting", "alive=%s out=%r" % (s10.proc.poll() is None, out))
+    out = s10.send("d")
+    if b"diff: M  f.txt" in out:
+        ok("diff exit: the diff reopens after q")
+    else:
+        fail("diff exit: the diff reopens after q", repr(out))
+    # A lone ESC is a whole key only once nothing follows it -- the reader
+    # resolves that with a timeout (lib/term.m31's `Decoder.flush`), so give
+    # it a longer drain than a printable key needs.
+    out = s10.send("\x1b")
+    out += s10.drain(0.8)
+    if s10.proc.poll() is None and b"Unstaged changes" in out and b"diff: M  f.txt" not in out:
+        ok("diff exit: Escape closes the diff and returns to the outline instead of quitting")
+    else:
+        fail("diff exit: Escape closes the diff and returns to the outline instead of quitting", "alive=%s out=%r" % (s10.proc.poll() is None, out))
+    rc = s10.quit()
+    if rc == 0:
+        ok("diff exit: q in the outline still quits cleanly (exit 0)")
+    else:
+        fail("diff exit: q in the outline still quits cleanly (exit 0)", "rc=%r" % rc)
 
     return failures
 

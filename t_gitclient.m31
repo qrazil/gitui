@@ -109,17 +109,55 @@ for (tuioutline.Row r in o2.rows()) {
     }
 }
 counter.check("outline: an expanded commit shows its own Files changed section, counting changes' entries", files_label == "Files changed (1)", files_label);
-counter.check("outline: a commit's Files changed section is itself collapsed by default", !saw_file_row, "file row leaked before Files changed was expanded");
-// Recorded as expanded too, the same build must show the file row itself.
-collapsed.set("commit:1111111111111111111111111111111111111111:files", false);
-tuioutline.Outline o2b = gitclient.build_outline(st, log, changes, collapsed, paths, file_diffs);
+counter.check("outline: a commit's Files changed section is open by default once the commit is", saw_file_row, "file row missing with the commit expanded and no fold recorded");
 str file_label = "";
-for (tuioutline.Row r in o2b.rows()) {
+for (tuioutline.Row r in o2.rows()) {
     if (r.node.id == "commit:1111111111111111111111111111111111111111:file:0") {
         file_label = r.node.label;
     }
 }
 counter.check("outline: a commit's file row shows mark, path and +insertions -deletions", file_label == "M  x.txt  +3 -1", file_label);
+// A fold the user recorded on the Files changed section itself still wins
+// over that default, the same way every other section's does.
+collapsed.set("commit:1111111111111111111111111111111111111111:files", true);
+tuioutline.Outline o2b = gitclient.build_outline(st, log, changes, collapsed, paths, file_diffs);
+bool saw_file_row_folded = false;
+for (tuioutline.Row r in o2b.rows()) {
+    if (r.node.id == "commit:1111111111111111111111111111111111111111:file:0") {
+        saw_file_row_folded = true;
+    }
+}
+counter.check("outline: a recorded fold on Files changed hides its file rows again", !saw_file_row_folded, "file row shown despite a recorded fold");
+collapsed.set("commit:1111111111111111111111111111111111111111:files", false);
+// A log as long as one page may have more behind it: the Commits section
+// then ends in the "load more" row (and says so in its count); a shorter
+// log has no such row -- `o` above, one commit, proved the absence already
+// via its exact id list.
+List<gitlog.Entry> long_log = [];
+int li = 0;
+while (li < 200) {
+    str hex = li.to_str();
+    while (hex.size() < 40) {
+        hex = "0" + hex;
+    }
+    long_log.push(gitlog.Entry(hex, c1));
+    li = li + 1;
+}
+Map<str, bool> collapsed_long = {};
+Map<str, bytes> paths_long = {};
+Map<str, List<gitclient.CommitFileDiff>> changes_long = {};
+Map<str, gitclient.CommitFileDiff> file_diffs_long = {};
+tuioutline.Outline o_long = gitclient.build_outline(st, long_log, changes_long, collapsed_long, paths_long, file_diffs_long);
+List<tuioutline.Row> long_rows = o_long.rows();
+str last_id = long_rows[long_rows.size() - 1].node.id;
+str commits_label_long = "";
+for (tuioutline.Row r in long_rows) {
+    if (r.node.id == "commits") {
+        commits_label_long = r.node.label;
+    }
+}
+counter.check("outline: a page-long log ends its Commits section with the load-more row", last_id == "commits:more", last_id);
+counter.check("outline: a page-long log's Commits count says there may be more", commits_label_long == "Commits (200+)", commits_label_long);
 match (file_diffs.get("commit:1111111111111111111111111111111111111111:file:0")) {
     case Some(gitclient.CommitFileDiff d): {
         counter.check("outline: file_diffs recovers the same CommitFileDiff show_diff_current reads on Enter", d.path.utf8().or("") == "x.txt", d.path.utf8().or("<none>"));
