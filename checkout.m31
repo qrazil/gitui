@@ -1,0 +1,702 @@
+// Writing the working tree from a tree -- the primitive `design.md` named as
+// the missing piece behind branch switching ("no 'write the working tree
+// from a tree' primitive exists"), and `git checkout <branch>` built on it.
+//
+// What `checkout` does, in git's own order and with git's own refusals:
+//
+//   1. Flatten HEAD's tree and the target commit's tree to `path -> (mode,
+//      blob)` and keep only the paths that differ -- a path identical on both
+//      sides is never touched, so a local modification to it survives the
+//      switch exactly as it does under real git.
+//   2. Refuse, writing nothing, if any differing path is dirty: staged or
+//      unstaged changes (`status.status`'s own two lists), or an untracked
+//      file already sitting where the target needs to write one. Refuse a
+//      submodule (gitlink) outright: this program has no notion of a nested
+//      repository. One named `Error` per refusal, so the client can say why.
+//   3. Write exactly the differing paths: create or overwrite a file with the
+//      target's mode (`0o100755` executable, `0o100644` plain) by removing
+//      the old one first and creating anew with that permission -- `io.open`'s
+//      `perm` only applies to a file it creates, and there is no `chmod` in
+//      the stdlib; a symlink (`0o120000`) via `fs.symlink`; a deletion via
+//      `fs.remove`, pruning directories left empty above it.
+//   4. Update the index for those same paths -- `index.from_stat` on each
+//      written file, exactly as `gitclient.stage_path` builds an entry;
+//      deleted paths dropped -- leaving every other entry (and its cached
+//      stat fields) as it was, which is what keeps unrelated local changes
+//      intact across the switch.
+//   5. Move HEAD: symbolically to the branch (`refs.update_symbolic`), or
+//      directly to the commit for a detached checkout (`refs.update`).
+//
+// A tree entry whose name is not UTF-8 is left out of the comparison, the
+// same skip `status.m31` and `object.flatten_tree` already make -- a path
+// this program cannot spell is one it should not be deleting or writing.
+//
+// `branches` lists `refs/heads/*`, the current one marked, for the client's
+// "Branches" section; `create_branch` is `git branch <name>` + `git
+// switch`: a new ref at HEAD's commit and HEAD moved onto it, nothing in the
+// working tree or index touched -- the one checkout that never needs step 3.
+
+import fs;
+import index;
+import io;
+import object;
+import refs;
+import status;
+
+/// Why a checkout did not happen (nothing written) or did not finish.
+pub enum Error {
+    /// A path the switch must rewrite has staged or unstaged changes.
+    Dirty;
+    /// An untracked file is already where the target tree needs to write.
+    UntrackedCollision;
+    /// The switch would have to touch a submodule, which this cannot do.
+    Submodule;
+    /// The target is not a commit.
+    NotACommit;
+    /// A working-tree file could not be written or removed.
+    Io;
+    /// An object could not be read.
+    Object(object.Error);
+    /// The index could not be written.
+    Index(index.Error);
+    /// HEAD, the branch, or the ref listing could not be read or written.
+    Refs(refs.Error);
+    /// `status.status` itself failed, so dirtiness could not be checked.
+    Status(status.Error);
+    /// A branch of that name already exists (`create_branch`).
+    BranchExists;
+    /// Not a name a branch can have (`create_branch`).
+    BadName;
+}
+
+pub str Error.to_str() {
+    match (this) {
+        case Dirty: {
+            return "local changes to a file the switch would overwrite -- commit, stage elsewhere, or discard them first";
+        }
+        case UntrackedCollision: {
+            return "an untracked file is in the way of a file the switch would write";
+        }
+        case Submodule: {
+            return "the switch would touch a submodule, which this client cannot check out";
+        }
+        case NotACommit: {
+            return "the target is not a commit";
+        }
+        case Io: {
+            return "a working-tree file could not be written or removed";
+        }
+        case Object(object.Error e): {
+            return "object: " + e.to_str();
+        }
+        case Index(index.Error e): {
+            return "index: " + e.to_str();
+        }
+        case Refs(refs.Error e): {
+            return "refs: " + e.to_str();
+        }
+        case Status(status.Error e): {
+            return "status: " + e.to_str();
+        }
+        case BranchExists: {
+            return "a branch of that name already exists";
+        }
+        case BadName: {
+            return "not a valid branch name";
+        }
+    }
+}
+
+/// One local branch: `name` is the short name (`main`), `full` the ref
+/// (`refs/heads/main`), `id` its tip, `current` whether HEAD is on it.
+pub type Branch {
+    pub str name;
+    pub str full;
+    pub str id;
+    pub bool current;
+}
+
+/// What `checkout` touched: how many paths it wrote and how many it removed.
+pub type Summary {
+    pub int written;
+    pub int removed;
+}
+
+/// Every local branch, sorted by name, the current one marked -- `HEAD`
+/// pointing at an unborn branch marks that name current too, since that is
+/// where a commit would land.
+pub Result<List<Branch>, Error> branches(str gitdir) {
+    List<refs.Ref> all = [];
+    match (refs.all(gitdir)) {
+        case Ok(List<refs.Ref> rs): {
+            all = rs;
+        }
+        case Err(refs.Error e): {
+            return Result<List<Branch>, Error>.Err(Error.Refs(e));
+        }
+    }
+    str cur = "";
+    match (refs.head(gitdir)) {
+        case Ok(refs.Head h): {
+            match (h) {
+                case Born(str name, str id): {
+                    cur = name;
+                }
+                case Unborn(str name): {
+                    cur = name;
+                }
+                case Detached(str id): {
+                }
+            }
+        }
+        case Err(refs.Error e): {
+            return Result<List<Branch>, Error>.Err(Error.Refs(e));
+        }
+    }
+    str prefix = "refs/heads/";
+    Map<str, str> ids = {};
+    List<str> names = [];
+    for (refs.Ref r in all) {
+        if (r.name.starts_with(prefix)) {
+            names.push(r.name);
+            ids.set(r.name, r.id);
+        }
+    }
+    names.sort();
+    List<Branch> out = [];
+    for (str full in names) {
+        out.push(Branch(full.substr(prefix.size(), full.size()), full, ids.get(full).or(""), full == cur));
+    }
+    return Result<List<Branch>, Error>.Ok(out);
+}
+
+/// `git switch -c <name>`: a new branch at HEAD's commit, and HEAD moved
+/// onto it. The working tree and the index are untouched -- the new branch's
+/// tree IS HEAD's tree, so there is nothing to write. Refuses a name that
+/// already exists, and a name git itself would refuse (empty, a leading `-`,
+/// `..`, whitespace, a control character, `.lock`, a slash at either end).
+pub Result<bool, Error> create_branch(str gitdir, str name) {
+    if (!plausible_branch_name(name)) {
+        return Result<bool, Error>.Err(Error.BadName);
+    }
+    str full = "refs/heads/" + name;
+    if (refs.exists(gitdir, full)) {
+        return Result<bool, Error>.Err(Error.BranchExists);
+    }
+    str head_id = "";
+    match (refs.head(gitdir)) {
+        case Ok(refs.Head h): {
+            match (h) {
+                case Born(str n, str id): {
+                    head_id = id;
+                }
+                case Detached(str id): {
+                    head_id = id;
+                }
+                case Unborn(str n): {
+                    // Nothing committed yet: the new branch is unborn too, so
+                    // only HEAD moves. `git switch -c` on a fresh repository
+                    // does exactly this.
+                    match (refs.update_symbolic(gitdir, "HEAD", full)) {
+                        case Ok: {
+                            return Result<bool, Error>.Ok(true);
+                        }
+                        case Err(refs.Error e): {
+                            return Result<bool, Error>.Err(Error.Refs(e));
+                        }
+                    }
+                }
+            }
+        }
+        case Err(refs.Error e): {
+            return Result<bool, Error>.Err(Error.Refs(e));
+        }
+    }
+    match (refs.update(gitdir, full, head_id, Option<str>.Some(""))) {
+        case Ok: {
+        }
+        case Err(refs.Error e): {
+            return Result<bool, Error>.Err(Error.Refs(e));
+        }
+    }
+    match (refs.update_symbolic(gitdir, "HEAD", full)) {
+        case Ok: {
+            return Result<bool, Error>.Ok(true);
+        }
+        case Err(refs.Error e): {
+            return Result<bool, Error>.Err(Error.Refs(e));
+        }
+    }
+}
+
+bool plausible_branch_name(str name) {
+    if (name == "" || name == "HEAD" || name.starts_with("-") || name.starts_with("/") || name.ends_with("/") || name.ends_with(".lock") || name.ends_with(".")) {
+        return false;
+    }
+    if (name.contains("..") || name.contains("//") || name.contains("@{") || name.contains("/.")) {
+        return false;
+    }
+    for (int i in 0 .. name.size()) {
+        int c = name.byte_at(i);
+        if (c <= 32 || c == 127 || c == '~' || c == '^' || c == ':' || c == '?' || c == '*' || c == '[' || c == '\\') {
+            return false;
+        }
+    }
+    return true;
+}
+
+/// Check out `target_commit_id`: write the working tree and the index to its
+/// tree (only the paths that differ from HEAD's tree), then point HEAD at
+/// `target_ref` (a full ref name, `refs/heads/<branch>`), or directly at the
+/// commit when `target_ref` is `""` -- a detached checkout. Refuses, writing
+/// nothing, per the module header's rules; on success the repository is in
+/// exactly the state `git checkout` would leave: `git status` clean for every
+/// path the switch touched, the index matching the target tree for them,
+/// HEAD moved.
+pub Result<Summary, Error> checkout(str gitdir, str worktree, str target_commit_id, str target_ref) {
+    Map<str, TreeEntry> target = {};
+    match (tree_of_commit(gitdir, target_commit_id)) {
+        case Ok(Map<str, TreeEntry> t): {
+            target = t;
+        }
+        case Err(Error e): {
+            return Result<Summary, Error>.Err(e);
+        }
+    }
+    Map<str, TreeEntry> current = {};
+    match (refs.head(gitdir)) {
+        case Ok(refs.Head h): {
+            match (h) {
+                case Born(str name, str id): {
+                    match (tree_of_commit(gitdir, id)) {
+                        case Ok(Map<str, TreeEntry> t): {
+                            current = t;
+                        }
+                        case Err(Error e): {
+                            return Result<Summary, Error>.Err(e);
+                        }
+                    }
+                }
+                case Detached(str id): {
+                    match (tree_of_commit(gitdir, id)) {
+                        case Ok(Map<str, TreeEntry> t): {
+                            current = t;
+                        }
+                        case Err(Error e): {
+                            return Result<Summary, Error>.Err(e);
+                        }
+                    }
+                }
+                case Unborn(str name): {
+                }
+            }
+        }
+        case Err(refs.Error e): {
+            return Result<Summary, Error>.Err(Error.Refs(e));
+        }
+    }
+    // --- 1. the paths that differ ----------------------------------------
+    List<str> paths = [];
+    for (str p in target.keys()) {
+        paths.push(p);
+    }
+    for (str p in current.keys()) {
+        if (!target.contains(p)) {
+            paths.push(p);
+        }
+    }
+    paths.sort();
+    List<Step> plan = [];
+    for (str p in paths) {
+        TreeEntry old = current.get(p).or(TreeEntry(0, ""));
+        TreeEntry new = target.get(p).or(TreeEntry(0, ""));
+        if (old.mode == new.mode && old.id == new.id) {
+            continue;
+        }
+        if (old.mode >> 12 == 0o16 || new.mode >> 12 == 0o16) {
+            return Result<Summary, Error>.Err(Error.Submodule);
+        }
+        plan.push(Step(p, old, new));
+    }
+    // --- 2. refuse before touching anything ------------------------------
+    Map<str, bool> dirty = {};
+    Map<str, bool> untracked = {};
+    match (status.status(gitdir, worktree)) {
+        case Ok(status.Status st): {
+            for (status.Delta d in st.staged) {
+                dirty.set(d.path.utf8().or(""), true);
+            }
+            for (status.Delta d in st.unstaged) {
+                dirty.set(d.path.utf8().or(""), true);
+            }
+            for (bytes u in st.untracked) {
+                untracked.set(u.utf8().or(""), true);
+            }
+        }
+        case Err(status.Error e): {
+            return Result<Summary, Error>.Err(Error.Status(e));
+        }
+    }
+    for (Step s in plan) {
+        if (dirty.contains(s.path)) {
+            return Result<Summary, Error>.Err(Error.Dirty);
+        }
+        if (s.old.id == "" && s.new.id != "") {
+            // Nothing in HEAD at this path, so anything on disk here is
+            // untracked (or ignored -- git overwrites an ignored file
+            // silently; this refuses it too, the stricter and safer choice
+            // for a client whose whole promise is never losing a file).
+            str full = fs.join(worktree, s.path);
+            if (untracked.contains(s.path) || fs.exists(full) || fs.is_link(full)) {
+                return Result<Summary, Error>.Err(Error.UntrackedCollision);
+            }
+        }
+    }
+    // --- 3. the working tree ---------------------------------------------
+    index.Index ix = index.Index([]);
+    match (index.read(gitdir)) {
+        case Ok(index.Index got): {
+            ix = got;
+        }
+        case Err(index.Error e): {
+            match (e) {
+                case NotFound: {
+                }
+                case Io: {
+                    return Result<Summary, Error>.Err(Error.Index(e));
+                }
+                case Truncated: {
+                    return Result<Summary, Error>.Err(Error.Index(e));
+                }
+                case BadSignature: {
+                    return Result<Summary, Error>.Err(Error.Index(e));
+                }
+                case BadVersion: {
+                    return Result<Summary, Error>.Err(Error.Index(e));
+                }
+                case BadExtension: {
+                    return Result<Summary, Error>.Err(Error.Index(e));
+                }
+                case Checksum: {
+                    return Result<Summary, Error>.Err(Error.Index(e));
+                }
+            }
+        }
+    }
+    int written = 0;
+    int removed = 0;
+    for (Step s in plan) {
+        str full = fs.join(worktree, s.path);
+        if (s.new.id == "") {
+            match (remove_path(worktree, full)) {
+                case Ok: {
+                }
+                case Err(Error e): {
+                    return Result<Summary, Error>.Err(e);
+                }
+            }
+            drop_entry(ix, s.path.to_bytes());
+            removed = removed + 1;
+            continue;
+        }
+        bytes content = [];
+        match (object.read(gitdir, s.new.id)) {
+            case Ok(object.Object o): {
+                content = o.raw;
+            }
+            case Err(object.Error e): {
+                return Result<Summary, Error>.Err(Error.Object(e));
+            }
+        }
+        match (write_path(full, content, s.new.mode)) {
+            case Ok: {
+            }
+            case Err(Error e): {
+                return Result<Summary, Error>.Err(e);
+            }
+        }
+        // --- 4. its index entry ------------------------------------------
+        index.Entry entry = index.Entry(0, 0, 0, 0, 0, 0, s.new.mode, 0, 0, content.size(), s.new.id, 0, false, s.path.to_bytes());
+        if (s.new.mode >> 12 != 0o12) {
+            match (fs.stat(full)) {
+                case Ok(fs.Stat st): {
+                    entry = index.from_stat(s.path.to_bytes(), st, false, s.new.id);
+                }
+                case Err(io.Error e): {
+                    return Result<Summary, Error>.Err(Error.Io);
+                }
+            }
+        }
+        put_entry(ix, entry);
+        written = written + 1;
+    }
+    match (index.write(gitdir, ix)) {
+        case Ok: {
+        }
+        case Err(index.Error e): {
+            return Result<Summary, Error>.Err(Error.Index(e));
+        }
+    }
+    // --- 5. HEAD ---------------------------------------------------------
+    if (target_ref == "") {
+        match (refs.update(gitdir, "HEAD", target_commit_id, Option<str>.None)) {
+            case Ok: {
+            }
+            case Err(refs.Error e): {
+                return Result<Summary, Error>.Err(Error.Refs(e));
+            }
+        }
+    } else {
+        match (refs.update_symbolic(gitdir, "HEAD", target_ref)) {
+            case Ok: {
+            }
+            case Err(refs.Error e): {
+                return Result<Summary, Error>.Err(Error.Refs(e));
+            }
+        }
+    }
+    return Result<Summary, Error>.Ok(Summary(written, removed));
+}
+
+// One blob in a flattened tree: its mode and name. `mode` 0 / `id` "" is
+// "absent", the value `checkout` compares against for an added or deleted
+// path.
+type TreeEntry {
+    int mode;
+    str id;
+}
+
+// One path `checkout` will touch: what is there now, what should be.
+type Step {
+    str path;
+    TreeEntry old;
+    TreeEntry new;
+}
+
+// The commit's tree, flattened. `object.flatten_tree` drops the mode, and the
+// mode is exactly what a checkout needs (an executable bit changing is a
+// change; a symlink is written differently from a file), so this is its own
+// walk, the same shape with the mode kept.
+Result<Map<str, TreeEntry>, Error> tree_of_commit(str gitdir, str commit_id) {
+    str tree_id = "";
+    match (object.read(gitdir, commit_id)) {
+        case Ok(object.Object o): {
+            match (o.body) {
+                case Commit(object.Commit c): {
+                    tree_id = c.tree;
+                }
+                case Blob: {
+                    return Result<Map<str, TreeEntry>, Error>.Err(Error.NotACommit);
+                }
+                case Tree(List<object.Entry> es): {
+                    return Result<Map<str, TreeEntry>, Error>.Err(Error.NotACommit);
+                }
+                case Tag: {
+                    return Result<Map<str, TreeEntry>, Error>.Err(Error.NotACommit);
+                }
+            }
+        }
+        case Err(object.Error e): {
+            return Result<Map<str, TreeEntry>, Error>.Err(Error.Object(e));
+        }
+    }
+    Map<str, TreeEntry> out = {};
+    match (walk(gitdir, tree_id, "", out)) {
+        case Ok: {
+            return Result<Map<str, TreeEntry>, Error>.Ok(out);
+        }
+        case Err(Error e): {
+            return Result<Map<str, TreeEntry>, Error>.Err(e);
+        }
+    }
+}
+
+Result<bool, Error> walk(str gitdir, str id, str prefix, Map<str, TreeEntry> out) {
+    match (object.read(gitdir, id)) {
+        case Ok(object.Object o): {
+            match (o.body) {
+                case Tree(List<object.Entry> es): {
+                    for (object.Entry e in es) {
+                        match (e.name.utf8()) {
+                            case Some(str name): {
+                                str full = name;
+                                if (prefix != "") {
+                                    full = prefix + "/" + name;
+                                }
+                                if (e.is_tree()) {
+                                    walk(gitdir, e.id, full, out)?;
+                                } else {
+                                    out.set(full, TreeEntry(e.mode, e.id));
+                                }
+                            }
+                            case None: {
+                            }
+                        }
+                    }
+                    return Result<bool, Error>.Ok(true);
+                }
+                case Blob: {
+                    return Result<bool, Error>.Err(Error.Object(object.Error.BadTree));
+                }
+                case Commit: {
+                    return Result<bool, Error>.Err(Error.Object(object.Error.BadTree));
+                }
+                case Tag: {
+                    return Result<bool, Error>.Err(Error.Object(object.Error.BadTree));
+                }
+            }
+        }
+        case Err(object.Error e): {
+            return Result<bool, Error>.Err(Error.Object(e));
+        }
+    }
+}
+
+// Write `content` at `full` with git's `mode`: a symlink for 0o120000,
+// otherwise a file created with 0o755 or 0o644 (less the umask, as git's own
+// 0o777/0o666 are). Any file already there is removed first -- `io.open`'s
+// permission only applies to a file it creates, so an executable bit that
+// changed would otherwise be kept as it was.
+Result<bool, Error> write_path(str full, bytes content, int mode) {
+    str parent = parent_dir(full);
+    if (parent != "") {
+        match (fs.makedirs(parent)) {
+            case Ok: {
+            }
+            case Err(io.Error e): {
+                return Result<bool, Error>.Err(Error.Io);
+            }
+        }
+    }
+    if (fs.exists(full) || fs.is_link(full)) {
+        match (fs.remove(full)) {
+            case Ok: {
+            }
+            case Err(io.Error e): {
+                return Result<bool, Error>.Err(Error.Io);
+            }
+        }
+    }
+    if (mode >> 12 == 0o12) {
+        str target = "";
+        match (content.utf8()) {
+            case Some(str t): {
+                target = t;
+            }
+            case None: {
+                return Result<bool, Error>.Err(Error.Io);
+            }
+        }
+        match (fs.symlink(target, full)) {
+            case Ok: {
+                return Result<bool, Error>.Ok(true);
+            }
+            case Err(io.Error e): {
+                return Result<bool, Error>.Err(Error.Io);
+            }
+        }
+    }
+    int perm = 0o644;
+    if (mode & 0o111 != 0) {
+        perm = 0o755;
+    }
+    match (io.open(full, mode: io.Mode.Write, perm: perm)) {
+        case Ok(io.File f): {
+            match (f.write(content)) {
+                case Ok: {
+                }
+                case Err(io.Error e): {
+                    return Result<bool, Error>.Err(Error.Io);
+                }
+            }
+            match (f.close()) {
+                case Ok: {
+                    return Result<bool, Error>.Ok(true);
+                }
+                case Err(io.Error e): {
+                    return Result<bool, Error>.Err(Error.Io);
+                }
+            }
+        }
+        case Err(io.Error e): {
+            return Result<bool, Error>.Err(Error.Io);
+        }
+    }
+}
+
+// Remove the file at `full`, then every directory above it that is left
+// empty, up to (never including) the working tree's root -- what `git
+// checkout` does when a switch deletes the last file in a directory.
+Result<bool, Error> remove_path(str worktree, str full) {
+    if (fs.exists(full) || fs.is_link(full)) {
+        match (fs.remove(full)) {
+            case Ok: {
+            }
+            case Err(io.Error e): {
+                return Result<bool, Error>.Err(Error.Io);
+            }
+        }
+    }
+    str dir = parent_dir(full);
+    str root = fs.join(worktree, "");
+    while (dir != "" && dir != worktree && dir != root && dir.starts_with(worktree)) {
+        match (fs.rmdir(dir)) {
+            case Ok: {
+            }
+            case Err(io.Error e): {
+                return Result<bool, Error>.Ok(true);
+            }
+        }
+        dir = parent_dir(dir);
+    }
+    return Result<bool, Error>.Ok(true);
+}
+
+// Everything before the last `/`, or `""` when there is none.
+str parent_dir(str p) {
+    int cut = -1;
+    for (int i in 0 .. p.size()) {
+        if (p.byte_at(i) == '/') {
+            cut = i;
+        }
+    }
+    if (cut <= 0) {
+        return "";
+    }
+    return p.substr(0, cut);
+}
+
+void put_entry(index.Index ix, index.Entry e) {
+    int i = 0;
+    while (i < ix.entries.size()) {
+        if (same_bytes(ix.entries[i].path, e.path)) {
+            ix.entries[i] = e;
+            return;
+        }
+        i = i + 1;
+    }
+    ix.entries.push(e);
+}
+
+void drop_entry(index.Index ix, bytes path) {
+    int i = 0;
+    while (i < ix.entries.size()) {
+        if (same_bytes(ix.entries[i].path, path)) {
+            ix.entries.remove_at(i);
+            return;
+        }
+        i = i + 1;
+    }
+}
+
+bool same_bytes(bytes a, bytes b) {
+    if (a.size() != b.size()) {
+        return false;
+    }
+    for (int i in 0 .. a.size()) {
+        if (a[i] != b[i]) {
+            return false;
+        }
+    }
+    return true;
+}

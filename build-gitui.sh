@@ -76,7 +76,7 @@ cp "$TUI_ROOT/tuiapp.m31" "$TUI_ROOT/tuibuf.m31" "$TUI_ROOT/tuidiff.m31" \
     "$TUI_ROOT/tuiscroll.m31" "$TUI_ROOT/tuistyle.m31" "$TUI_ROOT/tuitext.m31" \
     "$TUI_ROOT/tuiwidget.m31" \
     repo.m31 sha1.m31 zlib.m31 pack.m31 object.m31 \
-    refs.m31 index.m31 gitignore.m31 status.m31 \
+    refs.m31 index.m31 gitignore.m31 status.m31 checkout.m31 \
     gitlog.m31 hunks.m31 patch.m31 gitclient.m31 gitui.m31 \
     "$stage/"
 

@@ -36,7 +36,7 @@ build_tui() {
         "$TUI_ROOT/tuimenu.m31" "$TUI_ROOT/tuioutline.m31" "$TUI_ROOT/tuiscroll.m31" \
         "$TUI_ROOT/tuistyle.m31" "$TUI_ROOT/tuitext.m31" "$TUI_ROOT/tuiwidget.m31" \
         repo.m31 sha1.m31 zlib.m31 pack.m31 object.m31 \
-        refs.m31 index.m31 gitignore.m31 status.m31 \
+        refs.m31 index.m31 gitignore.m31 status.m31 checkout.m31 \
         gitlog.m31 hunks.m31 patch.m31 \
         gitclient.m31 "$name.m31" "$stage/"
     if ! "$LANGC" --emit-c "$stage/$name.m31" -o "$WORK/$name.c" 2>"$WORK/$name.diag"; then

@@ -32,6 +32,7 @@ bash build-gitui.sh -o ourgitui    # not build.sh -- see build-gitui.sh's own he
 | `git.m31` | the read-only CLI |
 | `index.m31` | `.git/index`: read, write, a fresh entry from `fs.stat` |
 | `status.m31` | working-tree status: staged, unstaged, untracked |
+| `checkout.m31` | local branches, switching branches (the working-tree-writing primitive: refuses on local changes in the way), creating a branch |
 | `hunks.m31` | `lib/diff.m31`'s edit script, grouped into qrazil/tui's `tuidiffview.Hunk`/`Line` with context; `spans` is the one definition of where each hunk starts and ends |
 | `patch.m31` | apply or revert exactly one hunk of a diff, byte for byte -- what the diff view's `s`/`u` stage and unstage with |
 | `gitlog.m31` | the commit-history walk, shared by `git.m31 -log` and `gitui.m31` |
@@ -80,7 +81,7 @@ hunk of a staged diff unstages exactly that hunk (`git reset -p`), the file
 then showing as partially staged (`MM`) the way git shows it; the index blob
 is built by `patch.m31` over the real `diff.Op` bytes, never the rendered
 text, and checked against real `git apply --cached` byte for byte
-(`test_gitui.sh`). Push/pull, checkout and rebase are each a named,
+(`test_gitui.sh`). Push/pull and rebase are each a named,
 deliberate gap in `apps/git/design.md`, not an oversight here.
 
 Discarding and amending, both checked against the real git command each
@@ -100,6 +101,17 @@ One limit, named in `discard_path`'s own comment: `lib/fs.m31` has no
 `chmod`, so an executable that was deleted and then discarded comes back
 without its executable bit (one still on disk is rewritten in place and
 keeps it).
+
+Branches: the last outline section lists every local branch (current one
+starred, tip short id and subject). `b` opens a which-key overlay: `c`
+checks out the branch under the cursor, `n` makes a new branch at `HEAD`
+(its name read from a file you edit in `$EDITOR`) and switches to it, `a`
+aborts. A checkout diffs the two trees and writes only the paths that
+differ (modes, symlinks, deletes with empty directories pruned), rewrites
+the index entries to match, and moves `HEAD`. It refuses, writing nothing,
+if a differing path has staged or unstaged changes, if an untracked file is
+in the way, or if either side holds a submodule; the reason shows in the
+message line. Checked against real git in `test_checkout.sh`.
 
 Each commit in the log also expands into its own "Files changed" list --
 one row per path changed against the commit's first parent (the empty tree,
