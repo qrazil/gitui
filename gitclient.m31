@@ -73,7 +73,9 @@
 import checkout;
 import date;
 import fs;
+import gitconfig;
 import gitlog;
+import httppush;
 import hunks;
 import patch;
 import index;
@@ -805,6 +807,8 @@ pub type State {
     /// serves both the commit message and the new-branch name.
     bool editor_for_branch = false;
     List<BranchRow> branch_rows = [];
+    /// The `P` which-key overlay (push), open until a choice or `Escape`.
+    pub bool push_open = false;
     /// Set by `edit_message` and read by `gitui.m31`'s own top-level driver
     /// after `tuiapp.Loop.run` returns: true means the loop stopped so
     /// `$EDITOR` could have the terminal, not because the operator pressed
@@ -2294,6 +2298,8 @@ List<tuiwidget.Span> State.footer_spans(tuistyle.Theme theme) {
     out.push(tuiwidget.Span(" commit  "));
     out.push(tuiwidget.Span("b", style: theme.accent));
     out.push(tuiwidget.Span(" branch  "));
+    out.push(tuiwidget.Span("P", style: theme.accent));
+    out.push(tuiwidget.Span(" push  "));
     out.push(tuiwidget.Span("J", style: theme.accent));
     out.push(tuiwidget.Span(" jump  "));
     out.push(tuiwidget.Span("w", style: theme.accent));
@@ -2373,6 +2379,10 @@ pub void State.draw(tuibuf.Buffer buf, tuigeom.Rect area) {
         tuimenu.WhichKey bk = tuimenu.WhichKey("branch", [tuimenu.Item("c", "check out the branch under the cursor"), tuimenu.Item("n", "new branch from HEAD: name it in $EDITOR, then switch to it"), tuimenu.Item("a", "abort")]);
         bk.render(buf, body);
     }
+    if (push_open) {
+        tuimenu.WhichKey wk = tuimenu.WhichKey("push", [tuimenu.Item("p", "push current branch to origin (fast-forward only)")]);
+        wk.render(buf, body);
+    }
 }
 
 /// The diff view, in place of the outline: a bordered block naming the file
@@ -2421,6 +2431,9 @@ tuiapp.Action State.handle_key(term.Code code) {
     }
     if (branch_open) {
         return handle_branch_key(code);
+    }
+    if (push_open) {
+        return handle_push_key(code);
     }
     if (diff_open) {
         return handle_diff_key(code);
@@ -2530,6 +2543,10 @@ tuiapp.Action State.handle_char(int c) {
         branch_open = true;
         return tuiapp.Action.Redraw;
     }
+    if (c == 'P') {
+        push_open = true;
+        return tuiapp.Action.Redraw;
+    }
     if (c == 'r') {
         reload();
         return tuiapp.Action.Redraw;
@@ -2583,6 +2600,128 @@ void State.handle_enter() {
         }
     }
     toggle_current();
+}
+
+/// Push the current branch to the same-named branch on `origin`, over
+/// smart HTTP, fast-forward only. The outcome -- success or the reason it
+/// did not happen -- is the status line's message; a password is never part
+/// of it (`httppush.parse_remote` strips it from the URL before anything
+/// else sees the URL).
+pub void State.push_current() {
+    push_open = false;
+    str refname = "";
+    str id = "";
+    match (refs.head(gitdir)) {
+        case Ok(refs.Head h): {
+            match (h) {
+                case Born(str name, str oid): {
+                    refname = name;
+                    id = oid;
+                }
+                case Unborn(str name): {
+                    message = "push: " + name + " has no commits yet";
+                    return;
+                }
+                case Detached(str oid): {
+                    message = "push: HEAD is detached; check out a branch first";
+                    return;
+                }
+            }
+        }
+        case Err(refs.Error e): {
+            message = "push: " + e.to_str();
+            return;
+        }
+    }
+    Option<str> url = gitconfig.get(gitdir, "remote", "origin", "url");
+    if (!url.is_some()) {
+        message = "push: no remote 'origin' in .git/config";
+        return;
+    }
+    httppush.Remote remote = httppush.Remote("", Option<httppush.Credentials>.None);
+    match (httppush.parse_remote(url.or(""))) {
+        case Ok(httppush.Remote r): {
+            remote = r;
+        }
+        case Err(httppush.Error e): {
+            message = "push: " + e.to_str();
+            return;
+        }
+    }
+    match (httppush.push(gitdir, remote, refname, id)) {
+        case Ok(httppush.Report rep): {
+            if (rep.ok) {
+                message = "pushed " + refname + " to origin";
+            } else {
+                message = "push refused by origin: " + rep.reason;
+            }
+        }
+        case Err(httppush.Error e): {
+            message = "push: " + e.to_str();
+        }
+    }
+    reload();
+}
+
+tuiapp.Action State.handle_push_key(term.Code code) {
+    match (code) {
+        case Char(int c): {
+            if (c == 'p') {
+                push_current();
+                return tuiapp.Action.Redraw;
+            }
+            return tuiapp.Action.Continue;
+        }
+        case Escape: {
+            push_open = false;
+            return tuiapp.Action.Redraw;
+        }
+        case Enter: {
+            return tuiapp.Action.Continue;
+        }
+        case Backspace: {
+            return tuiapp.Action.Continue;
+        }
+        case Tab: {
+            return tuiapp.Action.Continue;
+        }
+        case BackTab: {
+            return tuiapp.Action.Continue;
+        }
+        case Up: {
+            return tuiapp.Action.Continue;
+        }
+        case Down: {
+            return tuiapp.Action.Continue;
+        }
+        case Right: {
+            return tuiapp.Action.Continue;
+        }
+        case Left: {
+            return tuiapp.Action.Continue;
+        }
+        case Home: {
+            return tuiapp.Action.Continue;
+        }
+        case End: {
+            return tuiapp.Action.Continue;
+        }
+        case PageUp: {
+            return tuiapp.Action.Continue;
+        }
+        case PageDown: {
+            return tuiapp.Action.Continue;
+        }
+        case Insert: {
+            return tuiapp.Action.Continue;
+        }
+        case Delete: {
+            return tuiapp.Action.Continue;
+        }
+        case F(int n): {
+            return tuiapp.Action.Continue;
+        }
+    }
 }
 
 tuiapp.Action State.handle_commit_key(term.Code code) {
