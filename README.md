@@ -43,7 +43,7 @@ bash build-gitui.sh -o ourgitui    # not build.sh -- see build-gitui.sh's own he
 | `oracle_*.py` | the oracles: `hashlib`, `zlib`, and a from-scratch format reader |
 | `pty_e2e.py` | drives `ourgitui` under a real pty against disposable fixtures, real `git` as the oracle |
 | `compare.sh` | every command beside the real `git`, compared octet for octet |
-| `test.sh` | all of the above (sources `test_write.sh`, `test_gitignore.sh`, `test_hunks.sh`, `test_patch.sh`, `test_gitui.sh` and `test_httpfetch.sh`) |
+| `test.sh` | all of the above (sources `test_write.sh`, `test_gitignore.sh`, `test_hunks.sh`, `test_patch.sh`, `test_gitui.sh`, `test_httpfetch.sh` and `test_discard_amend.sh`) |
 | `FRICTION.md` | **the other half of this**: what the language made hard, and what it made easy |
 
 ## What works
@@ -82,6 +82,24 @@ is built by `patch.m31` over the real `diff.Op` bytes, never the rendered
 text, and checked against real `git apply --cached` byte for byte
 (`test_gitui.sh`). Push/pull, checkout and rebase are each a named,
 deliberate gap in `apps/git/design.md`, not an oversight here.
+
+Discarding and amending, both checked against the real git command each
+stands in for (`test_discard_amend.sh`): `x` on a path row asks first
+(`y` discards; any other key keeps it), then restores an unstaged file from
+the index's blob (`git checkout -- <path>`, a deleted file recreated, a
+symlink as a symlink), removes an untracked file and whatever directory
+that leaves empty (`git clean -f -- <path>`), or puts a staged path's index
+entry and file both back to HEAD (`git checkout HEAD -- <path>`; a staged
+brand-new file is dropped from the index and removed). In the commit
+overlay, `A` amends HEAD: its message is prefilled in `COMMIT_EDITMSG`, so
+`f` straight away is `--amend --no-edit` and `e` edits it first; the
+replacement keeps HEAD's parents and author (date and zone included) with a
+fresh committer, exactly as real git does, and moves the branch by
+compare-and-swap against the HEAD it replaces. Refused on an unborn branch.
+One limit, named in `discard_path`'s own comment: `lib/fs.m31` has no
+`chmod`, so an executable that was deleted and then discarded comes back
+without its executable bit (one still on disk is rewritten in place and
+keeps it).
 
 Each commit in the log also expands into its own "Files changed" list --
 one row per path changed against the commit's first parent (the empty tree,

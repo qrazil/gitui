@@ -647,6 +647,79 @@ def main():
         fail("hunk: 'u' on a staged diff's only hunk unstages it and closes the empty view", "status=%r out=%r" % (status_out, out))
     s11.quit()
 
+    # --- discard: `x` asks, `y` discards, anything else keeps -----------------
+    #
+    # The on-disk effect of each discard kind is checked against real git by
+    # test_discard_amend.sh; what a pty adds is the prompt itself: that `x`
+    # alone changes nothing, that a non-`y` key cancels, and that `y` goes
+    # through to the same `discard_path` -- with the status line's own words
+    # as the evidence of which branch ran.
+    fx10 = make_fixture(root, "discard")
+    with open(os.path.join(fx10, "a.txt"), "w") as f:
+        f.write("one\n")
+    git(fx10, "add", "-A", env=GIT_ENV)
+    git(fx10, "commit", "-q", "-m", "first", env=GIT_ENV)
+    with open(os.path.join(fx10, "a.txt"), "w") as f:
+        f.write("one\nchanged\n")
+    # rows: untracked(0), unstaged section(1): M a.txt -> row0 untracked,
+    # row1 unstaged section, row2 M a.txt.
+    s10 = Session(binpath, fx10)
+    s10.send("j")
+    s10.send("j")  # row2: M a.txt
+    out = s10.send("x")
+    if b"discard changes to a.txt?" in out:
+        ok("discard: x opens a confirmation naming the path, and changes nothing yet")
+    else:
+        fail("discard: x opens a confirmation naming the path", repr(out))
+    out = s10.send("n")  # any key but y cancels
+    got, _, _ = git(fx10, "status", "--short")
+    if b"discard cancelled" in out and got == " M a.txt":
+        ok("discard: a key other than y cancels, the modification is still there")
+    else:
+        fail("discard: a key other than y cancels", "out=%r status=%r" % (out, got))
+    s10.send("x")
+    out = s10.send("y")
+    got, _, _ = git(fx10, "status", "--short")
+    with open(os.path.join(fx10, "a.txt")) as f:
+        a_now = f.read()
+    if b"discarded changes to a.txt" in out and got == "" and a_now == "one\n":
+        ok("discard: y restores the index's blob, git status --short is clean afterward")
+    else:
+        fail("discard: y restores the index's blob", "out=%r status=%r a.txt=%r" % (out, got, a_now))
+    s10.quit()
+
+    # --- amend: `c`, `A`, `f` replaces HEAD --------------------------------
+    fx11 = make_fixture(root, "amend")
+    with open(os.path.join(fx11, "a.txt"), "w") as f:
+        f.write("one\n")
+    git(fx11, "add", "-A", env=GIT_ENV)
+    git(fx11, "commit", "-q", "-m", "first", env=GIT_ENV)
+    before, _, _ = git(fx11, "rev-parse", "HEAD")
+    with open(os.path.join(fx11, "b.txt"), "w") as f:
+        f.write("two\n")
+    git(fx11, "add", "-A", env=GIT_ENV)
+    s11 = Session(binpath, fx11)
+    s11.send("c")
+    out = s11.send("A")
+    if b"amend HEAD" in out and b"amending " in out:
+        ok("amend: c then A turns the commit overlay into an amend, naming HEAD")
+    else:
+        fail("amend: c then A turns the commit overlay into an amend", repr(out))
+    out = s11.send("f")
+    s11.quit()
+    after, _, _ = git(fx11, "rev-parse", "HEAD")
+    count, _, _ = git(fx11, "rev-list", "--count", "HEAD")
+    subject, _, _ = git(fx11, "log", "-1", "--format=%s")
+    status_out, _, _ = git(fx11, "status", "--short")
+    tree_has_b, _, rc_b = git(fx11, "cat-file", "-e", "HEAD:b.txt")
+    if b"HEAD is now" in out and after != before and count == "1" and subject == "first" and status_out == "" and rc_b == 0:
+        ok("amend: f replaces HEAD (still one commit, same message, b.txt now in its tree, nothing left staged)")
+    else:
+        fail(
+            "amend: f replaces HEAD",
+            "out=%r before=%s after=%s count=%s subject=%r status=%r b_rc=%d" % (out, before, after, count, subject, status_out, rc_b),
+        )
+
     return failures
 
 

@@ -12,6 +12,8 @@
 //   ./t_gitclient_ops <gitdir> <worktree> stage_hunk <relative-path> <k>
 //   ./t_gitclient_ops <gitdir> <worktree> unstage_hunk <relative-path> <k>
 //   ./t_gitclient_ops <gitdir> <worktree> hunk_patch <unstaged|staged> <relative-path> <k>
+//   ./t_gitclient_ops <gitdir> <worktree> discard <untracked|unstaged|staged> <relative-path>
+//   ./t_gitclient_ops <gitdir> <worktree> amend
 //
 // `commit` reads whatever is already at `<gitdir>/COMMIT_EDITMSG` -- the
 // caller writes it first, the same file a person editing it by hand would
@@ -144,6 +146,25 @@ if (op == "stage") {
     } else {
         io.eprint("no such row: " + id);
         os.exit(2);
+    }
+} else if (op == "discard") {
+    // `discard <untracked|unstaged|staged> <path>`: `discard_path` directly,
+    // the step the `x` prompt's own `y` takes -- the prompt itself is pure
+    // key handling, covered under a pty by pty_e2e.py.
+    if (argv.size() < 6) {
+        io.eprint("usage: t_gitclient_ops <gitdir> <worktree> discard <untracked|unstaged|staged> <path>");
+        os.exit(2);
+    }
+    state.discard_path(argv[4], argv[5].to_bytes());
+} else if (op == "amend") {
+    // `amend`: `start_amend` (prefills COMMIT_EDITMSG with HEAD's message)
+    // then `finish_commit` -- `c`, `A`, `f` with no edit in between, real
+    // git's `--amend --no-edit`. A refusal leaves `start_amend`'s own
+    // message to print.
+    state.commit_open = true;
+    state.start_amend();
+    if (state.amending) {
+        state.finish_commit();
     }
 } else {
     io.eprint("unknown op: " + op);
