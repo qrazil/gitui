@@ -32,7 +32,8 @@ bash build-gitui.sh -o ourgitui    # not build.sh -- see build-gitui.sh's own he
 | `git.m31` | the read-only CLI |
 | `index.m31` | `.git/index`: read, write, a fresh entry from `fs.stat` |
 | `status.m31` | working-tree status: staged, unstaged, untracked |
-| `hunks.m31` | `lib/diff.m31`'s edit script, grouped into qrazil/tui's `tuidiffview.Hunk`/`Line` with context |
+| `hunks.m31` | `lib/diff.m31`'s edit script, grouped into qrazil/tui's `tuidiffview.Hunk`/`Line` with context; `spans` is the one definition of where each hunk starts and ends |
+| `patch.m31` | apply or revert exactly one hunk of a diff, byte for byte -- what the diff view's `s`/`u` stage and unstage with |
 | `gitlog.m31` | the commit-history walk, shared by `git.m31 -log` and `gitui.m31` |
 | `gitclient.m31` | the interactive client's state and logic (no top-level statements, so it is importable and testable) |
 | `gitui.m31` | the interactive client's thin driver: parses a path, runs `tuiapp.Loop` |
@@ -42,7 +43,7 @@ bash build-gitui.sh -o ourgitui    # not build.sh -- see build-gitui.sh's own he
 | `oracle_*.py` | the oracles: `hashlib`, `zlib`, and a from-scratch format reader |
 | `pty_e2e.py` | drives `ourgitui` under a real pty against disposable fixtures, real `git` as the oracle |
 | `compare.sh` | every command beside the real `git`, compared octet for octet |
-| `test.sh` | all of the above (sources `test_write.sh`, `test_gitignore.sh`, `test_hunks.sh`, `test_gitui.sh` and `test_httpfetch.sh`) |
+| `test.sh` | all of the above (sources `test_write.sh`, `test_gitignore.sh`, `test_hunks.sh`, `test_patch.sh`, `test_gitui.sh` and `test_httpfetch.sh`) |
 | `FRICTION.md` | **the other half of this**: what the language made hard, and what it made easy |
 
 ## What works
@@ -73,9 +74,14 @@ path if no editor can be launched at all; `f` finishes; `a` aborts -- see
 `gitclient.m31`'s own header, "launching `$EDITOR`, and the terminal handoff
 that takes", for how the terminal is handed to the editor and back); a
 persistent footer of the base commands; and a synced jump list toggled with
-`J`. Hunk-level *staging* (as opposed to display), push/pull, checkout and
-rebase are each a named, deliberate gap in `apps/git/design.md`, not an
-oversight here.
+`J`; and hunk-level staging from inside that diff view -- `s` on a hunk of
+an unstaged diff stages exactly that hunk (`git add -p`'s "y"), `u` on a
+hunk of a staged diff unstages exactly that hunk (`git reset -p`), the file
+then showing as partially staged (`MM`) the way git shows it; the index blob
+is built by `patch.m31` over the real `diff.Op` bytes, never the rendered
+text, and checked against real `git apply --cached` byte for byte
+(`test_gitui.sh`). Push/pull, checkout and rebase are each a named,
+deliberate gap in `apps/git/design.md`, not an oversight here.
 
 Each commit in the log also expands into its own "Files changed" list --
 one row per path changed against the commit's first parent (the empty tree,

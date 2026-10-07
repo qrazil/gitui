@@ -6,6 +6,8 @@
 // ---
 //   hunks.Blob                  Binary | Hunks(List<tuidiffview.Hunk>)
 //   hunks.hunks(old, new, context:)  -> Blob
+//   hunks.Span                  one hunk's [start, end) range of diff.Ops
+//   hunks.spans(ops, context:)  -> List<Span>, the same grouping as hunks()
 //
 // --- the boundary this sits on -------------------------------------------------
 //
@@ -41,7 +43,7 @@ import diff;
 import tuidiffview;
 
 /// Three lines of context, `git diff`'s and `diff -u`'s own default.
-const int DEFAULT_CONTEXT = 3;
+pub const int DEFAULT_CONTEXT = 3;
 
 /// A file's diff, once binary content has been ruled out.
 pub enum Blob {
@@ -106,14 +108,23 @@ bool is_change(diff.Op op) {
     }
 }
 
-// Group `ops` into hunks, merging adjacent changes whose gap is within
-// `2 * context` and trimming the unchanged run before the first change and
-// after the last to `context` lines.
-List<tuidiffview.Hunk> group(List<diff.Op> ops, int context) {
+/// One hunk's extent as a range of `diff.Op`s, `[start, end)`, in the
+/// script `diff.diff` returned -- what `patch.m31` needs to apply or revert
+/// exactly one hunk byte for byte (a rendered `tuidiffview.Line.text` has
+/// had its line terminator stripped and may be a hex placeholder, see
+/// `line_text`; the `diff.Op`s still carry the exact bytes).
+pub type Span {
+    pub int start;
+    pub int end;
+}
+
+/// The hunk boundaries `hunks()` would draw for `ops`, as op ranges -- the
+/// one function both `hunks()` and `patch.m31` go through, so the k-th
+/// hunk a `DiffView` shows and the k-th span `patch.apply_hunk` edits are
+/// the same hunk by construction, never two groupings that could drift.
+pub List<Span> spans(List<diff.Op> ops, int context = DEFAULT_CONTEXT) {
     List<Run> runs = runs_of(ops);
-    List<int> old_no = prefix_counts(ops, true);
-    List<int> new_no = prefix_counts(ops, false);
-    List<tuidiffview.Hunk> out = [];
+    List<Span> out = [];
     int rn = runs.size();
     int idx = 0;
     while (idx < rn) {
@@ -148,8 +159,22 @@ List<tuidiffview.Hunk> group(List<diff.Op> ops, int context) {
             }
             content_end = trail.start + take;
         }
-        out.push(build_hunk(ops, old_no, new_no, content_start, content_end));
+        out.push(Span(content_start, content_end));
         idx = last_run + 1;
+    }
+    return out;
+}
+
+// Group `ops` into hunks, merging adjacent changes whose gap is within
+// `2 * context` and trimming the unchanged run before the first change and
+// after the last to `context` lines -- `spans` decides where, this only
+// builds the rendered `Hunk` for each.
+List<tuidiffview.Hunk> group(List<diff.Op> ops, int context) {
+    List<int> old_no = prefix_counts(ops, true);
+    List<int> new_no = prefix_counts(ops, false);
+    List<tuidiffview.Hunk> out = [];
+    for (Span sp in spans(ops, context: context)) {
+        out.push(build_hunk(ops, old_no, new_no, sp.start, sp.end));
     }
     return out;
 }

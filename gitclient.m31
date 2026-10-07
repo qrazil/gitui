@@ -15,8 +15,10 @@
 // See `apps/git/design.md`'s "Starting the client" for the scope this
 // implements: whole-file staging, a commit via an externally edited message
 // file, and the outline/jump-list/which-key/footer wiring the locked design
-// names. Hunk-level diff staging, push/pull, checkout and rebase are each a
-// named, deliberate gap there, not an oversight here.
+// names, plus hunk-level staging in the diff view (`patch.m31`, the
+// `git add -p`/`git reset -p` half that section named as the follow-up).
+// Push/pull, checkout and rebase are each a named, deliberate gap there,
+// not an oversight here.
 //
 // --- launching `$EDITOR`, and the terminal handoff that takes ---------------
 //
@@ -72,6 +74,7 @@ import date;
 import fs;
 import gitlog;
 import hunks;
+import patch;
 import index;
 import io;
 import object;
@@ -782,6 +785,13 @@ pub type State {
     /// scope for this change; keeping the addressing live here is what
     /// makes hunk staging a small follow-up instead of another rewrite.
     pub tuidiffview.DiffView diff_view = tuidiffview.DiffView([]);
+    /// Which comparison `diff_view` shows -- "untracked", "unstaged",
+    /// "staged" or "commit" -- and for which path, so `s`/`u` in the view
+    /// (`stage_hunk_current`/`unstage_hunk_current`) know which index
+    /// content to patch and `reopen_diff` can rebuild the same view after.
+    /// Empty while the view is closed.
+    pub str diff_section = "";
+    pub bytes diff_path = [];
     Map<str, bool> collapsed = {};
     Map<str, bytes> paths = {};
     Map<str, CommitFileDiff> file_diffs = {};
@@ -1130,6 +1140,8 @@ pub void State.show_diff_current() {
                 match (file_diffs.get(r.node.id)) {
                     case Some(CommitFileDiff d): {
                         open_diff(r.node.label, commit_blob(gitdir, d.old_id), commit_blob(gitdir, d.new_id));
+                        diff_section = "commit";
+                        diff_path = d.path;
                     }
                     case None: {
                         message = "diff: nothing to show here";
@@ -1141,10 +1153,16 @@ pub void State.show_diff_current() {
                 case Some(bytes p): {
                     if (r.node.id.starts_with("untracked:")) {
                         open_diff(r.node.label, [], read_worktree(p));
+                        diff_section = "untracked";
+                        diff_path = p;
                     } else if (r.node.id.starts_with("unstaged:")) {
                         open_diff(r.node.label, index_blob(p), read_worktree(p));
+                        diff_section = "unstaged";
+                        diff_path = p;
                     } else if (r.node.id.starts_with("staged:")) {
                         open_diff(r.node.label, head_blob(p), index_blob(p));
+                        diff_section = "staged";
+                        diff_path = p;
                     } else {
                         message = "diff: nothing to show here";
                     }
@@ -1254,7 +1272,215 @@ pub void State.close_diff() {
     diff_open = false;
     diff_binary = false;
     diff_view = tuidiffview.DiffView([]);
+    diff_section = "";
+    diff_path = [];
     message = "";
+}
+
+/// `s` in the diff view: stage only the hunk under the cursor -- `git add
+/// -p`'s "y" for exactly one hunk. Meaningful only for a diff opened from an
+/// UNSTAGED row (index vs working tree): the index's content with that one
+/// hunk applied becomes the new index blob, so the path is then both staged
+/// and unstaged, exactly as git shows a partially staged file (`MM`). An
+/// untracked row has no index content to patch -- the outline's own `s`
+/// stages the whole file -- and a staged or commit diff has nothing to
+/// stage, so those just say so. The cursor on a hunk's header or any line
+/// inside it addresses that hunk (`DiffView.at().hunk`); line-level
+/// staging is not attempted.
+pub void State.stage_hunk_current() {
+    if (diff_section != "unstaged") {
+        if (diff_section == "untracked") {
+            message = "untracked: stage the whole file with s from the outline";
+        } else {
+            message = "nothing to stage here";
+        }
+        return;
+    }
+    match (diff_view.at()) {
+        case Some(tuidiffview.Row row): {
+            int keep = diff_view.cursor;
+            if (stage_hunk(diff_path, row.hunk)) {
+                str said = message;
+                reload();
+                reopen_diff(keep);
+                message = said;
+            }
+        }
+        case None: {
+            message = "no hunk under the cursor";
+        }
+    }
+}
+
+/// `u` in the diff view: unstage only the hunk under the cursor -- `git
+/// reset -p`'s "y" for one hunk, on a diff opened from a STAGED row (HEAD vs
+/// index): the index's content with that one hunk reverted becomes the new
+/// index blob. The same no-ops as `stage_hunk_current` for every other
+/// section.
+pub void State.unstage_hunk_current() {
+    if (diff_section != "staged") {
+        message = "nothing to unstage here";
+        return;
+    }
+    match (diff_view.at()) {
+        case Some(tuidiffview.Row row): {
+            int keep = diff_view.cursor;
+            if (unstage_hunk(diff_path, row.hunk)) {
+                str said = message;
+                reload();
+                reopen_diff(keep);
+                message = said;
+            }
+        }
+        case None: {
+            message = "no hunk under the cursor";
+        }
+    }
+}
+
+/// Stage hunk `k` (0-based, in `hunks.hunks(index, worktree)`'s order) of
+/// `rel`'s unstaged change: `patch.apply_hunk` over the index's blob and
+/// the file on disk, written as a new blob and put in the index with the
+/// entry's stat fields reset (the same `size: -1` rule `unstage_path`
+/// uses, so `status.status` re-hashes it rather than trusting a snapshot
+/// that was never taken). Applying the deletion hunk of a file gone from
+/// disk leaves nothing, which is `git add -p`'s "stage deletion": the entry
+/// is dropped instead. `pub`, like `stage_path`, so `t_gitclient_ops.m31`
+/// can drive it against a real fixture and real git. True when the index
+/// changed.
+pub bool State.stage_hunk(bytes rel, int k) {
+    bytes old = index_blob(rel);
+    bytes new = read_worktree(rel);
+    match (patch.apply_hunk(old, new, k)) {
+        case Some(bytes content): {
+            str full = fs.join(worktree, rel.utf8().or(""));
+            if (content.size() == 0 && !fs.exists(full)) {
+                return drop_index_entry(rel, "staged deletion of " + rel.utf8().or("<non-utf8>"));
+            }
+            return set_index_blob(rel, content, "staged hunk " + (k + 1).to_str() + " of " + rel.utf8().or("<non-utf8>"));
+        }
+        case None: {
+            message = "no such hunk to stage";
+            return false;
+        }
+    }
+}
+
+/// Unstage hunk `k` (0-based, in `hunks.hunks(HEAD, index)`'s order) of
+/// `rel`'s staged change: `patch.revert_hunk` over HEAD's blob and the
+/// index's, written back the same way `stage_hunk` writes. Reverting the
+/// one all-added hunk of a path HEAD does not have leaves nothing, which is
+/// `git reset -p`'s "unstage addition": the entry is dropped, the file is
+/// untracked again. True when the index changed.
+pub bool State.unstage_hunk(bytes rel, int k) {
+    bytes old = head_blob(rel);
+    bytes new = index_blob(rel);
+    match (patch.revert_hunk(old, new, k)) {
+        case Some(bytes content): {
+            if (content.size() == 0 && !head_has(rel)) {
+                return drop_index_entry(rel, "unstaged addition of " + rel.utf8().or("<non-utf8>"));
+            }
+            return set_index_blob(rel, content, "unstaged hunk " + (k + 1).to_str() + " of " + rel.utf8().or("<non-utf8>"));
+        }
+        case None: {
+            message = "no such hunk to unstage";
+            return false;
+        }
+    }
+}
+
+/// Rebuild the open diff view for the same section and path after the index
+/// changed under it, keeping the cursor where it was (clamped: the view
+/// usually has one hunk fewer now). Nothing left to show -- the last hunk
+/// was staged or unstaged -- closes the view, and the outline underneath,
+/// already rebuilt by `reload`, no longer has that row either.
+void State.reopen_diff(int keep_cursor) {
+    str section = diff_section;
+    bytes p = diff_path;
+    str title = diff_title;
+    bytes old = [];
+    bytes new = [];
+    if (section == "unstaged") {
+        old = index_blob(p);
+        new = read_worktree(p);
+    } else if (section == "staged") {
+        old = head_blob(p);
+        new = index_blob(p);
+    } else {
+        return;
+    }
+    if (patch.hunk_count(old, new) == 0) {
+        close_diff();
+        return;
+    }
+    open_diff(title, old, new);
+    diff_section = section;
+    diff_path = p;
+    diff_view.cursor = keep_cursor;
+    diff_view.move(0);
+}
+
+/// Does HEAD's tree have `rel` at all? False on an unborn branch too.
+bool State.head_has(bytes rel) {
+    match (head_tree_id(gitdir)) {
+        case Some(str tid): {
+            return find_in_tree(gitdir, tid, rel).is_some();
+        }
+        case None: {
+            return false;
+        }
+    }
+}
+
+/// `rel`'s index entry now names a fresh blob of `content`, mode kept,
+/// stat fields reset so the next `status` re-hashes it. `said` becomes the
+/// status-line message on success.
+bool State.set_index_blob(bytes rel, bytes content, str said) {
+    str blob_id = "";
+    match (object.write_blob(gitdir, content)) {
+        case Ok(str id): {
+            blob_id = id;
+        }
+        case Err(object.Error e): {
+            message = "write_blob: " + e.to_str();
+            return false;
+        }
+    }
+    index.Index ix = read_index(gitdir);
+    int mode = 0o100644;
+    match (find_index_entry(ix, rel)) {
+        case Some(index.Entry e): {
+            mode = e.mode;
+        }
+        case None: {
+        }
+    }
+    replace_entry(ix, index.Entry(0, 0, 0, 0, 0, 0, mode, 0, 0, -1, blob_id, 0, false, rel));
+    match (index.write(gitdir, ix)) {
+        case Ok: {
+            message = said;
+            return true;
+        }
+        case Err(index.Error e): {
+            message = "index write: " + e.to_str();
+            return false;
+        }
+    }
+}
+
+bool State.drop_index_entry(bytes rel, str said) {
+    index.Index ix = read_index(gitdir);
+    remove_entry(ix, rel);
+    match (index.write(gitdir, ix)) {
+        case Ok: {
+            message = said;
+            return true;
+        }
+        case Err(index.Error e): {
+            message = "index write: " + e.to_str();
+            return false;
+        }
+    }
 }
 
 /// Write the commit-message template at `commit_msg_path`, unless something
@@ -1466,9 +1692,17 @@ List<tuiwidget.Span> State.footer_spans(tuistyle.Theme theme) {
     out.push(tuiwidget.Span("enter", style: theme.accent));
     out.push(tuiwidget.Span(" toggle  "));
     out.push(tuiwidget.Span("s", style: theme.accent));
-    out.push(tuiwidget.Span(" stage  "));
+    if (diff_open) {
+        out.push(tuiwidget.Span(" stage hunk  "));
+    } else {
+        out.push(tuiwidget.Span(" stage  "));
+    }
     out.push(tuiwidget.Span("u", style: theme.accent));
-    out.push(tuiwidget.Span(" unstage  "));
+    if (diff_open) {
+        out.push(tuiwidget.Span(" unstage hunk  "));
+    } else {
+        out.push(tuiwidget.Span(" unstage  "));
+    }
     out.push(tuiwidget.Span("d", style: theme.accent));
     out.push(tuiwidget.Span(" diff  "));
     if (diff_open) {
@@ -1832,6 +2066,14 @@ tuiapp.Action State.handle_diff_key(term.Code code) {
                 diff_view.move(-1);
                 return tuiapp.Action.Redraw;
             }
+            if (c == 's') {
+                stage_hunk_current();
+                return tuiapp.Action.Redraw;
+            }
+            if (c == 'u') {
+                unstage_hunk_current();
+                return tuiapp.Action.Redraw;
+            }
             return tuiapp.Action.Continue;
         }
         case Backspace: {
@@ -1935,7 +2177,7 @@ str branch_name(str full) {
     return full;
 }
 
-// --- staging and unstaging: whole files only (apps/git/design.md's scope) --
+// --- index helpers shared by whole-file (stage_path/unstage_path) and hunk-level staging --
 
 index.Index read_index(str gitdir) {
     match (index.read(gitdir)) {
