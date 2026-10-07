@@ -378,7 +378,8 @@ if [ -x "$WORK/t_gitclient_ops" ]; then
         git add -A
         GIT_AUTHOR_DATE='1700000000 +0000' GIT_COMMITTER_DATE='1700000000 +0000' \
             git commit -q -m base
-        sed -i -e 's/^line 3$/THREE/' -e 's/^line 27$/TWENTY-SEVEN/' f.txt
+        sed -e 's/^line 3$/THREE/' -e 's/^line 27$/TWENTY-SEVEN/' f.txt >f.txt.new
+        mv f.txt.new f.txt
         printf 'brand new\n' >new.txt
         git add new.txt
         rm gone.txt
