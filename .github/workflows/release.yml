@@ -15,7 +15,7 @@ name: Release
 # treats its gates job: a broken build must never produce a release.
 env:
   M31_REF: v0.1.1
-  TUI_REF: b475ecb8a771785754f9c2bbd5fc3f2e02f060e1
+  TUI_REF: bb7b778500a11ae5a522611e0a6df98c207d1ef6
 
 on:
   push:
