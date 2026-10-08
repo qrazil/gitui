@@ -178,11 +178,11 @@ bool bytes_eq(bytes left, bytes right) {
     return left.size() == right.size() && cmp_bytes(left, right) == 0;
 }
 
-int find_byte(bytes hay, int needle, int from) {
+int find_byte(bytes haystack, int needle, int from) {
     int index = from;
-    int length = hay.size();
+    int length = haystack.size();
     while (index < length) {
-        if (hay[index] == needle) {
+        if (haystack[index] == needle) {
             return index;
         }
         index = index + 1;
@@ -320,8 +320,8 @@ const str LOAD_MORE_ID = "commits:more";
 /// `refresh` first, then this, then `build_outline`).
 bytes commit_blob(str gitdir, Option<str> id) {
     match (id) {
-        case Some(str oid): {
-            match (GIT_object.read(gitdir, oid)) {
+        case Some(str old_id): {
+            match (GIT_object.read(gitdir, old_id)) {
                 case Ok(GIT_object.Object object): {
                     return object.raw;
                 }
@@ -384,13 +384,13 @@ Result<List<CommitFileDiff>, GIT_object.Error> commit_changes(str gitdir, GIT_ob
     paths.sort();
     List<CommitFileDiff> out = [];
     for (str path in paths) {
-        Option<str> oid = old_tree.get(path);
-        Option<str> nid = new_tree.get(path);
+        Option<str> old_blob_id = old_tree.get(path);
+        Option<str> new_blob_id = new_tree.get(path);
         GIT_status.Change kind = GIT_status.Change.Modified;
         bool is_skipping = false;
-        match (oid) {
+        match (old_blob_id) {
             case Some(str old_id): {
-                match (nid) {
+                match (new_blob_id) {
                     case Some(str new_id): {
                         if (old_id == new_id) {
                             is_skipping = true;
@@ -408,8 +408,8 @@ Result<List<CommitFileDiff>, GIT_object.Error> commit_changes(str gitdir, GIT_ob
         if (is_skipping) {
             continue;
         }
-        bytes old_bytes = commit_blob(gitdir, oid);
-        bytes new_bytes = commit_blob(gitdir, nid);
+        bytes old_bytes = commit_blob(gitdir, old_blob_id);
+        bytes new_bytes = commit_blob(gitdir, new_blob_id);
         bool is_binary = false;
         int insertions = 0;
         int deletions = 0;
@@ -434,7 +434,7 @@ Result<List<CommitFileDiff>, GIT_object.Error> commit_changes(str gitdir, GIT_ob
                 }
             }
         }
-        out.push(CommitFileDiff(path.to_bytes(), kind, oid, nid, is_binary, insertions, deletions));
+        out.push(CommitFileDiff(path.to_bytes(), kind, old_blob_id, new_blob_id, is_binary, insertions, deletions));
     }
     return Result<List<CommitFileDiff>, GIT_object.Error>.Ok(out);
 }
@@ -1048,15 +1048,15 @@ pub void State.stage_current() {
     }
 }
 
-pub void State.stage_path(bytes rel) {
-    str full = fs.join(worktree, rel.utf8().or(""));
+pub void State.stage_path(bytes relative_path) {
+    str full = fs.join(worktree, relative_path.utf8().or(""));
     bytes content = [];
     match (io.read_bytes(full)) {
         case Ok(bytes contents): {
             content = contents;
         }
         case Err(io.Error error): {
-            message = "cannot read " + rel.utf8().or("<non-utf8>") + ": " + error.to_str();
+            message = "cannot read " + relative_path.utf8().or("<non-utf8>") + ": " + error.to_str();
             return;
         }
     }
@@ -1080,12 +1080,12 @@ pub void State.stage_path(bytes rel) {
             return;
         }
     }
-    GIT_index.Entry entry = GIT_index.from_stat(rel, file_stat, fs.is_link(full), blob_id);
+    GIT_index.Entry entry = GIT_index.from_stat(relative_path, file_stat, fs.is_link(full), blob_id);
     GIT_index.Index index = read_index(gitdir);
     replace_entry(index, entry);
     match (GIT_index.write(gitdir, index)) {
         case Ok: {
-            message = "staged " + rel.utf8().or("<non-utf8>");
+            message = "staged " + relative_path.utf8().or("<non-utf8>");
         }
         case Err(GIT_index.Error error): {
             message = "index write: " + error.to_str();
@@ -1123,32 +1123,32 @@ pub void State.unstage_current() {
     }
 }
 
-pub void State.unstage_path(bytes rel) {
+pub void State.unstage_path(bytes relative_path) {
     GIT_index.Index index = read_index(gitdir);
     Option<str> tree = head_tree_id(gitdir);
     match (tree) {
         case Some(str tid): {
-            match (find_in_tree(gitdir, tid, rel)) {
+            match (find_in_tree(gitdir, tid, relative_path)) {
                 case Some(GIT_object.Entry entry): {
                     // size: -1 can never equal a real `fs.stat` size (always
                     // >= 0), so `GIT_status.status`'s mtime/size shortcut always
                     // re-hashes this entry instead of trusting a snapshot
                     // that was never actually taken.
-                    GIT_index.Entry restored = GIT_index.Entry(0, 0, 0, 0, 0, 0, entry.mode, 0, 0, -1, entry.id, 0, false, rel);
+                    GIT_index.Entry restored = GIT_index.Entry(0, 0, 0, 0, 0, 0, entry.mode, 0, 0, -1, entry.id, 0, false, relative_path);
                     replace_entry(index, restored);
                 }
                 case None: {
-                    remove_entry(index, rel);
+                    remove_entry(index, relative_path);
                 }
             }
         }
         case None: {
-            remove_entry(index, rel);
+            remove_entry(index, relative_path);
         }
     }
     match (GIT_index.write(gitdir, index)) {
         case Ok: {
-            message = "unstaged " + rel.utf8().or("<non-utf8>");
+            message = "unstaged " + relative_path.utf8().or("<non-utf8>");
         }
         case Err(GIT_index.Error error): {
             message = "index write: " + error.to_str();
@@ -1221,9 +1221,9 @@ pub void State.discard_current() {
 /// executable comes back without its executable bit (one that still exists
 /// is rewritten in place and keeps it). `pub`, like `stage_path`, so
 /// `t_gitclient_ops.m31` can drive each case against real git.
-pub void State.discard_path(str kind, bytes rel) {
-    str shown = rel.utf8().or("<non-utf8>");
-    str full = fs.join(worktree, rel.utf8().or(""));
+pub void State.discard_path(str kind, bytes relative_path) {
+    str shown = relative_path.utf8().or("<non-utf8>");
+    str full = fs.join(worktree, relative_path.utf8().or(""));
     if (kind == "untracked") {
         match (fs.remove(full)) {
             case Ok: {
@@ -1233,16 +1233,16 @@ pub void State.discard_path(str kind, bytes rel) {
                 return;
             }
         }
-        prune_empty_parents(rel);
+        prune_empty_parents(relative_path);
         message = "discarded " + shown + " (removed)";
         reload();
         return;
     }
     if (kind == "unstaged") {
         GIT_index.Index index = read_index(gitdir);
-        match (find_index_entry(index, rel)) {
+        match (find_index_entry(index, relative_path)) {
             case Some(GIT_index.Entry entry): {
-                if (!write_worktree(rel, entry.mode, read_blob(entry.id))) {
+                if (!write_worktree(relative_path, entry.mode, read_blob(entry.id))) {
                     return;
                 }
                 message = "discarded changes to " + shown;
@@ -1259,14 +1259,14 @@ pub void State.discard_path(str kind, bytes rel) {
         Option<GIT_object.Entry> in_head = Option<GIT_object.Entry>.None;
         match (head_tree_id(gitdir)) {
             case Some(str tid): {
-                in_head = find_in_tree(gitdir, tid, rel);
+                in_head = find_in_tree(gitdir, tid, relative_path);
             }
             case None: {
             }
         }
         match (in_head) {
             case Some(GIT_object.Entry entry): {
-                if (!write_worktree(rel, entry.mode, read_blob(entry.id))) {
+                if (!write_worktree(relative_path, entry.mode, read_blob(entry.id))) {
                     return;
                 }
                 // The file was just rewritten, so its real stat goes in the
@@ -1282,12 +1282,12 @@ pub void State.discard_path(str kind, bytes rel) {
                         return;
                     }
                 }
-                GIT_index.Entry fresh = GIT_index.from_stat(rel, file_stat, fs.is_link(full), entry.id);
-                GIT_index.Entry restored = GIT_index.Entry(fresh.ctime_s, fresh.ctime_ns, fresh.mtime_s, fresh.mtime_ns, 0, 0, entry.mode, 0, 0, fresh.size, entry.id, 0, false, rel);
+                GIT_index.Entry fresh = GIT_index.from_stat(relative_path, file_stat, fs.is_link(full), entry.id);
+                GIT_index.Entry restored = GIT_index.Entry(fresh.ctime_s, fresh.ctime_ns, fresh.mtime_s, fresh.mtime_ns, 0, 0, entry.mode, 0, 0, fresh.size, entry.id, 0, false, relative_path);
                 replace_entry(index, restored);
             }
             case None: {
-                remove_entry(index, rel);
+                remove_entry(index, relative_path);
                 if (fs.exists(full) || fs.is_link(full)) {
                     match (fs.remove(full)) {
                         case Ok: {
@@ -1297,7 +1297,7 @@ pub void State.discard_path(str kind, bytes rel) {
                             return;
                         }
                     }
-                    prune_empty_parents(rel);
+                    prune_empty_parents(relative_path);
                 }
             }
         }
@@ -1321,9 +1321,9 @@ pub void State.discard_path(str kind, bytes rel) {
 /// a regular file, its parent directories created as needed. A symlink
 /// already there is removed first (`fs.symlink` never replaces). False, with
 /// `message` set, on any failure.
-bool State.write_worktree(bytes rel, int mode, bytes content) {
-    str shown = rel.utf8().or("<non-utf8>");
-    str full = fs.join(worktree, rel.utf8().or(""));
+bool State.write_worktree(bytes relative_path, int mode, bytes content) {
+    str shown = relative_path.utf8().or("<non-utf8>");
+    str full = fs.join(worktree, relative_path.utf8().or(""));
     str directory = dir_of(full);
     if (directory != "." && !fs.is_dir(directory)) {
         match (fs.makedirs(directory)) {
@@ -1383,8 +1383,8 @@ bool State.write_worktree(bytes rel, int mode, bytes content) {
 /// empty, deepest first, stopping at the first that is not (or at the
 /// working tree's own root, which is never touched) -- `git clean`'s own
 /// tidying of a directory it emptied.
-void State.prune_empty_parents(bytes rel) {
-    str parent_path = dir_of(rel.utf8().or(""));
+void State.prune_empty_parents(bytes relative_path) {
+    str parent_path = dir_of(relative_path.utf8().or(""));
     while (parent_path != "." && parent_path != "") {
         match (fs.rmdir(fs.join(worktree, parent_path))) {
             case Ok: {
@@ -1485,8 +1485,8 @@ pub void State.show_diff_current() {
 /// `rel`'s content on disk right now, or empty if it cannot be read (missing,
 /// a permissions error) -- the same "missing reads as empty" the unstaged
 /// comparison's deleted-on-disk case needs.
-bytes State.read_worktree(bytes rel) {
-    str full = fs.join(worktree, rel.utf8().or(""));
+bytes State.read_worktree(bytes relative_path) {
+    str full = fs.join(worktree, relative_path.utf8().or(""));
     match (io.read_bytes(full)) {
         case Ok(bytes contents): {
             return contents;
@@ -1502,9 +1502,9 @@ bytes State.read_worktree(bytes rel) {
 /// case, and a defensive default the unstaged comparison should never
 /// actually hit (every unstaged row's path is, by construction, in the
 /// index).
-bytes State.index_blob(bytes rel) {
+bytes State.index_blob(bytes relative_path) {
     GIT_index.Index index = read_index(gitdir);
-    match (find_index_entry(index, rel)) {
+    match (find_index_entry(index, relative_path)) {
         case Some(GIT_index.Entry entry): {
             return read_blob(entry.id);
         }
@@ -1517,10 +1517,10 @@ bytes State.index_blob(bytes rel) {
 /// `rel`'s blob content as HEAD's tree has it, or empty if HEAD has no entry
 /// there (an unborn branch, or a path newly staged with nothing committed
 /// yet) -- the staged comparison's "old" side.
-bytes State.head_blob(bytes rel) {
+bytes State.head_blob(bytes relative_path) {
     match (head_tree_id(gitdir)) {
         case Some(str tid): {
-            match (find_in_tree(gitdir, tid, rel)) {
+            match (find_in_tree(gitdir, tid, relative_path)) {
                 case Some(GIT_object.Entry entry): {
                     return read_blob(entry.id);
                 }
@@ -1653,16 +1653,16 @@ pub void State.unstage_hunk_current() {
 /// is dropped instead. `pub`, like `stage_path`, so `t_gitclient_ops.m31`
 /// can drive it against a real fixture and real git. True when the index
 /// changed.
-pub bool State.stage_hunk(bytes rel, int hunk_index) {
-    bytes old = index_blob(rel);
-    bytes new = read_worktree(rel);
+pub bool State.stage_hunk(bytes relative_path, int hunk_index) {
+    bytes old = index_blob(relative_path);
+    bytes new = read_worktree(relative_path);
     match (GIT_patch.apply_hunk(old, new, hunk_index)) {
         case Some(bytes content): {
-            str full = fs.join(worktree, rel.utf8().or(""));
+            str full = fs.join(worktree, relative_path.utf8().or(""));
             if (content.size() == 0 && !fs.exists(full)) {
-                return drop_index_entry(rel, "staged deletion of " + rel.utf8().or("<non-utf8>"));
+                return drop_index_entry(relative_path, "staged deletion of " + relative_path.utf8().or("<non-utf8>"));
             }
-            return set_index_blob(rel, content, "staged hunk " + (hunk_index + 1).to_str() + " of " + rel.utf8().or("<non-utf8>"));
+            return set_index_blob(relative_path, content, "staged hunk " + (hunk_index + 1).to_str() + " of " + relative_path.utf8().or("<non-utf8>"));
         }
         case None: {
             message = "no such hunk to stage";
@@ -1677,15 +1677,15 @@ pub bool State.stage_hunk(bytes rel, int hunk_index) {
 /// one all-added hunk of a path HEAD does not have leaves nothing, which is
 /// `git reset -p`'s "unstage addition": the entry is dropped, the file is
 /// untracked again. True when the index changed.
-pub bool State.unstage_hunk(bytes rel, int hunk_index) {
-    bytes old = head_blob(rel);
-    bytes new = index_blob(rel);
+pub bool State.unstage_hunk(bytes relative_path, int hunk_index) {
+    bytes old = head_blob(relative_path);
+    bytes new = index_blob(relative_path);
     match (GIT_patch.revert_hunk(old, new, hunk_index)) {
         case Some(bytes content): {
-            if (content.size() == 0 && !head_has(rel)) {
-                return drop_index_entry(rel, "unstaged addition of " + rel.utf8().or("<non-utf8>"));
+            if (content.size() == 0 && !head_has(relative_path)) {
+                return drop_index_entry(relative_path, "unstaged addition of " + relative_path.utf8().or("<non-utf8>"));
             }
-            return set_index_blob(rel, content, "unstaged hunk " + (hunk_index + 1).to_str() + " of " + rel.utf8().or("<non-utf8>"));
+            return set_index_blob(relative_path, content, "unstaged hunk " + (hunk_index + 1).to_str() + " of " + relative_path.utf8().or("<non-utf8>"));
         }
         case None: {
             message = "no such hunk to unstage";
@@ -1726,10 +1726,10 @@ void State.reopen_diff(int keep_cursor) {
 }
 
 /// Does HEAD's tree have `rel` at all? False on an unborn branch too.
-bool State.head_has(bytes rel) {
+bool State.head_has(bytes relative_path) {
     match (head_tree_id(gitdir)) {
         case Some(str tid): {
-            return find_in_tree(gitdir, tid, rel).is_some();
+            return find_in_tree(gitdir, tid, relative_path).is_some();
         }
         case None: {
             return false;
@@ -1740,7 +1740,7 @@ bool State.head_has(bytes rel) {
 /// `rel`'s index entry now names a fresh blob of `content`, mode kept,
 /// stat fields reset so the next `status` re-hashes it. `said` becomes the
 /// status-line message on success.
-bool State.set_index_blob(bytes rel, bytes content, str said) {
+bool State.set_index_blob(bytes relative_path, bytes content, str said) {
     str blob_id = "";
     match (GIT_object.write_blob(gitdir, content)) {
         case Ok(str id): {
@@ -1753,14 +1753,14 @@ bool State.set_index_blob(bytes rel, bytes content, str said) {
     }
     GIT_index.Index index = read_index(gitdir);
     int mode = 0o100644;
-    match (find_index_entry(index, rel)) {
+    match (find_index_entry(index, relative_path)) {
         case Some(GIT_index.Entry entry): {
             mode = entry.mode;
         }
         case None: {
         }
     }
-    replace_entry(index, GIT_index.Entry(0, 0, 0, 0, 0, 0, mode, 0, 0, -1, blob_id, 0, false, rel));
+    replace_entry(index, GIT_index.Entry(0, 0, 0, 0, 0, 0, mode, 0, 0, -1, blob_id, 0, false, relative_path));
     match (GIT_index.write(gitdir, index)) {
         case Ok: {
             message = said;
@@ -1773,9 +1773,9 @@ bool State.set_index_blob(bytes rel, bytes content, str said) {
     }
 }
 
-bool State.drop_index_entry(bytes rel, str said) {
+bool State.drop_index_entry(bytes relative_path, str said) {
     GIT_index.Index index = read_index(gitdir);
-    remove_entry(index, rel);
+    remove_entry(index, relative_path);
     match (GIT_index.write(gitdir, index)) {
         case Ok: {
             message = said;
@@ -2630,15 +2630,15 @@ pub void State.push_current() {
     match (GIT_refs.head(gitdir)) {
         case Ok(GIT_refs.Head head): {
             match (head) {
-                case Born(str name, str oid): {
+                case Born(str name, str old_id): {
                     refname = name;
-                    id = oid;
+                    id = old_id;
                 }
                 case Unborn(str name): {
                     message = "push: " + name + " has no commits yet";
                     return;
                 }
-                case Detached(str oid): {
+                case Detached(str old_id): {
                     message = "push: HEAD is detached; check out a branch first";
                     return;
                 }
@@ -2665,11 +2665,11 @@ pub void State.push_current() {
         }
     }
     match (GIT_http_push.push(gitdir, remote, refname, id)) {
-        case Ok(GIT_http_push.Report rep): {
-            if (rep.is_ok) {
+        case Ok(GIT_http_push.Report report): {
+            if (report.is_ok) {
                 message = "pushed " + refname + " to origin";
             } else {
-                message = "push refused by origin: " + rep.reason;
+                message = "push refused by origin: " + report.reason;
             }
         }
         case Err(GIT_http_push.Error error): {
@@ -2920,14 +2920,14 @@ TUI_app.Action State.handle_commit_key(term.Code code) {
 /// cannot be fallen into by a keystroke meant for the outline underneath.
 TUI_app.Action State.handle_confirm_key(term.Code code) {
     str kind = confirm_kind;
-    bytes rel = confirm_path;
+    bytes relative_path = confirm_path;
     is_confirm_open = false;
     confirm_kind = "";
     confirm_path = [];
     match (code) {
         case Char(int character): {
             if (character == 'y') {
-                discard_path(kind, rel);
+                discard_path(kind, relative_path);
                 return TUI_app.Action.Redraw;
             }
         }

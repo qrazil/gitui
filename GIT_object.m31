@@ -859,11 +859,11 @@ Ident ident(bytes signature) {
 // The index of octet `b` at or after `from`, or -1. `bytes.index_of` takes a
 // needle and has no starting offset, so every scan over a structured buffer
 // has to be written out; see docs/FRICTION.md.
-int find(bytes hay, int needle, int from) {
+int find(bytes haystack, int needle, int from) {
     int index = from;
-    int length = hay.size();
+    int length = haystack.size();
     while (index < length) {
-        if (hay[index] == needle) {
+        if (haystack[index] == needle) {
             return index;
         }
         index = index + 1;
@@ -872,10 +872,10 @@ int find(bytes hay, int needle, int from) {
 }
 
 // The index of the LAST octet `b`, or -1.
-int rfind(bytes hay, int needle) {
-    int index = hay.size() - 1;
+int rfind(bytes haystack, int needle) {
+    int index = haystack.size() - 1;
     while (index >= 0) {
-        if (hay[index] == needle) {
+        if (haystack[index] == needle) {
             return index;
         }
         index = index - 1;

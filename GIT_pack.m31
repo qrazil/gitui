@@ -209,11 +209,11 @@ pub Result<List<Unpacked>, Error> read_pack(str gitdir, bytes pack) {
     Map<int, int> index_at = {};
     int current = 12;
     for (int i in 0 .. count) {
-        ObjHeader hdr = read_obj_header(pack, current)?;
-        int position = current + hdr.header_len;
+        ObjHeader header = read_obj_header(pack, current)?;
+        int position = current + header.header_len;
         int base_off = -1;
         bytes base_id = [];
-        if (hdr.kind == 6) {
+        if (header.kind == 6) {
             if (position >= pack.size()) {
                 return Result<List<Unpacked>, Error>.Err(Error.BadPack);
             }
@@ -234,18 +234,18 @@ pub Result<List<Unpacked>, Error> read_pack(str gitdir, bytes pack) {
             if (base_off < 0 || base_off >= current) {
                 return Result<List<Unpacked>, Error>.Err(Error.BadPack);
             }
-        } else if (hdr.kind == 7) {
+        } else if (header.kind == 7) {
             if (position + 20 > pack.size()) {
                 return Result<List<Unpacked>, Error>.Err(Error.BadPack);
             }
             base_id = pack.substr(position, position + 20);
             position = position + 20;
-        } else if (hdr.kind < 1 || hdr.kind > 4) {
+        } else if (header.kind < 1 || header.kind > 4) {
             return Result<List<Unpacked>, Error>.Err(Error.BadPack);
         }
         GIT_zlib.Decoded decoded = inflate_pack_zlib(pack, position)?;
         index_at.set(current, raws.size());
-        raws.push(Raw(hdr.kind, base_off, base_id, decoded.data));
+        raws.push(Raw(header.kind, base_off, base_id, decoded.data));
         current = position + decoded.used;
     }
     List<Option<Unpacked>> done = [];
@@ -453,11 +453,11 @@ Option<Found> loose_raw(str gitdir, str id) {
 // one, not the other way around; see the header on why, and `GIT_object.m31`'s
 // own copy of this same helper for the established house pattern of not
 // sharing a four-line scan across modules).
-int find(bytes hay, int needle, int from) {
+int find(bytes haystack, int needle, int from) {
     int index = from;
-    int length = hay.size();
+    int length = haystack.size();
     while (index < length) {
-        if (hay[index] == needle) {
+        if (haystack[index] == needle) {
             return index;
         }
         index = index + 1;
@@ -532,13 +532,13 @@ Result<Found, Error> resolve_offset(str gitdir, List<PackFile> packs, Idx pack_i
         if (steps > depth) {
             return Result<Found, Error>.Err(Error.ChainTooDeep);
         }
-        ObjHeader hdr = read_obj_header(pack, current)?;
-        if (hdr.kind == 1 || hdr.kind == 2 || hdr.kind == 3 || hdr.kind == 4) {
-            GIT_zlib.Decoded decoded = inflate_pack_zlib(pack, current + hdr.header_len)?;
-            base_kind = kind_name(hdr.kind);
+        ObjHeader header = read_obj_header(pack, current)?;
+        if (header.kind == 1 || header.kind == 2 || header.kind == 3 || header.kind == 4) {
+            GIT_zlib.Decoded decoded = inflate_pack_zlib(pack, current + header.header_len)?;
+            base_kind = kind_name(header.kind);
             base_content = decoded.data;
             break;
-        } else if (hdr.kind == 6) {
+        } else if (header.kind == 6) {
             // OBJ_OFS_DELTA: a backward byte offset from `current`, the start of
             // THIS object's own type+size header -- not from the end of the
             // header, not from the start of the pack. Encoded as successive
@@ -547,7 +547,7 @@ Result<Found, Error> resolve_offset(str gitdir, List<PackFile> packs, Idx pack_i
             // own trick for not wasting a representable value on 0, which a
             // plain base-128 varint would); see the header note on why this
             // is the easiest arithmetic here to get subtly wrong.
-            int position = current + hdr.header_len;
+            int position = current + header.header_len;
             if (position >= pack.size()) {
                 return Result<Found, Error>.Err(Error.BadPack);
             }
@@ -574,13 +574,13 @@ Result<Found, Error> resolve_offset(str gitdir, List<PackFile> packs, Idx pack_i
             GIT_zlib.Decoded decoded = inflate_pack_zlib(pack, position)?;
             chain.push(decoded.data);
             current = base_off;
-        } else if (hdr.kind == 7) {
+        } else if (header.kind == 7) {
             // OBJ_REF_DELTA: the base named by its own 20-byte id, which may
             // or may not be in THIS pack (a thin pack leaves it out on
             // purpose) -- checked against `pack_index` first, since that is the
             // common case and stays inside this iterative loop; only a miss
             // falls back to `resolve_id`'s general search.
-            int position = current + hdr.header_len;
+            int position = current + header.header_len;
             if (position + 20 > pack.size()) {
                 return Result<Found, Error>.Err(Error.BadPack);
             }

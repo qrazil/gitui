@@ -111,11 +111,11 @@ void do_push(str gitdir, str url, str refname) {
         }
     }
     match (GIT_http_push.push(gitdir, remote, refname, id)) {
-        case Ok(GIT_http_push.Report rep): {
-            if (rep.is_ok) {
-                print("ok " + rep.refname);
+        case Ok(GIT_http_push.Report report): {
+            if (report.is_ok) {
+                print("ok " + report.refname);
             } else {
-                print("ng " + rep.refname + " " + rep.reason);
+                print("ng " + report.refname + " " + report.reason);
                 os.exit(1);
             }
         }
@@ -152,8 +152,8 @@ void do_report(str path, str refname) {
     match (io.read_bytes(path)) {
         case Ok(bytes body): {
             match (GIT_http_push.parse_report(body, refname)) {
-                case Ok(GIT_http_push.Report rep): {
-                    print("unpacked " + bool_text(rep.is_unpacked) + " ok " + bool_text(rep.is_ok) + " reason " + rep.reason);
+                case Ok(GIT_http_push.Report report): {
+                    print("unpacked " + bool_text(report.is_unpacked) + " ok " + bool_text(report.is_ok) + " reason " + report.reason);
                 }
                 case Err(GIT_http_push.Error error): {
                     fail(error.to_str());

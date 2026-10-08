@@ -415,10 +415,10 @@ void push_be16(bytes out, int value) {
 }
 
 // The first octet `b` at or after `from` and before `upto`, or -1.
-int find(bytes hay, int octet, int from, int upto) {
+int find(bytes haystack, int octet, int from, int upto) {
     int position = from;
     while (position < upto) {
-        if (hay[position] == octet) {
+        if (haystack[position] == octet) {
             return position;
         }
         position = position + 1;

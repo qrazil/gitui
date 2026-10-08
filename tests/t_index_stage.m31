@@ -18,8 +18,8 @@ if (argv.size() < 4) {
 }
 str git_directory = argv[1];
 str worktree = argv[2];
-str rel = argv[3];
-str full = fs.join(worktree, rel);
+str relative_path = argv[3];
+str full = fs.join(worktree, relative_path);
 bytes content = [];
 match (io.read_bytes(full)) {
     case Ok(bytes contents): {
@@ -50,7 +50,7 @@ match (fs.stat(full)) {
         os.exit(1);
     }
 }
-GIT_index.Entry entry = GIT_index.from_stat(rel.to_bytes(), file_stat, fs.is_link(full), blob_id);
+GIT_index.Entry entry = GIT_index.from_stat(relative_path.to_bytes(), file_stat, fs.is_link(full), blob_id);
 GIT_index.Index original = GIT_index.Index([]);
 match (GIT_index.read(git_directory)) {
     case Ok(GIT_index.Index index): {

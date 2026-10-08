@@ -404,16 +404,16 @@ Result<List<WFile>, Error> list_worktree(str worktree) {
     match (fs.walk(worktree)) {
         case Ok(List<str> paths): {
             for (str path in paths) {
-                str rel = text.strip_prefix(path, base);
-                if (rel == ".git" || rel.starts_with(".git/")) {
+                str relative_path = text.strip_prefix(path, base);
+                if (relative_path == ".git" || relative_path.starts_with(".git/")) {
                     continue;
                 }
                 if (fs.is_link(path)) {
-                    out.push(WFile(rel, true));
+                    out.push(WFile(relative_path, true));
                 } else if (fs.is_dir(path)) {
                     continue;
                 } else if (fs.is_file(path)) {
-                    out.push(WFile(rel, false));
+                    out.push(WFile(relative_path, false));
                 }
             }
         }
