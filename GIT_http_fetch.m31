@@ -1,5 +1,5 @@
 // Git's smart HTTP protocol, protocol v0 only: enough to fetch a real
-// packfile from a real server over `lib/http.m31`. See
+// packfile from a real server over `lib/https.m31`. See
 // `docs/design.md`'s "Going remote, 2026-09-29" for where this sits: a
 // fetched pack is written to disk here, verified byte for byte against its
 // own trailing checksum, and handed to nothing else in this program. Turning
@@ -24,8 +24,8 @@
 //   GIT_http_fetch.verify_pack(pack, out_path) -> Result<Summary, Error>     Part 5
 //
 // `discover` and `fetch` are the only two functions that touch a socket, and
-// they do it by building a `http.Request` and calling `http.fetch` --
-// exactly the same two calls a caller of `lib/http.m31` would write by hand.
+// they do it by building a `http.Request` and handing it to `exchange` (below),
+// which is `https.fetch`: `http://` and `https://` URLs alike.
 // Everything else is a pure function over `bytes`, in memory, so the whole
 // wire format is unit-testable against fixed byte strings and the two real
 // exchanges are tested only for "does a real server's answer parse", not for
@@ -156,17 +156,30 @@
 //   - **Push**, and the capabilities that only matter for it
 //     (`report-status`, `delete-refs`, `push-options`, ...).
 //   - **Protocol v2** -- see above.
-//   - **SSH**, and TLS: `lib/http.m31`'s own `parse_url` already refuses
-//     `https://` before a socket exists, for the reason its header gives,
-//     and that refusal is inherited here rather than repeated.
+//   - **SSH**. (`https://` is supported, through `lib/https.m31`: see "TLS"
+//     below.)
 //   - **`multi_ack`/`multi_ack_detailed`** -- see "negotiation" above.
 
-import http;
-import io;
 import fs;
 import GIT_object;
+import http;
+import https;
+import io;
+import os;
 import random;
 import GIT_sha1;
+import tls;
+
+// --- TLS ----------------------------------------------------------------------
+//
+// `http://` URLs are spoken as before. An `https://` URL goes through
+// `lib/https.m31`, which proves the server's certificate against whom `trust()`
+// names and follows redirects by that module's own rules (five same-origin
+// hops; `http` to `https` on the same host is followed; `https` to `http` is
+// never followed -- `Error.InsecureRedirect`). There is no way to switch the
+// check off. The only knob is where the roots come from: the operating
+// system's by default, or the PEM file named by `GITUI_HTTP_CA_FILE` (a
+// private CA for a self-hosted server, or a test's throwaway one).
 
 /// Why a fetch or a ref listing could not be completed. Payload-free
 /// (`docs/errors-decision.md` §4, the convention every module in this
@@ -179,6 +192,13 @@ pub enum Error {
     /// own `Error` already said which; there is nothing more specific to add
     /// at this layer.
     Http;
+    /// An `https://` server's certificate was refused: not issued by a
+    /// trusted root (see `GITUI_HTTP_CA_FILE`), expired, or for another host.
+    Certificate;
+    /// The TLS connection failed for any other reason.
+    Tls;
+    /// An `https://` URL redirected to `http://`, which is never followed.
+    InsecureRedirect;
     /// The server answered, but not with `200`.
     Status;
     /// The response's `Content-Type` does not name a smart-HTTP git service
@@ -227,6 +247,15 @@ pub str Error.to_str() {
     match (this) {
         case Http: {
             return "the HTTP exchange failed";
+        }
+        case Certificate: {
+            return "the server's certificate was refused (untrusted, expired or for another host)";
+        }
+        case Tls: {
+            return "the TLS connection failed";
+        }
+        case InsecureRedirect: {
+            return "the server redirected https to http, which is not followed";
         }
         case Status: {
             return "the server did not answer 200";
@@ -369,6 +398,114 @@ pub type RemoteRef {
     pub str id;
 }
 
+/// How a failed exchange is told apart: `Plain` is everything `http` reports
+/// (a refused connection, a timeout, a malformed message), `Certificate` the
+/// three ways a server's certificate is refused, `Tls` the rest of TLS, and
+/// `InsecureRedirect` an `https` to `http` redirect.
+pub enum TransportFailure {
+    Plain;
+    Certificate;
+    Tls;
+    InsecureRedirect;
+}
+
+/// `error`, as one of the four `TransportFailure`s.
+pub TransportFailure classify(http.Error error) {
+    match (error) {
+        case CertificateUntrusted: {
+            return TransportFailure.Certificate;
+        }
+        case CertificateExpired: {
+            return TransportFailure.Certificate;
+        }
+        case HostnameMismatch: {
+            return TransportFailure.Certificate;
+        }
+        case TlsFailed: {
+            return TransportFailure.Tls;
+        }
+        case InsecureRedirect: {
+            return TransportFailure.InsecureRedirect;
+        }
+        case Syntax: {
+            return TransportFailure.Plain;
+        }
+        case Framing: {
+            return TransportFailure.Plain;
+        }
+        case TooLarge: {
+            return TransportFailure.Plain;
+        }
+        case BadUrl: {
+            return TransportFailure.Plain;
+        }
+        case Closed: {
+            return TransportFailure.Plain;
+        }
+        case Refused: {
+            return TransportFailure.Plain;
+        }
+        case TimedOut: {
+            return TransportFailure.Plain;
+        }
+        case Unreachable: {
+            return TransportFailure.Plain;
+        }
+        case Reset: {
+            return TransportFailure.Plain;
+        }
+        case InUse: {
+            return TransportFailure.Plain;
+        }
+        case NameNotFound: {
+            return TransportFailure.Plain;
+        }
+        case Other: {
+            return TransportFailure.Plain;
+        }
+        case SchemeNeedsTls: {
+            return TransportFailure.Plain;
+        }
+    }
+}
+
+Error error_of(http.Error error) {
+    match (classify(error)) {
+        case Plain: {
+            return Error.Http;
+        }
+        case Certificate: {
+            return Error.Certificate;
+        }
+        case Tls: {
+            return Error.Tls;
+        }
+        case InsecureRedirect: {
+            return Error.InsecureRedirect;
+        }
+    }
+}
+
+/// Whom an `https://` server must prove it is: the roots in the PEM file
+/// `GITUI_HTTP_CA_FILE` names, or the operating system's.
+pub tls.Trust trust() {
+    match (os.env("GITUI_HTTP_CA_FILE")) {
+        case Some(str path): {
+            if (path != "") {
+                return tls.Trust.CaFile(path);
+            }
+        }
+        case None: {
+        }
+    }
+    return tls.Trust.SystemRoots;
+}
+
+/// Send `request` over `http://` or, with `trust()`, `https://`.
+pub Result<http.Response, http.Error> exchange(http.Request request) {
+    return https.fetch(request, trust: trust());
+}
+
 /// The service announcement, the capabilities on the first ref line, and
 /// every ref -- in the server's own order, which is what `git ls-remote`
 /// prints and what this module's own tests compare against byte for byte.
@@ -393,12 +530,12 @@ pub Result<Advertisement, Error> discover(str url, str authorization = "") {
             if (authorization != "") {
                 request.set("authorization", authorization);
             }
-            match (http.fetch(request)) {
+            match (exchange(request)) {
                 case Ok(http.Response response): {
                     return after_refs_response(response);
                 }
-                case Err(_): {
-                    return Result<Advertisement, Error>.Err(Error.Http);
+                case Err(http.Error failure): {
+                    return Result<Advertisement, Error>.Err(error_of(failure));
                 }
             }
         }
@@ -655,12 +792,12 @@ pub Result<Summary, Error> fetch(str url, Advertisement advertisement, List<str>
                 request.set("authorization", authorization);
             }
             request.set_body(body);
-            match (http.fetch(request)) {
+            match (exchange(request)) {
                 case Ok(http.Response response): {
                     return after_pack_response(response, out_path);
                 }
-                case Err(_): {
-                    return Result<Summary, Error>.Err(Error.Http);
+                case Err(http.Error failure): {
+                    return Result<Summary, Error>.Err(error_of(failure));
                 }
             }
         }

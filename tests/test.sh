@@ -322,6 +322,12 @@ source tests/test_discard_amend.sh
 source tests/test_push.sh
 source tests/test_pull.sh
 
+# --- the same over TLS, against git http-backend behind an https listener -----
+#
+# `test_https.sh` starts three more servers and extends the EXIT trap again.
+
+source tests/test_https.sh
+
 echo
 if [ $fail -eq 0 ]; then
     printf '\033[32mall %d checks passed\033[0m\n' "$pass"

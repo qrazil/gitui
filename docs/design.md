@@ -195,6 +195,26 @@ reaches GitHub, GitLab and this project's own server with no SSH at all. It
 gets its own scoping pass, the same way `docs/concurrency-decision.md`
 exists as its own document, rather than riding in as a third parallel track.
 
+## HTTPS, 2026-10-08
+
+m31 v0.3.0 moved TLS out of `http` into a separate `https` module (`http.fetch`
+answers `SchemeNeedsTls` for an `https://` URL), so the smart-HTTP transport
+went from "`http://` only" to "both" by changing one call: every request in
+`GIT_http_fetch.m31` and `GIT_http_push.m31` goes through
+`GIT_http_fetch.exchange`, which is `https.fetch(request, trust: trust())`.
+`parse_remote` keeps the scheme it was given and refuses everything else.
+
+Decisions: (1) there is no insecure mode to expose, and none is added; the one
+knob is `GITUI_HTTP_CA_FILE` (a PEM of roots, `tls.Trust.CaFile`), which is what
+a self-hosted server with a private CA needs and what the tests use for their
+throwaway CA. (2) The error enums gain `Certificate`, `Tls` and
+`InsecureRedirect` (in `GIT_http_fetch`, and in `GIT_http_push`), derived from
+`http.Error` by `GIT_http_fetch.classify`, so a refused certificate is not
+reported as a generic network failure; everything else still maps to `Http`.
+(3) Redirect policy is the standard library's, not ours: a request is retried
+on the same origin up to five times, `http` to `https` on the same host is
+followed, `https` to `http` never is.
+
 ## What this deliberately does not decide yet
 
   - Exact keybindings (mnemonic, one key per base verb, is the only

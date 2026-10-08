@@ -146,10 +146,18 @@ user alice" ] || { pp_url_ok=0; note "remote userinfo: got '$got'"; }
     got=$("$WORK/t_push" remote "http://host/r.git" 2>&1)
     [ "$got" = "url http://host/r.git
 user -" ] || { pp_url_ok=0; note "remote plain: got '$got'"; }
-    if "$WORK/t_push" remote "https://host/r.git" >/dev/null 2>&1; then pp_url_ok=0; fi
+    got=$("$WORK/t_push" remote "https://bob:s3cret@host:8443/r.git?x=1" 2>&1)
+    [ "$got" = "url https://host:8443/r.git?x=1
+user bob" ] || { pp_url_ok=0; note "remote https userinfo: got '$got'"; }
+    case "$got" in *s3cret*) pp_url_ok=0 ;; esac
+    got=$("$WORK/t_push" remote "https://host/r.git" 2>&1)
+    [ "$got" = "url https://host/r.git
+user -" ] || { pp_url_ok=0; note "remote https plain: got '$got'"; }
+    if "$WORK/t_push" remote "ftp://host/r.git" >/dev/null 2>&1; then pp_url_ok=0; fi
+    if "$WORK/t_push" remote "httpsx://host/r.git" >/dev/null 2>&1; then pp_url_ok=0; fi
     if "$WORK/t_push" remote "/some/path" >/dev/null 2>&1; then pp_url_ok=0; fi
     if [ "$pp_url_ok" = 1 ]; then
-        note "httppush: userinfo is split out (password never printed); https:// and local paths are refused"
+        note "httppush: userinfo is split out (password never printed); https:// keeps its scheme; other schemes and local paths are refused"
     else
         bad "httppush parse_remote" "see notes above"
     fi

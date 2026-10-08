@@ -1,5 +1,5 @@
 // Git's smart-HTTP protocol, the push half: `git-receive-pack` over
-// `lib/http.m31`, the sibling of `GIT_http_fetch.m31` (which has the fetch half
+// `lib/https.m31`, the sibling of `GIT_http_fetch.m31` (which has the fetch half
 // and whose pkt-line framing and advertisement parser this reuses rather
 // than repeats). See `docs/design.md`'s "Going remote" for where this
 // sits: a push is "compute what the remote lacks, pack it, send it with the
@@ -56,9 +56,10 @@
 // URL carries none, from `GITUI_HTTP_USER`/`GITUI_HTTP_PASSWORD`. The
 // password is never written to any message, log or error this module
 // produces; `Remote.url` is the credential-free form for exactly that
-// reason. `lib/http.m31` has no TLS, so this only ever speaks to an
-// `http://` server -- a self-hosted or LAN one. Pushing to github.com (HTTPS
-// only) waits on TLS in the standard library, not on anything here.
+// reason. `https://` remotes go through `lib/https.m31` (see "TLS" in
+// `GIT_http_fetch.m31`): the certificate is always checked, against the
+// operating system's roots or the PEM file `GITUI_HTTP_CA_FILE` names, and the
+// credentials only ever travel inside the encrypted connection.
 
 import base64;
 import http;
@@ -72,6 +73,13 @@ import GIT_pack_write;
 pub enum Error {
     /// The HTTP exchange itself failed (`lib/http.m31` said why).
     Http;
+    /// An `https://` server's certificate was refused: not issued by a
+    /// trusted root (see `GITUI_HTTP_CA_FILE`), expired, or for another host.
+    Certificate;
+    /// The TLS connection failed for any other reason.
+    Tls;
+    /// An `https://` URL redirected to `http://`, which is never followed.
+    InsecureRedirect;
     /// The server answered, but not `200`.
     Status;
     /// `401`/`403`: the server wants credentials this client did not have,
@@ -87,8 +95,8 @@ pub enum Error {
     NoReportStatus;
     /// A ref name or object id is not well-formed.
     BadName;
-    /// The remote URL is not one this client can use (`https://`, or not a
-    /// URL at all).
+    /// The remote URL is not one this client can use (not `http://` or
+    /// `https://`, or not a URL at all).
     BadUrl;
     /// The remote already has exactly this id on this ref.
     UpToDate;
@@ -107,6 +115,15 @@ pub str Error.to_str() {
     match (this) {
         case Http: {
             return "the HTTP exchange failed";
+        }
+        case Certificate: {
+            return "the server's certificate was refused (untrusted, expired or for another host)";
+        }
+        case Tls: {
+            return "the TLS connection failed";
+        }
+        case InsecureRedirect: {
+            return "the server redirected https to http, which is not followed";
         }
         case Status: {
             return "the server did not answer 200";
@@ -127,7 +144,7 @@ pub str Error.to_str() {
             return "not a well-formed ref name or object id";
         }
         case BadUrl: {
-            return "the remote URL is not usable (only http:// is supported; lib/http has no TLS)";
+            return "the remote URL is not usable (only http:// and https:// are supported)";
         }
         case UpToDate: {
             return "everything up to date";
@@ -164,14 +181,19 @@ pub type Remote {
 }
 
 /// Split userinfo out of `url`, falling back to `GITUI_HTTP_USER`/
-/// `GITUI_HTTP_PASSWORD` when there is none. Refuses `https://` and anything
-/// that is not `http://...` up front, the same way `lib/http.m31` would a
-/// moment later -- but here, before a credential has been handled at all.
+/// `GITUI_HTTP_PASSWORD` when there is none. Refuses anything that is not
+/// `http://...` or `https://...` up front, before a credential has been
+/// handled at all.
 pub Result<Remote, Error> parse_remote(str url) {
-    if (!url.starts_with("http://")) {
+    str scheme = "";
+    if (url.starts_with("http://")) {
+        scheme = "http://";
+    } else if (url.starts_with("https://")) {
+        scheme = "https://";
+    } else {
         return Result<Remote, Error>.Err(Error.BadUrl);
     }
-    str rest = url.substr(7, url.size());
+    str rest = url.substr(scheme.size(), url.size());
     int end = rest.size();
     match (rest.index_of("/")) {
         case Some(int found): {
@@ -224,7 +246,7 @@ pub Result<Remote, Error> parse_remote(str url) {
     if (host == "") {
         return Result<Remote, Error>.Err(Error.BadUrl);
     }
-    return Result<Remote, Error>.Ok(Remote("http://" + host + tail, auth));
+    return Result<Remote, Error>.Ok(Remote(scheme + host + tail, auth));
 }
 
 // The offset of the last `@` in `s`, so a password containing an
@@ -284,7 +306,7 @@ pub Result<GIT_http_fetch.Advertisement, Error> discover(Remote remote) {
         case Ok(http.Request request): {
             request.set("accept", "application/x-git-receive-pack-advertisement");
             apply_auth(request, remote);
-            match (http.fetch(request)) {
+            match (GIT_http_fetch.exchange(request)) {
                 case Ok(http.Response response): {
                     if (response.status() == 401 || response.status() == 403) {
                         return Result<GIT_http_fetch.Advertisement, Error>.Err(Error.Auth);
@@ -305,8 +327,8 @@ pub Result<GIT_http_fetch.Advertisement, Error> discover(Remote remote) {
                         }
                     }
                 }
-                case Err(_): {
-                    return Result<GIT_http_fetch.Advertisement, Error>.Err(Error.Http);
+                case Err(http.Error failure): {
+                    return Result<GIT_http_fetch.Advertisement, Error>.Err(error_of(failure));
                 }
             }
         }
@@ -540,7 +562,7 @@ pub Result<Report, Error> push(str gitdir, Remote remote, str refname, str new_i
             request.set("accept", "application/x-git-receive-pack-result");
             apply_auth(request, remote);
             request.set_body(command_body(old, new_id, refname, pack));
-            match (http.fetch(request)) {
+            match (GIT_http_fetch.exchange(request)) {
                 case Ok(http.Response response): {
                     if (response.status() == 401 || response.status() == 403) {
                         return Result<Report, Error>.Err(Error.Auth);
@@ -554,13 +576,30 @@ pub Result<Report, Error> push(str gitdir, Remote remote, str refname, str new_i
                     }
                     return parse_report(response.body(), refname);
                 }
-                case Err(_): {
-                    return Result<Report, Error>.Err(Error.Http);
+                case Err(http.Error failure): {
+                    return Result<Report, Error>.Err(error_of(failure));
                 }
             }
         }
         case Err(_): {
             return Result<Report, Error>.Err(Error.BadUrl);
+        }
+    }
+}
+
+Error error_of(http.Error error) {
+    match (GIT_http_fetch.classify(error)) {
+        case Plain: {
+            return Error.Http;
+        }
+        case Certificate: {
+            return Error.Certificate;
+        }
+        case Tls: {
+            return Error.Tls;
+        }
+        case InsecureRedirect: {
+            return Error.InsecureRedirect;
         }
     }
 }

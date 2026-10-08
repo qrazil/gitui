@@ -13,7 +13,7 @@ build and records it in `deps.lock`. Library modules and the two entry points st
 at the root; `tests/`, `tests/oracles/`, `scripts/` and `docs/` hold the rest.
 
 ```
-export M31_ROOT=/path/to/m31      # a checkout, or an extracted release's runtime SDK (m31 v0.2.0+)
+export M31_ROOT=/path/to/m31      # a checkout, or an extracted release's runtime SDK (m31 v0.3.0+)
 export LANGC=/path/to/m31c        # the matching compiler
 
 bash tests/test.sh                    # the built-in fixtures
@@ -43,7 +43,7 @@ bash scripts/build-gitui.sh -o ourgitui    # not build.sh -- it is the one with 
 | `GIT_log.m31` | the commit-history walk, shared by `git.m31 -log` and `gitui.m31` |
 | `GIT_client.m31` | the interactive client's state and logic (no top-level statements, so it is importable and testable) |
 | `gitui.m31` | the interactive client's thin driver: parses a path, runs `TUI_app.Loop` |
-| `GIT_http_fetch.m31` | git's smart-HTTP protocol, v0 fetch/clone only: pkt-line framing, the ref advertisement, want/have negotiation, side-band-64k demultiplexing, and pack checksum verification, over `lib/http.m31` |
+| `GIT_http_fetch.m31` | git's smart-HTTP protocol, v0 fetch/clone only: pkt-line framing, the ref advertisement, want/have negotiation, side-band-64k demultiplexing, and pack checksum verification, over `lib/https.m31` (`http://` and `https://`) |
 | `GIT_pack_write.m31` | writes packfiles (whole objects, stored-zlib) and computes the object set a push must send, like `git rev-list --objects tips ^known` |
 | `GIT_http_push.m31` | smart-HTTP v0 push (`git-receive-pack`): fast-forward-only, `report-status`, HTTP Basic auth from the URL's userinfo or `GITUI_HTTP_USER`/`GITUI_HTTP_PASSWORD` |
 | `GIT_config.m31` | a minimal `.git/config` reader (`remote.origin.url` and friends) |
@@ -242,7 +242,7 @@ Packfile *writing* lives in `GIT_pack_write.m31` (see "Push" below).
 ## Smart-HTTP fetch (`GIT_http_fetch.m31`): a verified pack on disk, and no further
 
 `GIT_http_fetch.m31` speaks enough of git's smart-HTTP protocol -- v0 only, over
-`lib/http.m31` -- to fetch a real packfile from a real server: the ref
+`lib/https.m31` -- to fetch a real packfile from a real server: the ref
 advertisement (`GET .../info/refs?service=git-upload-pack`, refusing a
 "dumb HTTP" answer rather than misparsing it), want/have negotiation (a
 `clone`'s empty `have` list and a `fetch`'s non-empty one are both tested),
@@ -266,8 +266,53 @@ scope. Turning a fetched pack into a repository this program can `log` or
 `cat-file` is therefore stage 2's own follow-up, not a gap in this file.
 SSH and protocol v2 are named, separate gaps, not oversights: v0 is
 universally supported as a fallback even where v2 is preferred, and
-`lib/http.m31` itself already refuses `https://` before a socket exists, for
-the reason its own header gives.
+`https://` is supported (see "HTTPS" below).
+
+## HTTPS (`GIT_http_fetch.exchange`)
+
+Fetch, push and pull all work over `https://` remotes as well as `http://`.
+Every request goes through `GIT_http_fetch.exchange`, which is the standard
+library's `https.fetch` (m31 v0.3.0+; `http` itself no longer links TLS): an
+`http://` URL is spoken exactly as before, an `https://` one is spoken over a
+TLS connection whose certificate is verified. There is no insecure mode and no
+switch that skips the check.
+
+  - **Trust.** The operating system's root certificates by default. To trust a
+    private CA (a self-hosted server, orogit behind its own CA), set
+    `GITUI_HTTP_CA_FILE=/path/to/ca.pem`; it replaces the system roots for the
+    run and becomes `tls.Trust.CaFile`.
+  - **Credentials.** As for `http://`: `https://user:pass@host/...` or
+    `GITUI_HTTP_USER`/`GITUI_HTTP_PASSWORD`, sent as HTTP Basic inside the
+    encrypted connection. The password is stripped from the URL before the
+    request is built and is never part of any message or error, including
+    when the certificate is refused (nothing is sent before the handshake
+    has verified the server).
+  - **Errors.** The same vocabulary as over `http://` -- `the HTTP exchange
+    failed`, `the server did not answer 200`, `the server refused the push` --
+    plus three that only TLS can produce: `the server's certificate was refused
+    (untrusted, expired or for another host)`, `the TLS connection failed`
+    (anything else that stopped the handshake or the stream, including a CA
+    file that cannot be read), and `the server redirected https to http, which
+    is not followed`.
+  - **Redirects** follow the standard library's rules, unchanged: up to five
+    hops on the same origin (a 307/308 keeps the method and body, so a
+    redirected `git-upload-pack` or `git-receive-pack` POST works; the
+    `Authorization` header goes along), `http://` to `https://` on the same
+    host is followed, `https://` to `http://` is never followed, and any other
+    change of host or port is refused. A redirect only applies to the one
+    request: a 301 on `info/refs` does not rewrite the base URL the way real
+    git does, so a server that moves a repository should do it with a 307.
+
+`test_https.sh` runs real `git http-backend` behind Python's `ssl` (TLS 1.3, a
+throwaway CA and `localhost` leaf made with `openssl`, handed to the client
+through `GITUI_HTTP_CA_FILE`): the ref advertisement over TLS equals `git
+ls-remote`; a clone and a fetch with haves are accepted by `git index-pack`;
+push to a Basic-auth server (URL credentials, environment credentials, none,
+wrong) leaves a `git fsck`-clean repository and never prints the password; a
+pull fast-forwards; an unknown CA, another CA's file, a certificate for another
+host and a missing CA file are all refused with nothing written, pushed or
+moved; and the redirect cases above, including the refused downgrade, plus
+the plain `http://` listener of the same server still working.
 
 ## Smaller things this does not do
 
@@ -307,9 +352,8 @@ while it runs.
 Authentication is HTTP Basic, from `http://user:pass@host/...` in the remote
 URL or, when the URL carries none, `GITUI_HTTP_USER`/`GITUI_HTTP_PASSWORD`.
 The userinfo is stripped from the URL before anything is displayed, and the
-password is never part of any message or error. `https://` is refused (the
-standard library has no TLS), so GitHub itself is out of reach; an `http://`
-git server, such as orogit, is the target.
+password is never part of any message or error. Remotes may be `http://` or
+`https://` (see "HTTPS" below).
 
 `test_push.sh` uses real git as the oracle: every pack `packwrite` writes is
 accepted by `git index-pack --strict` and read back through `GIT_pack.m31`; the
