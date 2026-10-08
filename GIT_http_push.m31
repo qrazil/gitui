@@ -174,16 +174,16 @@ pub Result<Remote, Error> parse_remote(str url) {
     str rest = url.substr(7, url.size());
     int end = rest.size();
     match (rest.index_of("/")) {
-        case Some(int i): {
-            end = i;
+        case Some(int found): {
+            end = found;
         }
         case None: {
         }
     }
     match (rest.index_of("?")) {
-        case Some(int i): {
-            if (i < end) {
-                end = i;
+        case Some(int found): {
+            if (found < end) {
+                end = found;
             }
         }
         case None: {
@@ -194,9 +194,9 @@ pub Result<Remote, Error> parse_remote(str url) {
     Option<Credentials> auth = Option<Credentials>.None;
     str host = authority;
     match (last_at(authority)) {
-        case Some(int at): {
-            str userinfo = authority.substr(0, at);
-            host = authority.substr(at + 1, authority.size());
+        case Some(int at_index): {
+            str userinfo = authority.substr(0, at_index);
+            host = authority.substr(at_index + 1, authority.size());
             str user = userinfo;
             str password = "";
             match (userinfo.index_of(":")) {
@@ -213,8 +213,8 @@ pub Result<Remote, Error> parse_remote(str url) {
         }
         case None: {
             match (os.env("GITUI_HTTP_USER")) {
-                case Some(str u): {
-                    auth = Option<Credentials>.Some(Credentials(u, os.env("GITUI_HTTP_PASSWORD").or("")));
+                case Some(str environment_user): {
+                    auth = Option<Credentials>.Some(Credentials(environment_user, os.env("GITUI_HTTP_PASSWORD").or("")));
                 }
                 case None: {
                 }
@@ -229,23 +229,23 @@ pub Result<Remote, Error> parse_remote(str url) {
 
 // The offset of the last `@` in `s`, so a password containing an
 // (unescaped) `@` still splits at the one that ends the userinfo.
-Option<int> last_at(str s) {
-    int i = s.size() - 1;
-    while (i >= 0) {
-        if (s.byte_at(i) == '@') {
-            return Option<int>.Some(i);
+Option<int> last_at(str text) {
+    int position = text.size() - 1;
+    while (position >= 0) {
+        if (text.byte_at(position) == '@') {
+            return Option<int>.Some(position);
         }
-        i = i - 1;
+        position = position - 1;
     }
     return Option<int>.None;
 }
 
-Result<str, Error> decode(str s) {
-    match (http.unquote(s)) {
-        case Ok(str v): {
-            return Result<str, Error>.Ok(v);
+Result<str, Error> decode(str encoded) {
+    match (http.unquote(encoded)) {
+        case Ok(str decoded): {
+            return Result<str, Error>.Ok(decoded);
         }
-        case Err(http.Error e): {
+        case Err(_): {
             return Result<str, Error>.Err(Error.BadUrl);
         }
     }
@@ -253,10 +253,10 @@ Result<str, Error> decode(str s) {
 
 /// The `Authorization` header value for `r` (`Basic ...`), or `""` when it
 /// has no credentials. Handed to `httpfetch` for a pull; never displayed.
-pub str auth_header(Remote r) {
-    match (r.auth) {
-        case Some(Credentials c): {
-            return "Basic " + base64.encode((c.user + ":" + c.password).to_bytes());
+pub str auth_header(Remote remote) {
+    match (remote.auth) {
+        case Some(Credentials credentials): {
+            return "Basic " + base64.encode((credentials.user + ":" + credentials.password).to_bytes());
         }
         case None: {
             return "";
@@ -265,10 +265,10 @@ pub str auth_header(Remote r) {
 }
 
 // `Authorization: Basic ...` on `req`, if the remote has credentials.
-void apply_auth(http.Request req, Remote r) {
-    match (r.auth) {
-        case Some(Credentials c): {
-            req.set("authorization", "Basic " + base64.encode((c.user + ":" + c.password).to_bytes()));
+void apply_auth(http.Request request, Remote remote) {
+    match (remote.auth) {
+        case Some(Credentials credentials): {
+            request.set("authorization", "Basic " + base64.encode((credentials.user + ":" + credentials.password).to_bytes()));
         }
         case None: {
         }
@@ -278,39 +278,39 @@ void apply_auth(http.Request req, Remote r) {
 /// `GET <url>/info/refs?service=git-receive-pack`, parsed with
 /// `GIT_http_fetch.parse_advertisement` -- the same framing, a different service
 /// name and content type.
-pub Result<GIT_http_fetch.Advertisement, Error> discover(Remote r) {
-    str target = base_of(r.url) + "/info/refs?service=git-receive-pack";
+pub Result<GIT_http_fetch.Advertisement, Error> discover(Remote remote) {
+    str target = base_of(remote.url) + "/info/refs?service=git-receive-pack";
     match (http.request("GET", target)) {
-        case Ok(http.Request req): {
-            req.set("accept", "application/x-git-receive-pack-advertisement");
-            apply_auth(req, r);
-            match (http.fetch(req)) {
-                case Ok(http.Response resp): {
-                    if (resp.status() == 401 || resp.status() == 403) {
+        case Ok(http.Request request): {
+            request.set("accept", "application/x-git-receive-pack-advertisement");
+            apply_auth(request, remote);
+            match (http.fetch(request)) {
+                case Ok(http.Response response): {
+                    if (response.status() == 401 || response.status() == 403) {
                         return Result<GIT_http_fetch.Advertisement, Error>.Err(Error.Auth);
                     }
-                    if (resp.status() != 200) {
+                    if (response.status() != 200) {
                         return Result<GIT_http_fetch.Advertisement, Error>.Err(Error.Status);
                     }
-                    str ctype = resp.header("content-type").or("");
+                    str ctype = response.header("content-type").or("");
                     if (!ctype.starts_with("application/x-git-receive-pack-advertisement")) {
                         return Result<GIT_http_fetch.Advertisement, Error>.Err(Error.NotSmart);
                     }
-                    match (GIT_http_fetch.parse_advertisement(resp.body())) {
-                        case Ok(GIT_http_fetch.Advertisement ad): {
-                            return Result<GIT_http_fetch.Advertisement, Error>.Ok(ad);
+                    match (GIT_http_fetch.parse_advertisement(response.body())) {
+                        case Ok(GIT_http_fetch.Advertisement advertisement): {
+                            return Result<GIT_http_fetch.Advertisement, Error>.Ok(advertisement);
                         }
-                        case Err(GIT_http_fetch.Error e): {
+                        case Err(_): {
                             return Result<GIT_http_fetch.Advertisement, Error>.Err(Error.BadAdvertisement);
                         }
                     }
                 }
-                case Err(http.Error e): {
+                case Err(_): {
                     return Result<GIT_http_fetch.Advertisement, Error>.Err(Error.Http);
                 }
             }
         }
-        case Err(http.Error e): {
+        case Err(_): {
             return Result<GIT_http_fetch.Advertisement, Error>.Err(Error.BadUrl);
         }
     }
@@ -347,23 +347,23 @@ pub type Report {
 /// `report-status`'s plain pkt-lines: `unpack ok` or `unpack <why>`, then
 /// `ok <ref>` or `ng <ref> <why>` per command, then a flush. Pure.
 pub Result<Report, Error> parse_report(bytes body, str refname) {
-    int at = 0;
+    int offset = 0;
     bool unpacked = false;
     str unpack_reason = "";
     bool saw_unpack = false;
     bool saw_ref = false;
-    bool ok = false;
+    bool is_accepted = false;
     str reason = "";
-    while (at < body.size()) {
-        GIT_http_fetch.Packet p = read(body, at)?;
-        at = p.next;
-        if (p.flush) {
+    while (offset < body.size()) {
+        GIT_http_fetch.Packet packet = read(body, offset)?;
+        offset = packet.next;
+        if (packet.flush) {
             break;
         }
         str line = "";
-        match (p.payload.utf8()) {
-            case Some(str s): {
-                line = s.trim();
+        match (packet.payload.utf8()) {
+            case Some(str text): {
+                line = text.trim();
             }
             case None: {
                 return Result<Report, Error>.Err(Error.BadReport);
@@ -384,23 +384,23 @@ pub Result<Report, Error> parse_report(bytes body, str refname) {
         if (line.starts_with("ok ")) {
             if (line.substr(3, line.size()) == refname) {
                 saw_ref = true;
-                ok = true;
+                is_accepted = true;
             }
         } else if (line.starts_with("ng ")) {
             str rest = line.substr(3, line.size());
             str name = rest;
             str why = "";
             match (rest.index_of(" ")) {
-                case Some(int sp): {
-                    name = rest.substr(0, sp);
-                    why = rest.substr(sp + 1, rest.size());
+                case Some(int space_index): {
+                    name = rest.substr(0, space_index);
+                    why = rest.substr(space_index + 1, rest.size());
                 }
                 case None: {
                 }
             }
             if (name == refname) {
                 saw_ref = true;
-                ok = false;
+                is_accepted = false;
                 reason = why;
             }
         } else {
@@ -416,15 +416,15 @@ pub Result<Report, Error> parse_report(bytes body, str refname) {
     if (!saw_ref) {
         return Result<Report, Error>.Err(Error.BadReport);
     }
-    return Result<Report, Error>.Ok(Report(true, ok, refname, reason));
+    return Result<Report, Error>.Ok(Report(true, is_accepted, refname, reason));
 }
 
-Result<GIT_http_fetch.Packet, Error> read(bytes body, int at) {
-    match (GIT_http_fetch.read_packet(body, at)) {
-        case Ok(GIT_http_fetch.Packet p): {
-            return Result<GIT_http_fetch.Packet, Error>.Ok(p);
+Result<GIT_http_fetch.Packet, Error> read(bytes body, int offset) {
+    match (GIT_http_fetch.read_packet(body, offset)) {
+        case Ok(GIT_http_fetch.Packet packet): {
+            return Result<GIT_http_fetch.Packet, Error>.Ok(packet);
         }
-        case Err(GIT_http_fetch.Error e): {
+        case Err(_): {
             return Result<GIT_http_fetch.Packet, Error>.Err(Error.BadReport);
         }
     }
@@ -442,21 +442,21 @@ pub bool is_ancestor(str gitdir, str anc, str desc) {
     Map<str, bool> seen = {};
     List<str> queue = [desc];
     seen.set(desc, true);
-    int at = 0;
-    while (at < queue.size()) {
-        str id = queue[at];
-        at = at + 1;
+    int position = 0;
+    while (position < queue.size()) {
+        str id = queue[position];
+        position = position + 1;
         match (GIT_object.read(gitdir, id)) {
-            case Ok(GIT_object.Object o): {
-                match (o.body) {
-                    case Commit(GIT_object.Commit cm): {
-                        for (str p in cm.parents) {
-                            if (p == anc) {
+            case Ok(GIT_object.Object object): {
+                match (object.body) {
+                    case Commit(GIT_object.Commit commit): {
+                        for (str parent in commit.parents) {
+                            if (parent == anc) {
                                 return true;
                             }
-                            if (!seen.contains(p)) {
-                                seen.set(p, true);
-                                queue.push(p);
+                            if (!seen.contains(parent)) {
+                                seen.set(parent, true);
+                                queue.push(parent);
                             }
                         }
                     }
@@ -480,24 +480,24 @@ pub bool is_ancestor(str gitdir, str anc, str desc) {
 /// server's verdict. `Ok(report)` with `report.ok == false` is a push the
 /// server itself refused (its `reason` says why); every `Err` is a push
 /// that never reached the server, or an answer this client could not read.
-pub Result<Report, Error> push(str gitdir, Remote r, str refname, str new_id) {
+pub Result<Report, Error> push(str gitdir, Remote remote, str refname, str new_id) {
     if (!GIT_object.is_name(new_id) || new_id.size() != 40 || !refname.starts_with("refs/")) {
         return Result<Report, Error>.Err(Error.BadName);
     }
-    GIT_http_fetch.Advertisement ad = discover(r)?;
-    if (!has_cap(ad.capabilities, "report-status")) {
+    GIT_http_fetch.Advertisement advertisement = discover(remote)?;
+    if (!has_cap(advertisement.capabilities, "report-status")) {
         return Result<Report, Error>.Err(Error.NoReportStatus);
     }
     str old = ZERO_ID;
     List<str> known = [];
     Map<str, bool> seen = {};
-    for (GIT_http_fetch.RemoteRef rr in ad.refs) {
-        if (rr.name == refname) {
-            old = rr.id;
+    for (GIT_http_fetch.RemoteRef remote_ref in advertisement.refs) {
+        if (remote_ref.name == refname) {
+            old = remote_ref.id;
         }
-        if (!seen.contains(rr.id)) {
-            seen.set(rr.id, true);
-            known.push(rr.id);
+        if (!seen.contains(remote_ref.id)) {
+            seen.set(remote_ref.id, true);
+            known.push(remote_ref.id);
         }
     }
     if (old == new_id) {
@@ -505,9 +505,9 @@ pub Result<Report, Error> push(str gitdir, Remote r, str refname, str new_id) {
     }
     if (old != ZERO_ID) {
         match (GIT_object.read(gitdir, old)) {
-            case Ok(GIT_object.Object o): {
+            case Ok(_): {
             }
-            case Err(GIT_object.Error e): {
+            case Err(_): {
                 return Result<Report, Error>.Err(Error.Behind);
             }
         }
@@ -517,57 +517,57 @@ pub Result<Report, Error> push(str gitdir, Remote r, str refname, str new_id) {
     }
     List<str> ids = [];
     match (GIT_pack_write.objects_to_send(gitdir, [new_id], known)) {
-        case Ok(List<str> v): {
-            ids = v;
+        case Ok(List<str> listed): {
+            ids = listed;
         }
-        case Err(GIT_pack_write.Error e): {
+        case Err(_): {
             return Result<Report, Error>.Err(Error.Pack);
         }
     }
     bytes pack = [];
     match (GIT_pack_write.build(gitdir, ids)) {
-        case Ok(bytes p): {
-            pack = p;
+        case Ok(bytes packed): {
+            pack = packed;
         }
-        case Err(GIT_pack_write.Error e): {
+        case Err(_): {
             return Result<Report, Error>.Err(Error.Pack);
         }
     }
-    str target = base_of(r.url) + "/git-receive-pack";
+    str target = base_of(remote.url) + "/git-receive-pack";
     match (http.request("POST", target)) {
-        case Ok(http.Request req): {
-            req.set("content-type", "application/x-git-receive-pack-request");
-            req.set("accept", "application/x-git-receive-pack-result");
-            apply_auth(req, r);
-            req.set_body(command_body(old, new_id, refname, pack));
-            match (http.fetch(req)) {
-                case Ok(http.Response resp): {
-                    if (resp.status() == 401 || resp.status() == 403) {
+        case Ok(http.Request request): {
+            request.set("content-type", "application/x-git-receive-pack-request");
+            request.set("accept", "application/x-git-receive-pack-result");
+            apply_auth(request, remote);
+            request.set_body(command_body(old, new_id, refname, pack));
+            match (http.fetch(request)) {
+                case Ok(http.Response response): {
+                    if (response.status() == 401 || response.status() == 403) {
                         return Result<Report, Error>.Err(Error.Auth);
                     }
-                    if (resp.status() != 200) {
+                    if (response.status() != 200) {
                         return Result<Report, Error>.Err(Error.Status);
                     }
-                    str ctype = resp.header("content-type").or("");
+                    str ctype = response.header("content-type").or("");
                     if (!ctype.starts_with("application/x-git-receive-pack-result")) {
                         return Result<Report, Error>.Err(Error.NotSmart);
                     }
-                    return parse_report(resp.body(), refname);
+                    return parse_report(response.body(), refname);
                 }
-                case Err(http.Error e): {
+                case Err(_): {
                     return Result<Report, Error>.Err(Error.Http);
                 }
             }
         }
-        case Err(http.Error e): {
+        case Err(_): {
             return Result<Report, Error>.Err(Error.BadUrl);
         }
     }
 }
 
 bool has_cap(List<str> caps, str name) {
-    for (str c in caps) {
-        if (c == name || c.starts_with(name + "=")) {
+    for (str capability in caps) {
+        if (capability == name || capability.starts_with(name + "=")) {
             return true;
         }
     }

@@ -158,9 +158,9 @@ pub bool Entry.is_gitlink() {
 /// format's own order (`read_entry` relies on nothing about the order it is
 /// handed; `write` imposes this with `sort()` before encoding).
 pub int Entry.cmp(Entry other) {
-    int c = cmp_bytes(path, other.path);
-    if (c != 0) {
-        return c;
+    int order = cmp_bytes(path, other.path);
+    if (order != 0) {
+        return order;
     }
     return stage - other.stage;
 }
@@ -178,10 +178,10 @@ pub Result<Index, Error> read(str gitdir) {
     str path = fs.join(GIT_repository.common(gitdir), "index");
     bytes data = [];
     match (io.read_bytes(path)) {
-        case Ok(bytes b): {
-            data = b;
+        case Ok(bytes contents): {
+            data = contents;
         }
-        case Err(io.Error e): {
+        case Err(_): {
             if (!fs.exists(path)) {
                 return Result<Index, Error>.Err(Error.NotFound);
             }
@@ -215,21 +215,21 @@ pub Result<Index, Error> parse(bytes data) {
         return Result<Index, Error>.Err(Error.Checksum);
     }
     List<Entry> entries = [];
-    int at = 12;
+    int offset = 12;
     for (int i in 0 .. count) {
-        Parsed p = read_entry(data, at, end)?;
-        entries.push(p.entry);
-        at = p.next;
+        Parsed parsed = read_entry(data, offset, end)?;
+        entries.push(parsed.entry);
+        offset = parsed.next;
     }
-    while (end - at >= 8) {
-        int size = be32(data, at + 4);
-        int next = at + 8 + size;
+    while (end - offset >= 8) {
+        int size = be32(data, offset + 4);
+        int next = offset + 8 + size;
         if (size < 0 || next > end) {
             return Result<Index, Error>.Err(Error.BadExtension);
         }
-        at = next;
+        offset = next;
     }
-    if (at != end) {
+    if (offset != end) {
         return Result<Index, Error>.Err(Error.Truncated);
     }
     return Result<Index, Error>.Ok(Index(entries));
@@ -241,26 +241,26 @@ type Parsed {
     int next;
 }
 
-Result<Parsed, Error> read_entry(bytes data, int at, int end) {
-    if (at + 62 > end) {
+Result<Parsed, Error> read_entry(bytes data, int offset, int end) {
+    if (offset + 62 > end) {
         return Result<Parsed, Error>.Err(Error.Truncated);
     }
-    int ctime_s = be32(data, at);
-    int ctime_ns = be32(data, at + 4);
-    int mtime_s = be32(data, at + 8);
-    int mtime_ns = be32(data, at + 12);
-    int dev = be32(data, at + 16);
-    int ino = be32(data, at + 20);
-    int mode = be32(data, at + 24);
-    int uid = be32(data, at + 28);
-    int gid = be32(data, at + 32);
-    int size = be32(data, at + 36);
-    bytes id = data.substr(at + 40, at + 60);
-    int flags = be16(data, at + 60);
+    int ctime_s = be32(data, offset);
+    int ctime_ns = be32(data, offset + 4);
+    int mtime_s = be32(data, offset + 8);
+    int mtime_ns = be32(data, offset + 12);
+    int dev = be32(data, offset + 16);
+    int ino = be32(data, offset + 20);
+    int mode = be32(data, offset + 24);
+    int uid = be32(data, offset + 28);
+    int gid = be32(data, offset + 32);
+    int size = be32(data, offset + 36);
+    bytes id = data.substr(offset + 40, offset + 60);
+    int flags = be16(data, offset + 60);
     int stage = flags >> 12 & 0x3;
     bool assume_valid = flags & 0x8000 != 0;
     bool extended = flags & 0x4000 != 0;
-    int path_start = at + 62;
+    int path_start = offset + 62;
     if (extended) {
         path_start = path_start + 2;
     }
@@ -276,17 +276,17 @@ Result<Parsed, Error> read_entry(bytes data, int at, int end) {
     // to the next multiple of 8 -- git's own padding rule (`read-cache.c`'s
     // `ondisk_size`), which always leaves at least the one NUL already
     // counted and never fewer.
-    int through_nul = nul + 1 - at;
+    int through_nul = nul + 1 - offset;
     int padded = through_nul;
     if (padded % 8 != 0) {
         padded = padded + (8 - padded % 8);
     }
-    int next = at + padded;
+    int next = offset + padded;
     if (next > end) {
         return Result<Parsed, Error>.Err(Error.Truncated);
     }
-    Entry e = Entry(ctime_s, ctime_ns, mtime_s, mtime_ns, dev, ino, mode, uid, gid, size, id.hex(), stage, assume_valid, path);
-    return Result<Parsed, Error>.Ok(Parsed(e, next));
+    Entry entry = Entry(ctime_s, ctime_ns, mtime_s, mtime_ns, dev, ino, mode, uid, gid, size, id.hex(), stage, assume_valid, path);
+    return Result<Parsed, Error>.Ok(Parsed(entry, next));
 }
 
 /// A fresh, stage-0 entry for a regular file or a symlink: `fs.stat`'s
@@ -296,16 +296,16 @@ Result<Parsed, Error> read_entry(bytes data, int at, int end) {
 /// elsewhere (`GIT_object.write_blob`). `dev`, `ino`, `uid` and `gid` are 0 and
 /// `ctime` is set equal to `mtime`; see the module header for why that is
 /// safe.
-pub Entry from_stat(bytes path, fs.Stat st, bool is_link, str blob_id) {
+pub Entry from_stat(bytes path, fs.Stat stat, bool is_link, str blob_id) {
     int mode = 0o100644;
     if (is_link) {
         mode = 0o120000;
-    } else if (st.perm() & 0o111 != 0) {
+    } else if (stat.perm() & 0o111 != 0) {
         mode = 0o100755;
     }
-    int s = st.mtime_ns / 1_000_000_000;
-    int ns = st.mtime_ns % 1_000_000_000;
-    return Entry(s, ns, s, ns, 0, 0, mode, 0, 0, st.size, blob_id, 0, false, path);
+    int seconds = stat.mtime_ns / 1_000_000_000;
+    int nanoseconds = stat.mtime_ns % 1_000_000_000;
+    return Entry(seconds, nanoseconds, seconds, nanoseconds, 0, 0, mode, 0, 0, stat.size, blob_id, 0, false, path);
 }
 
 /// The index of the repository whose git directory is `gitdir`, written
@@ -313,23 +313,23 @@ pub Entry from_stat(bytes path, fs.Stat st, bool is_link, str blob_id) {
 /// renamed over it, so a reader never opens a half-written index and a crash
 /// mid-write leaves the old one intact -- the same discipline `GIT_refs.m31` uses
 /// for a ref.
-pub Result<bool, Error> write(str gitdir, Index ix) {
-    bytes out = encode(ix);
+pub Result<bool, Error> write(str gitdir, Index index) {
+    bytes out = encode(index);
     str path = fs.join(GIT_repository.common(gitdir), "index");
     random.System rnd = random.system();
-    str tmp = path + ".tmp" + rnd.hex(12);
-    match (io.write_bytes(tmp, out)) {
+    str temp = path + ".tmp" + rnd.hex(12);
+    match (io.write_bytes(temp, out)) {
         case Ok: {
         }
-        case Err(io.Error e): {
+        case Err(_): {
             return Result<bool, Error>.Err(Error.Io);
         }
     }
-    match (fs.rename(tmp, path)) {
+    match (fs.rename(temp, path)) {
         case Ok: {
             return Result<bool, Error>.Ok(true);
         }
-        case Err(io.Error e): {
+        case Err(_): {
             return Result<bool, Error>.Err(Error.Io);
         }
     }
@@ -339,15 +339,15 @@ pub Result<bool, Error> write(str gitdir, Index ix) {
 /// so a test can check this against a fixture byte for byte without touching
 /// a filesystem. Entries are sorted into the format's own order first
 /// (`Entry.cmp`); a caller need not have sorted them.
-pub bytes encode(Index ix) {
-    List<Entry> sorted = clone(ix.entries);
+pub bytes encode(Index index) {
+    List<Entry> sorted = clone(index.entries);
     sorted.sort();
     bytes out = [];
     out.extend("DIRC".to_bytes());
     push_be32(out, 2);
     push_be32(out, sorted.size());
-    for (Entry e in sorted) {
-        encode_entry(out, e);
+    for (Entry entry in sorted) {
+        encode_entry(out, entry);
     }
     bytes sum = GIT_sha1.sum(out);
     out.extend(sum);
@@ -357,30 +357,30 @@ pub bytes encode(Index ix) {
 // One entry, version-2 shape: no extended-flags word, `stage` folded into the
 // flags, and NUL padding to the next multiple of 8 counted from the start of
 // the entry -- the exact inverse of `read_entry`'s arithmetic.
-void encode_entry(bytes out, Entry e) {
+void encode_entry(bytes out, Entry entry) {
     int start = out.size();
-    push_be32(out, e.ctime_s);
-    push_be32(out, e.ctime_ns);
-    push_be32(out, e.mtime_s);
-    push_be32(out, e.mtime_ns);
-    push_be32(out, e.dev);
-    push_be32(out, e.ino);
-    push_be32(out, e.mode);
-    push_be32(out, e.uid);
-    push_be32(out, e.gid);
-    push_be32(out, e.size);
-    out.extend(hex_decode(e.id));
-    int namelen = e.path.size();
+    push_be32(out, entry.ctime_s);
+    push_be32(out, entry.ctime_ns);
+    push_be32(out, entry.mtime_s);
+    push_be32(out, entry.mtime_ns);
+    push_be32(out, entry.dev);
+    push_be32(out, entry.ino);
+    push_be32(out, entry.mode);
+    push_be32(out, entry.uid);
+    push_be32(out, entry.gid);
+    push_be32(out, entry.size);
+    out.extend(hex_decode(entry.id));
+    int namelen = entry.path.size();
     int lenfield = namelen;
     if (lenfield > 0x0FFF) {
         lenfield = 0x0FFF;
     }
-    int flags = (e.stage & 0x3) << 12 | lenfield;
-    if (e.assume_valid) {
+    int flags = (entry.stage & 0x3) << 12 | lenfield;
+    if (entry.assume_valid) {
         flags = flags | 0x8000;
     }
     push_be16(out, flags);
-    out.extend(e.path);
+    out.extend(entry.path);
     int through_nul = out.size() - start + 1;
     int padded = through_nul;
     if (padded % 8 != 0) {
@@ -394,34 +394,34 @@ void encode_entry(bytes out, Entry e) {
 
 // --- small helpers, the way GIT_object.m31 and GIT_refs.m31 each write their own ----
 
-int be32(bytes b, int at) {
-    return b[at] << 24 | b[at + 1] << 16 | b[at + 2] << 8 | b[at + 3];
+int be32(bytes data, int offset) {
+    return data[offset] << 24 | data[offset + 1] << 16 | data[offset + 2] << 8 | data[offset + 3];
 }
 
-int be16(bytes b, int at) {
-    return b[at] << 8 | b[at + 1];
+int be16(bytes data, int offset) {
+    return data[offset] << 8 | data[offset + 1];
 }
 
-void push_be32(bytes out, int v) {
-    out.push(v >> 24 & 0xFF);
-    out.push(v >> 16 & 0xFF);
-    out.push(v >> 8 & 0xFF);
-    out.push(v & 0xFF);
+void push_be32(bytes out, int value) {
+    out.push(value >> 24 & 0xFF);
+    out.push(value >> 16 & 0xFF);
+    out.push(value >> 8 & 0xFF);
+    out.push(value & 0xFF);
 }
 
-void push_be16(bytes out, int v) {
-    out.push(v >> 8 & 0xFF);
-    out.push(v & 0xFF);
+void push_be16(bytes out, int value) {
+    out.push(value >> 8 & 0xFF);
+    out.push(value & 0xFF);
 }
 
 // The first octet `b` at or after `from` and before `upto`, or -1.
-int find(bytes hay, int b, int from, int upto) {
-    int i = from;
-    while (i < upto) {
-        if (hay[i] == b) {
-            return i;
+int find(bytes hay, int octet, int from, int upto) {
+    int position = from;
+    while (position < upto) {
+        if (hay[position] == octet) {
+            return position;
         }
-        i = i + 1;
+        position = position + 1;
     }
     return -1;
 }
@@ -429,39 +429,39 @@ int find(bytes hay, int b, int from, int upto) {
 // 40 lowercase hex digits to the 20 octets they spell -- `GIT_object.m31`'s own
 // helper, needed here too and not shared, the way `find`/`ascii`/`decimal`
 // are each written out per module rather than pulled into a shared utility.
-bytes hex_decode(str s) {
+bytes hex_decode(str text) {
     bytes out = [];
-    int i = 0;
-    while (i + 1 < s.size()) {
-        out.push(hex_val(s.byte_at(i)) << 4 | hex_val(s.byte_at(i + 1)));
-        i = i + 2;
+    int position = 0;
+    while (position + 1 < text.size()) {
+        out.push(hex_val(text.byte_at(position)) << 4 | hex_val(text.byte_at(position + 1)));
+        position = position + 2;
     }
     return out;
 }
 
-int hex_val(int c) {
-    if (c >= '0' && c <= '9') {
-        return c - '0';
+int hex_val(int digit) {
+    if (digit >= '0' && digit <= '9') {
+        return digit - '0';
     }
-    if (c >= 'a' && c <= 'f') {
-        return c - 'a' + 10;
+    if (digit >= 'a' && digit <= 'f') {
+        return digit - 'a' + 10;
     }
-    if (c >= 'A' && c <= 'F') {
-        return c - 'A' + 10;
+    if (digit >= 'A' && digit <= 'F') {
+        return digit - 'A' + 10;
     }
     return 0;
 }
 
 // Byte comparison of two runs, negative/zero/positive.
-int cmp_bytes(bytes a, bytes b) {
-    int n = a.size();
-    if (b.size() < n) {
-        n = b.size();
+int cmp_bytes(bytes left, bytes right) {
+    int shared_length = left.size();
+    if (right.size() < shared_length) {
+        shared_length = right.size();
     }
-    for (int i in 0 .. n) {
-        if (a[i] != b[i]) {
-            return a[i] - b[i];
+    for (int i in 0 .. shared_length) {
+        if (left[i] != right[i]) {
+            return left[i] - right[i];
         }
     }
-    return a.size() - b.size();
+    return left.size() - right.size();
 }

@@ -147,13 +147,13 @@ pub type Ignore {
 /// patterns that reach it.
 pub bool Ignore.is_ignored(str relpath) {
     List<str> segs = split_segments(relpath);
-    int n = segs.size();
-    for (int k in 1 .. n) {
-        if (matched(files, segs, k, true)) {
+    int segment_count = segs.size();
+    for (int depth in 1 .. segment_count) {
+        if (matched(files, segs, depth, true)) {
             return true;
         }
     }
-    return matched(files, segs, n, false);
+    return matched(files, segs, segment_count, false);
 }
 
 /// Load every applicable ignore file for the repository at `gitdir`/`worktree`.
@@ -164,8 +164,8 @@ pub Result<Ignore, Error> load(str gitdir, str worktree) {
     List<IgnoreFile> files = [];
     str excl = fs.join(GIT_repository.common(gitdir), "info/exclude");
     match (io.read(excl)) {
-        case Ok(str s): {
-            files.push(IgnoreFile([], parse_patterns(s)));
+        case Ok(str contents): {
+            files.push(IgnoreFile([], parse_patterns(contents)));
         }
         case Err: {
         }
@@ -173,24 +173,24 @@ pub Result<Ignore, Error> load(str gitdir, str worktree) {
     match (fs.walk(worktree)) {
         case Ok(List<str> paths): {
             str base = fs.join(worktree, "");
-            for (str p in paths) {
-                str rel = text.strip_prefix(p, base);
+            for (str file_path in paths) {
+                str rel = text.strip_prefix(file_path, base);
                 if (rel == ".git" || rel.starts_with(".git/")) {
                     continue;
                 }
                 if (rel != ".gitignore" && !rel.ends_with("/.gitignore")) {
                     continue;
                 }
-                if (!fs.is_file(p)) {
+                if (!fs.is_file(file_path)) {
                     continue;
                 }
-                match (io.read(p)) {
-                    case Ok(str s): {
-                        str dir = "";
+                match (io.read(file_path)) {
+                    case Ok(str contents): {
+                        str directory = "";
                         if (rel != ".gitignore") {
-                            dir = text.strip_suffix(rel, "/.gitignore");
+                            directory = text.strip_suffix(rel, "/.gitignore");
                         }
-                        files.push(IgnoreFile(split_segments(dir), parse_patterns(s)));
+                        files.push(IgnoreFile(split_segments(directory), parse_patterns(contents)));
                     }
                     case Err: {
                     }
@@ -211,16 +211,16 @@ pub Result<Ignore, Error> load(str gitdir, str worktree) {
 // says whether that candidate is a directory (every ancestor is; the final
 // path itself, checked by `is_ignored`'s own last call, never is -- a leaf
 // from `GIT_status.m31`'s walk is always a file or a symlink).
-bool matched(List<IgnoreFile> files, List<str> segs, int k, bool is_dir) {
+bool matched(List<IgnoreFile> files, List<str> segs, int depth, bool is_dir) {
     bool ignored = false;
-    for (IgnoreFile f in files) {
-        int bdepth = f.base_segs.size();
-        if (bdepth >= k) {
+    for (IgnoreFile ignore_file in files) {
+        int bdepth = ignore_file.base_segs.size();
+        if (bdepth >= depth) {
             continue;
         }
         bool under = true;
         for (int i in 0 .. bdepth) {
-            if (f.base_segs[i] != segs[i]) {
+            if (ignore_file.base_segs[i] != segs[i]) {
                 under = false;
                 break;
             }
@@ -228,13 +228,13 @@ bool matched(List<IgnoreFile> files, List<str> segs, int k, bool is_dir) {
         if (!under) {
             continue;
         }
-        List<str> rel = sub_segments(segs, bdepth, k);
-        for (Pattern p in f.patterns) {
-            if (p.dir_only && !is_dir) {
+        List<str> rel = sub_segments(segs, bdepth, depth);
+        for (Pattern pattern in ignore_file.patterns) {
+            if (pattern.dir_only && !is_dir) {
                 continue;
             }
-            if (match_segments(p.segments, 0, rel, 0)) {
-                ignored = !p.negate;
+            if (match_segments(pattern.segments, 0, rel, 0)) {
+                ignored = !pattern.negate;
             }
         }
     }
@@ -247,8 +247,8 @@ List<Pattern> parse_patterns(str content) {
     List<Pattern> out = [];
     for (str raw in text.lines(content)) {
         match (parse_line(raw)) {
-            case Some(Pattern p): {
-                out.push(p);
+            case Some(Pattern pattern): {
+                out.push(pattern);
             }
             case None: {
             }
@@ -308,20 +308,20 @@ Option<Pattern> parse_line(str raw) {
 // `s` split on `/` into non-empty segments -- `""` becomes `[]`, and
 // neither a leading nor a trailing `/` (there is never one here: callers
 // strip both before this is reached) would leave an empty piece behind.
-List<str> split_segments(str s) {
-    if (s == "") {
+List<str> split_segments(str path) {
+    if (path == "") {
         return [];
     }
     List<str> out = [];
-    for (str part in s.split("/")) {
+    for (str part in path.split("/")) {
         out.push(part);
     }
     return out;
 }
 
-List<str> sub_segments(List<str> segs, int from, int to) {
+List<str> sub_segments(List<str> segs, int start, int end) {
     List<str> out = [];
-    for (int i in from .. to) {
+    for (int i in start .. end) {
         out.push(segs[i]);
     }
     return out;
@@ -334,27 +334,27 @@ List<str> sub_segments(List<str> segs, int from, int to) {
 // number of path segments it could consume, zero included, which is what
 // makes it cross directories; any other segment must consume exactly one
 // path segment and glob-match it.
-bool match_segments(List<str> pat, int pi, List<str> path, int si) {
-    if (pi == pat.size()) {
-        return si == path.size();
+bool match_segments(List<str> pat, int pattern_index, List<str> path, int segment_index) {
+    if (pattern_index == pat.size()) {
+        return segment_index == path.size();
     }
-    if (pat[pi] == "**") {
-        int j = si;
-        while (j <= path.size()) {
-            if (match_segments(pat, pi + 1, path, j)) {
+    if (pat[pattern_index] == "**") {
+        int candidate = segment_index;
+        while (candidate <= path.size()) {
+            if (match_segments(pat, pattern_index + 1, path, candidate)) {
                 return true;
             }
-            j = j + 1;
+            candidate = candidate + 1;
         }
         return false;
     }
-    if (si == path.size()) {
+    if (segment_index == path.size()) {
         return false;
     }
-    if (!seg_match(chars_of(path[si]), chars_of(pat[pi]))) {
+    if (!seg_match(chars_of(path[segment_index]), chars_of(pat[pattern_index]))) {
         return false;
     }
-    return match_segments(pat, pi + 1, path, si + 1);
+    return match_segments(pat, pattern_index + 1, path, segment_index + 1);
 }
 
 // One path component against one pattern component: `*` (any run, zero
@@ -363,49 +363,49 @@ bool match_segments(List<str> pat, int pi, List<str> path, int si) {
 // leading-dot rule -- `.gitignore` patterns match a leading dot like any
 // other character -- and minus `[...]` classes, out of scope here).
 bool seg_match(List<int> name, List<int> pat) {
-    int n = name.size();
-    int m = pat.size();
-    int ni = 0;
-    int pi = 0;
+    int name_length = name.size();
+    int pattern_length = pat.size();
+    int name_index = 0;
+    int pattern_index = 0;
     int star = -1;
     int star_ni = 0;
     while (true) {
-        if (pi < m) {
-            int c = pat[pi];
-            if (c == 42) {
-                star = pi;
-                star_ni = ni;
-                pi = pi + 1;
+        if (pattern_index < pattern_length) {
+            int code_point = pat[pattern_index];
+            if (code_point == 42) {
+                star = pattern_index;
+                star_ni = name_index;
+                pattern_index = pattern_index + 1;
                 continue;
             }
-            if (ni < n) {
+            if (name_index < name_length) {
                 bool hit = false;
-                if (c == 63) {
+                if (code_point == 63) {
                     hit = true;
-                    pi = pi + 1;
+                    pattern_index = pattern_index + 1;
                 } else {
-                    hit = c == name[ni];
+                    hit = code_point == name[name_index];
                     if (hit) {
-                        pi = pi + 1;
+                        pattern_index = pattern_index + 1;
                     }
                 }
                 if (hit) {
-                    ni = ni + 1;
+                    name_index = name_index + 1;
                     continue;
                 }
             }
-        } else if (ni == n) {
+        } else if (name_index == name_length) {
             return true;
         }
         if (star == -1) {
             return false;
         }
         star_ni = star_ni + 1;
-        if (star_ni > n) {
+        if (star_ni > name_length) {
             return false;
         }
-        ni = star_ni;
-        pi = star + 1;
+        name_index = star_ni;
+        pattern_index = star + 1;
     }
 }
 
@@ -413,31 +413,31 @@ bool seg_match(List<int> name, List<int> pat) {
 // for the reason `GIT_index.m31`'s header gives for `hex_decode`: a small
 // per-module helper, not a shared utility, for a language whose `str` has
 // no built-in code-point indexing).
-List<int> chars_of(str s) {
+List<int> chars_of(str input) {
     List<int> out = [];
-    int i = 0;
-    int n = s.size();
-    while (i < n) {
-        int b = s.byte_at(i);
-        int len = 1;
-        int cp = b;
-        if (b >= 240) {
-            len = 4;
-            cp = b & 7;
-        } else if (b >= 224) {
-            len = 3;
-            cp = b & 15;
-        } else if (b >= 192) {
-            len = 2;
-            cp = b & 31;
+    int position = 0;
+    int text_size = input.size();
+    while (position < text_size) {
+        int first_byte = input.byte_at(position);
+        int length = 1;
+        int code_point = first_byte;
+        if (first_byte >= 240) {
+            length = 4;
+            code_point = first_byte & 7;
+        } else if (first_byte >= 224) {
+            length = 3;
+            code_point = first_byte & 15;
+        } else if (first_byte >= 192) {
+            length = 2;
+            code_point = first_byte & 31;
         }
-        int j = 1;
-        while (j < len && i + j < n) {
-            cp = cp << 6 | s.byte_at(i + j) & 63;
-            j = j + 1;
+        int offset = 1;
+        while (offset < length && position + offset < text_size) {
+            code_point = code_point << 6 | input.byte_at(position + offset) & 63;
+            offset = offset + 1;
         }
-        out.push(cp);
-        i = i + len;
+        out.push(code_point);
+        position = position + length;
     }
     return out;
 }

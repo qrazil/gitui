@@ -92,12 +92,12 @@ pub bytes entry_header(int type_num, int size) {
     }
     out.push(first);
     while (rest > 0) {
-        int b = rest & 0x7F;
+        int octet = rest & 0x7F;
         rest = rest >> 7;
         if (rest > 0) {
-            b = b | 0x80;
+            octet = octet | 0x80;
         }
-        out.push(b);
+        out.push(octet);
     }
     return out;
 }
@@ -111,11 +111,11 @@ pub Result<bytes, Error> build(str gitdir, List<str> ids) {
     be32(out, ids.size());
     for (str id in ids) {
         match (GIT_object.read(gitdir, id)) {
-            case Ok(GIT_object.Object o): {
-                out.extend(entry_header(type_number(o.kind()), o.raw.size()));
-                out.extend(GIT_zlib.compress(o.raw));
+            case Ok(GIT_object.Object object): {
+                out.extend(entry_header(type_number(object.kind()), object.raw.size()));
+                out.extend(GIT_zlib.compress(object.raw));
             }
-            case Err(GIT_object.Error e): {
+            case Err(_): {
                 return Result<bytes, Error>.Err(Error.Object);
             }
         }
@@ -125,11 +125,11 @@ pub Result<bytes, Error> build(str gitdir, List<str> ids) {
     return Result<bytes, Error>.Ok(out);
 }
 
-void be32(bytes out, int v) {
-    out.push(v >> 24 & 0xFF);
-    out.push(v >> 16 & 0xFF);
-    out.push(v >> 8 & 0xFF);
-    out.push(v & 0xFF);
+void be32(bytes out, int value) {
+    out.push(value >> 24 & 0xFF);
+    out.push(value >> 16 & 0xFF);
+    out.push(value >> 8 & 0xFF);
+    out.push(value & 0xFF);
 }
 
 /// `git rev-list --objects <tips> ^<known>` -- see the module note. Commits
@@ -138,12 +138,12 @@ void be32(bytes out, int v) {
 pub Result<List<str>, Error> objects_to_send(str gitdir, List<str> tips, List<str> known) {
     // Every commit reachable from a known ref this repository actually has.
     Map<str, bool> stop = {};
-    for (str k in known) {
-        match (peel(gitdir, k)) {
-            case Ok(str c): {
-                reachable_commits(gitdir, c, stop);
+    for (str known_id in known) {
+        match (peel(gitdir, known_id)) {
+            case Ok(str commit_id): {
+                reachable_commits(gitdir, commit_id, stop);
             }
-            case Err(Error e): {
+            case Err(_): {
                 // Not here at all: the remote is ahead of us somewhere, which
                 // is not this function's problem (module note).
             }
@@ -155,31 +155,31 @@ pub Result<List<str>, Error> objects_to_send(str gitdir, List<str> tips, List<st
     List<str> tags = [];
     Map<str, bool> boundary = {};
     List<str> queue = [];
-    for (str t in tips) {
-        str c = peel_collecting(gitdir, t, tags)?;
-        if (stop.contains(c) || seen.contains(c)) {
+    for (str tip in tips) {
+        str commit_id = peel_collecting(gitdir, tip, tags)?;
+        if (stop.contains(commit_id) || seen.contains(commit_id)) {
             continue;
         }
-        seen.set(c, true);
-        queue.push(c);
+        seen.set(commit_id, true);
+        queue.push(commit_id);
     }
-    int at = 0;
-    while (at < queue.size()) {
-        str id = queue[at];
-        at = at + 1;
+    int position = 0;
+    while (position < queue.size()) {
+        str id = queue[position];
+        position = position + 1;
         match (GIT_object.read(gitdir, id)) {
-            case Ok(GIT_object.Object o): {
-                match (o.body) {
-                    case Commit(GIT_object.Commit cm): {
+            case Ok(GIT_object.Object object): {
+                match (object.body) {
+                    case Commit(GIT_object.Commit commit): {
                         commits.push(id);
-                        for (str p in cm.parents) {
-                            if (stop.contains(p)) {
-                                boundary.set(p, true);
+                        for (str parent in commit.parents) {
+                            if (stop.contains(parent)) {
+                                boundary.set(parent, true);
                                 continue;
                             }
-                            if (!seen.contains(p)) {
-                                seen.set(p, true);
-                                queue.push(p);
+                            if (!seen.contains(parent)) {
+                                seen.set(parent, true);
+                                queue.push(parent);
                             }
                         }
                     }
@@ -194,7 +194,7 @@ pub Result<List<str>, Error> objects_to_send(str gitdir, List<str> tips, List<st
                     }
                 }
             }
-            case Err(GIT_object.Error e): {
+            case Err(_): {
                 return Result<List<str>, Error>.Err(Error.Object);
             }
         }
@@ -203,12 +203,12 @@ pub Result<List<str>, Error> objects_to_send(str gitdir, List<str> tips, List<st
     // beyond it.
     Map<str, bool> have = {};
     List<str> ignored = [];
-    for (str b in boundary.keys()) {
-        match (GIT_object.read(gitdir, b)) {
-            case Ok(GIT_object.Object o): {
-                match (o.body) {
-                    case Commit(GIT_object.Commit cm): {
-                        tree_objects(gitdir, cm.tree, have, ignored, ignored)?;
+    for (str boundary_id in boundary.keys()) {
+        match (GIT_object.read(gitdir, boundary_id)) {
+            case Ok(GIT_object.Object object): {
+                match (object.body) {
+                    case Commit(GIT_object.Commit commit): {
+                        tree_objects(gitdir, commit.tree, have, ignored, ignored)?;
                     }
                     case Blob: {
                     }
@@ -218,19 +218,19 @@ pub Result<List<str>, Error> objects_to_send(str gitdir, List<str> tips, List<st
                     }
                 }
             }
-            case Err(GIT_object.Error e): {
+            case Err(_): {
                 return Result<List<str>, Error>.Err(Error.Object);
             }
         }
     }
     List<str> trees = [];
     List<str> blobs = [];
-    for (str c in commits) {
-        match (GIT_object.read(gitdir, c)) {
-            case Ok(GIT_object.Object o): {
-                match (o.body) {
-                    case Commit(GIT_object.Commit cm): {
-                        tree_objects(gitdir, cm.tree, have, trees, blobs)?;
+    for (str commit_id in commits) {
+        match (GIT_object.read(gitdir, commit_id)) {
+            case Ok(GIT_object.Object object): {
+                match (object.body) {
+                    case Commit(GIT_object.Commit commit): {
+                        tree_objects(gitdir, commit.tree, have, trees, blobs)?;
                     }
                     case Blob: {
                     }
@@ -240,23 +240,23 @@ pub Result<List<str>, Error> objects_to_send(str gitdir, List<str> tips, List<st
                     }
                 }
             }
-            case Err(GIT_object.Error e): {
+            case Err(_): {
                 return Result<List<str>, Error>.Err(Error.Object);
             }
         }
     }
     List<str> out = [];
-    for (str c in commits) {
-        out.push(c);
+    for (str commit_id in commits) {
+        out.push(commit_id);
     }
-    for (str t in trees) {
-        out.push(t);
+    for (str tree_id in trees) {
+        out.push(tree_id);
     }
-    for (str b in blobs) {
-        out.push(b);
+    for (str blob_id in blobs) {
+        out.push(blob_id);
     }
-    for (str t in tags) {
-        out.push(t);
+    for (str tag_id in tags) {
+        out.push(tag_id);
     }
     return Result<List<str>, Error>.Ok(out);
 }
@@ -271,17 +271,17 @@ Result<str, Error> peel(str gitdir, str id) {
 // `peel`, recording every tag object passed through in `tags` -- a pushed
 // tag has to travel in the pack along with what it points at.
 Result<str, Error> peel_collecting(str gitdir, str id, List<str> tags) {
-    str at = id;
+    str current = id;
     for (int depth in 0 .. 16) {
-        match (GIT_object.read(gitdir, at)) {
-            case Ok(GIT_object.Object o): {
-                match (o.body) {
+        match (GIT_object.read(gitdir, current)) {
+            case Ok(GIT_object.Object object): {
+                match (object.body) {
                     case Commit: {
-                        return Result<str, Error>.Ok(at);
+                        return Result<str, Error>.Ok(current);
                     }
-                    case Tag(GIT_object.Tag t): {
-                        tags.push(at);
-                        at = t.object;
+                    case Tag(GIT_object.Tag tag): {
+                        tags.push(current);
+                        current = tag.object;
                     }
                     case Blob: {
                         return Result<str, Error>.Err(Error.NotCommit);
@@ -291,7 +291,7 @@ Result<str, Error> peel_collecting(str gitdir, str id, List<str> tags) {
                     }
                 }
             }
-            case Err(GIT_object.Error e): {
+            case Err(_): {
                 return Result<str, Error>.Err(Error.Object);
             }
         }
@@ -309,18 +309,18 @@ void reachable_commits(str gitdir, str start, Map<str, bool> out) {
     }
     List<str> queue = [start];
     out.set(start, true);
-    int at = 0;
-    while (at < queue.size()) {
-        str id = queue[at];
-        at = at + 1;
+    int position = 0;
+    while (position < queue.size()) {
+        str id = queue[position];
+        position = position + 1;
         match (GIT_object.read(gitdir, id)) {
-            case Ok(GIT_object.Object o): {
-                match (o.body) {
-                    case Commit(GIT_object.Commit cm): {
-                        for (str p in cm.parents) {
-                            if (!out.contains(p)) {
-                                out.set(p, true);
-                                queue.push(p);
+            case Ok(GIT_object.Object object): {
+                match (object.body) {
+                    case Commit(GIT_object.Commit commit): {
+                        for (str parent in commit.parents) {
+                            if (!out.contains(parent)) {
+                                out.set(parent, true);
+                                queue.push(parent);
                             }
                         }
                     }
@@ -348,20 +348,20 @@ Result<bool, Error> tree_objects(str gitdir, str tree_id, Map<str, bool> have, L
     have.set(tree_id, true);
     trees.push(tree_id);
     match (GIT_object.read(gitdir, tree_id)) {
-        case Ok(GIT_object.Object o): {
-            match (o.body) {
-                case Tree(List<GIT_object.Entry> es): {
-                    for (GIT_object.Entry e in es) {
-                        if (e.is_commit()) {
+        case Ok(GIT_object.Object object): {
+            match (object.body) {
+                case Tree(List<GIT_object.Entry> entries): {
+                    for (GIT_object.Entry entry in entries) {
+                        if (entry.is_commit()) {
                             // A submodule: a commit in another repository,
                             // never an object of this one.
                             continue;
                         }
-                        if (e.is_tree()) {
-                            tree_objects(gitdir, e.id, have, trees, blobs)?;
-                        } else if (!have.contains(e.id)) {
-                            have.set(e.id, true);
-                            blobs.push(e.id);
+                        if (entry.is_tree()) {
+                            tree_objects(gitdir, entry.id, have, trees, blobs)?;
+                        } else if (!have.contains(entry.id)) {
+                            have.set(entry.id, true);
+                            blobs.push(entry.id);
                         }
                     }
                     return Result<bool, Error>.Ok(true);
@@ -377,7 +377,7 @@ Result<bool, Error> tree_objects(str gitdir, str tree_id, Map<str, bool> have, L
                 }
             }
         }
-        case Err(GIT_object.Error e): {
+        case Err(_): {
             return Result<bool, Error>.Err(Error.Object);
         }
     }

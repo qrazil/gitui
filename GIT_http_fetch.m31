@@ -298,29 +298,29 @@ pub const bytes FLUSH_PKT = [48, 48, 48, 48];
 /// packets and are refused as `Syntax` rather than misread as a one-, two- or
 /// three-byte payload, since this module never negotiates v2 and a real v0
 /// server never sends them.
-pub Result<Packet, Error> read_packet(bytes buf, int at) {
-    if (at < 0 || at + 4 > buf.size()) {
+pub Result<Packet, Error> read_packet(bytes buffer, int offset) {
+    if (offset < 0 || offset + 4 > buffer.size()) {
         return Result<Packet, Error>.Err(Error.Truncated);
     }
-    int len = 0;
+    int length = 0;
     for (int i in 0 .. 4) {
-        int d = hex_val(buf[at + i]);
-        if (d < 0) {
+        int digit = hex_val(buffer[offset + i]);
+        if (digit < 0) {
             return Result<Packet, Error>.Err(Error.Syntax);
         }
-        len = len * 16 + d;
+        length = length * 16 + digit;
     }
-    if (len == 0) {
-        return Result<Packet, Error>.Ok(Packet(true, [], at + 4));
+    if (length == 0) {
+        return Result<Packet, Error>.Ok(Packet(true, [], offset + 4));
     }
-    if (len < 4) {
+    if (length < 4) {
         return Result<Packet, Error>.Err(Error.Syntax);
     }
-    int end = at + len;
-    if (end > buf.size()) {
+    int end = offset + length;
+    if (end > buffer.size()) {
         return Result<Packet, Error>.Err(Error.Truncated);
     }
-    bytes payload = buf.substr(at + 4, end);
+    bytes payload = buffer.substr(offset + 4, end);
     return Result<Packet, Error>.Ok(Packet(false, payload, end));
 }
 
@@ -336,20 +336,20 @@ pub bytes pkt_line(bytes payload) {
 // The length-prefix trick: two big-endian octets, then `bytes.hex()` --
 // which zero-pads every octet to two digits -- gives exactly the four hex
 // digits a pkt-line length is, with no hand-written digit table.
-bytes len_hex(int n) {
-    bytes two = [n >> 8 & 0xFF, n & 0xFF];
+bytes len_hex(int value) {
+    bytes two = [value >> 8 & 0xFF, value & 0xFF];
     return two.hex().to_bytes();
 }
 
-int hex_val(int c) {
-    if (c >= '0' && c <= '9') {
-        return c - 48;
+int hex_val(int character) {
+    if (character >= '0' && character <= '9') {
+        return character - 48;
     }
-    if (c >= 'a' && c <= 'f') {
-        return c - 87;
+    if (character >= 'a' && character <= 'f') {
+        return character - 87;
     }
-    if (c >= 'A' && c <= 'F') {
-        return c - 55;
+    if (character >= 'A' && character <= 'F') {
+        return character - 55;
     }
     return -1;
 }
@@ -388,35 +388,35 @@ pub type Advertisement {
 pub Result<Advertisement, Error> discover(str url, str authorization = "") {
     str target = base_of(url) + "/info/refs?service=git-upload-pack";
     match (http.request("GET", target)) {
-        case Ok(http.Request req): {
-            req.set("accept", "application/x-git-upload-pack-advertisement");
+        case Ok(http.Request request): {
+            request.set("accept", "application/x-git-upload-pack-advertisement");
             if (authorization != "") {
-                req.set("authorization", authorization);
+                request.set("authorization", authorization);
             }
-            match (http.fetch(req)) {
-                case Ok(http.Response resp): {
-                    return after_refs_response(resp);
+            match (http.fetch(request)) {
+                case Ok(http.Response response): {
+                    return after_refs_response(response);
                 }
-                case Err(http.Error e): {
+                case Err(_): {
                     return Result<Advertisement, Error>.Err(Error.Http);
                 }
             }
         }
-        case Err(http.Error e): {
+        case Err(_): {
             return Result<Advertisement, Error>.Err(Error.Http);
         }
     }
 }
 
-Result<Advertisement, Error> after_refs_response(http.Response resp) {
-    if (resp.status() != 200) {
+Result<Advertisement, Error> after_refs_response(http.Response response) {
+    if (response.status() != 200) {
         return Result<Advertisement, Error>.Err(Error.Status);
     }
-    str ctype = resp.header("content-type").or("");
+    str ctype = response.header("content-type").or("");
     if (!ctype.starts_with("application/x-git-upload-pack-advertisement")) {
         return Result<Advertisement, Error>.Err(Error.NotSmart);
     }
-    return parse_advertisement(resp.body());
+    return parse_advertisement(response.body());
 }
 
 /// The ref advertisement, parsed out of the response body already read into
@@ -430,8 +430,8 @@ pub Result<Advertisement, Error> parse_advertisement(bytes body) {
     }
     str line0 = "";
     match (first.payload.utf8()) {
-        case Some(str s): {
-            line0 = s.trim();
+        case Some(str payload): {
+            line0 = payload.trim();
         }
         case None: {
             return Result<Advertisement, Error>.Err(Error.BadAdvertisement);
@@ -445,17 +445,17 @@ pub Result<Advertisement, Error> parse_advertisement(bytes body) {
     if (!flush1.flush) {
         return Result<Advertisement, Error>.Err(Error.BadAdvertisement);
     }
-    int at = flush1.next;
+    int offset = flush1.next;
     List<str> caps = [];
     List<RemoteRef> refs = [];
     bool first_ref = true;
     while (true) {
-        Packet p = read_packet(body, at)?;
-        at = p.next;
-        if (p.flush) {
+        Packet packet = read_packet(body, offset)?;
+        offset = packet.next;
+        if (packet.flush) {
             break;
         }
-        bytes line = p.payload;
+        bytes line = packet.payload;
         if (line.ends_with(LF1)) {
             line = line.substr(0, line.size() - 1);
         }
@@ -466,10 +466,10 @@ pub Result<Advertisement, Error> parse_advertisement(bytes body) {
                     bytes capbytes = line.substr(nul + 1, line.size());
                     line = line.substr(0, nul);
                     match (capbytes.utf8()) {
-                        case Some(str s): {
-                            for (str c in s.split(" ")) {
-                                if (c.size() > 0) {
-                                    caps.push(c);
+                        case Some(str capability_text): {
+                            for (str capability in capability_text.split(" ")) {
+                                if (capability.size() > 0) {
+                                    caps.push(capability);
                                 }
                             }
                         }
@@ -482,15 +482,15 @@ pub Result<Advertisement, Error> parse_advertisement(bytes body) {
                 }
             }
         }
-        RemoteRef r = parse_ref_line(line)?;
-        if (r.name != "capabilities^{}") {
-            refs.push(r);
+        RemoteRef remote_ref = parse_ref_line(line)?;
+        if (remote_ref.name != "capabilities^{}") {
+            refs.push(remote_ref);
         }
     }
     str object_format = "sha1";
-    for (str c in caps) {
-        if (c.starts_with("object-format=")) {
-            object_format = c.substr(14, c.size());
+    for (str capability in caps) {
+        if (capability.starts_with("object-format=")) {
+            object_format = capability.substr(14, capability.size());
         }
     }
     if (object_format != "sha1") {
@@ -500,22 +500,22 @@ pub Result<Advertisement, Error> parse_advertisement(bytes body) {
 }
 
 Result<RemoteRef, Error> parse_ref_line(bytes line) {
-    int sp = 0;
+    int space_index = 0;
     match (line.index_of(SP1)) {
-        case Some(int i): {
-            sp = i;
+        case Some(int found): {
+            space_index = found;
         }
         case None: {
             return Result<RemoteRef, Error>.Err(Error.BadAdvertisement);
         }
     }
-    if (sp != 40) {
+    if (space_index != 40) {
         return Result<RemoteRef, Error>.Err(Error.BadAdvertisement);
     }
     str id = "";
     match (line.substr(0, 40).utf8()) {
-        case Some(str s): {
-            id = s;
+        case Some(str found): {
+            id = found;
         }
         case None: {
             return Result<RemoteRef, Error>.Err(Error.BadAdvertisement);
@@ -526,8 +526,8 @@ Result<RemoteRef, Error> parse_ref_line(bytes line) {
     }
     str name = "";
     match (line.substr(41, line.size()).utf8()) {
-        case Some(str s): {
-            name = s;
+        case Some(str found): {
+            name = found;
         }
         case None: {
             return Result<RemoteRef, Error>.Err(Error.BadAdvertisement);
@@ -540,8 +540,8 @@ Result<RemoteRef, Error> parse_ref_line(bytes line) {
 }
 
 bool has_cap(List<str> caps, str name) {
-    for (str c in caps) {
-        if (c == name || c.starts_with(name + "=")) {
+    for (str capability in caps) {
+        if (capability == name || capability.starts_with(name + "=")) {
             return true;
         }
     }
@@ -568,26 +568,26 @@ pub type DemuxResult {
 /// `skip_ack_nak`, using the same `read_packet` this takes its input from, so
 /// this function is pure demultiplexing and nothing about negotiation.
 pub Result<DemuxResult, Error> demux(bytes body) {
-    int at = 0;
+    int offset = 0;
     bytes pack = [];
     bool saw_error = false;
-    while (at < body.size()) {
-        Packet p = read_packet(body, at)?;
-        at = p.next;
-        if (p.flush) {
+    while (offset < body.size()) {
+        Packet packet = read_packet(body, offset)?;
+        offset = packet.next;
+        if (packet.flush) {
             continue;
         }
-        if (p.payload.size() == 0) {
+        if (packet.payload.size() == 0) {
             return Result<DemuxResult, Error>.Err(Error.BadBand);
         }
-        int band = p.payload[0];
-        bytes data = p.payload.substr(1, p.payload.size());
+        int band = packet.payload[0];
+        bytes data = packet.payload.substr(1, packet.payload.size());
         if (band == 1) {
             pack.extend(data);
         } else if (band == 2) {
             match (data.utf8()) {
-                case Some(str s): {
-                    io.eprint(s);
+                case Some(str message): {
+                    io.eprint(message);
                 }
                 case None: {
                 }
@@ -595,8 +595,8 @@ pub Result<DemuxResult, Error> demux(bytes body) {
         } else if (band == 3) {
             saw_error = true;
             match (data.utf8()) {
-                case Some(str s): {
-                    io.eprint("remote: " + s);
+                case Some(str message): {
+                    io.eprint("remote: " + message);
                 }
                 case None: {
                     io.eprint("remote: (an error, not valid UTF-8)");
@@ -628,43 +628,43 @@ pub type Summary {
 /// offered; `side-band-64k` always, and `NoSideBand` if the server never
 /// offered it). Every `want` and `have` must be a 40-digit lowercase hex
 /// object name, and there must be at least one `want`.
-pub Result<Summary, Error> fetch(str url, Advertisement ad, List<str> wants, List<str> haves, str out_path, str authorization = "") {
+pub Result<Summary, Error> fetch(str url, Advertisement advertisement, List<str> wants, List<str> haves, str out_path, str authorization = "") {
     if (wants.size() == 0) {
         return Result<Summary, Error>.Err(Error.NoWant);
     }
-    for (str w in wants) {
-        if (!GIT_object.is_name(w) || w.size() != 40) {
+    for (str want in wants) {
+        if (!GIT_object.is_name(want) || want.size() != 40) {
             return Result<Summary, Error>.Err(Error.BadName);
         }
     }
-    for (str h in haves) {
-        if (!GIT_object.is_name(h) || h.size() != 40) {
+    for (str have in haves) {
+        if (!GIT_object.is_name(have) || have.size() != 40) {
             return Result<Summary, Error>.Err(Error.BadName);
         }
     }
-    if (!has_cap(ad.capabilities, "side-band-64k")) {
+    if (!has_cap(advertisement.capabilities, "side-band-64k")) {
         return Result<Summary, Error>.Err(Error.NoSideBand);
     }
-    bytes body = negotiation_body(ad, wants, haves);
+    bytes body = negotiation_body(advertisement, wants, haves);
     str target = base_of(url) + "/git-upload-pack";
     match (http.request("POST", target)) {
-        case Ok(http.Request req): {
-            req.set("content-type", "application/x-git-upload-pack-request");
-            req.set("accept", "application/x-git-upload-pack-result");
+        case Ok(http.Request request): {
+            request.set("content-type", "application/x-git-upload-pack-request");
+            request.set("accept", "application/x-git-upload-pack-result");
             if (authorization != "") {
-                req.set("authorization", authorization);
+                request.set("authorization", authorization);
             }
-            req.set_body(body);
-            match (http.fetch(req)) {
-                case Ok(http.Response resp): {
-                    return after_pack_response(resp, out_path);
+            request.set_body(body);
+            match (http.fetch(request)) {
+                case Ok(http.Response response): {
+                    return after_pack_response(response, out_path);
                 }
-                case Err(http.Error e): {
+                case Err(_): {
                     return Result<Summary, Error>.Err(Error.Http);
                 }
             }
         }
-        case Err(http.Error e): {
+        case Err(_): {
             return Result<Summary, Error>.Err(Error.Http);
         }
     }
@@ -674,52 +674,52 @@ pub Result<Summary, Error> fetch(str url, Advertisement ad, List<str> wants, Lis
 // protocol's own rule), a flush, every `have`, then `done` -- git's basic,
 // single-round negotiation; see the module note on why there is no
 // `multi_ack`.
-bytes negotiation_body(Advertisement ad, List<str> wants, List<str> haves) {
+bytes negotiation_body(Advertisement advertisement, List<str> wants, List<str> haves) {
     List<str> use = ["side-band-64k"];
-    if (has_cap(ad.capabilities, "ofs-delta")) {
+    if (has_cap(advertisement.capabilities, "ofs-delta")) {
         use.push("ofs-delta");
     }
     use.push("agent=m31-httpfetch/1");
     str first_caps = use.join(" ");
     bytes out = [];
     bool first = true;
-    for (str w in wants) {
+    for (str want in wants) {
         if (first) {
-            out.extend(pkt_line(("want " + w + " " + first_caps + "\n").to_bytes()));
+            out.extend(pkt_line(("want " + want + " " + first_caps + "\n").to_bytes()));
             first = false;
         } else {
-            out.extend(pkt_line(("want " + w + "\n").to_bytes()));
+            out.extend(pkt_line(("want " + want + "\n").to_bytes()));
         }
     }
     out.extend(FLUSH_PKT);
-    for (str h in haves) {
-        out.extend(pkt_line(("have " + h + "\n").to_bytes()));
+    for (str have in haves) {
+        out.extend(pkt_line(("have " + have + "\n").to_bytes()));
     }
     out.extend(pkt_line("done\n".to_bytes()));
     return out;
 }
 
-Result<Summary, Error> after_pack_response(http.Response resp, str out_path) {
-    if (resp.status() != 200) {
+Result<Summary, Error> after_pack_response(http.Response response, str out_path) {
+    if (response.status() != 200) {
         return Result<Summary, Error>.Err(Error.Status);
     }
-    str ctype = resp.header("content-type").or("");
+    str ctype = response.header("content-type").or("");
     if (!ctype.starts_with("application/x-git-upload-pack-result")) {
         return Result<Summary, Error>.Err(Error.NotSmart);
     }
-    bytes body = resp.body();
+    bytes body = response.body();
     // Zero or more plain ACK/NAK lines, then the side-band pack stream --
     // see the module note for why "zero or more" and not "exactly one".
-    int at = skip_ack_nak(body)?;
-    match (demux(body.substr(at, body.size()))) {
-        case Ok(DemuxResult d): {
-            if (d.remote_error) {
+    int offset = skip_ack_nak(body)?;
+    match (demux(body.substr(offset, body.size()))) {
+        case Ok(DemuxResult demux_result): {
+            if (demux_result.remote_error) {
                 return Result<Summary, Error>.Err(Error.RemoteError);
             }
-            return verify_pack(d.pack, out_path);
+            return verify_pack(demux_result.pack, out_path);
         }
-        case Err(Error e): {
-            return Result<Summary, Error>.Err(e);
+        case Err(Error error): {
+            return Result<Summary, Error>.Err(error);
         }
     }
 }
@@ -730,25 +730,25 @@ Result<Summary, Error> after_pack_response(http.Response resp, str out_path) {
 // The first packet that does not is left unconsumed -- it is the first
 // side-band pkt-line of the pack stream, and `demux` reads it next.
 Result<int, Error> skip_ack_nak(bytes body) {
-    int at = 0;
-    while (at < body.size()) {
-        Packet p = read_packet(body, at)?;
-        if (p.flush) {
-            at = p.next;
+    int offset = 0;
+    while (offset < body.size()) {
+        Packet packet = read_packet(body, offset)?;
+        if (packet.flush) {
+            offset = packet.next;
             continue;
         }
-        if (!is_ack_or_nak(p.payload)) {
-            return Result<int, Error>.Ok(at);
+        if (!is_ack_or_nak(packet.payload)) {
+            return Result<int, Error>.Ok(offset);
         }
-        at = p.next;
+        offset = packet.next;
     }
-    return Result<int, Error>.Ok(at);
+    return Result<int, Error>.Ok(offset);
 }
 
 bool is_ack_or_nak(bytes payload) {
     match (payload.utf8()) {
-        case Some(str s): {
-            return s.starts_with("ACK ") || s.starts_with("NAK");
+        case Some(str line): {
+            return line.starts_with("ACK ") || line.starts_with("NAK");
         }
         case None: {
             return false;
@@ -782,14 +782,14 @@ pub Result<Summary, Error> verify_pack(bytes pack, str out_path) {
         case Ok: {
             return Result<Summary, Error>.Ok(Summary(pack.size(), count));
         }
-        case Err(io.Error e): {
+        case Err(_): {
             return Result<Summary, Error>.Err(Error.Io);
         }
     }
 }
 
-int be32(bytes b, int at) {
-    return b[at] << 24 | b[at + 1] << 16 | b[at + 2] << 8 | b[at + 3];
+int be32(bytes data, int offset) {
+    return data[offset] << 24 | data[offset + 1] << 16 | data[offset + 2] << 8 | data[offset + 3];
 }
 
 // --- small shared helpers -----------------------------------------------------
@@ -811,29 +811,29 @@ Result<bool, io.Error> write_atomic(str path, bytes content) {
     match (fs.makedirs(dir_of(path))) {
         case Ok: {
         }
-        case Err(io.Error e): {
-            return Result<bool, io.Error>.Err(e);
+        case Err(io.Error error): {
+            return Result<bool, io.Error>.Err(error);
         }
     }
     random.System rnd = random.system();
-    str tmp = path + ".tmp" + rnd.hex(12);
-    match (io.write_bytes(tmp, content)) {
+    str temp = path + ".tmp" + rnd.hex(12);
+    match (io.write_bytes(temp, content)) {
         case Ok: {
         }
-        case Err(io.Error e): {
-            return Result<bool, io.Error>.Err(e);
+        case Err(io.Error error): {
+            return Result<bool, io.Error>.Err(error);
         }
     }
-    return fs.rename(tmp, path);
+    return fs.rename(temp, path);
 }
 
 str dir_of(str path) {
-    int i = path.size() - 1;
-    while (i >= 0 && path.byte_at(i) != '/') {
-        i = i - 1;
+    int position = path.size() - 1;
+    while (position >= 0 && path.byte_at(position) != '/') {
+        position = position - 1;
     }
-    if (i < 0) {
+    if (position < 0) {
         return ".";
     }
-    return path.substr(0, i);
+    return path.substr(0, position);
 }
