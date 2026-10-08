@@ -335,7 +335,7 @@ pub Result<bool, Error> write(str gitdir, Index index) {
     }
 }
 
-/// `ix`, as the bytes of a version-2 index file, checksum included -- no I/O,
+/// `index`, as the bytes of a version-2 index file, checksum included -- no I/O,
 /// so a test can check this against a fixture byte for byte without touching
 /// a filesystem. Entries are sorted into the format's own order first
 /// (`Entry.cmp`); a caller need not have sorted them.

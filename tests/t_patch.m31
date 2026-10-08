@@ -1,6 +1,6 @@
-// Round-trip checks for `GIT_patch.m31`: applying hunk 0 of diff(cur, new) to
-// `cur` repeatedly turns `old` into `new`, exactly; reverting hunk 0 of
-// diff(old, cur) from `cur` repeatedly turns `new` back into `old`. Pairs
+// Round-trip checks for `GIT_patch.m31`: applying hunk 0 of diff(current, new) to
+// `current` repeatedly turns `old` into `new`, exactly; reverting hunk 0 of
+// diff(old, current) from `current` repeatedly turns `new` back into `old`. Pairs
 // cover CRLF, a missing final newline, an empty side, several well-separated
 // hunks and two changes close enough to merge into one hunk -- the exact
 // shapes a rendered `Line.text` would lose (see GIT_patch.m31's header for why

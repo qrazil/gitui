@@ -45,11 +45,11 @@
 /// them. They are fields with defaults rather than module constants so that
 /// `Hasher()` is the whole of "start a hash".
 pub type Hasher {
-    int state_0 = 0x6745_2301;
-    int state_1 = 0xEFCD_AB89;
-    int state_2 = 0x98BA_DCFE;
-    int state_3 = 0x1032_5476;
-    int state_4 = 0xC3D2_E1F0;
+    int state_0 = 0x6745_2301;  // H0 in FIPS 180-4
+    int state_1 = 0xEFCD_AB89;  // H1 in FIPS 180-4
+    int state_2 = 0x98BA_DCFE;  // H2 in FIPS 180-4
+    int state_3 = 0x1032_5476;  // H3 in FIPS 180-4
+    int state_4 = 0xC3D2_E1F0;  // H4 in FIPS 180-4
     /// Octets seen so far, which the padding needs as a bit count.
     int total = 0;
     /// The partial block: always fewer than 64 octets between `update`s.
@@ -119,7 +119,7 @@ pub bytes Hasher.digest() {
     return out;
 }
 
-// One 64-octet block, read from `b` starting at `at`. The caller guarantees
+// One 64-octet block, read from `source` starting at `start`. The caller guarantees
 // that 64 octets are there.
 void Hasher.block(bytes source, int start) {
     // `sched` read once into a local, and every `w[i]` below goes through the
@@ -138,11 +138,11 @@ void Hasher.block(bytes source, int start) {
         int x = words[i - 3] ^ words[i - 8] ^ words[i - 14] ^ words[i - 16];
         words[i] = ((x << 1) | (x >> 31)) & 0xFFFF_FFFF;
     }
-    int word_a = state_0;
-    int word_b = state_1;
-    int word_c = state_2;
-    int word_d = state_3;
-    int word_e = state_4;
+    int word_a = state_0;  // `a` in FIPS 180-4 §6.1.2
+    int word_b = state_1;  // `b` in FIPS 180-4 §6.1.2
+    int word_c = state_2;  // `c` in FIPS 180-4 §6.1.2
+    int word_d = state_3;  // `d` in FIPS 180-4 §6.1.2
+    int word_e = state_4;  // `e` in FIPS 180-4 §6.1.2
     // The four rounds are one loop with a branch rather than four loops,
     // because four loops would repeat the eight lines of the step. The
     // branch predicts perfectly -- it changes three times in eighty
@@ -167,7 +167,7 @@ void Hasher.block(bytes source, int start) {
             mixed = word_b ^ word_c ^ word_d;
             round_constant = 0xCA62_C1D6;
         }
-        int next_word = (((word_a << 5) | (word_a >> 27)) & 0xFFFF_FFFF) + mixed + word_e + round_constant + words[i] & 0xFFFF_FFFF;
+        int next_word = (((word_a << 5) | (word_a >> 27)) & 0xFFFF_FFFF) + mixed + word_e + round_constant + words[i] & 0xFFFF_FFFF;  // `T` in FIPS 180-4 §6.1.2
         word_e = word_d;
         word_d = word_c;
         word_c = ((word_b << 30) | (word_b >> 2)) & 0xFFFF_FFFF;

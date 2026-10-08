@@ -146,7 +146,7 @@ counter.check("outline: a recorded fold on Files changed hides its file rows aga
 collapsed.set("commit:1111111111111111111111111111111111111111:files", false);
 // A log as long as one page may have more behind it: the Commits section
 // then ends in the "load more" row (and says so in its count); a shorter
-// log has no such row -- `o` above, one commit, proved the absence already
+// log has no such row -- `outline` above, one commit, proved the absence already
 // via its exact id list.
 List<GIT_log.Entry> long_log = [];
 int line_index = 0;
@@ -187,7 +187,7 @@ match (file_diffs.get("commit:1111111111111111111111111111111111111111:file:0"))
 // `commit_node` wraps each logical message line to `COMMIT_BODY_WRAP_COLS`
 // (72, see its own comment in `GIT_client.m31`) rather than clipping it --
 // this is the fix itself, so it gets its own commit and its own checks
-// rather than piggybacking on `c1` above.
+// rather than piggybacking on `first_commit` above.
 
 str long_words = "lorem ipsum dolor sit amet consectetur adipiscing elit sed do eiusmod ";
 str long_line = long_words.repeat(3).trim();

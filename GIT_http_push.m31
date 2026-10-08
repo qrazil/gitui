@@ -264,7 +264,7 @@ pub str auth_header(Remote remote) {
     }
 }
 
-// `Authorization: Basic ...` on `req`, if the remote has credentials.
+// `Authorization: Basic ...` on `request`, if the remote has credentials.
 void apply_auth(http.Request request, Remote remote) {
     match (remote.auth) {
         case Some(Credentials credentials): {
@@ -336,7 +336,7 @@ pub bytes command_body(str old, str new, str refname, bytes pack) {
 
 /// What the server said about one update: whether it unpacked what was sent
 /// (`is_unpacked`, with `reason` holding its words when it did not), and
-/// whether the ref itself was updated (`ok`, `reason` otherwise).
+/// whether the ref itself was updated (`is_ok`, `reason` otherwise).
 pub type Report {
     pub bool is_unpacked;
     pub bool is_ok;

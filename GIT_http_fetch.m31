@@ -275,7 +275,7 @@ pub str Error.to_str() {
 
 // --- pkt-line framing (Part 1) -----------------------------------------------
 
-/// One packet read out of `buf` at `at`: `flush` with no payload, or `data`
+/// One packet read out of `buffer` at `offset`: `flush` with no payload, or `data`
 /// with its payload -- the bytes strictly after the four-hex-digit length
 /// prefix, which counts itself. `next` is the offset just past this packet,
 /// for the caller's next call; there are no tuples in this language
@@ -294,7 +294,7 @@ pub const bytes FLUSH_PKT = [48, 48, 48, 48];
 ///
 /// A length of `0000` is a flush, with no payload. Any other length must be
 /// at least 4 (it counts its own four digits) and no more than what remains
-/// in `buf`; `1`, `2` and `3` are protocol v2's delimiter and response-end
+/// in `buffer`; `1`, `2` and `3` are protocol v2's delimiter and response-end
 /// packets and are refused as `Syntax` rather than misread as a one-, two- or
 /// three-byte payload, since this module never negotiates v2 and a real v0
 /// server never sends them.
@@ -623,7 +623,7 @@ pub type Summary {
 /// (computed by the caller -- see the module note), and write the verified
 /// pack to `out_path`.
 ///
-/// `ad` is the `Advertisement` `discover` already returned for this `url`:
+/// `advertisement` is the `Advertisement` `discover` already returned for this `url`:
 /// its capabilities decide what this module asks for (`ofs-delta` only if
 /// offered; `side-band-64k` always, and `NoSideBand` if the server never
 /// offered it). Every `want` and `have` must be a 40-digit lowercase hex

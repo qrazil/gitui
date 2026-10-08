@@ -62,7 +62,7 @@
 //
 // A chain is walked DOWN iteratively, not recursively: from the requested
 // offset, each `OBJ_OFS_DELTA` link decompresses its own delta stream once and
-// moves `cur` to its base's offset in the SAME loop, so a chain fifty deep
+// moves `current` to its base's offset in the SAME loop, so a chain fifty deep
 // costs fifty decompressions and one call frame, not fifty. Recursion (via
 // `resolve_id`) is used only where the chain can actually leave this walk --
 // an `OBJ_REF_DELTA` whose base is not in this pack's own `.idx`, which
@@ -516,7 +516,7 @@ Result<Found, Error> resolve_id(str gitdir, List<PackFile> packs, str id, int de
     return Result<Found, Error>.Err(Error.NotFound);
 }
 
-// The object at `start_offset` in `pack` (indexed by `ix`), walking down an
+// The object at `start_offset` in `pack` (indexed by `pack_index`), walking down an
 // `OBJ_OFS_DELTA`/`OBJ_REF_DELTA` chain iteratively and applying it back up
 // once the chain bottoms out at a real commit/tree/blob/tag. See the module
 // header, "resolving a delta chain", for why this is a loop and not a
@@ -539,7 +539,7 @@ Result<Found, Error> resolve_offset(str gitdir, List<PackFile> packs, Idx pack_i
             base_content = decoded.data;
             break;
         } else if (hdr.kind == 6) {
-            // OBJ_OFS_DELTA: a backward byte offset from `cur`, the start of
+            // OBJ_OFS_DELTA: a backward byte offset from `current`, the start of
             // THIS object's own type+size header -- not from the end of the
             // header, not from the start of the pack. Encoded as successive
             // 7-bit groups, continuation in the top bit, but with a `+1`
@@ -577,7 +577,7 @@ Result<Found, Error> resolve_offset(str gitdir, List<PackFile> packs, Idx pack_i
         } else if (hdr.kind == 7) {
             // OBJ_REF_DELTA: the base named by its own 20-byte id, which may
             // or may not be in THIS pack (a thin pack leaves it out on
-            // purpose) -- checked against `ix` first, since that is the
+            // purpose) -- checked against `pack_index` first, since that is the
             // common case and stays inside this iterative loop; only a miss
             // falls back to `resolve_id`'s general search.
             int position = current + hdr.header_len;

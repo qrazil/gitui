@@ -329,8 +329,8 @@ List<str> sub_segments(List<str> segs, int start, int end) {
 
 // --- the segment-list matcher, "**" included ---------------------------------
 
-// Does the pattern's segment list, from `pi`, match the path's segment
-// list, from `si`, to the very end of both? A "**" segment tries every
+// Does the pattern's segment list, from `pattern_index`, match the path's segment
+// list, from `segment_index`, to the very end of both? A "**" segment tries every
 // number of path segments it could consume, zero included, which is what
 // makes it cross directories; any other segment must consume exactly one
 // path segment and glob-match it.
