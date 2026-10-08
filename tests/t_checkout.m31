@@ -1,4 +1,4 @@
-// Drives `checkout.m31` directly -- no terminal, no `tuiapp.Loop` -- against
+// Drives `checkout.m31` directly -- no terminal, no `TUI_app.Loop` -- against
 // a real, disposable fixture, so `test_checkout.sh` can check each switch's
 // on-disk effect against real git the same way `t_gitclient_ops.m31` does
 // for staging and committing.

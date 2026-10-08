@@ -1,5 +1,5 @@
 // Drives `gitclient.State`'s staging, unstaging, committing and diffing
-// directly -- no terminal, no `tuiapp.Loop` -- against a real, disposable
+// directly -- no terminal, no `TUI_app.Loop` -- against a real, disposable
 // fixture, so `test_gitui.sh` can check each action's on-disk effect against
 // real git the same way `t_index_stage.m31` and `t_write_refs.m31` already
 // do for the plumbing underneath this client.
@@ -40,7 +40,7 @@
 // fixture, so the two index blobs can be compared byte for byte.
 //
 // `edit` calls `edit_message()` then `launch_editor()` exactly as
-// `gitui.m31`'s own driver does once `tuiapp.Loop.run` has handed the
+// `gitui.m31`'s own driver does once `TUI_app.Loop.run` has handed the
 // terminal back -- there is no terminal or `Session` in this harness at all,
 // which is exactly what makes it able to drive `os.run`'s every outcome
 // (success, nonzero exit, signal, `$EDITOR` unset or not found)
@@ -52,7 +52,7 @@
 import gitclient;
 import io;
 import os;
-import tui.tuidiffview;
+import tui.TUI_diff_view;
 
 List<str> argv = os.args();
 if (argv.size() < 4) {
@@ -92,9 +92,9 @@ if (op == "stage") {
             if (state.diff_binary) {
                 print("Binary files differ");
             } else {
-                for (tuidiffview.Hunk h in state.diff_view.hunks) {
+                for (TUI_diff_view.Hunk h in state.diff_view.hunks) {
                     print(h.header);
-                    for (tuidiffview.Line l in h.lines) {
+                    for (TUI_diff_view.Line l in h.lines) {
                         print(marker(l.kind) + l.text);
                     }
                 }
@@ -134,9 +134,9 @@ if (op == "stage") {
         if (state.diff_open && !state.diff_binary && k >= 0 && k < state.diff_view.hunks.size()) {
             print("--- a/" + argv[5]);
             print("+++ b/" + argv[5]);
-            tuidiffview.Hunk h = state.diff_view.hunks[k];
+            TUI_diff_view.Hunk h = state.diff_view.hunks[k];
             print(h.header);
-            for (tuidiffview.Line l in h.lines) {
+            for (TUI_diff_view.Line l in h.lines) {
                 print(marker(l.kind) + l.text);
             }
             os.exit(0);
@@ -172,7 +172,7 @@ if (op == "stage") {
 }
 print(state.message);
 
-str marker(tuidiffview.Kind k) {
+str marker(TUI_diff_view.Kind k) {
     match (k) {
         case Context: {
             return " ";

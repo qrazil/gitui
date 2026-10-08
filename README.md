@@ -3,7 +3,7 @@
 Git plumbing and an interactive client, written entirely in m31 (the
 language at github.com/qrazil/m31): SHA-1, zlib inflate, the loose-object
 format, refs, the index, working-tree status, and both a read-only CLI
-(`git.m31`) and a `tuiapp.Loop`-driven interactive client (`gitui.m31`) over
+(`git.m31`) and a `TUI_app.Loop`-driven interactive client (`gitui.m31`) over
 github.com/qrazil/tui. Nothing here is a binding to anything; the only C in
 the program is the runtime every program links.
 
@@ -38,17 +38,17 @@ bash scripts/build-gitui.sh -o ourgitui    # not build.sh -- it is the one with 
 | `index.m31` | `.git/index`: read, write, a fresh entry from `fs.stat` |
 | `status.m31` | working-tree status: staged, unstaged, untracked |
 | `checkout.m31` | local branches, switching branches (the working-tree-writing primitive: refuses on local changes in the way), creating a branch |
-| `hunks.m31` | `lib/diff.m31`'s edit script, grouped into qrazil/tui's `tuidiffview.Hunk`/`Line` with context; `spans` is the one definition of where each hunk starts and ends |
+| `hunks.m31` | `lib/diff.m31`'s edit script, grouped into qrazil/tui's `TUI_diff_view.Hunk`/`Line` with context; `spans` is the one definition of where each hunk starts and ends |
 | `patch.m31` | apply or revert exactly one hunk of a diff, byte for byte -- what the diff view's `s`/`u` stage and unstage with |
 | `gitlog.m31` | the commit-history walk, shared by `git.m31 -log` and `gitui.m31` |
 | `gitclient.m31` | the interactive client's state and logic (no top-level statements, so it is importable and testable) |
-| `gitui.m31` | the interactive client's thin driver: parses a path, runs `tuiapp.Loop` |
+| `gitui.m31` | the interactive client's thin driver: parses a path, runs `TUI_app.Loop` |
 | `httpfetch.m31` | git's smart-HTTP protocol, v0 fetch/clone only: pkt-line framing, the ref advertisement, want/have negotiation, side-band-64k demultiplexing, and pack checksum verification, over `lib/http.m31` |
 | `packwrite.m31` | writes packfiles (whole objects, stored-zlib) and computes the object set a push must send, like `git rev-list --objects tips ^known` |
 | `httppush.m31` | smart-HTTP v0 push (`git-receive-pack`): fast-forward-only, `report-status`, HTTP Basic auth from the URL's userinfo or `GITUI_HTTP_USER`/`GITUI_HTTP_PASSWORD` |
 | `gitconfig.m31` | a minimal `.git/config` reader (`remote.origin.url` and friends) |
 | `deps` | the project manifest: name, version and the pinned qrazil/tui commit (`deps.lock` records what was fetched) |
-| `scripts/build-gitui.sh` | builds `gitui.m31`; its `import tui.tuiapp;` lines resolve through `deps`, so nothing is staged or copied |
+| `scripts/build-gitui.sh` | builds `gitui.m31`; its `import tui.TUI_app;` lines resolve through `deps`, so nothing is staged or copied |
 | `tests/t_*.m31` | test programs, each printing what a Python oracle prints, or asserting against its own expectations |
 | `tests/oracles/oracle_*.py` | the oracles: `hashlib`, `zlib`, and a from-scratch format reader |
 | `tests/pty_e2e.py` | drives `ourgitui` under a real pty against disposable fixtures, real `git` as the oracle |

@@ -11,7 +11,7 @@
 import os;
 import io;
 import hunks;
-import tui.tuidiffview;
+import tui.TUI_diff_view;
 
 List<str> argv = os.args();
 if (argv.size() != 3) {
@@ -24,10 +24,10 @@ match (hunks.hunks(old, new)) {
     case Binary: {
         print("Binary files differ");
     }
-    case Hunks(List<tuidiffview.Hunk> hs): {
-        for (tuidiffview.Hunk h in hs) {
+    case Hunks(List<TUI_diff_view.Hunk> hs): {
+        for (TUI_diff_view.Hunk h in hs) {
             print(h.header);
-            for (tuidiffview.Line l in h.lines) {
+            for (TUI_diff_view.Line l in h.lines) {
                 print(marker(l.kind) + l.text);
             }
         }
@@ -47,7 +47,7 @@ bytes read(str path) {
     }
 }
 
-str marker(tuidiffview.Kind k) {
+str marker(TUI_diff_view.Kind k) {
     match (k) {
         case Context: {
             return " ";

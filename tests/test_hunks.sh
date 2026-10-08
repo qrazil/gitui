@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # `hunks.m31`: the generic edit script from `lib/diff.m31`, grouped into
-# qrazil/tui's `tuidiffview.Hunk`/`Line` with context -- checked against real
+# qrazil/tui's `TUI_diff_view.Hunk`/`Line` with context -- checked against real
 # `diff -u` (hunk boundaries and line classification) and real `git diff`
 # (the binary-file case, since git's own NUL heuristic is what
 # `lib/diff.m31`'s `is_binary` matches).
@@ -16,7 +16,7 @@ if build t_hunks; then
 
     # Each pair is compared two ways: `t_hunks`'s own output against real
     # `diff -u`'s body (its `---`/`+++` file-header lines stripped, and any
-    # `\ No newline at end of file` marker dropped -- `tuidiffview.Line` has
+    # `\ No newline at end of file` marker dropped -- `TUI_diff_view.Line` has
     # no way to carry that annotation, only the text of a line, so this is
     # the one place the two are allowed to differ; the ROUND-TRIP property in
     # `corpus/modules/stdlib-diff` is what actually proves the no-trailing-

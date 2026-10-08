@@ -15,9 +15,9 @@
 // `None` from either: the pair is binary (`diff.is_binary`, no line diff
 // exists to pick a hunk from) or `k` names no hunk.
 //
-// --- why this works on `diff.Op`s, not on `tuidiffview.Hunk`s ------------
+// --- why this works on `diff.Op`s, not on `TUI_diff_view.Hunk`s ------------
 //
-// A rendered `tuidiffview.Line.text` is a `str` with its line terminator
+// A rendered `TUI_diff_view.Line.text` is a `str` with its line terminator
 // stripped, and a line that is not UTF-8 renders as a hex placeholder
 // (`hunks.m31`'s `line_text`) -- fine to look at, lossy to rebuild a file
 // from: `\n` vs `\r\n` vs no terminator on the last line would all come

@@ -7,7 +7,7 @@
 #       -> ./mygitui
 #
 # `gitui.m31` imports this repo's own plumbing and github.com/qrazil/tui's
-# widgets as `import tui.tuiapp;` and so on. The `deps` file at the repo root
+# widgets as `import tui.TUI_app;` and so on. The `deps` file at the repo root
 # names tui and the exact commit; the first compile fetches it into
 # `.m31-deps/` and records it in `deps.lock`, so nothing is staged or copied.
 #

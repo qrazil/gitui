@@ -15,9 +15,9 @@ import gitclient;
 import gitlog;
 import object;
 import status;
-import tui.tuidiffview;
-import tui.tuioutline;
-import tui.tuitext;
+import tui.TUI_diff_view;
+import tui.TUI_outline;
+import tui.TUI_text;
 
 // A local of the top-level program body is invisible to a function
 // (`apps/git/FRICTION.md` §6, `git.m31`'s own `dispatch` comment) -- so the
@@ -52,19 +52,19 @@ Map<str, bytes> paths = {};
 Map<str, List<gitclient.CommitFileDiff>> changes = {};
 changes.set("1111111111111111111111111111111111111111", [gitclient.CommitFileDiff("x.txt".to_bytes(), status.Change.Modified, Option<str>.Some("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"), Option<str>.Some("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"), false, 3, 1)]);
 Map<str, gitclient.CommitFileDiff> file_diffs = {};
-tuioutline.Outline o = gitclient.build_outline(st, log, changes, collapsed, paths, file_diffs, []);
-List<tuioutline.Row> rows = o.rows();
+TUI_outline.Outline o = gitclient.build_outline(st, log, changes, collapsed, paths, file_diffs, []);
+List<TUI_outline.Row> rows = o.rows();
 List<str> ids = [];
-for (tuioutline.Row r in rows) {
+for (TUI_outline.Row r in rows) {
     ids.push(r.node.id);
 }
 str joined = ids.join(",");
 counter.check("outline: five top-level sections plus their children, commits collapsed by default", joined == "untracked,untracked:c.txt,unstaged,unstaged:b.txt,staged,staged:a.txt,staged:newfile.txt,commits,commit:1111111111111111111111111111111111111111,branches", joined);
 List<gitclient.BranchRow> brs = [gitclient.BranchRow(checkout.Branch("feature", "refs/heads/feature", "2222222222222222222222222222222222222222", false), "second thing"), gitclient.BranchRow(checkout.Branch("main", "refs/heads/main", "1111111111111111111111111111111111111111", true), "first commit")];
-tuioutline.Outline bo = gitclient.build_outline(st, log, changes, collapsed, paths, file_diffs, brs);
+TUI_outline.Outline bo = gitclient.build_outline(st, log, changes, collapsed, paths, file_diffs, brs);
 List<str> bids = [];
 List<str> blabels = [];
-for (tuioutline.Row r in bo.rows()) {
+for (TUI_outline.Row r in bo.rows()) {
     if (r.node.id == "branches" || r.node.id.starts_with("branch:")) {
         bids.push(r.node.id);
         blabels.push(r.node.label);
@@ -105,9 +105,9 @@ for (str id in ids) {
 counter.check("outline: a commit's body is hidden until expanded", !saw_body, "body row leaked into the collapsed view");
 // Recorded as expanded (via `collapsed`), the same build must show it.
 collapsed.set("commit:1111111111111111111111111111111111111111", false);
-tuioutline.Outline o2 = gitclient.build_outline(st, log, changes, collapsed, paths, file_diffs, []);
+TUI_outline.Outline o2 = gitclient.build_outline(st, log, changes, collapsed, paths, file_diffs, []);
 bool saw_body2 = false;
-for (tuioutline.Row r in o2.rows()) {
+for (TUI_outline.Row r in o2.rows()) {
     if (r.node.id == "commit:1111111111111111111111111111111111111111:author") {
         saw_body2 = true;
     }
@@ -115,7 +115,7 @@ for (tuioutline.Row r in o2.rows()) {
 counter.check("outline: an expanded commit shows its author/date/message rows", saw_body2, "author row missing after expanding");
 str files_label = "";
 bool saw_file_row = false;
-for (tuioutline.Row r in o2.rows()) {
+for (TUI_outline.Row r in o2.rows()) {
     if (r.node.id == "commit:1111111111111111111111111111111111111111:files") {
         files_label = r.node.label;
     }
@@ -126,7 +126,7 @@ for (tuioutline.Row r in o2.rows()) {
 counter.check("outline: an expanded commit shows its own Files changed section, counting changes' entries", files_label == "Files changed (1)", files_label);
 counter.check("outline: a commit's Files changed section is open by default once the commit is", saw_file_row, "file row missing with the commit expanded and no fold recorded");
 str file_label = "";
-for (tuioutline.Row r in o2.rows()) {
+for (TUI_outline.Row r in o2.rows()) {
     if (r.node.id == "commit:1111111111111111111111111111111111111111:file:0") {
         file_label = r.node.label;
     }
@@ -135,9 +135,9 @@ counter.check("outline: a commit's file row shows mark, path and +insertions -de
 // A fold the user recorded on the Files changed section itself still wins
 // over that default, the same way every other section's does.
 collapsed.set("commit:1111111111111111111111111111111111111111:files", true);
-tuioutline.Outline o2b = gitclient.build_outline(st, log, changes, collapsed, paths, file_diffs, []);
+TUI_outline.Outline o2b = gitclient.build_outline(st, log, changes, collapsed, paths, file_diffs, []);
 bool saw_file_row_folded = false;
-for (tuioutline.Row r in o2b.rows()) {
+for (TUI_outline.Row r in o2b.rows()) {
     if (r.node.id == "commit:1111111111111111111111111111111111111111:file:0") {
         saw_file_row_folded = true;
     }
@@ -162,11 +162,11 @@ Map<str, bool> collapsed_long = {};
 Map<str, bytes> paths_long = {};
 Map<str, List<gitclient.CommitFileDiff>> changes_long = {};
 Map<str, gitclient.CommitFileDiff> file_diffs_long = {};
-tuioutline.Outline o_long = gitclient.build_outline(st, long_log, changes_long, collapsed_long, paths_long, file_diffs_long, []);
-List<tuioutline.Row> long_rows = o_long.rows();
+TUI_outline.Outline o_long = gitclient.build_outline(st, long_log, changes_long, collapsed_long, paths_long, file_diffs_long, []);
+List<TUI_outline.Row> long_rows = o_long.rows();
 str last_id = long_rows[long_rows.size() - 1].node.id;
 str commits_label_long = "";
-for (tuioutline.Row r in long_rows) {
+for (TUI_outline.Row r in long_rows) {
     if (r.node.id == "commits") {
         commits_label_long = r.node.label;
     }
@@ -198,11 +198,11 @@ collapsed2.set("commit:2222222222222222222222222222222222222222", false);
 Map<str, bytes> paths2 = {};
 Map<str, List<gitclient.CommitFileDiff>> changes2 = {};
 Map<str, gitclient.CommitFileDiff> file_diffs2 = {};
-tuioutline.Outline o3 = gitclient.build_outline(st, log2, changes2, collapsed2, paths2, file_diffs2, []);
+TUI_outline.Outline o3 = gitclient.build_outline(st, log2, changes2, collapsed2, paths2, file_diffs2, []);
 List<str> m0_rows = [];
 List<str> m2_rows = [];
 bool saw_blank_line_row = false;
-for (tuioutline.Row r in o3.rows()) {
+for (TUI_outline.Row r in o3.rows()) {
     str rid = r.node.id;
     if (rid.starts_with("commit:2222222222222222222222222222222222222222:m0:")) {
         m0_rows.push(r.node.label);
@@ -219,7 +219,7 @@ bool all_fit = true;
 List<str> pieces = [];
 for (str row in m0_rows) {
     str content = row.substr(2, row.size());
-    if (tuitext.width(content) > 72) {
+    if (TUI_text.width(content) > 72) {
         all_fit = false;
     }
     pieces.push(content);
@@ -238,9 +238,9 @@ collapsed3.set("commit:3333333333333333333333333333333333333333", false);
 Map<str, bytes> paths3 = {};
 Map<str, List<gitclient.CommitFileDiff>> changes3 = {};
 Map<str, gitclient.CommitFileDiff> file_diffs3 = {};
-tuioutline.Outline o4 = gitclient.build_outline(st, log3, changes3, collapsed3, paths3, file_diffs3, []);
+TUI_outline.Outline o4 = gitclient.build_outline(st, log3, changes3, collapsed3, paths3, file_diffs3, []);
 bool saw_any_message_row = false;
-for (tuioutline.Row r in o4.rows()) {
+for (TUI_outline.Row r in o4.rows()) {
     if (r.node.id.starts_with("commit:3333333333333333333333333333333333333333:m")) {
         saw_any_message_row = true;
     }
@@ -256,7 +256,7 @@ counter.check("commit message: whitespace-only input strips to empty", gitclient
 // --- open_diff / close_diff: the hunks.hunks/DiffView wiring, no repository ---
 //
 // `open_diff` and the comparison it feeds are `hunks.hunks(old, new)` and
-// `tuidiffview.DiffView`, both already tested elsewhere (`apps/git/t_hunks.m31`,
+// `TUI_diff_view.DiffView`, both already tested elsewhere (`apps/git/t_hunks.m31`,
 // `apps/tui`'s own suite) -- what these checks are actually for is that
 // `gitclient.State` wires the two together correctly: a text change becomes a
 // non-binary `DiffView` with an addressable cursor, and a NUL-bearing buffer
@@ -273,7 +273,7 @@ if (ds.diff_view.hunks.size() > 0) {
 }
 counter.check("open_diff: the hunk header is a unified-diff @@ line", header0 == "@@ -1,3 +1,3 @@", header0);
 match (ds.diff_view.at()) {
-    case Some(tuidiffview.Row r): {
+    case Some(TUI_diff_view.Row r): {
         bool is_header = false;
         match (r.kind) {
             case Header: {
@@ -291,7 +291,7 @@ match (ds.diff_view.at()) {
 }
 ds.diff_view.move(1);
 match (ds.diff_view.at()) {
-    case Some(tuidiffview.Row r): {
+    case Some(TUI_diff_view.Row r): {
         bool is_body = false;
         match (r.kind) {
             case Header: {
@@ -323,7 +323,7 @@ gitclient.State us = gitclient.State.open("", "");
 us.open_diff("new.txt", [], "one\ntwo\n".to_bytes());
 bool all_added = us.diff_view.hunks.size() == 1;
 if (all_added) {
-    for (tuidiffview.Line l in us.diff_view.hunks[0].lines) {
+    for (TUI_diff_view.Line l in us.diff_view.hunks[0].lines) {
         match (l.kind) {
             case Add: {
             }

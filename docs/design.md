@@ -128,7 +128,7 @@ its own rather than something the client builds inline.
 Split into two tracks:
 
   - **The diff algorithm** — a line-based edit script (Myers or similar),
-    grouped into hunks with context, matching `tuidiffview`'s existing
+    grouped into hunks with context, matching `TUI_diff_view`'s existing
     `Hunk`/`Line` shape, plus git's own binary-file heuristic (a NUL byte
     in the first several KB) so a binary diff reports as one rather than
     garbling. Self-contained; the client doesn't need it to get started.

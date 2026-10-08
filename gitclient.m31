@@ -6,7 +6,7 @@
 // `.m31` that actually runs the terminal loop.
 //
 // `gitui.m31` is the thin driver: parse a path off the command line, build a
-// `State`, and hand it to `tuiapp.Loop` exactly as `apps/tui/browse.m31`
+// `State`, and hand it to `TUI_app.Loop` exactly as `apps/tui/browse.m31`
 // hands its own `State` to the same loop. Everything a test needs --
 // building the outline from a `status.Status`, staging or unstaging one
 // path, stripping a commit message down to what git would actually commit --
@@ -34,7 +34,7 @@
 // does: `os.run` leaves stdin/stdout/stderr untouched precisely so an
 // interactive child can take over the real terminal, but this program has
 // already put that terminal in raw mode with the alternate screen on
-// (`tuiapp.Loop.run`'s own `enter`/`leave` sequences) -- the wrong mode for
+// (`TUI_app.Loop.run`'s own `enter`/`leave` sequences) -- the wrong mode for
 // an editor expecting a normal, cooked terminal to draw on. `lib/term.m31`'s
 // `Session` is exactly the value that knows how to undo that (`restore()`,
 // idempotent, called from its own destructor), but `Loop.run` holds it in
@@ -55,7 +55,7 @@
 // terminal is cooked and on the normal screen, calls `launch_editor` to
 // interpret the result, and -- unless the loop actually asked to quit --
 // calls `Loop.run` again. That is the re-acquire half: a fresh `raw()` call,
-// and a first frame `Loop.run` always draws with `tuidiff.full` rather than
+// and a first frame `Loop.run` always draws with `TUI_diff.full` rather than
 // a diff against whatever the editor left on screen.
 //
 // `f` (finish) and `a` (abort) are untouched: `launch_editor` reuses
@@ -87,17 +87,17 @@ import refs;
 import status;
 import term;
 import text;
-import tui.tuibuf;
-import tui.tuidiffview;
-import tui.tuifooter;
-import tui.tuigeom;
-import tui.tuijump;
-import tui.tuimenu;
-import tui.tuioutline;
-import tui.tuitext;
-import tui.tuiwidget;
-import tui.tuistyle;
-import tui.tuiapp;
+import tui.TUI_buffer;
+import tui.TUI_diff_view;
+import tui.TUI_footer;
+import tui.TUI_geometry;
+import tui.TUI_jump_list;
+import tui.TUI_menu;
+import tui.TUI_outline;
+import tui.TUI_text;
+import tui.TUI_widget;
+import tui.TUI_style;
+import tui.TUI_app;
 
 /// One row of a change list (`status.Status.staged`/`.unstaged`, or
 /// `.untracked`), ready to sort and to show: `path` is what a human reads,
@@ -270,14 +270,14 @@ bool expanded_for(Map<str, bool> collapsed, str id, bool default_expanded) {
 //
 // `build_outline` (and so `commit_node`) runs once, from `State.reload()`,
 // after an action that changes the repository -- not on every frame. The
-// outline it returns is then rendered against whatever `tuigeom.Rect` the
+// outline it returns is then rendered against whatever `TUI_geometry.Rect` the
 // terminal loop hands `State.draw()`, which can change across a resize with
 // no `reload()` in between (see `draw()` below: it calls `outline.render`
 // straight on the stored tree). So the real column count is known only
-// inside `tuioutline.Outline.render`, one row = one screen line, well after
+// inside `TUI_outline.Outline.render`, one row = one screen line, well after
 // these nodes are built.
 //
-// Making `tuioutline` itself wrap-aware -- so a resize could reflow without
+// Making `TUI_outline` itself wrap-aware -- so a resize could reflow without
 // a full rebuild -- would mean one logical `Row` can occupy a *variable*
 // number of physical lines, which reaches into `rows()`, `move()`,
 // `select_id()` and the `Viewport.reveal`/`clamped` scroll math that all
@@ -288,17 +288,17 @@ bool expanded_for(Map<str, bool> collapsed, str id, bool default_expanded) {
 // So this wraps eagerly, here, against `COMMIT_BODY_WRAP_COLS` -- a stand-in
 // for a typical terminal, chosen so it still looks right at the common case
 // rather than picking an arbitrary round number. Neither direction loses a
-// character: `tuitext.wrap` only drops whitespace exactly at a line break
+// character: `TUI_text.wrap` only drops whitespace exactly at a line break
 // it introduces, never a non-space byte, so joining a message line's
 // wrapped rows back together (with a single space where a break was)
-// reproduces the original line. General wrap-awareness in `tuioutline`
+// reproduces the original line. General wrap-awareness in `TUI_outline`
 // itself is a real follow-up, not attempted here.
 //
 // A terminal narrower than this fallback still clips a wrapped row's tail
 // in `Outline.render`, exactly as it always could for any other row (a long
 // file path, the author line below, never wrapped at all) -- `h`/`l` and
 // the left/right arrows now cover that case directly, via
-// `tuioutline.Outline.scroll_h`, rather than waiting on wrap-awareness to
+// `TUI_outline.Outline.scroll_h`, rather than waiting on wrap-awareness to
 // close it. Content is reachable by scrolling sideways; it no longer just
 // clips with no way back.
 const int COMMIT_BODY_WRAP_COLS = 72;
@@ -417,9 +417,9 @@ Result<List<CommitFileDiff>, object.Error> commit_changes(str gitdir, object.Com
             case Binary: {
                 binary = true;
             }
-            case Hunks(List<tuidiffview.Hunk> hs): {
-                for (tuidiffview.Hunk h in hs) {
-                    for (tuidiffview.Line l in h.lines) {
+            case Hunks(List<TUI_diff_view.Hunk> hs): {
+                for (TUI_diff_view.Hunk h in hs) {
+                    for (TUI_diff_view.Line l in h.lines) {
                         match (l.kind) {
                             case Add: {
                                 insertions = insertions + 1;
@@ -441,7 +441,7 @@ Result<List<CommitFileDiff>, object.Error> commit_changes(str gitdir, object.Com
 
 /// The outline's commit section: one collapsible node per commit, its short
 /// id and first message line as the label, and -- expanded -- its author,
-/// date and full message as leaf rows underneath. See `tuioutline.m31`'s own
+/// date and full message as leaf rows underneath. See `TUI_outline.m31`'s own
 /// header on why every row needs a stable `id`: folding must not renumber
 /// what the jump list or a saved cursor position names.
 ///
@@ -462,24 +462,24 @@ Result<List<CommitFileDiff>, object.Error> commit_changes(str gitdir, object.Com
 /// and then the files are what they asked for: `Enter` on a commit shows its
 /// files at once, `Enter` on a file shows its diff. A fold recorded in
 /// `collapsed` still wins, as everywhere else.
-List<tuioutline.Node> commit_node(gitlog.Entry en, List<CommitFileDiff> changes, Map<str, bool> collapsed, Map<str, CommitFileDiff> out_file_diffs) {
+List<TUI_outline.Node> commit_node(gitlog.Entry en, List<CommitFileDiff> changes, Map<str, bool> collapsed, Map<str, CommitFileDiff> out_file_diffs) {
     str id = "commit:" + en.id;
     str label = en.id.substr(0, 7) + "  " + first_line(en.commit.message);
-    List<tuioutline.Node> body = [];
+    List<TUI_outline.Node> body = [];
     str author = en.commit.author.name.utf8().or("<non-utf8>") + " <" + en.commit.author.email.utf8().or("<non-utf8>") + ">";
-    body.push(tuioutline.Node.leaf(id + ":author", "Author: " + author));
-    body.push(tuioutline.Node.leaf(id + ":date", "Date:   " + date.iso(en.commit.author.when)));
+    body.push(TUI_outline.Node.leaf(id + ":author", "Author: " + author));
+    body.push(TUI_outline.Node.leaf(id + ":date", "Date:   " + date.iso(en.commit.author.when)));
     str msg = en.commit.message.utf8().or("<non-utf8 message>");
     int i = 0;
     for (str line in text.lines(msg)) {
         int j = 0;
-        for (str wrapped in tuitext.wrap(line, COMMIT_BODY_WRAP_COLS)) {
-            body.push(tuioutline.Node.leaf(id + ":m" + i.to_str() + ":" + j.to_str(), "  " + wrapped));
+        for (str wrapped in TUI_text.wrap(line, COMMIT_BODY_WRAP_COLS)) {
+            body.push(TUI_outline.Node.leaf(id + ":m" + i.to_str() + ":" + j.to_str(), "  " + wrapped));
             j = j + 1;
         }
         i = i + 1;
     }
-    List<tuioutline.Node> file_nodes = [];
+    List<TUI_outline.Node> file_nodes = [];
     int k = 0;
     for (CommitFileDiff ch in changes) {
         str file_id = id + ":file:" + k.to_str();
@@ -488,13 +488,13 @@ List<tuioutline.Node> commit_node(gitlog.Entry en, List<CommitFileDiff> changes,
         if (ch.binary) {
             stat = "(binary)";
         }
-        file_nodes.push(tuioutline.Node.leaf(file_id, mark_str(change_mark(ch.kind)) + "  " + p + "  " + stat));
+        file_nodes.push(TUI_outline.Node.leaf(file_id, mark_str(change_mark(ch.kind)) + "  " + p + "  " + stat));
         out_file_diffs.set(file_id, ch);
         k = k + 1;
     }
     str files_id = id + ":files";
-    body.push(tuioutline.Node.section(files_id, "Files changed (" + file_nodes.size().to_str() + ")", file_nodes, expanded: expanded_for(collapsed, files_id, true)));
-    return [tuioutline.Node.section(id, label, body, expanded: expanded_for(collapsed, id, false))];
+    body.push(TUI_outline.Node.section(files_id, "Files changed (" + file_nodes.size().to_str() + ")", file_nodes, expanded: expanded_for(collapsed, files_id, true)));
+    return [TUI_outline.Node.section(id, label, body, expanded: expanded_for(collapsed, id, false))];
 }
 
 /// The primary document, from a `Status` and a commit walk alone -- no
@@ -504,7 +504,7 @@ List<tuioutline.Node> commit_node(gitlog.Entry en, List<CommitFileDiff> changes,
 /// Every leaf row this builds is recorded in `out_paths` (row id -> the raw
 /// bytes to stage or unstage), which `State` keeps and `stage_current`/
 /// `unstage_current` read from -- there is no other way to get from "the
-/// cursor is on this row" back to a path, since `tuioutline.Row` only knows
+/// cursor is on this row" back to a path, since `TUI_outline.Row` only knows
 /// the label it was given. A commit's own file rows are recorded a second
 /// time in `out_file_diffs` (row id -> the `CommitFileDiff` `commit_changes`
 /// already computed for it), which `show_diff_current`'s commit-file branch
@@ -519,35 +519,35 @@ List<tuioutline.Node> commit_node(gitlog.Entry en, List<CommitFileDiff> changes,
 /// cache and rebuilds (`State.toggle_current`). The computing happens
 /// elsewhere, this only ever renders what it is handed, which is what keeps
 /// this function itself free of I/O (this doc comment's own first line).
-pub tuioutline.Outline build_outline(status.Status st, List<gitlog.Entry> log, Map<str, List<CommitFileDiff>> changes_by_commit, Map<str, bool> collapsed, Map<str, bytes> out_paths, Map<str, CommitFileDiff> out_file_diffs, List<BranchRow> branches) {
+pub TUI_outline.Outline build_outline(status.Status st, List<gitlog.Entry> log, Map<str, List<CommitFileDiff>> changes_by_commit, Map<str, bool> collapsed, Map<str, bytes> out_paths, Map<str, CommitFileDiff> out_file_diffs, List<BranchRow> branches) {
     out_paths.clear();
     out_file_diffs.clear();
-    List<tuioutline.Node> roots = [];
-    List<tuioutline.Node> untracked_children = [];
+    List<TUI_outline.Node> roots = [];
+    List<TUI_outline.Node> untracked_children = [];
     for (PathRow row in rows_from_untracked(st.untracked)) {
         str id = "untracked:" + row.path;
         out_paths.set(id, row.raw);
-        untracked_children.push(tuioutline.Node.leaf(id, row.path));
+        untracked_children.push(TUI_outline.Node.leaf(id, row.path));
     }
-    roots.push(tuioutline.Node.section("untracked", "Untracked files (" + untracked_children.size().to_str() + ")", untracked_children, expanded: expanded_for(collapsed, "untracked", true)));
-    List<tuioutline.Node> unstaged_children = [];
+    roots.push(TUI_outline.Node.section("untracked", "Untracked files (" + untracked_children.size().to_str() + ")", untracked_children, expanded: expanded_for(collapsed, "untracked", true)));
+    List<TUI_outline.Node> unstaged_children = [];
     for (PathRow row in rows_from_deltas(st.unstaged)) {
         str id = "unstaged:" + row.path;
         out_paths.set(id, row.raw);
-        unstaged_children.push(tuioutline.Node.leaf(id, mark_str(row.mark) + "  " + row.path));
+        unstaged_children.push(TUI_outline.Node.leaf(id, mark_str(row.mark) + "  " + row.path));
     }
-    roots.push(tuioutline.Node.section("unstaged", "Unstaged changes (" + unstaged_children.size().to_str() + ")", unstaged_children, expanded: expanded_for(collapsed, "unstaged", true)));
-    List<tuioutline.Node> staged_children = [];
+    roots.push(TUI_outline.Node.section("unstaged", "Unstaged changes (" + unstaged_children.size().to_str() + ")", unstaged_children, expanded: expanded_for(collapsed, "unstaged", true)));
+    List<TUI_outline.Node> staged_children = [];
     for (PathRow row in rows_from_deltas(st.staged)) {
         str id = "staged:" + row.path;
         out_paths.set(id, row.raw);
-        staged_children.push(tuioutline.Node.leaf(id, mark_str(row.mark) + "  " + row.path));
+        staged_children.push(TUI_outline.Node.leaf(id, mark_str(row.mark) + "  " + row.path));
     }
-    roots.push(tuioutline.Node.section("staged", "Staged changes (" + staged_children.size().to_str() + ")", staged_children, expanded: expanded_for(collapsed, "staged", true)));
-    List<tuioutline.Node> commit_children = [];
+    roots.push(TUI_outline.Node.section("staged", "Staged changes (" + staged_children.size().to_str() + ")", staged_children, expanded: expanded_for(collapsed, "staged", true)));
+    List<TUI_outline.Node> commit_children = [];
     for (gitlog.Entry en in log) {
         List<CommitFileDiff> changes = changes_by_commit.get(en.id).or([]);
-        for (tuioutline.Node n in commit_node(en, changes, collapsed, out_file_diffs)) {
+        for (TUI_outline.Node n in commit_node(en, changes, collapsed, out_file_diffs)) {
             commit_children.push(n);
         }
     }
@@ -555,25 +555,25 @@ pub tuioutline.Outline build_outline(status.Status st, List<gitlog.Entry> log, M
     if (log.size() >= LOG_PAGE) {
         // The walk hit its limit, so there may be more behind it: one last,
         // addressable row that `handle_enter` turns into a longer walk.
-        commit_children.push(tuioutline.Node.leaf(LOAD_MORE_ID, "… load " + LOG_PAGE.to_str() + " more commits"));
+        commit_children.push(TUI_outline.Node.leaf(LOAD_MORE_ID, "… load " + LOG_PAGE.to_str() + " more commits"));
         commits_label = "Commits (" + log.size().to_str() + "+)";
     }
-    roots.push(tuioutline.Node.section("commits", commits_label, commit_children, expanded: expanded_for(collapsed, "commits", true)));
+    roots.push(TUI_outline.Node.section("commits", commits_label, commit_children, expanded: expanded_for(collapsed, "commits", true)));
     // Local branches, the current one starred -- `b` acts on the row under
     // the cursor (`checkout_current`). Last, after the commits, so the row
     // positions every existing check counts on (untracked first, commits
     // fourth) are untouched; design.md's own Magit comparison lists branches
     // as one more section of the same document, not a panel of its own.
-    List<tuioutline.Node> branch_children = [];
+    List<TUI_outline.Node> branch_children = [];
     for (BranchRow br in branches) {
         str mark = "  ";
         if (br.branch.current) {
             mark = "* ";
         }
-        branch_children.push(tuioutline.Node.leaf("branch:" + br.branch.name, mark + br.branch.name + "  " + br.branch.id.substr(0, 7) + "  " + br.subject));
+        branch_children.push(TUI_outline.Node.leaf("branch:" + br.branch.name, mark + br.branch.name + "  " + br.branch.id.substr(0, 7) + "  " + br.subject));
     }
-    roots.push(tuioutline.Node.section("branches", "Branches (" + branch_children.size().to_str() + ")", branch_children, expanded: expanded_for(collapsed, "branches", true)));
-    return tuioutline.Outline(roots);
+    roots.push(TUI_outline.Node.section("branches", "Branches (" + branch_children.size().to_str() + ")", branch_children, expanded: expanded_for(collapsed, "branches", true)));
+    return TUI_outline.Outline(roots);
 }
 
 // --- the commit message: writing the template, reading it back -------------
@@ -778,8 +778,8 @@ pub Option<object.Entry> find_in_tree(str gitdir, str tree_id, bytes path) {
 pub type State {
     pub str gitdir;
     pub str worktree;
-    pub tuioutline.Outline outline = tuioutline.Outline([]);
-    pub tuijump.JumpList jump = tuijump.JumpList.empty;
+    pub TUI_outline.Outline outline = TUI_outline.Outline([]);
+    pub TUI_jump_list.JumpList jump = TUI_jump_list.JumpList.empty;
     pub bool show_jump = false;
     pub bool jump_focused = false;
     pub bool commit_open = false;
@@ -813,7 +813,7 @@ pub type State {
     /// The `F` which-key overlay (pull), open until a choice or `Escape`.
     pub bool pull_open = false;
     /// Set by `edit_message` and read by `gitui.m31`'s own top-level driver
-    /// after `tuiapp.Loop.run` returns: true means the loop stopped so
+    /// after `TUI_app.Loop.run` returns: true means the loop stopped so
     /// `$EDITOR` could have the terminal, not because the operator pressed
     /// `q`. See this module's own header, "launching `$EDITOR`, and the
     /// terminal handoff that takes".
@@ -839,7 +839,7 @@ pub type State {
     /// line the cursor addresses. Actually staging that address is out of
     /// scope for this change; keeping the addressing live here is what
     /// makes hunk staging a small follow-up instead of another rewrite.
-    pub tuidiffview.DiffView diff_view = tuidiffview.DiffView([]);
+    pub TUI_diff_view.DiffView diff_view = TUI_diff_view.DiffView([]);
     /// Which comparison `diff_view` shows -- "untracked", "unstaged",
     /// "staged" or "commit" -- and for which path, so `s`/`u` in the view
     /// (`stage_hunk_current`/`unstage_hunk_current`) know which index
@@ -959,14 +959,14 @@ bool State.ensure_commit_changes(str id) {
 }
 
 /// Refresh and rebuild the outline, keeping the cursor on the row it was on
-/// (by id, not by position -- `tuioutline.m31`'s own reason) and the jump
+/// (by id, not by position -- `TUI_outline.m31`'s own reason) and the jump
 /// list in step with it. Called after every action that changes what the
 /// repository looks like: staging, unstaging, committing, and the manual
 /// refresh key.
 pub void State.reload() {
     str keep_id = "";
     match (outline.current()) {
-        case Some(tuioutline.Row r): {
+        case Some(TUI_outline.Row r): {
             keep_id = r.node.id;
         }
         case None: {
@@ -996,7 +996,7 @@ pub void State.toggle_current() {
     str keep_id = "";
     bool rebuild = false;
     match (outline.current()) {
-        case Some(tuioutline.Row r): {
+        case Some(TUI_outline.Row r): {
             collapsed.set(r.node.id, !r.node.expanded);
             keep_id = r.node.id;
             if (r.node.expanded) {
@@ -1032,7 +1032,7 @@ pub void State.move_cursor(int delta) {
 /// whatever entry that path already had.
 pub void State.stage_current() {
     match (outline.current()) {
-        case Some(tuioutline.Row r): {
+        case Some(TUI_outline.Row r): {
             if (r.node.id.starts_with("untracked:") || r.node.id.starts_with("unstaged:")) {
                 match (paths.get(r.node.id)) {
                     case Some(bytes p): {
@@ -1107,7 +1107,7 @@ pub void State.stage_path(bytes rel) {
 /// again, not deleted from disk).
 pub void State.unstage_current() {
     match (outline.current()) {
-        case Some(tuioutline.Row r): {
+        case Some(TUI_outline.Row r): {
             if (r.node.id.starts_with("staged:")) {
                 match (paths.get(r.node.id)) {
                     case Some(bytes p): {
@@ -1165,7 +1165,7 @@ pub void State.unstage_path(bytes rel) {
 /// Nothing is touched until `handle_confirm_key` sees `y`.
 pub void State.discard_current() {
     match (outline.current()) {
-        case Some(tuioutline.Row r): {
+        case Some(TUI_outline.Row r): {
             str kind = "";
             if (r.node.id.starts_with("untracked:")) {
                 kind = "untracked";
@@ -1399,7 +1399,7 @@ void State.prune_empty_parents(bytes rel) {
 
 /// Real, hunk-level diff for the row under the cursor -- the diff-algorithm
 /// track (`lib/diff.m31`/`apps/git/hunks.m31`) and the rendering widget
-/// (`apps/tui/tuidiffview.DiffView`) both already existed; this is the
+/// (`apps/tui/TUI_diff_view.DiffView`) both already existed; this is the
 /// wiring `docs/design.md`'s "Starting the client" section named as the
 /// follow-up once they did. A no-op on anything that is not a path row (a
 /// section heading or a commit).
@@ -1440,7 +1440,7 @@ void State.prune_empty_parents(bytes rel) {
 /// than attempting to render binary content as text.
 pub void State.show_diff_current() {
     match (outline.current()) {
-        case Some(tuioutline.Row r): {
+        case Some(TUI_outline.Row r): {
             if (r.node.id.contains(":file:")) {
                 match (file_diffs.get(r.node.id)) {
                     case Some(CommitFileDiff d): {
@@ -1559,11 +1559,11 @@ pub void State.open_diff(str title, bytes old, bytes new) {
     match (hunks.hunks(old, new)) {
         case Binary: {
             diff_binary = true;
-            diff_view = tuidiffview.DiffView([]);
+            diff_view = TUI_diff_view.DiffView([]);
         }
-        case Hunks(List<tuidiffview.Hunk> hs): {
+        case Hunks(List<TUI_diff_view.Hunk> hs): {
             diff_binary = false;
-            diff_view = tuidiffview.DiffView(hs);
+            diff_view = TUI_diff_view.DiffView(hs);
         }
     }
     diff_open = true;
@@ -1576,7 +1576,7 @@ pub void State.open_diff(str title, bytes old, bytes new) {
 pub void State.close_diff() {
     diff_open = false;
     diff_binary = false;
-    diff_view = tuidiffview.DiffView([]);
+    diff_view = TUI_diff_view.DiffView([]);
     diff_section = "";
     diff_path = [];
     message = "";
@@ -1602,7 +1602,7 @@ pub void State.stage_hunk_current() {
         return;
     }
     match (diff_view.at()) {
-        case Some(tuidiffview.Row row): {
+        case Some(TUI_diff_view.Row row): {
             int keep = diff_view.cursor;
             if (stage_hunk(diff_path, row.hunk)) {
                 str said = message;
@@ -1628,7 +1628,7 @@ pub void State.unstage_hunk_current() {
         return;
     }
     match (diff_view.at()) {
-        case Some(tuidiffview.Row row): {
+        case Some(TUI_diff_view.Row row): {
             int keep = diff_view.cursor;
             if (unstage_hunk(diff_path, row.hunk)) {
                 str said = message;
@@ -1795,7 +1795,7 @@ bool State.drop_index_entry(bytes rel, str said) {
 ///
 /// This cannot call `os.run` itself: the terminal is still in raw mode with
 /// the alternate screen on, owned by a `term.Session` this state has no
-/// access to (`tuiapp.Loop.run`'s own scope). Setting `want_editor` and
+/// access to (`TUI_app.Loop.run`'s own scope). Setting `want_editor` and
 /// letting the which-key's `e` return `Quit` is what unwinds that scope --
 /// see this module's own header, "launching `$EDITOR`, and the terminal
 /// handoff that takes" -- so `launch_editor` below is where the actual
@@ -1816,7 +1816,7 @@ pub void State.edit_message() {
 }
 
 /// Actually launch `$EDITOR` (or `vi`) on `commit_msg_path` and act on how it
-/// ended -- called by `gitui.m31`'s driver after `tuiapp.Loop.run` has
+/// ended -- called by `gitui.m31`'s driver after `TUI_app.Loop.run` has
 /// returned with `want_editor` set, so the terminal `os.run`'s child
 /// inherits is the real, cooked one, not the raw alternate screen this
 /// program draws on.
@@ -1906,7 +1906,7 @@ str State.tip_subject(str tip) {
 pub void State.checkout_current() {
     str name = "";
     match (outline.current()) {
-        case Some(tuioutline.Row r): {
+        case Some(TUI_outline.Row r): {
             if (r.node.id.starts_with("branch:")) {
                 name = r.node.id.substr(7, r.node.id.size());
             }
@@ -1946,7 +1946,7 @@ pub void State.checkout_branch(str name) {
 }
 
 /// `b`, then `n`: ask for a name the same way `c` asks for a message -- a
-/// file (`branch_name_path`) handed to `$EDITOR` once `tuiapp.Loop.run` has
+/// file (`branch_name_path`) handed to `$EDITOR` once `TUI_app.Loop.run` has
 /// given the terminal back (see `edit_message`'s own header for why the
 /// launch cannot happen here). `launch_branch_editor` reads it back.
 pub void State.new_branch() {
@@ -2269,59 +2269,59 @@ str State.status_line() {
     return branch_label;
 }
 
-List<tuiwidget.Span> State.footer_spans(tuistyle.Theme theme) {
-    List<tuiwidget.Span> out = [];
-    out.push(tuiwidget.Span(" j/k"));
-    out.push(tuiwidget.Span(" move  "));
-    out.push(tuiwidget.Span("h/l", style: theme.accent));
-    out.push(tuiwidget.Span(" scroll  "));
-    out.push(tuiwidget.Span("enter", style: theme.accent));
-    out.push(tuiwidget.Span(" toggle  "));
-    out.push(tuiwidget.Span("s", style: theme.accent));
+List<TUI_widget.Span> State.footer_spans(TUI_style.Theme theme) {
+    List<TUI_widget.Span> out = [];
+    out.push(TUI_widget.Span(" j/k"));
+    out.push(TUI_widget.Span(" move  "));
+    out.push(TUI_widget.Span("h/l", style: theme.accent));
+    out.push(TUI_widget.Span(" scroll  "));
+    out.push(TUI_widget.Span("enter", style: theme.accent));
+    out.push(TUI_widget.Span(" toggle  "));
+    out.push(TUI_widget.Span("s", style: theme.accent));
     if (diff_open) {
-        out.push(tuiwidget.Span(" stage hunk  "));
+        out.push(TUI_widget.Span(" stage hunk  "));
     } else {
-        out.push(tuiwidget.Span(" stage  "));
+        out.push(TUI_widget.Span(" stage  "));
     }
-    out.push(tuiwidget.Span("u", style: theme.accent));
+    out.push(TUI_widget.Span("u", style: theme.accent));
     if (diff_open) {
-        out.push(tuiwidget.Span(" unstage hunk  "));
+        out.push(TUI_widget.Span(" unstage hunk  "));
     } else {
-        out.push(tuiwidget.Span(" unstage  "));
+        out.push(TUI_widget.Span(" unstage  "));
     }
-    out.push(tuiwidget.Span("d", style: theme.accent));
-    out.push(tuiwidget.Span(" diff  "));
-    out.push(tuiwidget.Span("x", style: theme.accent));
-    out.push(tuiwidget.Span(" discard  "));
+    out.push(TUI_widget.Span("d", style: theme.accent));
+    out.push(TUI_widget.Span(" diff  "));
+    out.push(TUI_widget.Span("x", style: theme.accent));
+    out.push(TUI_widget.Span(" discard  "));
     if (diff_open) {
-        out.push(tuiwidget.Span("q/esc/backspace", style: theme.accent));
-        out.push(tuiwidget.Span(" back  "));
+        out.push(TUI_widget.Span("q/esc/backspace", style: theme.accent));
+        out.push(TUI_widget.Span(" back  "));
     }
-    out.push(tuiwidget.Span("c", style: theme.accent));
-    out.push(tuiwidget.Span(" commit  "));
-    out.push(tuiwidget.Span("b", style: theme.accent));
-    out.push(tuiwidget.Span(" branch  "));
-    out.push(tuiwidget.Span("P", style: theme.accent));
-    out.push(tuiwidget.Span(" push  "));
-    out.push(tuiwidget.Span("F", style: theme.accent));
-    out.push(tuiwidget.Span(" pull  "));
-    out.push(tuiwidget.Span("J", style: theme.accent));
-    out.push(tuiwidget.Span(" jump  "));
-    out.push(tuiwidget.Span("w", style: theme.accent));
-    out.push(tuiwidget.Span(" focus  "));
-    out.push(tuiwidget.Span("r", style: theme.accent));
-    out.push(tuiwidget.Span(" refresh"));
+    out.push(TUI_widget.Span("c", style: theme.accent));
+    out.push(TUI_widget.Span(" commit  "));
+    out.push(TUI_widget.Span("b", style: theme.accent));
+    out.push(TUI_widget.Span(" branch  "));
+    out.push(TUI_widget.Span("P", style: theme.accent));
+    out.push(TUI_widget.Span(" push  "));
+    out.push(TUI_widget.Span("F", style: theme.accent));
+    out.push(TUI_widget.Span(" pull  "));
+    out.push(TUI_widget.Span("J", style: theme.accent));
+    out.push(TUI_widget.Span(" jump  "));
+    out.push(TUI_widget.Span("w", style: theme.accent));
+    out.push(TUI_widget.Span(" focus  "));
+    out.push(TUI_widget.Span("r", style: theme.accent));
+    out.push(TUI_widget.Span(" refresh"));
     if (!diff_open) {
-        out.push(tuiwidget.Span("  "));
-        out.push(tuiwidget.Span("q", style: theme.accent));
-        out.push(tuiwidget.Span(" quit"));
+        out.push(TUI_widget.Span("  "));
+        out.push(TUI_widget.Span("q", style: theme.accent));
+        out.push(TUI_widget.Span(" quit"));
     }
     return out;
 }
 
 /// The frame: the primary document -- either the outline (and, toggled on,
 /// the jump list beside it), or, once `d` has been pressed, the hunk-level
-/// diff view in its place -- then the two-row footer `tuifooter.split`
+/// diff view in its place -- then the two-row footer `TUI_footer.split`
 /// reserves -- a status line and the fixed key legend -- and, on top of
 /// everything, the commit which-key overlay when it is open. See
 /// `docs/design.md`'s locked layout: one primary document, one optional
@@ -2330,36 +2330,36 @@ List<tuiwidget.Span> State.footer_spans(tuistyle.Theme theme) {
 /// REPLACES the document the way `apps/tui/browse.m31`'s preview pane
 /// changes with the selection, which is why the jump list (synced to the
 /// outline's own entries) is not shown alongside it.
-pub void State.draw(tuibuf.Buffer buf, tuigeom.Rect area) {
-    tuistyle.Theme theme = tuistyle.Theme.plain;
+pub void State.draw(TUI_buffer.Buffer buf, TUI_geometry.Rect area) {
+    TUI_style.Theme theme = TUI_style.Theme.plain;
     str frame_title = worktree;
     if (frame_title == ".") {
         frame_title = "git";
     }
-    tuiwidget.Block frame = tuiwidget.Block(title: frame_title, borders: tuiwidget.Borders.Rounded);
+    TUI_widget.Block frame = TUI_widget.Block(title: frame_title, borders: TUI_widget.Borders.Rounded);
     frame.render(buf, area);
-    tuigeom.Rect body = frame.inner(area);
-    List<tuigeom.Rect> bands = tuifooter.split(body, 2);
-    tuigeom.Rect main = bands[0];
-    tuigeom.Rect footer_area = bands[1];
+    TUI_geometry.Rect body = frame.inner(area);
+    List<TUI_geometry.Rect> bands = TUI_footer.split(body, 2);
+    TUI_geometry.Rect main = bands[0];
+    TUI_geometry.Rect footer_area = bands[1];
     if (diff_open) {
         draw_diff(buf, main);
     } else {
-        tuigeom.Rect outline_area = main;
+        TUI_geometry.Rect outline_area = main;
         if (show_jump) {
-            List<tuigeom.Rect> cols = tuigeom.cols(main, [tuigeom.Constraint.Fill(1), tuigeom.Constraint.Length(28)]);
+            List<TUI_geometry.Rect> cols = TUI_geometry.cols(main, [TUI_geometry.Constraint.Fill(1), TUI_geometry.Constraint.Length(28)]);
             outline_area = cols[0];
             outline.render(buf, outline_area);
-            tuiwidget.Block jb = tuiwidget.Block(title: "jump", borders: tuiwidget.Borders.Single);
+            TUI_widget.Block jb = TUI_widget.Block(title: "jump", borders: TUI_widget.Borders.Single);
             jb.render(buf, cols[1]);
             jump.render(buf, jb.inner(cols[1]));
         } else {
             outline.render(buf, outline_area);
         }
     }
-    tuiwidget.Line status_row = tuiwidget.Line([tuiwidget.Span(" " + status_line(), style: theme.dim)]);
-    status_row.render(buf, tuigeom.Rect(footer_area.x, footer_area.y, footer_area.w, 1));
-    tuifooter.Footer(footer_spans(theme)).render(buf, tuigeom.Rect(footer_area.x, footer_area.y + 1, footer_area.w, 1));
+    TUI_widget.Line status_row = TUI_widget.Line([TUI_widget.Span(" " + status_line(), style: theme.dim)]);
+    status_row.render(buf, TUI_geometry.Rect(footer_area.x, footer_area.y, footer_area.width, 1));
+    TUI_footer.Footer(footer_spans(theme)).render(buf, TUI_geometry.Rect(footer_area.x, footer_area.y + 1, footer_area.width, 1));
     if (commit_open) {
         str title = "commit";
         str finish = "finish: write the commit";
@@ -2367,7 +2367,7 @@ pub void State.draw(tuibuf.Buffer buf, tuigeom.Rect area) {
             title = "amend HEAD";
             finish = "finish: replace HEAD with the amended commit";
         }
-        tuimenu.WhichKey wk = tuimenu.WhichKey(title, [tuimenu.Item("e", "edit message in $EDITOR (" + commit_msg_path + ")"), tuimenu.Item("f", finish), tuimenu.Item("A", "amend HEAD: its message prefilled, its parents and author kept"), tuimenu.Item("a", "abort")]);
+        TUI_menu.WhichKey wk = TUI_menu.WhichKey(title, [TUI_menu.Item("e", "edit message in $EDITOR (" + commit_msg_path + ")"), TUI_menu.Item("f", finish), TUI_menu.Item("A", "amend HEAD: its message prefilled, its parents and author kept"), TUI_menu.Item("a", "abort")]);
         wk.render(buf, body);
     }
     if (confirm_open) {
@@ -2377,19 +2377,19 @@ pub void State.draw(tuibuf.Buffer buf, tuigeom.Rect area) {
         } else if (confirm_kind == "staged") {
             what = "staged changes to " + confirm_path.utf8().or("<non-utf8>") + " (index and working tree)";
         }
-        tuimenu.WhichKey wk = tuimenu.WhichKey("discard " + what + "?", [tuimenu.Item("y", "yes, discard"), tuimenu.Item("any other key", "no, keep it")]);
+        TUI_menu.WhichKey wk = TUI_menu.WhichKey("discard " + what + "?", [TUI_menu.Item("y", "yes, discard"), TUI_menu.Item("any other key", "no, keep it")]);
         wk.render(buf, body);
     }
     if (branch_open) {
-        tuimenu.WhichKey bk = tuimenu.WhichKey("branch", [tuimenu.Item("c", "check out the branch under the cursor"), tuimenu.Item("n", "new branch from HEAD: name it in $EDITOR, then switch to it"), tuimenu.Item("a", "abort")]);
+        TUI_menu.WhichKey bk = TUI_menu.WhichKey("branch", [TUI_menu.Item("c", "check out the branch under the cursor"), TUI_menu.Item("n", "new branch from HEAD: name it in $EDITOR, then switch to it"), TUI_menu.Item("a", "abort")]);
         bk.render(buf, body);
     }
     if (push_open) {
-        tuimenu.WhichKey wk = tuimenu.WhichKey("push", [tuimenu.Item("p", "push current branch to origin (fast-forward only)")]);
+        TUI_menu.WhichKey wk = TUI_menu.WhichKey("push", [TUI_menu.Item("p", "push current branch to origin (fast-forward only)")]);
         wk.render(buf, body);
     }
     if (pull_open) {
-        tuimenu.WhichKey wk = tuimenu.WhichKey("pull", [tuimenu.Item("p", "pull current branch from origin (fast-forward only)")]);
+        TUI_menu.WhichKey wk = TUI_menu.WhichKey("pull", [TUI_menu.Item("p", "pull current branch from origin (fast-forward only)")]);
         wk.render(buf, body);
     }
 }
@@ -2399,12 +2399,12 @@ pub void State.draw(tuibuf.Buffer buf, tuigeom.Rect area) {
 /// wording, `diff_binary`) or `diff_view` itself -- a `DiffView` whose
 /// `at()`/`move()` already give hunk- and line-granular addressing, even
 /// though nothing in this change acts on that address yet.
-void State.draw_diff(tuibuf.Buffer buf, tuigeom.Rect area) {
-    tuiwidget.Block block = tuiwidget.Block(title: "diff: " + diff_title, borders: tuiwidget.Borders.Single);
+void State.draw_diff(TUI_buffer.Buffer buf, TUI_geometry.Rect area) {
+    TUI_widget.Block block = TUI_widget.Block(title: "diff: " + diff_title, borders: TUI_widget.Borders.Single);
     block.render(buf, area);
-    tuigeom.Rect inner = block.inner(area);
+    TUI_geometry.Rect inner = block.inner(area);
     if (diff_binary) {
-        tuiwidget.Paragraph("binary files differ").render(buf, inner);
+        TUI_widget.Paragraph("binary files differ").render(buf, inner);
         return;
     }
     diff_view.render(buf, inner);
@@ -2414,24 +2414,24 @@ void State.draw_diff(tuibuf.Buffer buf, tuigeom.Rect area) {
 /// `State.handle` is: every `term.Code` variant named, so a key this client
 /// does not use is `Continue` rather than missing from the match entirely
 /// (there is no `default`, reference §5.6).
-pub tuiapp.Action State.handle(term.Event ev) {
+pub TUI_app.Action State.handle(term.Event ev) {
     match (ev) {
         case Key(term.Key k): {
             return handle_key(k.code);
         }
         case Mouse(term.Mouse m): {
-            return tuiapp.Action.Continue;
+            return TUI_app.Action.Continue;
         }
         case Paste(str p): {
-            return tuiapp.Action.Continue;
+            return TUI_app.Action.Continue;
         }
         case Unknown(bytes u): {
-            return tuiapp.Action.Continue;
+            return TUI_app.Action.Continue;
         }
     }
 }
 
-tuiapp.Action State.handle_key(term.Code code) {
+TUI_app.Action State.handle_key(term.Code code) {
     if (confirm_open) {
         return handle_confirm_key(code);
     }
@@ -2456,126 +2456,126 @@ tuiapp.Action State.handle_key(term.Code code) {
         }
         case Enter: {
             handle_enter();
-            return tuiapp.Action.Redraw;
+            return TUI_app.Action.Redraw;
         }
         case Escape: {
-            return tuiapp.Action.Quit;
+            return TUI_app.Action.Quit;
         }
         case Up: {
             move_cursor(-1);
-            return tuiapp.Action.Redraw;
+            return TUI_app.Action.Redraw;
         }
         case Down: {
             move_cursor(1);
-            return tuiapp.Action.Redraw;
+            return TUI_app.Action.Redraw;
         }
         case Backspace: {
-            return tuiapp.Action.Continue;
+            return TUI_app.Action.Continue;
         }
         case Tab: {
-            return tuiapp.Action.Continue;
+            return TUI_app.Action.Continue;
         }
         case BackTab: {
-            return tuiapp.Action.Continue;
+            return TUI_app.Action.Continue;
         }
         case Right: {
             outline.scroll_h(SCROLL_H_STEP);
-            return tuiapp.Action.Redraw;
+            return TUI_app.Action.Redraw;
         }
         case Left: {
             outline.scroll_h(-SCROLL_H_STEP);
-            return tuiapp.Action.Redraw;
+            return TUI_app.Action.Redraw;
         }
         case Home: {
-            return tuiapp.Action.Continue;
+            return TUI_app.Action.Continue;
         }
         case End: {
-            return tuiapp.Action.Continue;
+            return TUI_app.Action.Continue;
         }
         case PageUp: {
-            return tuiapp.Action.Continue;
+            return TUI_app.Action.Continue;
         }
         case PageDown: {
-            return tuiapp.Action.Continue;
+            return TUI_app.Action.Continue;
         }
         case Insert: {
-            return tuiapp.Action.Continue;
+            return TUI_app.Action.Continue;
         }
         case Delete: {
-            return tuiapp.Action.Continue;
+            return TUI_app.Action.Continue;
         }
         case F(int n): {
-            return tuiapp.Action.Continue;
+            return TUI_app.Action.Continue;
         }
     }
 }
 
-tuiapp.Action State.handle_char(int c) {
+TUI_app.Action State.handle_char(int c) {
     if (c == 'q') {
-        return tuiapp.Action.Quit;
+        return TUI_app.Action.Quit;
     }
     if (c == 'j') {
         step_or_move(1);
-        return tuiapp.Action.Redraw;
+        return TUI_app.Action.Redraw;
     }
     if (c == 'k') {
         step_or_move(-1);
-        return tuiapp.Action.Redraw;
+        return TUI_app.Action.Redraw;
     }
     if (c == 'h') {
         outline.scroll_h(-SCROLL_H_STEP);
-        return tuiapp.Action.Redraw;
+        return TUI_app.Action.Redraw;
     }
     if (c == 'l') {
         outline.scroll_h(SCROLL_H_STEP);
-        return tuiapp.Action.Redraw;
+        return TUI_app.Action.Redraw;
     }
     if (c == 's') {
         stage_current();
-        return tuiapp.Action.Redraw;
+        return TUI_app.Action.Redraw;
     }
     if (c == 'u') {
         unstage_current();
-        return tuiapp.Action.Redraw;
+        return TUI_app.Action.Redraw;
     }
     if (c == 'd') {
         show_diff_current();
-        return tuiapp.Action.Redraw;
+        return TUI_app.Action.Redraw;
     }
     if (c == 'c') {
         commit_open = true;
         amending = false;
-        return tuiapp.Action.Redraw;
+        return TUI_app.Action.Redraw;
     }
     if (c == 'x') {
         discard_current();
-        return tuiapp.Action.Redraw;
+        return TUI_app.Action.Redraw;
     }
     if (c == 'b') {
         branch_open = true;
-        return tuiapp.Action.Redraw;
+        return TUI_app.Action.Redraw;
     }
     if (c == 'P') {
         push_open = true;
-        return tuiapp.Action.Redraw;
+        return TUI_app.Action.Redraw;
     }
     if (c == 'F') {
         pull_open = true;
-        return tuiapp.Action.Redraw;
+        return TUI_app.Action.Redraw;
     }
     if (c == 'r') {
         reload();
-        return tuiapp.Action.Redraw;
+        return TUI_app.Action.Redraw;
     }
     if (c == 'J') {
         show_jump = !show_jump;
-        return tuiapp.Action.Redraw;
+        return TUI_app.Action.Redraw;
     }
     if (c == 'w') {
         jump_focused = !jump_focused;
-        return tuiapp.Action.Redraw;
+        return TUI_app.Action.Redraw;
     }
-    return tuiapp.Action.Continue;
+    return TUI_app.Action.Continue;
 }
 
 void State.step_or_move(int delta) {
@@ -2601,7 +2601,7 @@ void State.handle_enter() {
         return;
     }
     match (outline.current()) {
-        case Some(tuioutline.Row r): {
+        case Some(TUI_outline.Row r): {
             if (r.node.id.contains(":file:")) {
                 show_diff_current();
                 return;
@@ -2679,63 +2679,63 @@ pub void State.push_current() {
     reload();
 }
 
-tuiapp.Action State.handle_push_key(term.Code code) {
+TUI_app.Action State.handle_push_key(term.Code code) {
     match (code) {
         case Char(int c): {
             if (c == 'p') {
                 push_current();
-                return tuiapp.Action.Redraw;
+                return TUI_app.Action.Redraw;
             }
-            return tuiapp.Action.Continue;
+            return TUI_app.Action.Continue;
         }
         case Escape: {
             push_open = false;
-            return tuiapp.Action.Redraw;
+            return TUI_app.Action.Redraw;
         }
         case Enter: {
-            return tuiapp.Action.Continue;
+            return TUI_app.Action.Continue;
         }
         case Backspace: {
-            return tuiapp.Action.Continue;
+            return TUI_app.Action.Continue;
         }
         case Tab: {
-            return tuiapp.Action.Continue;
+            return TUI_app.Action.Continue;
         }
         case BackTab: {
-            return tuiapp.Action.Continue;
+            return TUI_app.Action.Continue;
         }
         case Up: {
-            return tuiapp.Action.Continue;
+            return TUI_app.Action.Continue;
         }
         case Down: {
-            return tuiapp.Action.Continue;
+            return TUI_app.Action.Continue;
         }
         case Right: {
-            return tuiapp.Action.Continue;
+            return TUI_app.Action.Continue;
         }
         case Left: {
-            return tuiapp.Action.Continue;
+            return TUI_app.Action.Continue;
         }
         case Home: {
-            return tuiapp.Action.Continue;
+            return TUI_app.Action.Continue;
         }
         case End: {
-            return tuiapp.Action.Continue;
+            return TUI_app.Action.Continue;
         }
         case PageUp: {
-            return tuiapp.Action.Continue;
+            return TUI_app.Action.Continue;
         }
         case PageDown: {
-            return tuiapp.Action.Continue;
+            return TUI_app.Action.Continue;
         }
         case Insert: {
-            return tuiapp.Action.Continue;
+            return TUI_app.Action.Continue;
         }
         case Delete: {
-            return tuiapp.Action.Continue;
+            return TUI_app.Action.Continue;
         }
         case F(int n): {
-            return tuiapp.Action.Continue;
+            return TUI_app.Action.Continue;
         }
     }
 }
@@ -2775,141 +2775,141 @@ pub void State.pull_current() {
     reload();
 }
 
-tuiapp.Action State.handle_pull_key(term.Code code) {
+TUI_app.Action State.handle_pull_key(term.Code code) {
     match (code) {
         case Char(int c): {
             if (c == 'p') {
                 pull_current();
-                return tuiapp.Action.Redraw;
+                return TUI_app.Action.Redraw;
             }
-            return tuiapp.Action.Continue;
+            return TUI_app.Action.Continue;
         }
         case Escape: {
             pull_open = false;
-            return tuiapp.Action.Redraw;
+            return TUI_app.Action.Redraw;
         }
         case Enter: {
-            return tuiapp.Action.Continue;
+            return TUI_app.Action.Continue;
         }
         case Backspace: {
-            return tuiapp.Action.Continue;
+            return TUI_app.Action.Continue;
         }
         case Tab: {
-            return tuiapp.Action.Continue;
+            return TUI_app.Action.Continue;
         }
         case BackTab: {
-            return tuiapp.Action.Continue;
+            return TUI_app.Action.Continue;
         }
         case Up: {
-            return tuiapp.Action.Continue;
+            return TUI_app.Action.Continue;
         }
         case Down: {
-            return tuiapp.Action.Continue;
+            return TUI_app.Action.Continue;
         }
         case Right: {
-            return tuiapp.Action.Continue;
+            return TUI_app.Action.Continue;
         }
         case Left: {
-            return tuiapp.Action.Continue;
+            return TUI_app.Action.Continue;
         }
         case Home: {
-            return tuiapp.Action.Continue;
+            return TUI_app.Action.Continue;
         }
         case End: {
-            return tuiapp.Action.Continue;
+            return TUI_app.Action.Continue;
         }
         case PageUp: {
-            return tuiapp.Action.Continue;
+            return TUI_app.Action.Continue;
         }
         case PageDown: {
-            return tuiapp.Action.Continue;
+            return TUI_app.Action.Continue;
         }
         case Insert: {
-            return tuiapp.Action.Continue;
+            return TUI_app.Action.Continue;
         }
         case Delete: {
-            return tuiapp.Action.Continue;
+            return TUI_app.Action.Continue;
         }
         case F(int n): {
-            return tuiapp.Action.Continue;
+            return TUI_app.Action.Continue;
         }
     }
 }
 
-tuiapp.Action State.handle_commit_key(term.Code code) {
+TUI_app.Action State.handle_commit_key(term.Code code) {
     match (code) {
         case Char(int c): {
             if (c == 'e') {
                 edit_message();
-                // `Quit` unwinds `tuiapp.Loop.run`'s own `Session`, which is
+                // `Quit` unwinds `TUI_app.Loop.run`'s own `Session`, which is
                 // what actually leaves raw mode and the alternate screen --
                 // see `edit_message`'s own header. `gitui.m31`'s driver
                 // reads `want_editor` on the way out and calls `Loop.run`
                 // again once `launch_editor` is done.
-                return tuiapp.Action.Quit;
+                return TUI_app.Action.Quit;
             }
             if (c == 'f') {
                 finish_commit();
-                return tuiapp.Action.Redraw;
+                return TUI_app.Action.Redraw;
             }
             if (c == 'a') {
                 abort_commit();
-                return tuiapp.Action.Redraw;
+                return TUI_app.Action.Redraw;
             }
             if (c == 'A') {
                 start_amend();
-                return tuiapp.Action.Redraw;
+                return TUI_app.Action.Redraw;
             }
-            return tuiapp.Action.Continue;
+            return TUI_app.Action.Continue;
         }
         case Escape: {
             abort_commit();
-            return tuiapp.Action.Redraw;
+            return TUI_app.Action.Redraw;
         }
         case Enter: {
-            return tuiapp.Action.Continue;
+            return TUI_app.Action.Continue;
         }
         case Backspace: {
-            return tuiapp.Action.Continue;
+            return TUI_app.Action.Continue;
         }
         case Tab: {
-            return tuiapp.Action.Continue;
+            return TUI_app.Action.Continue;
         }
         case BackTab: {
-            return tuiapp.Action.Continue;
+            return TUI_app.Action.Continue;
         }
         case Up: {
-            return tuiapp.Action.Continue;
+            return TUI_app.Action.Continue;
         }
         case Down: {
-            return tuiapp.Action.Continue;
+            return TUI_app.Action.Continue;
         }
         case Right: {
-            return tuiapp.Action.Continue;
+            return TUI_app.Action.Continue;
         }
         case Left: {
-            return tuiapp.Action.Continue;
+            return TUI_app.Action.Continue;
         }
         case Home: {
-            return tuiapp.Action.Continue;
+            return TUI_app.Action.Continue;
         }
         case End: {
-            return tuiapp.Action.Continue;
+            return TUI_app.Action.Continue;
         }
         case PageUp: {
-            return tuiapp.Action.Continue;
+            return TUI_app.Action.Continue;
         }
         case PageDown: {
-            return tuiapp.Action.Continue;
+            return TUI_app.Action.Continue;
         }
         case Insert: {
-            return tuiapp.Action.Continue;
+            return TUI_app.Action.Continue;
         }
         case Delete: {
-            return tuiapp.Action.Continue;
+            return TUI_app.Action.Continue;
         }
         case F(int n): {
-            return tuiapp.Action.Continue;
+            return TUI_app.Action.Continue;
         }
     }
 }
@@ -2918,7 +2918,7 @@ tuiapp.Action State.handle_commit_key(term.Code code) {
 /// every other key -- any character, Escape, Enter, an arrow -- cancels.
 /// Deliberately not "n to cancel": a prompt that only acts on one exact key
 /// cannot be fallen into by a keystroke meant for the outline underneath.
-tuiapp.Action State.handle_confirm_key(term.Code code) {
+TUI_app.Action State.handle_confirm_key(term.Code code) {
     str kind = confirm_kind;
     bytes rel = confirm_path;
     confirm_open = false;
@@ -2928,7 +2928,7 @@ tuiapp.Action State.handle_confirm_key(term.Code code) {
         case Char(int c): {
             if (c == 'y') {
                 discard_path(kind, rel);
-                return tuiapp.Action.Redraw;
+                return TUI_app.Action.Redraw;
             }
         }
         case Escape: {
@@ -2965,7 +2965,7 @@ tuiapp.Action State.handle_confirm_key(term.Code code) {
         }
     }
     message = "discard cancelled";
-    return tuiapp.Action.Redraw;
+    return TUI_app.Action.Redraw;
 }
 
 /// Keys while the diff view is showing: `j`/`k`/the arrows move its cursor
@@ -2973,76 +2973,76 @@ tuiapp.Action State.handle_confirm_key(term.Code code) {
 /// starts a new one (via `$EDITOR`, the same `Quit`-then-relaunch dance
 /// `handle_commit_key`'s `e` does), `a`/`Escape` close it. Anything else is
 /// swallowed while the overlay is up, exactly like the commit overlay.
-tuiapp.Action State.handle_branch_key(term.Code code) {
+TUI_app.Action State.handle_branch_key(term.Code code) {
     match (code) {
         case Char(int c): {
             if (c == 'c') {
                 branch_open = false;
                 checkout_current();
-                return tuiapp.Action.Redraw;
+                return TUI_app.Action.Redraw;
             }
             if (c == 'n') {
                 branch_open = false;
                 new_branch();
                 if (want_editor) {
-                    return tuiapp.Action.Quit;
+                    return TUI_app.Action.Quit;
                 }
-                return tuiapp.Action.Redraw;
+                return TUI_app.Action.Redraw;
             }
             if (c == 'a') {
                 branch_open = false;
-                return tuiapp.Action.Redraw;
+                return TUI_app.Action.Redraw;
             }
-            return tuiapp.Action.Continue;
+            return TUI_app.Action.Continue;
         }
         case Escape: {
             branch_open = false;
-            return tuiapp.Action.Redraw;
+            return TUI_app.Action.Redraw;
         }
         case Enter: {
-            return tuiapp.Action.Continue;
+            return TUI_app.Action.Continue;
         }
         case Backspace: {
-            return tuiapp.Action.Continue;
+            return TUI_app.Action.Continue;
         }
         case Tab: {
-            return tuiapp.Action.Continue;
+            return TUI_app.Action.Continue;
         }
         case BackTab: {
-            return tuiapp.Action.Continue;
+            return TUI_app.Action.Continue;
         }
         case Up: {
-            return tuiapp.Action.Continue;
+            return TUI_app.Action.Continue;
         }
         case Down: {
-            return tuiapp.Action.Continue;
+            return TUI_app.Action.Continue;
         }
         case Right: {
-            return tuiapp.Action.Continue;
+            return TUI_app.Action.Continue;
         }
         case Left: {
-            return tuiapp.Action.Continue;
+            return TUI_app.Action.Continue;
         }
         case Home: {
-            return tuiapp.Action.Continue;
+            return TUI_app.Action.Continue;
         }
         case End: {
-            return tuiapp.Action.Continue;
+            return TUI_app.Action.Continue;
         }
         case PageUp: {
-            return tuiapp.Action.Continue;
+            return TUI_app.Action.Continue;
         }
         case PageDown: {
-            return tuiapp.Action.Continue;
+            return TUI_app.Action.Continue;
         }
         case Insert: {
-            return tuiapp.Action.Continue;
+            return TUI_app.Action.Continue;
         }
         case Delete: {
-            return tuiapp.Action.Continue;
+            return TUI_app.Action.Continue;
         }
         case F(int n): {
-            return tuiapp.Action.Continue;
+            return TUI_app.Action.Continue;
         }
     }
 }
@@ -3056,82 +3056,82 @@ tuiapp.Action State.handle_branch_key(term.Code code) {
 /// commit popup's `Escape`, the program's own `q`) is what their hands reach
 /// for -- quitting the whole program from inside a diff was the one place
 /// that surprised. `q` in the outline still quits.
-tuiapp.Action State.handle_diff_key(term.Code code) {
+TUI_app.Action State.handle_diff_key(term.Code code) {
     match (code) {
         case Char(int c): {
             if (c == 'q') {
                 close_diff();
-                return tuiapp.Action.Redraw;
+                return TUI_app.Action.Redraw;
             }
             if (c == 'j') {
                 diff_view.move(1);
-                return tuiapp.Action.Redraw;
+                return TUI_app.Action.Redraw;
             }
             if (c == 'k') {
                 diff_view.move(-1);
-                return tuiapp.Action.Redraw;
+                return TUI_app.Action.Redraw;
             }
             if (c == 's') {
                 stage_hunk_current();
-                return tuiapp.Action.Redraw;
+                return TUI_app.Action.Redraw;
             }
             if (c == 'u') {
                 unstage_hunk_current();
-                return tuiapp.Action.Redraw;
+                return TUI_app.Action.Redraw;
             }
-            return tuiapp.Action.Continue;
+            return TUI_app.Action.Continue;
         }
         case Backspace: {
             close_diff();
-            return tuiapp.Action.Redraw;
+            return TUI_app.Action.Redraw;
         }
         case Escape: {
             close_diff();
-            return tuiapp.Action.Redraw;
+            return TUI_app.Action.Redraw;
         }
         case Up: {
             diff_view.move(-1);
-            return tuiapp.Action.Redraw;
+            return TUI_app.Action.Redraw;
         }
         case Down: {
             diff_view.move(1);
-            return tuiapp.Action.Redraw;
+            return TUI_app.Action.Redraw;
         }
         case Enter: {
-            return tuiapp.Action.Continue;
+            return TUI_app.Action.Continue;
         }
         case Tab: {
-            return tuiapp.Action.Continue;
+            return TUI_app.Action.Continue;
         }
         case BackTab: {
-            return tuiapp.Action.Continue;
+            return TUI_app.Action.Continue;
         }
         case Right: {
-            return tuiapp.Action.Continue;
+            return TUI_app.Action.Continue;
         }
         case Left: {
-            return tuiapp.Action.Continue;
+            return TUI_app.Action.Continue;
         }
         case Home: {
-            return tuiapp.Action.Continue;
+            return TUI_app.Action.Continue;
         }
         case End: {
-            return tuiapp.Action.Continue;
+            return TUI_app.Action.Continue;
         }
         case PageUp: {
-            return tuiapp.Action.Continue;
+            return TUI_app.Action.Continue;
         }
         case PageDown: {
-            return tuiapp.Action.Continue;
+            return TUI_app.Action.Continue;
         }
         case Insert: {
-            return tuiapp.Action.Continue;
+            return TUI_app.Action.Continue;
         }
         case Delete: {
-            return tuiapp.Action.Continue;
+            return TUI_app.Action.Continue;
         }
         case F(int n): {
-            return tuiapp.Action.Continue;
+            return TUI_app.Action.Continue;
         }
     }
 }

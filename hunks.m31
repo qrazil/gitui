@@ -1,10 +1,10 @@
-// Turning `diff.diff`'s edit script into what `apps/tui/tuidiffview.DiffView`
+// Turning `diff.diff`'s edit script into what `apps/tui/TUI_diff_view.DiffView`
 // renders: `Hunk`s, grouped with a few lines of unchanged context on each
 // side, the way `git diff`/`diff -u` group theirs.
 //
 // API
 // ---
-//   hunks.Blob                  Binary | Hunks(List<tuidiffview.Hunk>)
+//   hunks.Blob                  Binary | Hunks(List<TUI_diff_view.Hunk>)
 //   hunks.hunks(old, new, context:)  -> Blob
 //   hunks.Span                  one hunk's [start, end) range of diff.Ops
 //   hunks.spans(ops, context:)  -> List<Span>, the same grouping as hunks()
@@ -13,11 +13,11 @@
 //
 // `lib/diff.m31` computes the generic edit script -- keep, add or remove,
 // line by line -- and knows nothing about hunks, context, or
-// `tuidiffview.Hunk`/`Line`; it cannot, because `lib/` does not depend on
+// `TUI_diff_view.Hunk`/`Line`; it cannot, because `lib/` does not depend on
 // `apps/tui` (`docs/design.md`'s "Starting the client" section, and
 // `lib/diff.m31`'s own header, say why at more length). Grouping that script
 // into hunks and turning each `diff.Op`'s `bytes` line into the `str`
-// `tuidiffview.Line.text` wants is presentation, not algorithm, so it lives
+// `TUI_diff_view.Line.text` wants is presentation, not algorithm, so it lives
 // here instead -- `apps/git` is the one place today that needs both
 // `lib/diff` and `apps/tui`, and the client this is for (`docs/design.md`) is
 // itself an `apps/git` program.
@@ -35,12 +35,12 @@
 //
 // No context exists past either end of the file: a change on line 1 gets no
 // leading context and one on the last line gets no trailing context, because
-// there is no line there to show -- the same reason `tuidiffview.Hunk`'s
+// there is no line there to show -- the same reason `TUI_diff_view.Hunk`'s
 // header is free text rather than something this always fills with three
 // lines regardless.
 
 import diff;
-import tui.tuidiffview;
+import tui.TUI_diff_view;
 
 /// Three lines of context, `git diff`'s and `diff -u`'s own default.
 pub const int DEFAULT_CONTEXT = 3;
@@ -52,10 +52,10 @@ pub enum Blob {
     Binary;
     /// Every hunk, in order, each with up to `context` lines of unchanged
     /// text on either side.
-    Hunks(List<tuidiffview.Hunk>);
+    Hunks(List<TUI_diff_view.Hunk>);
 }
 
-/// `old` and `new`, as hunks a `tuidiffview.DiffView` can render.
+/// `old` and `new`, as hunks a `TUI_diff_view.DiffView` can render.
 pub Blob hunks(bytes old, bytes new, int context = DEFAULT_CONTEXT) {
     match (diff.diff(old, new)) {
         case Binary: {
@@ -110,7 +110,7 @@ bool is_change(diff.Op op) {
 
 /// One hunk's extent as a range of `diff.Op`s, `[start, end)`, in the
 /// script `diff.diff` returned -- what `patch.m31` needs to apply or revert
-/// exactly one hunk byte for byte (a rendered `tuidiffview.Line.text` has
+/// exactly one hunk byte for byte (a rendered `TUI_diff_view.Line.text` has
 /// had its line terminator stripped and may be a hex placeholder, see
 /// `line_text`; the `diff.Op`s still carry the exact bytes).
 pub type Span {
@@ -169,10 +169,10 @@ pub List<Span> spans(List<diff.Op> ops, int context = DEFAULT_CONTEXT) {
 // `2 * context` and trimming the unchanged run before the first change and
 // after the last to `context` lines -- `spans` decides where, this only
 // builds the rendered `Hunk` for each.
-List<tuidiffview.Hunk> group(List<diff.Op> ops, int context) {
+List<TUI_diff_view.Hunk> group(List<diff.Op> ops, int context) {
     List<int> old_no = prefix_counts(ops, true);
     List<int> new_no = prefix_counts(ops, false);
-    List<tuidiffview.Hunk> out = [];
+    List<TUI_diff_view.Hunk> out = [];
     for (Span sp in spans(ops, context: context)) {
         out.push(build_hunk(ops, old_no, new_no, sp.start, sp.end));
     }
@@ -212,21 +212,21 @@ List<int> prefix_counts(List<diff.Op> ops, bool old) {
     return counts;
 }
 
-tuidiffview.Hunk build_hunk(List<diff.Op> ops, List<int> old_no, List<int> new_no, int start, int end) {
-    List<tuidiffview.Line> lines = [];
+TUI_diff_view.Hunk build_hunk(List<diff.Op> ops, List<int> old_no, List<int> new_no, int start, int end) {
+    List<TUI_diff_view.Line> lines = [];
     int i = start;
     while (i < end) {
         diff.Op op = ops[i];
         str text = line_text(op.line);
         match (op.kind) {
             case Keep: {
-                lines.push(tuidiffview.Line.context(text));
+                lines.push(TUI_diff_view.Line.context(text));
             }
             case Add: {
-                lines.push(tuidiffview.Line.added(text));
+                lines.push(TUI_diff_view.Line.added(text));
             }
             case Remove: {
-                lines.push(tuidiffview.Line.removed(text));
+                lines.push(TUI_diff_view.Line.removed(text));
             }
         }
         i = i + 1;
@@ -234,7 +234,7 @@ tuidiffview.Hunk build_hunk(List<diff.Op> ops, List<int> old_no, List<int> new_n
     int old_count = old_no[end] - old_no[start];
     int new_count = new_no[end] - new_no[start];
     str header = "@@ -" + hunk_range(old_no[start], old_count) + " +" + hunk_range(new_no[start], new_count) + " @@";
-    return tuidiffview.Hunk(header, lines);
+    return TUI_diff_view.Hunk(header, lines);
 }
 
 // The `start,count` half of a unified-diff hunk header. `before` is the
@@ -252,7 +252,7 @@ str hunk_range(int before, int count) {
     return start.to_str() + "," + count.to_str();
 }
 
-// One line's text, its own terminator stripped, for `tuidiffview.Line`,
+// One line's text, its own terminator stripped, for `TUI_diff_view.Line`,
 // which is `str` (`Kind`-tagged text a widget prints, not octets a hunk
 // carries). `diff.Op.line` keeps a trailing `\n` (`\r\n` too, for a
 // CRLF-terminated line) as part of its bytes -- exactly what makes

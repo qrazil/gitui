@@ -1,4 +1,8 @@
 # gitui project file (m31 v0.2.0+): this directory is the project root.
 name gitui
 version 0.2.1
-tui https://github.com/qrazil/tui 593d39af474b50eef895fb9eb945d1c183f84f6e
+# TEMPORARY: tui is consumed in place from the unreleased naming/migrate branch.
+# Re-pin to the released tui SHA once tui is pushed/tagged:
+#   tui https://github.com/qrazil/tui <released-sha>
+# and restore the deps.lock line (tui <released-sha>).
+tui path /home/nox/homelab/repo-extractions/tui-wt/naming
