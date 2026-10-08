@@ -108,12 +108,12 @@ pub str Error.to_str() {
 }
 
 /// One local branch: `name` is the short name (`main`), `full` the ref
-/// (`refs/heads/main`), `id` its tip, `current` whether HEAD is on it.
+/// (`refs/heads/main`), `id` its tip, `is_current` whether HEAD is on it.
 pub type Branch {
     pub str name;
     pub str full;
     pub str id;
-    pub bool current;
+    pub bool is_current;
 }
 
 /// What `checkout` touched: how many paths it wrote and how many it removed.

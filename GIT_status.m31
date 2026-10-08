@@ -229,8 +229,8 @@ pub Result<Status, Error> status(str gitdir, str worktree) {
         if (entry.is_gitlink()) {
             continue;
         }
-        bool present = wt_link.contains(path);
-        if (!present) {
+        bool is_present = wt_link.contains(path);
+        if (!is_present) {
             unstaged.push(Delta(path.to_bytes(), Change.Deleted));
             continue;
         }

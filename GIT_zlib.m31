@@ -60,12 +60,12 @@
 // times for a megabyte -- which is not a price a codec can pay.
 //
 // So the reader cannot fail. Past the end of the input it hands back zero bits
-// and sets `over`, and every loop that consumes symbols checks `over` once per
+// and sets `has_overrun`, and every loop that consumes symbols checks `has_overrun` once per
 // symbol and stops. The cost is that a truncated stream may decode one more
 // symbol than it should before it is noticed, and that symbol's output is
 // thrown away with the error; the gain is that the inner loop allocates
 // nothing. What this must never do is loop forever on a truncated stream, and
-// it cannot: zero bits decode to *some* symbol, `over` is already set, and the
+// it cannot: zero bits decode to *some* symbol, `has_overrun` is already set, and the
 // check is at the top of the next iteration.
 //
 // --- decoding is puff's, not zlib's ------------------------------------------
@@ -212,7 +212,7 @@ type Bits {
     /// Set the first time a read went past the end. See the module header:
     /// the reader answers zero bits rather than failing, and the caller's loop
     /// checks this once per symbol.
-    bool over = false;
+    bool has_overrun = false;
 }
 
 /// The next `bit_count` bits as an integer, low bit first. `bit_count` is at most 16 here, so
@@ -220,7 +220,7 @@ type Bits {
 int Bits.take(int bit_count) {
     while (count < bit_count) {
         if (position >= source.size()) {
-            over = true;
+            has_overrun = true;
             count = count + 8;
         } else {
             value = value | source[position] << count;
@@ -250,7 +250,7 @@ void Bits.align() {
 /// One octet, read directly. Only valid straight after `align`.
 int Bits.byte() {
     if (position >= source.size()) {
-        over = true;
+        has_overrun = true;
         return 0;
     }
     int octet = source[position];
@@ -342,7 +342,7 @@ Result<void, Error> stored(Bits bits, bytes out, int limit) {
     int length_high = bits.byte();
     int complement_low = bits.byte();
     int complement_high = bits.byte();
-    if (bits.over) {
+    if (bits.has_overrun) {
         return Result<void, Error>.Err(Error.Truncated);
     }
     int length = length_low | length_high << 8;
@@ -403,7 +403,7 @@ Result<Tables, Error> dynamic_tables(Bits bits) {
     int nlen = bits.take(5) + 257;
     int ndist = bits.take(5) + 1;
     int ncode = bits.take(4) + 4;
-    if (bits.over) {
+    if (bits.has_overrun) {
         return Result<Tables, Error>.Err(Error.Truncated);
     }
     if (nlen > 286 || ndist > 30) {
@@ -425,7 +425,7 @@ Result<Tables, Error> dynamic_tables(Bits bits) {
     int want = nlen + ndist;
     while (index < want) {
         int sym = length_huff.decode(bits);
-        if (bits.over) {
+        if (bits.has_overrun) {
             return Result<Tables, Error>.Err(Error.Truncated);
         }
         if (sym < 0) {
@@ -458,7 +458,7 @@ Result<Tables, Error> dynamic_tables(Bits bits) {
             }
         }
     }
-    if (bits.over) {
+    if (bits.has_overrun) {
         return Result<Tables, Error>.Err(Error.Truncated);
     }
     if (lengths[256] == 0) {
@@ -489,7 +489,7 @@ Result<Tables, Error> dynamic_tables(Bits bits) {
 Result<void, Error> symbols(Bits bits, Huff lit, Huff dist, bytes out, int limit) {
     while (true) {
         int sym = lit.decode(bits);
-        if (bits.over) {
+        if (bits.has_overrun) {
             return Result<void, Error>.Err(Error.Truncated);
         }
         if (sym < 0) {
@@ -509,7 +509,7 @@ Result<void, Error> symbols(Bits bits, Huff lit, Huff dist, bytes out, int limit
             }
             int length = LENGTH_BASE[length_symbol] + bits.take(LENGTH_EXTRA[length_symbol]);
             int distance_symbol = dist.decode(bits);
-            if (bits.over) {
+            if (bits.has_overrun) {
                 return Result<void, Error>.Err(Error.Truncated);
             }
             if (distance_symbol < 0) {
@@ -519,7 +519,7 @@ Result<void, Error> symbols(Bits bits, Huff lit, Huff dist, bytes out, int limit
                 return Result<void, Error>.Err(Error.BadDistance);
             }
             int distance = DIST_BASE[distance_symbol] + bits.take(DIST_EXTRA[distance_symbol]);
-            if (bits.over) {
+            if (bits.has_overrun) {
                 return Result<void, Error>.Err(Error.Truncated);
             }
             if (distance > out.size()) {
@@ -544,11 +544,11 @@ Result<void, Error> symbols(Bits bits, Huff lit, Huff dist, bytes out, int limit
 // --- the stream --------------------------------------------------------------
 
 Result<void, Error> run(Bits bits, bytes out, int limit) {
-    bool last = false;
-    while (!last) {
-        last = bits.take(1) == 1;
+    bool is_last = false;
+    while (!is_last) {
+        is_last = bits.take(1) == 1;
         int kind = bits.take(2);
-        if (bits.over) {
+        if (bits.has_overrun) {
             return Result<void, Error>.Err(Error.Truncated);
         }
         if (kind == 0) {
@@ -624,9 +624,9 @@ pub bytes deflate_stored(bytes data) {
         if (length > 65535) {
             length = 65535;
         }
-        bool last = position + length == data_length;
+        bool is_last = position + length == data_length;
         int hdr = 0;
-        if (last) {
+        if (is_last) {
             hdr = 1;
         }
         out.push(hdr);
@@ -637,7 +637,7 @@ pub bytes deflate_stored(bytes data) {
         out.push(nlen >> 8 & 0xFF);
         out.extend(data.substr(position, position + length));
         position = position + length;
-        if (last) {
+        if (is_last) {
             return out;
         }
     }
@@ -710,7 +710,7 @@ Result<Decoded, Error> decompress_from(bytes source, int start, int limit) {
     int adler_second = bits.byte();
     int adler_third = bits.byte();
     int adler_fourth = bits.byte();
-    if (bits.over) {
+    if (bits.has_overrun) {
         return Result<Decoded, Error>.Err(Error.Truncated);
     }
     int want = adler_first << 24 | adler_second << 16 | adler_third << 8 | adler_fourth;

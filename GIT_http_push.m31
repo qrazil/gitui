@@ -350,14 +350,14 @@ pub Result<Report, Error> parse_report(bytes body, str refname) {
     int offset = 0;
     bool is_unpacked = false;
     str unpack_reason = "";
-    bool saw_unpack = false;
-    bool saw_ref = false;
+    bool has_seen_unpack = false;
+    bool has_seen_ref = false;
     bool is_accepted = false;
     str reason = "";
     while (offset < body.size()) {
         GIT_http_fetch.Packet packet = read(body, offset)?;
         offset = packet.next;
-        if (packet.flush) {
+        if (packet.is_flush) {
             break;
         }
         str line = "";
@@ -369,11 +369,11 @@ pub Result<Report, Error> parse_report(bytes body, str refname) {
                 return Result<Report, Error>.Err(Error.BadReport);
             }
         }
-        if (!saw_unpack) {
+        if (!has_seen_unpack) {
             if (!line.starts_with("unpack ")) {
                 return Result<Report, Error>.Err(Error.BadReport);
             }
-            saw_unpack = true;
+            has_seen_unpack = true;
             str rest = line.substr(7, line.size());
             is_unpacked = rest == "ok";
             if (!is_unpacked) {
@@ -383,7 +383,7 @@ pub Result<Report, Error> parse_report(bytes body, str refname) {
         }
         if (line.starts_with("ok ")) {
             if (line.substr(3, line.size()) == refname) {
-                saw_ref = true;
+                has_seen_ref = true;
                 is_accepted = true;
             }
         } else if (line.starts_with("ng ")) {
@@ -399,7 +399,7 @@ pub Result<Report, Error> parse_report(bytes body, str refname) {
                 }
             }
             if (name == refname) {
-                saw_ref = true;
+                has_seen_ref = true;
                 is_accepted = false;
                 reason = why;
             }
@@ -407,13 +407,13 @@ pub Result<Report, Error> parse_report(bytes body, str refname) {
             return Result<Report, Error>.Err(Error.BadReport);
         }
     }
-    if (!saw_unpack) {
+    if (!has_seen_unpack) {
         return Result<Report, Error>.Err(Error.BadReport);
     }
     if (!is_unpacked) {
         return Result<Report, Error>.Ok(Report(false, false, refname, unpack_reason));
     }
-    if (!saw_ref) {
+    if (!has_seen_ref) {
         return Result<Report, Error>.Err(Error.BadReport);
     }
     return Result<Report, Error>.Ok(Report(true, is_accepted, refname, reason));

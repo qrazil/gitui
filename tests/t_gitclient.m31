@@ -96,35 +96,35 @@ match (paths.get("untracked:c.txt")) {
 }
 // A commit section defaults collapsed, so its body rows (author/date/message)
 // must not appear in the flattened, visible list yet.
-bool saw_body = false;
+bool has_seen_body = false;
 for (str id in ids) {
     if (id.starts_with("commit:1111111111111111111111111111111111111111:")) {
-        saw_body = true;
+        has_seen_body = true;
     }
 }
-counter.check("outline: a commit's body is hidden until expanded", !saw_body, "body row leaked into the collapsed view");
+counter.check("outline: a commit's body is hidden until expanded", !has_seen_body, "body row leaked into the collapsed view");
 // Recorded as expanded (via `collapsed`), the same build must show it.
 collapsed.set("commit:1111111111111111111111111111111111111111", false);
 TUI_outline.Outline second_outline = GIT_client.build_outline(status, log, changes, collapsed, paths, file_diffs, []);
-bool saw_body2 = false;
+bool has_seen_second_body = false;
 for (TUI_outline.Row row in second_outline.rows()) {
     if (row.node.id == "commit:1111111111111111111111111111111111111111:author") {
-        saw_body2 = true;
+        has_seen_second_body = true;
     }
 }
-counter.check("outline: an expanded commit shows its author/date/message rows", saw_body2, "author row missing after expanding");
+counter.check("outline: an expanded commit shows its author/date/message rows", has_seen_second_body, "author row missing after expanding");
 str files_label = "";
-bool saw_file_row = false;
+bool has_seen_file_row = false;
 for (TUI_outline.Row row in second_outline.rows()) {
     if (row.node.id == "commit:1111111111111111111111111111111111111111:files") {
         files_label = row.node.label;
     }
     if (row.node.id == "commit:1111111111111111111111111111111111111111:file:0") {
-        saw_file_row = true;
+        has_seen_file_row = true;
     }
 }
 counter.check("outline: an expanded commit shows its own Files changed section, counting changes' entries", files_label == "Files changed (1)", files_label);
-counter.check("outline: a commit's Files changed section is open by default once the commit is", saw_file_row, "file row missing with the commit expanded and no fold recorded");
+counter.check("outline: a commit's Files changed section is open by default once the commit is", has_seen_file_row, "file row missing with the commit expanded and no fold recorded");
 str file_label = "";
 for (TUI_outline.Row row in second_outline.rows()) {
     if (row.node.id == "commit:1111111111111111111111111111111111111111:file:0") {
@@ -136,13 +136,13 @@ counter.check("outline: a commit's file row shows mark, path and +insertions -de
 // over that default, the same way every other section's does.
 collapsed.set("commit:1111111111111111111111111111111111111111:files", true);
 TUI_outline.Outline o2b = GIT_client.build_outline(status, log, changes, collapsed, paths, file_diffs, []);
-bool saw_file_row_folded = false;
+bool has_seen_folded_file_row = false;
 for (TUI_outline.Row row in o2b.rows()) {
     if (row.node.id == "commit:1111111111111111111111111111111111111111:file:0") {
-        saw_file_row_folded = true;
+        has_seen_folded_file_row = true;
     }
 }
-counter.check("outline: a recorded fold on Files changed hides its file rows again", !saw_file_row_folded, "file row shown despite a recorded fold");
+counter.check("outline: a recorded fold on Files changed hides its file rows again", !has_seen_folded_file_row, "file row shown despite a recorded fold");
 collapsed.set("commit:1111111111111111111111111111111111111111:files", false);
 // A log as long as one page may have more behind it: the Commits section
 // then ends in the "load more" row (and says so in its count); a shorter
@@ -201,32 +201,32 @@ Map<str, GIT_client.CommitFileDiff> file_diffs2 = {};
 TUI_outline.Outline third_outline = GIT_client.build_outline(status, log2, changes2, collapsed2, paths2, file_diffs2, []);
 List<str> m0_rows = [];
 List<str> m2_rows = [];
-bool saw_blank_line_row = false;
+bool has_seen_blank_line_row = false;
 for (TUI_outline.Row row in third_outline.rows()) {
     str rid = row.node.id;
     if (rid.starts_with("commit:2222222222222222222222222222222222222222:m0:")) {
         m0_rows.push(row.node.label);
     }
     if (rid == "commit:2222222222222222222222222222222222222222:m1:0") {
-        saw_blank_line_row = row.node.label == "  ";
+        has_seen_blank_line_row = row.node.label == "  ";
     }
     if (rid.starts_with("commit:2222222222222222222222222222222222222222:m2:")) {
         m2_rows.push(row.node.label);
     }
 }
 counter.check("commit message wrap: a line far longer than the fallback width becomes more than one leaf row", m0_rows.size() > 1, m0_rows.size().to_str() + " row(s)");
-bool all_fit = true;
+bool is_all_fitting = true;
 List<str> pieces = [];
 for (str row in m0_rows) {
     str content = row.substr(2, row.size());
     if (TUI_text.width(content) > 72) {
-        all_fit = false;
+        is_all_fitting = false;
     }
     pieces.push(content);
 }
-counter.check("commit message wrap: every wrapped row fits within the fallback width", all_fit, m0_rows.join(" | "));
+counter.check("commit message wrap: every wrapped row fits within the fallback width", is_all_fitting, m0_rows.join(" | "));
 counter.check("commit message wrap: rejoining the wrapped rows reproduces the original line losslessly", pieces.join(" ") == long_line, "got: " + pieces.join(" ") + "\nwant: " + long_line);
-counter.check("commit message wrap: a blank message line still yields exactly one, empty leaf row", saw_blank_line_row, "no lone blank-line row found");
+counter.check("commit message wrap: a blank message line still yields exactly one, empty leaf row", has_seen_blank_line_row, "no lone blank-line row found");
 counter.check("commit message wrap: a line that already fits still yields exactly one leaf row", m2_rows.size() == 1 && m2_rows[0] == "  short tail line", m2_rows.join(" | "));
 // An empty commit message: no message rows at all, matching `first_line`'s
 // own "nothing to show" reading of an empty message (just the author/date
@@ -239,13 +239,13 @@ Map<str, bytes> paths3 = {};
 Map<str, List<GIT_client.CommitFileDiff>> changes3 = {};
 Map<str, GIT_client.CommitFileDiff> file_diffs3 = {};
 TUI_outline.Outline fourth_outline = GIT_client.build_outline(status, log3, changes3, collapsed3, paths3, file_diffs3, []);
-bool saw_any_message_row = false;
+bool has_seen_any_message_row = false;
 for (TUI_outline.Row row in fourth_outline.rows()) {
     if (row.node.id.starts_with("commit:3333333333333333333333333333333333333333:m")) {
-        saw_any_message_row = true;
+        has_seen_any_message_row = true;
     }
 }
-counter.check("commit message wrap: an empty commit message yields no message rows", !saw_any_message_row, "unexpected message row for an empty commit message");
+counter.check("commit message wrap: an empty commit message yields no message rows", !has_seen_any_message_row, "unexpected message row for an empty commit message");
 
 // --- strip_comment_lines -------------------------------------------------------
 
@@ -260,13 +260,13 @@ counter.check("commit message: whitespace-only input strips to empty", GIT_clien
 // `apps/tui`'s own suite) -- what these checks are actually for is that
 // `GIT_client.State` wires the two together correctly: a text change becomes a
 // non-binary `DiffView` with an addressable cursor, and a NUL-bearing buffer
-// on either side becomes `diff_binary` instead of a garbled render. Which
+// on either side becomes `is_diff_binary` instead of a garbled render. Which
 // on-disk/index/HEAD comparison feeds `open_diff` for each of the
 // unstaged/staged/untracked cases is exercised against real git in
 // `test_gitui.sh` instead, since that needs an actual repository.
 GIT_client.State diff_state = GIT_client.State.open("", "");
 diff_state.open_diff("t.txt", "a\nb\nc\n".to_bytes(), "a\nB\nc\n".to_bytes());
-counter.check("open_diff: a one-line text change opens a non-binary, single-hunk view", diff_state.diff_open && !diff_state.diff_binary && diff_state.diff_view.hunks.size() == 1, "diff_open=" + diff_state.diff_open.to_str() + " binary=" + diff_state.diff_binary.to_str() + " hunks=" + diff_state.diff_view.hunks.size().to_str());
+counter.check("open_diff: a one-line text change opens a non-binary, single-hunk view", diff_state.is_diff_open && !diff_state.is_diff_binary && diff_state.diff_view.hunks.size() == 1, "diff_open=" + diff_state.is_diff_open.to_str() + " binary=" + diff_state.is_diff_binary.to_str() + " hunks=" + diff_state.diff_view.hunks.size().to_str());
 str header0 = "<no hunk>";
 if (diff_state.diff_view.hunks.size() > 0) {
     header0 = diff_state.diff_view.hunks[0].header;
@@ -308,35 +308,35 @@ match (diff_state.diff_view.at()) {
     }
 }
 diff_state.close_diff();
-counter.check("close_diff: closing drops back to the outline and clears the view", !diff_state.diff_open && !diff_state.diff_binary && diff_state.diff_view.hunks.size() == 0, "diff_open=" + diff_state.diff_open.to_str() + " binary=" + diff_state.diff_binary.to_str() + " hunks=" + diff_state.diff_view.hunks.size().to_str());
+counter.check("close_diff: closing drops back to the outline and clears the view", !diff_state.is_diff_open && !diff_state.is_diff_binary && diff_state.diff_view.hunks.size() == 0, "diff_open=" + diff_state.is_diff_open.to_str() + " binary=" + diff_state.is_diff_binary.to_str() + " hunks=" + diff_state.diff_view.hunks.size().to_str());
 // A NUL on either side is `diff.is_binary`'s own heuristic (`lib/diff.m31`) --
-// checked here only to confirm `open_diff` reports it as `diff_binary` rather
+// checked here only to confirm `open_diff` reports it as `is_diff_binary` rather
 // than trying to line-diff it.
 GIT_client.State branch_state = GIT_client.State.open("", "");
 bytes nul_old = [104, 101, 108, 108, 111, 0, 119, 111, 114, 108, 100, 10];
 branch_state.open_diff("bin.dat", nul_old, "hello world\n".to_bytes());
-counter.check("open_diff: a NUL-bearing old side reports diff_binary, not a garbled hunk view", branch_state.diff_open && branch_state.diff_binary && branch_state.diff_view.hunks.size() == 0, "diff_open=" + branch_state.diff_open.to_str() + " binary=" + branch_state.diff_binary.to_str() + " hunks=" + branch_state.diff_view.hunks.size().to_str());
+counter.check("open_diff: a NUL-bearing old side reports diff_binary, not a garbled hunk view", branch_state.is_diff_open && branch_state.is_diff_binary && branch_state.diff_view.hunks.size() == 0, "diff_open=" + branch_state.is_diff_open.to_str() + " binary=" + branch_state.is_diff_binary.to_str() + " hunks=" + branch_state.diff_view.hunks.size().to_str());
 // Untracked: no "old" side at all -- open_diff against an empty old, exactly
 // what `show_diff_current` does for an untracked row, should be one
 // all-added hunk covering the whole file.
 GIT_client.State unstaged_state = GIT_client.State.open("", "");
 unstaged_state.open_diff("new.txt", [], "one\ntwo\n".to_bytes());
-bool all_added = unstaged_state.diff_view.hunks.size() == 1;
-if (all_added) {
+bool is_all_added = unstaged_state.diff_view.hunks.size() == 1;
+if (is_all_added) {
     for (TUI_diff_view.Line line in unstaged_state.diff_view.hunks[0].lines) {
         match (line.kind) {
             case Add: {
             }
             case Context: {
-                all_added = false;
+                is_all_added = false;
             }
             case Remove: {
-                all_added = false;
+                is_all_added = false;
             }
         }
     }
 }
-counter.check("open_diff: an untracked file (empty old) is one all-added hunk", !unstaged_state.diff_binary && all_added, "binary=" + unstaged_state.diff_binary.to_str() + " hunks=" + unstaged_state.diff_view.hunks.size().to_str());
+counter.check("open_diff: an untracked file (empty old) is one all-added hunk", !unstaged_state.is_diff_binary && is_all_added, "binary=" + unstaged_state.is_diff_binary.to_str() + " hunks=" + unstaged_state.diff_view.hunks.size().to_str());
 
 // --- pick_editor ---------------------------------------------------------------
 

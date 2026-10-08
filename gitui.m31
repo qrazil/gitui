@@ -29,10 +29,10 @@
 // `Session` and hands the now-cooked, normal-screen terminal back here. This
 // is the "drop the Session and re-acquire `raw()` afterward" a caller with
 // no `suspend`/`restore` pair on the `Session` itself has to do: this loop
-// notices `want_editor`, runs the editor for real (`launch_editor`), and
+// notices `is_editor_wanted`, runs the editor for real (`launch_editor`), and
 // calls `loop.run` again -- which re-enters raw mode and always draws its
 // first frame with `TUI_diff.full`, never a diff against whatever the editor
-// drew. A `q` (a real quit) leaves `want_editor` false and ends this loop
+// drew. A `q` (a real quit) leaves `is_editor_wanted` false and ends this loop
 // too.
 
 import fs;
@@ -62,20 +62,20 @@ if (!term.is_terminal(0)) {
 GIT_client.State state = GIT_client.State.open(git_directory, path);
 state.reload();
 TUI_app.Loop loop = TUI_app.Loop();
-bool running = true;
-while (running) {
+bool is_running = true;
+while (is_running) {
     match (loop.run((TUI_buffer.Buffer buffer, TUI_geometry.Rect area) => state.draw(buffer, area), (term.Event event) => state.handle(event))) {
         case Ok(_): {
-            if (state.want_editor) {
-                state.want_editor = false;
+            if (state.is_editor_wanted) {
+                state.is_editor_wanted = false;
                 state.launch_editor();
             } else {
-                running = false;
+                is_running = false;
             }
         }
         case Err(term.Error error): {
             io.eprint("gitui: " + error.to_str());
-            running = false;
+            is_running = false;
         }
     }
 }

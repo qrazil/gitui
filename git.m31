@@ -308,13 +308,13 @@ bytes tree_text(List<GIT_object.Entry> entries) {
 // `"caf\303\251.txt"` -- the octets, not the characters, because git has no
 // more idea than this does what encoding a path is in.
 bytes quoted(bytes name) {
-    bool need = false;
+    bool is_needed = false;
     for (int byte_value in name) {
         if (byte_value < ' ' || byte_value == '"' || byte_value == '\\' || byte_value >= 127) {
-            need = true;
+            is_needed = true;
         }
     }
-    if (!need) {
+    if (!is_needed) {
         return name;
     }
     bytes output = [];
@@ -440,27 +440,27 @@ bytes indented(bytes message) {
     bytes output = [];
     int position = 0;
     int length = message.size();
-    bool first = true;
+    bool is_first = true;
     while (position < length) {
         int line_end = position;
         while (line_end < length && message[line_end] != '\n') {
             line_end = line_end + 1;
         }
         int end = line_end;
-        bool empty = true;
+        bool is_empty = true;
         for (int index in position .. line_end) {
             if (!blank_octet(message[index])) {
-                empty = false;
+                is_empty = false;
             }
         }
-        if (empty) {
+        if (is_empty) {
             end = position;
-            if (first) {
+            if (is_first) {
                 position = line_end + 1;
                 continue;
             }
         }
-        first = false;
+        is_first = false;
         output.extend("    ".to_bytes());
         int col = 0;
         for (int i in position .. end) {

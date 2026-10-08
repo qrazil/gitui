@@ -73,7 +73,7 @@ pub Blob hunks(bytes old, bytes new, int context = DEFAULT_CONTEXT) {
 // splitting it this way, once, is enough to find every hunk boundary without
 // re-scanning.
 type Run {
-    bool change;
+    bool is_changed;
     int start;
     int end;
 }
@@ -83,12 +83,12 @@ List<Run> runs_of(List<diff.Op> ops) {
     int op_count = ops.size();
     int index = 0;
     while (index < op_count) {
-        bool change = is_change(ops[index]);
+        bool is_changed = is_change(ops[index]);
         int run_end = index + 1;
-        while (run_end < op_count && is_change(ops[run_end]) == change) {
+        while (run_end < op_count && is_change(ops[run_end]) == is_changed) {
             run_end = run_end + 1;
         }
-        runs.push(Run(change, index, run_end));
+        runs.push(Run(is_changed, index, run_end));
         index = run_end;
     }
     return runs;
@@ -128,7 +128,7 @@ pub List<Span> spans(List<diff.Op> ops, int context = DEFAULT_CONTEXT) {
     int run_count = runs.size();
     int index = 0;
     while (index < run_count) {
-        if (!runs[index].change) {
+        if (!runs[index].is_changed) {
             index = index + 1;
             continue;
         }
@@ -185,24 +185,24 @@ List<TUI_diff_view.Hunk> group(List<diff.Op> ops, int context) {
 // 1` is the 1-based line number of the next old or new line, when there is
 // one. Sized `ops.size() + 1` so a hunk that runs to the end of `ops` can
 // still ask for the count at its (one past the last) boundary.
-List<int> prefix_counts(List<diff.Op> ops, bool old) {
+List<int> prefix_counts(List<diff.Op> ops, bool is_old) {
     List<int> counts = [0; ops.size() + 1];
     int index = 0;
     int op_count = ops.size();
     while (index < op_count) {
-        bool counts_here = false;
+        bool is_counted_here = false;
         match (ops[index].kind) {
             case Keep: {
-                counts_here = true;
+                is_counted_here = true;
             }
             case Remove: {
-                counts_here = old;
+                is_counted_here = is_old;
             }
             case Add: {
-                counts_here = !old;
+                is_counted_here = !is_old;
             }
         }
-        if (counts_here) {
+        if (is_counted_here) {
             counts[index + 1] = counts[index] + 1;
         } else {
             counts[index + 1] = counts[index];

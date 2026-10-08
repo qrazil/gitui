@@ -140,7 +140,7 @@ pub type Entry {
     /// git has not asked to resolve yet ("ours", "theirs", the merge base).
     /// `write` never produces anything but 0.
     pub int stage;
-    pub bool assume_valid;
+    pub bool is_assume_valid;
     pub bytes path;
 }
 
@@ -258,10 +258,10 @@ Result<Parsed, Error> read_entry(bytes data, int offset, int end) {
     bytes id = data.substr(offset + 40, offset + 60);
     int flags = be16(data, offset + 60);
     int stage = flags >> 12 & 0x3;
-    bool assume_valid = flags & 0x8000 != 0;
-    bool extended = flags & 0x4000 != 0;
+    bool is_assume_valid = flags & 0x8000 != 0;
+    bool is_extended = flags & 0x4000 != 0;
     int path_start = offset + 62;
-    if (extended) {
+    if (is_extended) {
         path_start = path_start + 2;
     }
     if (path_start > end) {
@@ -285,7 +285,7 @@ Result<Parsed, Error> read_entry(bytes data, int offset, int end) {
     if (next > end) {
         return Result<Parsed, Error>.Err(Error.Truncated);
     }
-    Entry entry = Entry(ctime_s, ctime_ns, mtime_s, mtime_ns, dev, ino, mode, uid, gid, size, id.hex(), stage, assume_valid, path);
+    Entry entry = Entry(ctime_s, ctime_ns, mtime_s, mtime_ns, dev, ino, mode, uid, gid, size, id.hex(), stage, is_assume_valid, path);
     return Result<Parsed, Error>.Ok(Parsed(entry, next));
 }
 
@@ -376,7 +376,7 @@ void encode_entry(bytes out, Entry entry) {
         lenfield = 0x0FFF;
     }
     int flags = (entry.stage & 0x3) << 12 | lenfield;
-    if (entry.assume_valid) {
+    if (entry.is_assume_valid) {
         flags = flags | 0x8000;
     }
     push_be16(out, flags);

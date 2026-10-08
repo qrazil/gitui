@@ -49,7 +49,7 @@ pub Option<str> get(str gitdir, str section, str subsection, str key) {
 pub Option<str> find(str text, str section, str subsection, str key) {
     str want_section = section.to_lower();
     str want_key = key.to_lower();
-    bool in_section = false;
+    bool is_in_section = false;
     Option<str> found = Option<str>.None;
     for (str raw in text.split("\n")) {
         str line = raw.trim();
@@ -57,10 +57,10 @@ pub Option<str> find(str text, str section, str subsection, str key) {
             continue;
         }
         if (line.starts_with("[")) {
-            in_section = header_matches(close_header(line), want_section, subsection);
+            is_in_section = header_matches(close_header(line), want_section, subsection);
             continue;
         }
-        if (!in_section) {
+        if (!is_in_section) {
             continue;
         }
         match (line.index_of("=")) {
@@ -94,7 +94,7 @@ str close_header(str line) {
 
 // A value without a trailing `#`/`;` comment that sits outside double quotes.
 str strip_comment(str value) {
-    bool quoted = false;
+    bool is_quoted = false;
     int position = 0;
     while (position < value.size()) {
         str character = value.substr(position, position + 1);
@@ -103,8 +103,8 @@ str strip_comment(str value) {
             continue;
         }
         if (character == "\"") {
-            quoted = !quoted;
-        } else if (!quoted && (character == "#" || character == ";")) {
+            is_quoted = !is_quoted;
+        } else if (!is_quoted && (character == "#" || character == ";")) {
             return value.substr(0, position).trim();
         }
         position = position + 1;

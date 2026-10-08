@@ -45,7 +45,7 @@ void do_pull(str gitdir, str worktree, str url) {
     }
     match (GIT_pull.pull(gitdir, worktree, remote)) {
         case Ok(GIT_pull.Outcome outcome): {
-            if (outcome.moved) {
+            if (outcome.has_moved) {
                 print("pulled " + outcome.old_id + " " + outcome.new_id + " " + outcome.objects.to_str());
             } else {
                 print("up to date " + outcome.old_id);

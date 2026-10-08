@@ -43,7 +43,7 @@
 // for, and adding one to that enum would ripple through every `match` on
 // `Action` in `apps/tui`, which this task does not own.
 //
-// So `edit_message` does not call `os.run` itself. It sets `want_editor` and
+// So `edit_message` does not call `os.run` itself. It sets `is_editor_wanted` and
 // returns `Quit` from the which-key's `e`, which unwinds `Loop.run` exactly
 // as a real quit would: the `Session` goes out of scope, its destructor
 // calls `restore()`, and the terminal is back in the ORIGINAL cooked mode
@@ -51,7 +51,7 @@
 // already turned off by the `leave` sequence `Loop.run` registered with
 // `on_exit`. That is the drop half of "drop the Session and re-acquire
 // `raw()` afterward" -- `gitui.m31`'s own top-level driver, watching
-// `want_editor`, is what does both: it runs `os.run` for real now that the
+// `is_editor_wanted`, is what does both: it runs `os.run` for real now that the
 // terminal is cooked and on the normal screen, calls `launch_editor` to
 // interpret the result, and -- unless the loop actually asked to quit --
 // calls `Loop.run` again. That is the re-acquire half: a fresh `raw()` call,
@@ -62,7 +62,7 @@
 // `finish_commit` verbatim for a successful edit (exit 0, non-empty
 // message), so the "same stripping/empty-message-refusal logic" runs from
 // exactly one place either way. A nonzero exit or a signal is treated as a
-// cancelled edit -- `commit_open` stays true and the message file is left
+// cancelled edit -- `is_commit_open` stays true and the message file is left
 // alone, so `e` can be pressed again, `f` can still try to finish whatever
 // is on disk, and `a` can still discard it. `os.run` itself returning `Err`
 // -- no `$EDITOR`, no `vi`, nothing nowhere on `$PATH` -- falls back to
@@ -130,15 +130,15 @@ pub type BranchRow {
 /// `GIT_hunks.hunks` call `show_diff_current` itself would make -- computed in
 /// `commit_changes`, once per commit, the first time it is unfolded, so the
 /// stat the outline shows next to a file never disagrees with the diff
-/// `Enter` opens on it. `binary` is `GIT_hunks.hunks` reporting `Binary` for this pair;
+/// `Enter` opens on it. `is_binary` is `GIT_hunks.hunks` reporting `Binary` for this pair;
 /// `insertions`/`deletions` are both 0 then, the same "nothing to count"
-/// `open_diff`'s own `diff_binary` path already means elsewhere.
+/// `open_diff`'s own `is_diff_binary` path already means elsewhere.
 pub type CommitFileDiff {
     pub bytes path;
     pub GIT_status.Change kind;
     pub Option<str> old_id;
     pub Option<str> new_id;
-    pub bool binary;
+    pub bool is_binary;
     pub int insertions;
     pub int deletions;
 }
@@ -254,13 +254,13 @@ pub str first_line(bytes message) {
 /// Is `id` expanded, given what the caller has recorded about it and what it
 /// defaults to when nothing has been recorded yet? A toggled-closed section
 /// survives a rebuild of the outline this way -- see `State.toggle_current`.
-bool expanded_for(Map<str, bool> collapsed, str id, bool default_expanded) {
+bool expanded_for(Map<str, bool> collapsed, str id, bool is_default_expanded) {
     match (collapsed.get(id)) {
         case Some(bool is_collapsed): {
             return !is_collapsed;
         }
         case None: {
-            return default_expanded;
+            return is_default_expanded;
         }
     }
 }
@@ -387,13 +387,13 @@ Result<List<CommitFileDiff>, GIT_object.Error> commit_changes(str gitdir, GIT_ob
         Option<str> oid = old_tree.get(path);
         Option<str> nid = new_tree.get(path);
         GIT_status.Change kind = GIT_status.Change.Modified;
-        bool skip = false;
+        bool is_skipping = false;
         match (oid) {
             case Some(str old_id): {
                 match (nid) {
                     case Some(str new_id): {
                         if (old_id == new_id) {
-                            skip = true;
+                            is_skipping = true;
                         }
                     }
                     case None: {
@@ -405,17 +405,17 @@ Result<List<CommitFileDiff>, GIT_object.Error> commit_changes(str gitdir, GIT_ob
                 kind = GIT_status.Change.Added;
             }
         }
-        if (skip) {
+        if (is_skipping) {
             continue;
         }
         bytes old_bytes = commit_blob(gitdir, oid);
         bytes new_bytes = commit_blob(gitdir, nid);
-        bool binary = false;
+        bool is_binary = false;
         int insertions = 0;
         int deletions = 0;
         match (GIT_hunks.hunks(old_bytes, new_bytes)) {
             case Binary: {
-                binary = true;
+                is_binary = true;
             }
             case Hunks(List<TUI_diff_view.Hunk> hunks): {
                 for (TUI_diff_view.Hunk hunk in hunks) {
@@ -434,7 +434,7 @@ Result<List<CommitFileDiff>, GIT_object.Error> commit_changes(str gitdir, GIT_ob
                 }
             }
         }
-        out.push(CommitFileDiff(path.to_bytes(), kind, oid, nid, binary, insertions, deletions));
+        out.push(CommitFileDiff(path.to_bytes(), kind, oid, nid, is_binary, insertions, deletions));
     }
     return Result<List<CommitFileDiff>, GIT_object.Error>.Ok(out);
 }
@@ -485,7 +485,7 @@ List<TUI_outline.Node> commit_node(GIT_log.Entry entry, List<CommitFileDiff> cha
         str file_id = id + ":file:" + file_index.to_str();
         str path_text = change.path.utf8().or("<non-utf8 path>");
         str stat = "+" + change.insertions.to_str() + " -" + change.deletions.to_str();
-        if (change.binary) {
+        if (change.is_binary) {
             stat = "(binary)";
         }
         file_nodes.push(TUI_outline.Node.leaf(file_id, mark_str(change_mark(change.kind)) + "  " + path_text + "  " + stat));
@@ -567,7 +567,7 @@ pub TUI_outline.Outline build_outline(GIT_status.Status status, List<GIT_log.Ent
     List<TUI_outline.Node> branch_children = [];
     for (BranchRow branch_row in branches) {
         str mark = "  ";
-        if (branch_row.branch.current) {
+        if (branch_row.branch.is_current) {
             mark = "* ";
         }
         branch_children.push(TUI_outline.Node.leaf("branch:" + branch_row.branch.name, mark + branch_row.branch.name + "  " + branch_row.branch.id.substr(0, 7) + "  " + branch_row.subject));
@@ -780,16 +780,16 @@ pub type State {
     pub str worktree;
     pub TUI_outline.Outline outline = TUI_outline.Outline([]);
     pub TUI_jump_list.JumpList jump = TUI_jump_list.JumpList.empty;
-    pub bool show_jump = false;
-    pub bool jump_focused = false;
-    pub bool commit_open = false;
+    pub bool is_jump_shown = false;
+    pub bool is_jump_focused = false;
+    pub bool is_commit_open = false;
     /// The `x` confirmation overlay: discarding is the one destructive thing
     /// this client does to a working tree, so it never happens on a single
     /// keypress -- `discard_current` records what `x` was pressed on here and
     /// opens the prompt, and only `y` (`handle_confirm_key`) actually calls
     /// `discard_path`. `confirm_kind` is the row's section (`untracked`,
     /// `unstaged`, `staged`), which decides what "discard" restores from.
-    pub bool confirm_open = false;
+    pub bool is_confirm_open = false;
     str confirm_kind = "";
     bytes confirm_path = [];
     /// `c` then `A`: the commit overlay is replacing HEAD rather than adding a
@@ -797,27 +797,27 @@ pub type State {
     /// with HEAD's own message); `finish_commit` reads it to pick HEAD's
     /// parents and author instead of HEAD-as-parent and a fresh author.
     /// Reset whenever the overlay is opened fresh or aborted.
-    pub bool amending = false;
+    pub bool is_amending = false;
     /// The `b` which-key overlay (check out / new branch) is open.
-    pub bool branch_open = false;
+    pub bool is_branch_open = false;
     /// Where `n` (new branch) asks for the name: a file `$EDITOR` is launched
     /// on, exactly like `commit_msg_path`, since there is no text-input
     /// widget to type into -- see `new_branch`.
     pub str branch_name_path = "";
     /// Which file the pending `$EDITOR` launch is for -- `launch_editor`
     /// serves both the commit message and the new-branch name.
-    bool editor_for_branch = false;
+    bool is_editor_for_branch = false;
     List<BranchRow> branch_rows = [];
     /// The `P` which-key overlay (push), open until a choice or `Escape`.
-    pub bool push_open = false;
+    pub bool is_push_open = false;
     /// The `F` which-key overlay (pull), open until a choice or `Escape`.
-    pub bool pull_open = false;
+    pub bool is_pull_open = false;
     /// Set by `edit_message` and read by `gitui.m31`'s own top-level driver
     /// after `TUI_app.Loop.run` returns: true means the loop stopped so
     /// `$EDITOR` could have the terminal, not because the operator pressed
     /// `q`. See this module's own header, "launching `$EDITOR`, and the
     /// terminal handoff that takes".
-    pub bool want_editor = false;
+    pub bool is_editor_wanted = false;
     pub str commit_msg_path = "";
     pub str branch_label = "";
     pub str message = "";
@@ -826,11 +826,11 @@ pub type State {
     /// view the document can show, per `docs/design.md`'s locked "one
     /// primary document" layout, not a second panel competing with the
     /// outline for space.
-    pub bool diff_open = false;
+    pub bool is_diff_open = false;
     /// Set instead of populating `diff_view`, when `GIT_hunks.hunks` reported
     /// `Binary` for the pair being compared -- matching git's own "Binary
     /// files differ" rather than trying to render binary content as text.
-    pub bool diff_binary = false;
+    pub bool is_diff_binary = false;
     /// The row label the diff view's border is drawn with, so the file
     /// being diffed stays visible while the outline underneath is hidden.
     pub str diff_title = "";
@@ -994,7 +994,7 @@ pub void State.reload() {
 pub void State.toggle_current() {
     outline.toggle();
     str keep_id = "";
-    bool rebuild = false;
+    bool is_rebuilding = false;
     match (outline.current()) {
         case Some(TUI_outline.Row row): {
             collapsed.set(row.node.id, !row.node.expanded);
@@ -1002,7 +1002,7 @@ pub void State.toggle_current() {
             if (row.node.expanded) {
                 match (commit_id_of_unfoldable(row.node.id)) {
                     case Some(str cid): {
-                        rebuild = ensure_commit_changes(cid);
+                        is_rebuilding = ensure_commit_changes(cid);
                     }
                     case None: {
                     }
@@ -1012,7 +1012,7 @@ pub void State.toggle_current() {
         case None: {
         }
     }
-    if (rebuild) {
+    if (is_rebuilding) {
         outline = build_outline(last_status, log, commit_changes_cache, collapsed, paths, file_diffs, branch_rows);
         outline.select_id(keep_id);
     }
@@ -1182,7 +1182,7 @@ pub void State.discard_current() {
                 case Some(bytes path): {
                     confirm_kind = kind;
                     confirm_path = path;
-                    confirm_open = true;
+                    is_confirm_open = true;
                     message = "";
                 }
                 case None: {
@@ -1435,7 +1435,7 @@ void State.prune_empty_parents(bytes rel) {
 ///     does not have.
 ///
 /// `GIT_hunks.hunks` reporting `Binary` (either side trips `diff.is_binary`'s
-/// NUL heuristic) sets `diff_binary` instead of populating `diff_view`,
+/// NUL heuristic) sets `is_diff_binary` instead of populating `diff_view`,
 /// which `draw` shows as "Binary files differ", git's own wording, rather
 /// than attempting to render binary content as text.
 pub void State.show_diff_current() {
@@ -1558,15 +1558,15 @@ pub void State.open_diff(str title, bytes old, bytes new) {
     diff_title = title;
     match (GIT_hunks.hunks(old, new)) {
         case Binary: {
-            diff_binary = true;
+            is_diff_binary = true;
             diff_view = TUI_diff_view.DiffView([]);
         }
         case Hunks(List<TUI_diff_view.Hunk> hunks): {
-            diff_binary = false;
+            is_diff_binary = false;
             diff_view = TUI_diff_view.DiffView(hunks);
         }
     }
-    diff_open = true;
+    is_diff_open = true;
     message = "";
 }
 
@@ -1574,8 +1574,8 @@ pub void State.open_diff(str title, bytes old, bytes new) {
 /// back" key `apps/tui/browse.m31` already uses for leaving a drilled-into
 /// view, and `q`/`Escape` too (`handle_diff_key`'s own comment has why).
 pub void State.close_diff() {
-    diff_open = false;
-    diff_binary = false;
+    is_diff_open = false;
+    is_diff_binary = false;
     diff_view = TUI_diff_view.DiffView([]);
     diff_section = "";
     diff_path = [];
@@ -1795,7 +1795,7 @@ bool State.drop_index_entry(bytes rel, str said) {
 ///
 /// This cannot call `os.run` itself: the terminal is still in raw mode with
 /// the alternate screen on, owned by a `term.Session` this state has no
-/// access to (`TUI_app.Loop.run`'s own scope). Setting `want_editor` and
+/// access to (`TUI_app.Loop.run`'s own scope). Setting `is_editor_wanted` and
 /// letting the which-key's `e` return `Quit` is what unwinds that scope --
 /// see this module's own header, "launching `$EDITOR`, and the terminal
 /// handoff that takes" -- so `launch_editor` below is where the actual
@@ -1811,13 +1811,13 @@ pub void State.edit_message() {
             }
         }
     }
-    want_editor = true;
+    is_editor_wanted = true;
     message = "launching editor...";
 }
 
 /// Actually launch `$EDITOR` (or `vi`) on `commit_msg_path` and act on how it
 /// ended -- called by `gitui.m31`'s driver after `TUI_app.Loop.run` has
-/// returned with `want_editor` set, so the terminal `os.run`'s child
+/// returned with `is_editor_wanted` set, so the terminal `os.run`'s child
 /// inherits is the real, cooked one, not the raw alternate screen this
 /// program draws on.
 ///
@@ -1832,17 +1832,17 @@ pub void State.edit_message() {
 ///     "There was a problem with the editor" -- a signal, `^C` most often,
 ///     gets its own status line, a more unusual case worth naming
 ///     differently even though the outcome -- leave everything as it is --
-///     is the same). `commit_open` stays true and the message file is left
+///     is the same). `is_commit_open` stays true and the message file is left
 ///     untouched, so `e` can be pressed again, `f` can still try to finish
 ///     whatever is on disk right now, and `a` can still discard it.
 ///   - `os.run` itself failed (`Err`) -- no `$EDITOR`, no `vi`, nothing
 ///     found on `$PATH` -- there is no process to have run at all, so this
 ///     falls back to exactly the original, pre-`os.run` behaviour: the
 ///     template is already on disk (`edit_message` wrote it before setting
-///     `want_editor`), and the operator is told to edit it externally.
+///     `is_editor_wanted`), and the operator is told to edit it externally.
 pub void State.launch_editor() {
-    if (editor_for_branch) {
-        editor_for_branch = false;
+    if (is_editor_for_branch) {
+        is_editor_for_branch = false;
         launch_branch_editor();
         return;
     }
@@ -1926,7 +1926,7 @@ pub void State.checkout_current() {
 pub void State.checkout_branch(str name) {
     for (BranchRow branch_row in branch_rows) {
         if (branch_row.branch.name == name) {
-            if (branch_row.branch.current) {
+            if (branch_row.branch.is_current) {
                 message = "already on " + name;
                 return;
             }
@@ -1958,8 +1958,8 @@ pub void State.new_branch() {
             return;
         }
     }
-    editor_for_branch = true;
-    want_editor = true;
+    is_editor_for_branch = true;
+    is_editor_wanted = true;
     message = "launching editor...";
 }
 
@@ -1967,13 +1967,13 @@ pub void State.new_branch() {
 /// non-comment line is the name; `GIT_checkout.create_branch` does the rest.
 pub void State.launch_branch_editor() {
     str editor = pick_editor(os.env("EDITOR"));
-    bool ran = false;
+    bool has_run = false;
     match (os.run([editor, branch_name_path])) {
         case Ok(os.ExitStatus exit_status): {
             match (exit_status) {
                 case Exited(int code): {
                     if (code == 0) {
-                        ran = true;
+                        has_run = true;
                     } else {
                         message = "editor '" + editor + "' exited " + code.to_str() + "; no branch created";
                     }
@@ -1987,7 +1987,7 @@ pub void State.launch_branch_editor() {
             message = "cannot launch '" + editor + "' (" + error.to_str() + "); no branch created";
         }
     }
-    if (ran) {
+    if (has_run) {
         finish_new_branch();
     }
     if (fs.exists(branch_name_path)) {
@@ -2040,15 +2040,15 @@ pub void State.abort_commit() {
             }
         }
     }
-    commit_open = false;
-    amending = false;
+    is_commit_open = false;
+    is_amending = false;
     message = "commit aborted";
 }
 
 /// `c` then `A`: turn the open commit overlay into `git commit --amend`.
 /// HEAD's own message is written to `commit_msg_path` (with the template's
 /// comment lines after it, so `e` opens something a person recognises and
-/// `f` straight away is `--amend --no-edit`), and `amending` tells
+/// `f` straight away is `--amend --no-edit`), and `is_amending` tells
 /// `finish_commit` to replace HEAD rather than add to it. Refused, with the
 /// overlay left open on its ordinary meaning, when there is no HEAD to
 /// amend: an unborn branch, or a HEAD whose commit cannot be read.
@@ -2112,7 +2112,7 @@ pub void State.start_amend() {
             return;
         }
     }
-    amending = true;
+    is_amending = true;
     message = "amending " + head_id.substr(0, 7) + ": e to edit its message, f to finish, a to abort";
 }
 
@@ -2138,8 +2138,8 @@ pub void State.finish_commit() {
     str commit_message = strip_comment_lines(raw);
     if (commit_message == "") {
         message = "aborting commit due to empty commit message";
-        commit_open = false;
-        amending = false;
+        is_commit_open = false;
+        is_amending = false;
         return;
     }
     GIT_index.Index index = read_index(gitdir);
@@ -2156,7 +2156,7 @@ pub void State.finish_commit() {
     List<str> parents = [];
     str ref_name = "HEAD";
     str expect_old = "";
-    bool have_old = false;
+    bool has_old = false;
     match (GIT_refs.head(gitdir)) {
         case Ok(GIT_refs.Head head): {
             match (head) {
@@ -2164,18 +2164,18 @@ pub void State.finish_commit() {
                     parents.push(id);
                     ref_name = name;
                     expect_old = id;
-                    have_old = true;
+                    has_old = true;
                 }
                 case Unborn(str name): {
                     ref_name = name;
                     expect_old = "";
-                    have_old = true;
+                    has_old = true;
                 }
                 case Detached(str id): {
                     parents.push(id);
                     ref_name = "HEAD";
                     expect_old = id;
-                    have_old = true;
+                    has_old = true;
                 }
             }
         }
@@ -2185,7 +2185,7 @@ pub void State.finish_commit() {
         }
     }
     GIT_object.Ident author = author_ident();
-    if (amending) {
+    if (is_amending) {
         // `--amend`: the new commit takes HEAD's place, so it gets HEAD's own
         // parents and author (date and zone included -- real git keeps the
         // original authorship and only the committer is "now"); HEAD itself
@@ -2233,7 +2233,7 @@ pub void State.finish_commit() {
         }
     }
     Option<str> want = Option<str>.None;
-    if (have_old) {
+    if (has_old) {
         want = Option<str>.Some(expect_old);
     }
     match (GIT_refs.update(gitdir, ref_name, commit_id, want)) {
@@ -2252,13 +2252,13 @@ pub void State.finish_commit() {
             }
         }
     }
-    if (amending) {
+    if (is_amending) {
         message = "amended: HEAD is now " + commit_id.substr(0, 7);
     } else {
         message = "committed " + commit_id.substr(0, 7);
     }
-    commit_open = false;
-    amending = false;
+    is_commit_open = false;
+    is_amending = false;
     reload();
 }
 
@@ -2278,13 +2278,13 @@ List<TUI_widget.Span> State.footer_spans(TUI_style.Theme theme) {
     out.push(TUI_widget.Span("enter", style: theme.accent));
     out.push(TUI_widget.Span(" toggle  "));
     out.push(TUI_widget.Span("s", style: theme.accent));
-    if (diff_open) {
+    if (is_diff_open) {
         out.push(TUI_widget.Span(" stage hunk  "));
     } else {
         out.push(TUI_widget.Span(" stage  "));
     }
     out.push(TUI_widget.Span("u", style: theme.accent));
-    if (diff_open) {
+    if (is_diff_open) {
         out.push(TUI_widget.Span(" unstage hunk  "));
     } else {
         out.push(TUI_widget.Span(" unstage  "));
@@ -2293,7 +2293,7 @@ List<TUI_widget.Span> State.footer_spans(TUI_style.Theme theme) {
     out.push(TUI_widget.Span(" diff  "));
     out.push(TUI_widget.Span("x", style: theme.accent));
     out.push(TUI_widget.Span(" discard  "));
-    if (diff_open) {
+    if (is_diff_open) {
         out.push(TUI_widget.Span("q/esc/backspace", style: theme.accent));
         out.push(TUI_widget.Span(" back  "));
     }
@@ -2311,7 +2311,7 @@ List<TUI_widget.Span> State.footer_spans(TUI_style.Theme theme) {
     out.push(TUI_widget.Span(" focus  "));
     out.push(TUI_widget.Span("r", style: theme.accent));
     out.push(TUI_widget.Span(" refresh"));
-    if (!diff_open) {
+    if (!is_diff_open) {
         out.push(TUI_widget.Span("  "));
         out.push(TUI_widget.Span("q", style: theme.accent));
         out.push(TUI_widget.Span(" quit"));
@@ -2342,11 +2342,11 @@ pub void State.draw(TUI_buffer.Buffer buffer, TUI_geometry.Rect area) {
     List<TUI_geometry.Rect> bands = TUI_footer.split(body, 2);
     TUI_geometry.Rect main = bands[0];
     TUI_geometry.Rect footer_area = bands[1];
-    if (diff_open) {
+    if (is_diff_open) {
         draw_diff(buffer, main);
     } else {
         TUI_geometry.Rect outline_area = main;
-        if (show_jump) {
+        if (is_jump_shown) {
             List<TUI_geometry.Rect> cols = TUI_geometry.cols(main, [TUI_geometry.Constraint.Fill(1), TUI_geometry.Constraint.Length(28)]);
             outline_area = cols[0];
             outline.render(buffer, outline_area);
@@ -2360,17 +2360,17 @@ pub void State.draw(TUI_buffer.Buffer buffer, TUI_geometry.Rect area) {
     TUI_widget.Line status_row = TUI_widget.Line([TUI_widget.Span(" " + status_line(), style: theme.dim)]);
     status_row.render(buffer, TUI_geometry.Rect(footer_area.x, footer_area.y, footer_area.width, 1));
     TUI_footer.Footer(footer_spans(theme)).render(buffer, TUI_geometry.Rect(footer_area.x, footer_area.y + 1, footer_area.width, 1));
-    if (commit_open) {
+    if (is_commit_open) {
         str title = "commit";
         str finish = "finish: write the commit";
-        if (amending) {
+        if (is_amending) {
             title = "amend HEAD";
             finish = "finish: replace HEAD with the amended commit";
         }
         TUI_menu.WhichKey which_key = TUI_menu.WhichKey(title, [TUI_menu.Item("e", "edit message in $EDITOR (" + commit_msg_path + ")"), TUI_menu.Item("f", finish), TUI_menu.Item("A", "amend HEAD: its message prefilled, its parents and author kept"), TUI_menu.Item("a", "abort")]);
         which_key.render(buffer, body);
     }
-    if (confirm_open) {
+    if (is_confirm_open) {
         str what = "changes to " + confirm_path.utf8().or("<non-utf8>");
         if (confirm_kind == "untracked") {
             what = "untracked file " + confirm_path.utf8().or("<non-utf8>") + " (it will be removed)";
@@ -2380,15 +2380,15 @@ pub void State.draw(TUI_buffer.Buffer buffer, TUI_geometry.Rect area) {
         TUI_menu.WhichKey which_key = TUI_menu.WhichKey("discard " + what + "?", [TUI_menu.Item("y", "yes, discard"), TUI_menu.Item("any other key", "no, keep it")]);
         which_key.render(buffer, body);
     }
-    if (branch_open) {
+    if (is_branch_open) {
         TUI_menu.WhichKey which_key = TUI_menu.WhichKey("branch", [TUI_menu.Item("c", "check out the branch under the cursor"), TUI_menu.Item("n", "new branch from HEAD: name it in $EDITOR, then switch to it"), TUI_menu.Item("a", "abort")]);
         which_key.render(buffer, body);
     }
-    if (push_open) {
+    if (is_push_open) {
         TUI_menu.WhichKey which_key = TUI_menu.WhichKey("push", [TUI_menu.Item("p", "push current branch to origin (fast-forward only)")]);
         which_key.render(buffer, body);
     }
-    if (pull_open) {
+    if (is_pull_open) {
         TUI_menu.WhichKey which_key = TUI_menu.WhichKey("pull", [TUI_menu.Item("p", "pull current branch from origin (fast-forward only)")]);
         which_key.render(buffer, body);
     }
@@ -2396,14 +2396,14 @@ pub void State.draw(TUI_buffer.Buffer buffer, TUI_geometry.Rect area) {
 
 /// The diff view, in place of the outline: a bordered block naming the file
 /// (`diff_title`), and inside it either "binary files differ" (git's own
-/// wording, `diff_binary`) or `diff_view` itself -- a `DiffView` whose
+/// wording, `is_diff_binary`) or `diff_view` itself -- a `DiffView` whose
 /// `at()`/`move()` already give hunk- and line-granular addressing, even
 /// though nothing in this change acts on that address yet.
 void State.draw_diff(TUI_buffer.Buffer buffer, TUI_geometry.Rect area) {
     TUI_widget.Block block = TUI_widget.Block(title: "diff: " + diff_title, borders: TUI_widget.Borders.Single);
     block.render(buffer, area);
     TUI_geometry.Rect inner = block.inner(area);
-    if (diff_binary) {
+    if (is_diff_binary) {
         TUI_widget.Paragraph("binary files differ").render(buffer, inner);
         return;
     }
@@ -2432,22 +2432,22 @@ pub TUI_app.Action State.handle(term.Event event) {
 }
 
 TUI_app.Action State.handle_key(term.Code code) {
-    if (confirm_open) {
+    if (is_confirm_open) {
         return handle_confirm_key(code);
     }
-    if (commit_open) {
+    if (is_commit_open) {
         return handle_commit_key(code);
     }
-    if (branch_open) {
+    if (is_branch_open) {
         return handle_branch_key(code);
     }
-    if (push_open) {
+    if (is_push_open) {
         return handle_push_key(code);
     }
-    if (pull_open) {
+    if (is_pull_open) {
         return handle_pull_key(code);
     }
-    if (diff_open) {
+    if (is_diff_open) {
         return handle_diff_key(code);
     }
     match (code) {
@@ -2543,8 +2543,8 @@ TUI_app.Action State.handle_char(int character) {
         return TUI_app.Action.Redraw;
     }
     if (character == 'c') {
-        commit_open = true;
-        amending = false;
+        is_commit_open = true;
+        is_amending = false;
         return TUI_app.Action.Redraw;
     }
     if (character == 'x') {
@@ -2552,15 +2552,15 @@ TUI_app.Action State.handle_char(int character) {
         return TUI_app.Action.Redraw;
     }
     if (character == 'b') {
-        branch_open = true;
+        is_branch_open = true;
         return TUI_app.Action.Redraw;
     }
     if (character == 'P') {
-        push_open = true;
+        is_push_open = true;
         return TUI_app.Action.Redraw;
     }
     if (character == 'F') {
-        pull_open = true;
+        is_pull_open = true;
         return TUI_app.Action.Redraw;
     }
     if (character == 'r') {
@@ -2568,18 +2568,18 @@ TUI_app.Action State.handle_char(int character) {
         return TUI_app.Action.Redraw;
     }
     if (character == 'J') {
-        show_jump = !show_jump;
+        is_jump_shown = !is_jump_shown;
         return TUI_app.Action.Redraw;
     }
     if (character == 'w') {
-        jump_focused = !jump_focused;
+        is_jump_focused = !is_jump_focused;
         return TUI_app.Action.Redraw;
     }
     return TUI_app.Action.Continue;
 }
 
 void State.step_or_move(int delta) {
-    if (jump_focused && show_jump) {
+    if (is_jump_focused && is_jump_shown) {
         jump.step(delta);
     } else {
         move_cursor(delta);
@@ -2595,9 +2595,9 @@ void State.step_or_move(int delta) {
 /// empty "Files changed (0)" section itself (there is nothing to diff a
 /// merge whose first-parent diff touched no files) still just folds.
 void State.handle_enter() {
-    if (jump_focused && show_jump) {
+    if (is_jump_focused && is_jump_shown) {
         jump.activate(outline);
-        jump_focused = false;
+        is_jump_focused = false;
         return;
     }
     match (outline.current()) {
@@ -2624,7 +2624,7 @@ void State.handle_enter() {
 /// of it (`GIT_http_push.parse_remote` strips it from the URL before anything
 /// else sees the URL).
 pub void State.push_current() {
-    push_open = false;
+    is_push_open = false;
     str refname = "";
     str id = "";
     match (GIT_refs.head(gitdir)) {
@@ -2689,7 +2689,7 @@ TUI_app.Action State.handle_push_key(term.Code code) {
             return TUI_app.Action.Continue;
         }
         case Escape: {
-            push_open = false;
+            is_push_open = false;
             return TUI_app.Action.Redraw;
         }
         case Enter: {
@@ -2744,7 +2744,7 @@ TUI_app.Action State.handle_push_key(term.Code code) {
 /// refused on a dirty tree and on a diverged branch. The outcome is the
 /// status line's message.
 pub void State.pull_current() {
-    pull_open = false;
+    is_pull_open = false;
     Option<str> url = GIT_config.get(gitdir, "remote", "origin", "url");
     if (!url.is_some()) {
         message = "pull: no remote 'origin' in .git/config";
@@ -2762,7 +2762,7 @@ pub void State.pull_current() {
     }
     match (GIT_pull.pull(gitdir, worktree, remote)) {
         case Ok(GIT_pull.Outcome outcome): {
-            if (outcome.moved) {
+            if (outcome.has_moved) {
                 message = "pulled: fast-forwarded " + outcome.old_id.substr(0, 7) + ".." + outcome.new_id.substr(0, 7);
             } else {
                 message = "pull: already up to date";
@@ -2785,7 +2785,7 @@ TUI_app.Action State.handle_pull_key(term.Code code) {
             return TUI_app.Action.Continue;
         }
         case Escape: {
-            pull_open = false;
+            is_pull_open = false;
             return TUI_app.Action.Redraw;
         }
         case Enter: {
@@ -2844,7 +2844,7 @@ TUI_app.Action State.handle_commit_key(term.Code code) {
                 // `Quit` unwinds `TUI_app.Loop.run`'s own `Session`, which is
                 // what actually leaves raw mode and the alternate screen --
                 // see `edit_message`'s own header. `gitui.m31`'s driver
-                // reads `want_editor` on the way out and calls `Loop.run`
+                // reads `is_editor_wanted` on the way out and calls `Loop.run`
                 // again once `launch_editor` is done.
                 return TUI_app.Action.Quit;
             }
@@ -2921,7 +2921,7 @@ TUI_app.Action State.handle_commit_key(term.Code code) {
 TUI_app.Action State.handle_confirm_key(term.Code code) {
     str kind = confirm_kind;
     bytes rel = confirm_path;
-    confirm_open = false;
+    is_confirm_open = false;
     confirm_kind = "";
     confirm_path = [];
     match (code) {
@@ -2977,26 +2977,26 @@ TUI_app.Action State.handle_branch_key(term.Code code) {
     match (code) {
         case Char(int character): {
             if (character == 'c') {
-                branch_open = false;
+                is_branch_open = false;
                 checkout_current();
                 return TUI_app.Action.Redraw;
             }
             if (character == 'n') {
-                branch_open = false;
+                is_branch_open = false;
                 new_branch();
-                if (want_editor) {
+                if (is_editor_wanted) {
                     return TUI_app.Action.Quit;
                 }
                 return TUI_app.Action.Redraw;
             }
             if (character == 'a') {
-                branch_open = false;
+                is_branch_open = false;
                 return TUI_app.Action.Redraw;
             }
             return TUI_app.Action.Continue;
         }
         case Escape: {
-            branch_open = false;
+            is_branch_open = false;
             return TUI_app.Action.Redraw;
         }
         case Enter: {

@@ -54,7 +54,7 @@ and every loop that consumes symbols checks `b.over` once per symbol. It
 works, it is fast, and it is strictly worse code: the failure is now a
 condition the caller must remember to test rather than one the type system
 enforces, and a truncated stream decodes one junk symbol before anyone
-notices. Nine places in `GIT_zlib.m31` check `over`, and a tenth that forgot to
+notices. Nine places in `GIT_zlib.m31` check `has_overrun`, and a tenth that forgot to
 would silently accept a truncated stream.
 
 **What would fix it:** a `Result` (or any enum) whose payloads are all scalars
@@ -74,7 +74,7 @@ language changed, which is what this item asked for.
 The rewrite was done in full and measured: `take` and `byte` return
 `Result<int, Error>`, `Huff.decode` takes the table it is decoding for and
 answers `Err(BadCode(which))` rather than `-1`, every call site is `?`, and
-the `over` flag and all nine of its checks are gone. Thirteen lines shorter,
+the `has_overrun` flag and all nine of its checks are gone. Thirteen lines shorter,
 29 `?` where there were 6, correct against all 29 `zlib` fixtures the first
 time it ran. The patch is `bench/valenum/zlib-result.diff`.
 

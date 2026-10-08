@@ -106,8 +106,8 @@ pub str Error.to_str() {
 // here" -- including one synthesised at the front for a pattern that had no
 // `/` of its own, which is what makes it match at any depth.
 type Pattern {
-    bool negate;
-    bool dir_only;
+    bool is_negated;
+    bool is_directory_only;
     List<str> segments;
 }
 
@@ -212,33 +212,33 @@ pub Result<Ignore, Error> load(str gitdir, str worktree) {
 // path itself, checked by `is_ignored`'s own last call, never is -- a leaf
 // from `GIT_status.m31`'s walk is always a file or a symlink).
 bool matched(List<IgnoreFile> files, List<str> segs, int depth, bool is_dir) {
-    bool ignored = false;
+    bool is_matched = false;
     for (IgnoreFile ignore_file in files) {
         int bdepth = ignore_file.base_segs.size();
         if (bdepth >= depth) {
             continue;
         }
-        bool under = true;
+        bool is_under = true;
         for (int i in 0 .. bdepth) {
             if (ignore_file.base_segs[i] != segs[i]) {
-                under = false;
+                is_under = false;
                 break;
             }
         }
-        if (!under) {
+        if (!is_under) {
             continue;
         }
         List<str> rel = sub_segments(segs, bdepth, depth);
         for (Pattern pattern in ignore_file.patterns) {
-            if (pattern.dir_only && !is_dir) {
+            if (pattern.is_directory_only && !is_dir) {
                 continue;
             }
             if (match_segments(pattern.segments, 0, rel, 0)) {
-                ignored = !pattern.negate;
+                is_matched = !pattern.is_negated;
             }
         }
     }
-    return ignored;
+    return is_matched;
 }
 
 // --- one .gitignore file's text, into `Pattern`s -----------------------------
@@ -265,44 +265,44 @@ Option<Pattern> parse_line(str raw) {
     if (line == "") {
         return Option<Pattern>.None;
     }
-    bool negate = false;
+    bool is_negated = false;
     if (line.starts_with("\\!")) {
         line = line.substr(1, line.size());
     } else if (line.starts_with("\\#")) {
         line = line.substr(1, line.size());
     } else if (line.starts_with("!")) {
-        negate = true;
+        is_negated = true;
         line = line.substr(1, line.size());
     }
     if (line == "") {
         return Option<Pattern>.None;
     }
-    bool dir_only = false;
+    bool is_directory_only = false;
     if (line.ends_with("/")) {
-        dir_only = true;
+        is_directory_only = true;
         line = line.substr(0, line.size() - 1);
     }
     if (line == "") {
         return Option<Pattern>.None;
     }
-    bool anchored = false;
+    bool is_anchored = false;
     if (line.starts_with("/")) {
-        anchored = true;
+        is_anchored = true;
         line = line.substr(1, line.size());
     } else if (line.contains("/")) {
-        anchored = true;
+        is_anchored = true;
     }
     if (line == "") {
         return Option<Pattern>.None;
     }
     List<str> segments = [];
-    if (anchored) {
+    if (is_anchored) {
         segments = split_segments(line);
     } else {
         segments.push("**");
         segments.push(line);
     }
-    return Option<Pattern>.Some(Pattern(negate, dir_only, segments));
+    return Option<Pattern>.Some(Pattern(is_negated, is_directory_only, segments));
 }
 
 // `s` split on `/` into non-empty segments -- `""` becomes `[]`, and
@@ -379,17 +379,17 @@ bool seg_match(List<int> name, List<int> pat) {
                 continue;
             }
             if (name_index < name_length) {
-                bool hit = false;
+                bool is_hit = false;
                 if (code_point == 63) {
-                    hit = true;
+                    is_hit = true;
                     pattern_index = pattern_index + 1;
                 } else {
-                    hit = code_point == name[name_index];
-                    if (hit) {
+                    is_hit = code_point == name[name_index];
+                    if (is_hit) {
                         pattern_index = pattern_index + 1;
                     }
                 }
-                if (hit) {
+                if (is_hit) {
                     name_index = name_index + 1;
                     continue;
                 }

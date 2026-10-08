@@ -275,14 +275,14 @@ pub str Error.to_str() {
 
 // --- pkt-line framing (Part 1) -----------------------------------------------
 
-/// One packet read out of `buffer` at `offset`: `flush` with no payload, or `data`
+/// One packet read out of `buffer` at `offset`: `is_flush` with no payload, or `data`
 /// with its payload -- the bytes strictly after the four-hex-digit length
 /// prefix, which counts itself. `next` is the offset just past this packet,
 /// for the caller's next call; there are no tuples in this language
 /// (`docs/FRICTION.md` §2), so a small result type carries both answers
 /// out of one call the way `GIT_log.Entry` does.
 pub type Packet {
-    pub bool flush;
+    pub bool is_flush;
     pub bytes payload;
     pub int next;
 }
@@ -425,7 +425,7 @@ Result<Advertisement, Error> after_refs_response(http.Response response) {
 /// against a captured or hand-built advertisement with no server involved.
 pub Result<Advertisement, Error> parse_advertisement(bytes body) {
     Packet first = read_packet(body, 0)?;
-    if (first.flush) {
+    if (first.is_flush) {
         return Result<Advertisement, Error>.Err(Error.BadAdvertisement);
     }
     str line0 = "";
@@ -442,25 +442,25 @@ pub Result<Advertisement, Error> parse_advertisement(bytes body) {
     }
     str service = line0.substr(10, line0.size());
     Packet flush1 = read_packet(body, first.next)?;
-    if (!flush1.flush) {
+    if (!flush1.is_flush) {
         return Result<Advertisement, Error>.Err(Error.BadAdvertisement);
     }
     int offset = flush1.next;
     List<str> caps = [];
     List<RemoteRef> refs = [];
-    bool first_ref = true;
+    bool is_first_ref = true;
     while (true) {
         Packet packet = read_packet(body, offset)?;
         offset = packet.next;
-        if (packet.flush) {
+        if (packet.is_flush) {
             break;
         }
         bytes line = packet.payload;
         if (line.ends_with(LF1)) {
             line = line.substr(0, line.size() - 1);
         }
-        if (first_ref) {
-            first_ref = false;
+        if (is_first_ref) {
+            is_first_ref = false;
             match (line.index_of(NUL1)) {
                 case Some(int nul): {
                     bytes capbytes = line.substr(nul + 1, line.size());
@@ -553,28 +553,28 @@ bool has_cap(List<str> caps, str name) {
 /// What was demultiplexed out of a side-band-64k response: the reassembled
 /// pack bytes (band 1), and whether band 3 carried an error -- already
 /// printed to standard error by the time this is returned, per the module
-/// note; `remote_error` is what tells the caller to stop rather than go on
+/// note; `has_remote_error` is what tells the caller to stop rather than go on
 /// to verify a pack that was never meant to be trusted.
 pub type DemuxResult {
     pub bytes pack;
-    pub bool remote_error;
+    pub bool has_remote_error;
 }
 
 /// Demultiplex a side-band-64k byte stream: every pkt-line is
 /// `<band><data>`, band 1 accumulates into `pack`, band 2 is printed to
 /// standard error and discarded, band 3 is printed to standard error and
-/// sets `remote_error`. `body` starts right after the ACK/NAK preamble --
+/// sets `has_remote_error`. `body` starts right after the ACK/NAK preamble --
 /// `fetch` skips that (zero or more lines; see the module note) with
 /// `skip_ack_nak`, using the same `read_packet` this takes its input from, so
 /// this function is pure demultiplexing and nothing about negotiation.
 pub Result<DemuxResult, Error> demux(bytes body) {
     int offset = 0;
     bytes pack = [];
-    bool saw_error = false;
+    bool has_seen_error = false;
     while (offset < body.size()) {
         Packet packet = read_packet(body, offset)?;
         offset = packet.next;
-        if (packet.flush) {
+        if (packet.is_flush) {
             continue;
         }
         if (packet.payload.size() == 0) {
@@ -593,7 +593,7 @@ pub Result<DemuxResult, Error> demux(bytes body) {
                 }
             }
         } else if (band == 3) {
-            saw_error = true;
+            has_seen_error = true;
             match (data.utf8()) {
                 case Some(str message): {
                     io.eprint("remote: " + message);
@@ -606,7 +606,7 @@ pub Result<DemuxResult, Error> demux(bytes body) {
             return Result<DemuxResult, Error>.Err(Error.BadBand);
         }
     }
-    return Result<DemuxResult, Error>.Ok(DemuxResult(pack, saw_error));
+    return Result<DemuxResult, Error>.Ok(DemuxResult(pack, has_seen_error));
 }
 
 /// What a fetch produced: the verified pack's size on disk, and the object
@@ -682,11 +682,11 @@ bytes negotiation_body(Advertisement advertisement, List<str> wants, List<str> h
     use.push("agent=m31-httpfetch/1");
     str first_caps = use.join(" ");
     bytes out = [];
-    bool first = true;
+    bool is_first = true;
     for (str want in wants) {
-        if (first) {
+        if (is_first) {
             out.extend(pkt_line(("want " + want + " " + first_caps + "\n").to_bytes()));
-            first = false;
+            is_first = false;
         } else {
             out.extend(pkt_line(("want " + want + "\n").to_bytes()));
         }
@@ -713,7 +713,7 @@ Result<Summary, Error> after_pack_response(http.Response response, str out_path)
     int offset = skip_ack_nak(body)?;
     match (demux(body.substr(offset, body.size()))) {
         case Ok(DemuxResult demux_result): {
-            if (demux_result.remote_error) {
+            if (demux_result.has_remote_error) {
                 return Result<Summary, Error>.Err(Error.RemoteError);
             }
             return verify_pack(demux_result.pack, out_path);
@@ -733,7 +733,7 @@ Result<int, Error> skip_ack_nak(bytes body) {
     int offset = 0;
     while (offset < body.size()) {
         Packet packet = read_packet(body, offset)?;
-        if (packet.flush) {
+        if (packet.is_flush) {
             offset = packet.next;
             continue;
         }

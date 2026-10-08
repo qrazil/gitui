@@ -88,8 +88,8 @@ if (operation == "stage") {
     str id = argv[4] + ":" + argv[5];
     if (state.outline.select_id(id)) {
         state.show_diff_current();
-        if (state.diff_open) {
-            if (state.diff_binary) {
+        if (state.is_diff_open) {
+            if (state.is_diff_binary) {
                 print("Binary files differ");
             } else {
                 for (TUI_diff_view.Hunk hunk in state.diff_view.hunks) {
@@ -131,7 +131,7 @@ if (operation == "stage") {
     int hunk_index = argv[6].parse_int().or(-1);
     if (state.outline.select_id(id)) {
         state.show_diff_current();
-        if (state.diff_open && !state.diff_binary && hunk_index >= 0 && hunk_index < state.diff_view.hunks.size()) {
+        if (state.is_diff_open && !state.is_diff_binary && hunk_index >= 0 && hunk_index < state.diff_view.hunks.size()) {
             print("--- a/" + argv[5]);
             print("+++ b/" + argv[5]);
             TUI_diff_view.Hunk hunk = state.diff_view.hunks[hunk_index];
@@ -161,9 +161,9 @@ if (operation == "stage") {
     // then `finish_commit` -- `c`, `A`, `f` with no edit in between, real
     // git's `--amend --no-edit`. A refusal leaves `start_amend`'s own
     // message to print.
-    state.commit_open = true;
+    state.is_commit_open = true;
     state.start_amend();
-    if (state.amending) {
+    if (state.is_amending) {
         state.finish_commit();
     }
 } else {

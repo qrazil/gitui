@@ -30,7 +30,7 @@ if (operation == "branches") {
         case Ok(List<GIT_checkout.Branch> branches): {
             for (GIT_checkout.Branch branch in branches) {
                 str mark = "-";
-                if (branch.current) {
+                if (branch.is_current) {
                     mark = "*";
                 }
                 print(mark + " " + branch.name + " " + branch.id);

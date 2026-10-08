@@ -92,7 +92,7 @@ pub str Error.to_str() {
 /// What a successful pull did.
 pub type Outcome {
     /// False when the branch already had the remote's tip (or more).
-    pub bool moved;
+    pub bool has_moved;
     pub str old_id;
     pub str new_id;
     pub int objects;

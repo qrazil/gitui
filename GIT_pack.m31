@@ -587,7 +587,7 @@ Result<Found, Error> resolve_offset(str gitdir, List<PackFile> packs, Idx pack_i
             bytes base_sha = pack.substr(position, position + 20);
             GIT_zlib.Decoded decoded = inflate_pack_zlib(pack, position + 20)?;
             chain.push(decoded.data);
-            bool base_done = false;
+            bool is_base_done = false;
             match (pack_index.offset_of(base_sha)) {
                 case Some(int base_off): {
                     current = base_off;
@@ -596,10 +596,10 @@ Result<Found, Error> resolve_offset(str gitdir, List<PackFile> packs, Idx pack_i
                     Found found = resolve_id(gitdir, packs, base_sha.hex(), depth - steps)?;
                     base_kind = found.kind;
                     base_content = found.content;
-                    base_done = true;
+                    is_base_done = true;
                 }
             }
-            if (base_done) {
+            if (is_base_done) {
                 break;
             }
         } else {
@@ -895,8 +895,8 @@ Result<Idx, Error> parse_idx(bytes data) {
     if (data.size() < 8) {
         return Result<Idx, Error>.Err(Error.BadIdx);
     }
-    bool magic = data[0] == 0xFF && data[1] == 0x74 && data[2] == 0x4F && data[3] == 0x63;
-    if (!magic) {
+    bool has_magic = data[0] == 0xFF && data[1] == 0x74 && data[2] == 0x4F && data[3] == 0x63;
+    if (!has_magic) {
         return Result<Idx, Error>.Err(Error.UnsupportedIdx);
     }
     int version = u32be(data, 4);

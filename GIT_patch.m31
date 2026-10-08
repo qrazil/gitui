@@ -84,28 +84,28 @@ pub int hunk_count(bytes old, bytes new, int context = GIT_hunks.DEFAULT_CONTEXT
     }
 }
 
-// `applying`: outside the span take the old side, inside take the new side
+// `is_applying`: outside the span take the old side, inside take the new side
 // (the file after staging this one hunk). Otherwise the mirror: outside the
 // span take the new side, inside take the old side (the file after
 // unstaging this one hunk).
-bytes rebuild(List<diff.Op> ops, GIT_hunks.Span span, bool applying) {
+bytes rebuild(List<diff.Op> ops, GIT_hunks.Span span, bool is_applying) {
     bytes out = [];
     int position = 0;
     int op_count = ops.size();
     while (position < op_count) {
-        bool inside = position >= span.start && position < span.end;
-        bool take_new = inside == applying;
+        bool is_inside = position >= span.start && position < span.end;
+        bool is_taking_new = is_inside == is_applying;
         match (ops[position].kind) {
             case Keep: {
                 out.extend(ops[position].line);
             }
             case Add: {
-                if (take_new) {
+                if (is_taking_new) {
                     out.extend(ops[position].line);
                 }
             }
             case Remove: {
-                if (!take_new) {
+                if (!is_taking_new) {
                     out.extend(ops[position].line);
                 }
             }
