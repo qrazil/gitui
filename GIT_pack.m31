@@ -346,8 +346,8 @@ pub Result<List<str>, Error> ids(str gitdir) {
         match (io.read_bytes(pack_file.idx_path)) {
             case Ok(bytes data): {
                 match (parse_idx(data)) {
-                    case Ok(Idx idx): {
-                        for (str id in idx.all_ids()) {
+                    case Ok(Idx pack_index): {
+                        for (str id in pack_index.all_ids()) {
                             out.push(id);
                         }
                     }
@@ -489,12 +489,12 @@ Result<Found, Error> resolve_id(str gitdir, List<PackFile> packs, str id, int de
         match (io.read_bytes(pack_file.idx_path)) {
             case Ok(bytes idata): {
                 match (parse_idx(idata)) {
-                    case Ok(Idx idx): {
-                        match (idx.offset_of(id20)) {
+                    case Ok(Idx pack_index): {
+                        match (pack_index.offset_of(id20)) {
                             case Some(int off): {
                                 match (io.read_bytes(pack_file.pack_path)) {
                                     case Ok(bytes packbytes): {
-                                        return resolve_offset(gitdir, packs, idx, packbytes, off, depth);
+                                        return resolve_offset(gitdir, packs, pack_index, packbytes, off, depth);
                                     }
                                     case Err(_): {
                                         return Result<Found, Error>.Err(Error.Io);
@@ -521,7 +521,7 @@ Result<Found, Error> resolve_id(str gitdir, List<PackFile> packs, str id, int de
 // once the chain bottoms out at a real commit/tree/blob/tag. See the module
 // header, "resolving a delta chain", for why this is a loop and not a
 // recursive call for the common case.
-Result<Found, Error> resolve_offset(str gitdir, List<PackFile> packs, Idx idx, bytes pack, int start_offset, int depth) {
+Result<Found, Error> resolve_offset(str gitdir, List<PackFile> packs, Idx pack_index, bytes pack, int start_offset, int depth) {
     List<bytes> chain = [];
     int current = start_offset;
     int steps = 0;
@@ -588,7 +588,7 @@ Result<Found, Error> resolve_offset(str gitdir, List<PackFile> packs, Idx idx, b
             GIT_zlib.Decoded decoded = inflate_pack_zlib(pack, position + 20)?;
             chain.push(decoded.data);
             bool base_done = false;
-            match (idx.offset_of(base_sha)) {
+            match (pack_index.offset_of(base_sha)) {
                 case Some(int base_off): {
                     current = base_off;
                 }
@@ -827,7 +827,7 @@ Result<GIT_zlib.Decoded, Error> inflate_pack_zlib(bytes pack, int start) {
 // table itself is always at `8 .. 8 + 1024`, so it needs no field of its own.
 type Idx {
     bytes data;
-    int n;
+    int entry_count;
     int names_off;
     int off_off;
     int large_off;
@@ -884,7 +884,7 @@ int Idx.offset_at(int entry_index) {
 List<str> Idx.all_ids() {
     List<str> out = [];
     int index = 0;
-    while (index < n) {
+    while (index < entry_count) {
         out.push(data.substr(names_off + index * 20, names_off + index * 20 + 20).hex());
         index = index + 1;
     }

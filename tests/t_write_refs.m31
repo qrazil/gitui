@@ -17,62 +17,62 @@ if (argv.size() < 4) {
     io.eprint("usage: t_write_refs <gitdir> <commit-a> <commit-b>");
     os.exit(2);
 }
-str gd = argv[1];
-str a = argv[2];
-str b = argv[3];
+str git_directory = argv[1];
+str first_id = argv[2];
+str second_id = argv[3];
 // A plain, unconditional write of a new branch.
-match (GIT_refs.update(gd, "refs/heads/newbranch", a, Option<str>.None)) {
+match (GIT_refs.update(git_directory, "refs/heads/newbranch", first_id, Option<str>.None)) {
     case Ok: {
         print("update-plain ok");
     }
-    case Err(GIT_refs.Error e): {
-        print("update-plain err " + e.to_str());
+    case Err(GIT_refs.Error error): {
+        print("update-plain err " + error.to_str());
     }
 }
 // A symbolic HEAD, pointed at that branch.
-match (GIT_refs.update_symbolic(gd, "HEAD", "refs/heads/newbranch")) {
+match (GIT_refs.update_symbolic(git_directory, "HEAD", "refs/heads/newbranch")) {
     case Ok: {
         print("symbolic-head ok");
     }
-    case Err(GIT_refs.Error e): {
-        print("symbolic-head err " + e.to_str());
+    case Err(GIT_refs.Error error): {
+        print("symbolic-head err " + error.to_str());
     }
 }
 // A compare-and-swap against the WRONG current value must fail, and leave
 // the branch exactly where it was.
-match (GIT_refs.update(gd, "refs/heads/newbranch", b, Option<str>.Some("0000000000000000000000000000000000000000"))) {
+match (GIT_refs.update(git_directory, "refs/heads/newbranch", second_id, Option<str>.Some("0000000000000000000000000000000000000000"))) {
     case Ok: {
         print("cas-wrong ok (should have been a Mismatch)");
     }
-    case Err(GIT_refs.Error e): {
-        print("cas-wrong err " + e.to_str());
+    case Err(GIT_refs.Error error): {
+        print("cas-wrong err " + error.to_str());
     }
 }
 // A compare-and-swap against the RIGHT current value must succeed.
-match (GIT_refs.update(gd, "refs/heads/newbranch", b, Option<str>.Some(a))) {
+match (GIT_refs.update(git_directory, "refs/heads/newbranch", second_id, Option<str>.Some(first_id))) {
     case Ok: {
         print("cas-right ok");
     }
-    case Err(GIT_refs.Error e): {
-        print("cas-right err " + e.to_str());
+    case Err(GIT_refs.Error error): {
+        print("cas-right err " + error.to_str());
     }
 }
 // A detached HEAD, direct.
-match (GIT_refs.update(gd, "HEAD", a, Option<str>.None)) {
+match (GIT_refs.update(git_directory, "HEAD", first_id, Option<str>.None)) {
     case Ok: {
         print("detached-head ok");
     }
-    case Err(GIT_refs.Error e): {
-        print("detached-head err " + e.to_str());
+    case Err(GIT_refs.Error error): {
+        print("detached-head err " + error.to_str());
     }
 }
 // A compare-and-swap creating a brand new branch -- `expect_old` is `""`
 // because there is nothing there yet.
-match (GIT_refs.update(gd, "refs/heads/fresh", a, Option<str>.Some(""))) {
+match (GIT_refs.update(git_directory, "refs/heads/fresh", first_id, Option<str>.Some(""))) {
     case Ok: {
         print("cas-create ok");
     }
-    case Err(GIT_refs.Error e): {
-        print("cas-create err " + e.to_str());
+    case Err(GIT_refs.Error error): {
+        print("cas-create err " + error.to_str());
     }
 }

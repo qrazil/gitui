@@ -27,23 +27,23 @@ if (argv.size() < 2) {
     io.eprint("usage: t_inflate <fixture-dir>");
     os.exit(2);
 }
-str dir = argv[1];
+str directory = argv[1];
 List<str> names = [];
-match (fs.listdir(dir)) {
+match (fs.listdir(directory)) {
     case Ok(List<str> found): {
-        for (str f in found) {
+        for (str file_name in found) {
             // The name WITHOUT the extension, because that is what is
             // printed and the order has to be the order of the printed
             // lines: `fixed-match.z` sorts before `fixed.z` (`-` is below
             // `.`) while `fixed` sorts before `fixed-match`.
-            str name = text.strip_suffix(f, ".z");
-            if (name != f) {
+            str name = text.strip_suffix(file_name, ".z");
+            if (name != file_name) {
                 names.push(name);
             }
         }
     }
-    case Err(io.Error e): {
-        io.eprint("cannot list " + dir + ": " + e.to_str());
+    case Err(io.Error error): {
+        io.eprint("cannot list " + directory + ": " + error.to_str());
         os.exit(2);
     }
 }
@@ -52,30 +52,30 @@ int slowest = 0;
 int slowest_bytes = 0;
 str slowest_name = "";
 for (str name in names) {
-    match (io.read_bytes(fs.join(dir, name + ".z"))) {
+    match (io.read_bytes(fs.join(directory, name + ".z"))) {
         case Ok(bytes stream): {
-            int t0 = date.now_ns();
+            int start_nanoseconds = date.now_ns();
             match (GIT_zlib.decompress(stream)) {
                 case Ok(bytes out): {
-                    int ns = date.now_ns() - t0;
+                    int elapsed_nanoseconds = date.now_ns() - start_nanoseconds;
                     print(name + " ok " + out.size().to_str() + " " + GIT_sha1.hex(out));
                     if (out.size() > slowest_bytes) {
                         slowest_bytes = out.size();
-                        slowest = ns;
+                        slowest = elapsed_nanoseconds;
                         slowest_name = name;
                     }
                 }
-                case Err(GIT_zlib.Error e): {
+                case Err(GIT_zlib.Error error): {
                     print(name + " err");
                     // The message is not compared -- no oracle has an opinion
                     // about it -- but a refusal nobody can read is not much of
                     // a refusal, so every one of them is shown on stderr.
-                    io.eprint("  " + name + ": " + e.to_str());
+                    io.eprint("  " + name + ": " + error.to_str());
                 }
             }
         }
-        case Err(io.Error e): {
-            io.eprint("cannot read " + name + ": " + e.to_str());
+        case Err(io.Error error): {
+            io.eprint("cannot read " + name + ": " + error.to_str());
             os.exit(2);
         }
     }

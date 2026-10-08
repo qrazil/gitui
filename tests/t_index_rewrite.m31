@@ -14,23 +14,23 @@ if (argv.size() < 2) {
     io.eprint("usage: t_index_rewrite <gitdir>");
     os.exit(2);
 }
-str gd = argv[1];
-GIT_index.Index ix = GIT_index.Index([]);
-match (GIT_index.read(gd)) {
-    case Ok(GIT_index.Index v): {
-        ix = v;
+str git_directory = argv[1];
+GIT_index.Index original = GIT_index.Index([]);
+match (GIT_index.read(git_directory)) {
+    case Ok(GIT_index.Index index): {
+        original = index;
     }
-    case Err(GIT_index.Error e): {
-        io.eprint("read: " + e.to_str());
+    case Err(GIT_index.Error error): {
+        io.eprint("read: " + error.to_str());
         os.exit(1);
     }
 }
-match (GIT_index.write(gd, ix)) {
+match (GIT_index.write(git_directory, original)) {
     case Ok: {
     }
-    case Err(GIT_index.Error e): {
-        io.eprint("write: " + e.to_str());
+    case Err(GIT_index.Error error): {
+        io.eprint("write: " + error.to_str());
         os.exit(1);
     }
 }
-print("rewritten " + ix.entries.size().to_str());
+print("rewritten " + original.entries.size().to_str());

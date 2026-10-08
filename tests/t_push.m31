@@ -71,8 +71,8 @@ void usage() {
     os.exit(2);
 }
 
-void fail(str msg) {
-    io.eprint("error: " + msg);
+void fail(str message) {
+    io.eprint("error: " + message);
     os.exit(1);
 }
 
@@ -85,8 +85,8 @@ void do_objects(str gitdir, str tip, List<str> known) {
                 print(id);
             }
         }
-        case Err(GIT_pack_write.Error e): {
-            fail(e.to_str());
+        case Err(GIT_pack_write.Error error): {
+            fail(error.to_str());
         }
     }
 }
@@ -94,33 +94,33 @@ void do_objects(str gitdir, str tip, List<str> known) {
 void do_push(str gitdir, str url, str refname) {
     str id = "";
     match (GIT_refs.resolve(gitdir, refname)) {
-        case Ok(str v): {
-            id = v;
+        case Ok(str resolved_id): {
+            id = resolved_id;
         }
-        case Err(GIT_refs.Error e): {
-            fail("resolve " + refname + ": " + e.to_str());
+        case Err(GIT_refs.Error error): {
+            fail("resolve " + refname + ": " + error.to_str());
         }
     }
-    GIT_http_push.Remote r = GIT_http_push.Remote("", Option<GIT_http_push.Credentials>.None);
+    GIT_http_push.Remote remote = GIT_http_push.Remote("", Option<GIT_http_push.Credentials>.None);
     match (GIT_http_push.parse_remote(url)) {
-        case Ok(GIT_http_push.Remote v): {
-            r = v;
+        case Ok(GIT_http_push.Remote parsed): {
+            remote = parsed;
         }
-        case Err(GIT_http_push.Error e): {
-            fail(e.to_str());
+        case Err(GIT_http_push.Error error): {
+            fail(error.to_str());
         }
     }
-    match (GIT_http_push.push(gitdir, r, refname, id)) {
+    match (GIT_http_push.push(gitdir, remote, refname, id)) {
         case Ok(GIT_http_push.Report rep): {
-            if (rep.ok) {
+            if (rep.is_ok) {
                 print("ok " + rep.refname);
             } else {
                 print("ng " + rep.refname + " " + rep.reason);
                 os.exit(1);
             }
         }
-        case Err(GIT_http_push.Error e): {
-            fail(e.to_str());
+        case Err(GIT_http_push.Error error): {
+            fail(error.to_str());
         }
     }
 }
@@ -131,19 +131,19 @@ void do_origin(str gitdir) {
 
 void do_remote(str url) {
     match (GIT_http_push.parse_remote(url)) {
-        case Ok(GIT_http_push.Remote r): {
-            print("url " + r.url);
-            match (r.auth) {
-                case Some(GIT_http_push.Credentials c): {
-                    print("user " + c.user);
+        case Ok(GIT_http_push.Remote remote): {
+            print("url " + remote.url);
+            match (remote.auth) {
+                case Some(GIT_http_push.Credentials credentials): {
+                    print("user " + credentials.user);
                 }
                 case None: {
                     print("user -");
                 }
             }
         }
-        case Err(GIT_http_push.Error e): {
-            fail(e.to_str());
+        case Err(GIT_http_push.Error error): {
+            fail(error.to_str());
         }
     }
 }
@@ -153,15 +153,15 @@ void do_report(str path, str refname) {
         case Ok(bytes body): {
             match (GIT_http_push.parse_report(body, refname)) {
                 case Ok(GIT_http_push.Report rep): {
-                    print("unpacked " + bool_text(rep.unpacked) + " ok " + bool_text(rep.ok) + " reason " + rep.reason);
+                    print("unpacked " + bool_text(rep.is_unpacked) + " ok " + bool_text(rep.is_ok) + " reason " + rep.reason);
                 }
-                case Err(GIT_http_push.Error e): {
-                    fail(e.to_str());
+                case Err(GIT_http_push.Error error): {
+                    fail(error.to_str());
                 }
             }
         }
-        case Err(io.Error e): {
-            fail("cannot read " + path + ": " + e.to_str());
+        case Err(io.Error error): {
+            fail("cannot read " + path + ": " + error.to_str());
         }
     }
 }
@@ -171,8 +171,8 @@ void do_config(str path, str section, str subsection, str key) {
         case Ok(str text): {
             print(GIT_config.find(text, section, subsection, key).or("none"));
         }
-        case Err(io.Error e): {
-            fail("cannot read " + path + ": " + e.to_str());
+        case Err(io.Error error): {
+            fail("cannot read " + path + ": " + error.to_str());
         }
     }
 }
@@ -185,8 +185,8 @@ void do_ancestor(str gitdir, str anc, str desc) {
     }
 }
 
-str bool_text(bool b) {
-    if (b) {
+str bool_text(bool flag) {
+    if (flag) {
         return "true";
     }
     return "false";

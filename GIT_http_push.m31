@@ -335,11 +335,11 @@ pub bytes command_body(str old, str new, str refname, bytes pack) {
 // --- the server's verdict (Part 3) --------------------------------------------
 
 /// What the server said about one update: whether it unpacked what was sent
-/// (`unpacked`, with `reason` holding its words when it did not), and
+/// (`is_unpacked`, with `reason` holding its words when it did not), and
 /// whether the ref itself was updated (`ok`, `reason` otherwise).
 pub type Report {
-    pub bool unpacked;
-    pub bool ok;
+    pub bool is_unpacked;
+    pub bool is_ok;
     pub str refname;
     pub str reason;
 }
@@ -348,7 +348,7 @@ pub type Report {
 /// `ok <ref>` or `ng <ref> <why>` per command, then a flush. Pure.
 pub Result<Report, Error> parse_report(bytes body, str refname) {
     int offset = 0;
-    bool unpacked = false;
+    bool is_unpacked = false;
     str unpack_reason = "";
     bool saw_unpack = false;
     bool saw_ref = false;
@@ -375,8 +375,8 @@ pub Result<Report, Error> parse_report(bytes body, str refname) {
             }
             saw_unpack = true;
             str rest = line.substr(7, line.size());
-            unpacked = rest == "ok";
-            if (!unpacked) {
+            is_unpacked = rest == "ok";
+            if (!is_unpacked) {
                 unpack_reason = rest;
             }
             continue;
@@ -410,7 +410,7 @@ pub Result<Report, Error> parse_report(bytes body, str refname) {
     if (!saw_unpack) {
         return Result<Report, Error>.Err(Error.BadReport);
     }
-    if (!unpacked) {
+    if (!is_unpacked) {
         return Result<Report, Error>.Ok(Report(false, false, refname, unpack_reason));
     }
     if (!saw_ref) {
@@ -477,7 +477,7 @@ pub bool is_ancestor(str gitdir, str anc, str desc) {
 
 /// Push `new_id` to `refname` on `r`: discover, check the fast-forward
 /// rule, collect and pack what the remote lacks, send, and return the
-/// server's verdict. `Ok(report)` with `report.ok == false` is a push the
+/// server's verdict. `Ok(report)` with `report.is_ok == false` is a push the
 /// server itself refused (its `reason` says why); every `Err` is a push
 /// that never reached the server, or an answer this client could not read.
 pub Result<Report, Error> push(str gitdir, Remote remote, str refname, str new_id) {

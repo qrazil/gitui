@@ -2666,7 +2666,7 @@ pub void State.push_current() {
     }
     match (GIT_http_push.push(gitdir, remote, refname, id)) {
         case Ok(GIT_http_push.Report rep): {
-            if (rep.ok) {
+            if (rep.is_ok) {
                 message = "pushed " + refname + " to origin";
             } else {
                 message = "push refused by origin: " + rep.reason;

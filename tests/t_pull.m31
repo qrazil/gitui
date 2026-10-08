@@ -28,31 +28,31 @@ if (argv.size() == 5 && argv[1] == "pull") {
     os.exit(2);
 }
 
-void fail(str msg) {
-    io.eprint("error: " + msg);
+void fail(str message) {
+    io.eprint("error: " + message);
     os.exit(1);
 }
 
 void do_pull(str gitdir, str worktree, str url) {
-    GIT_http_push.Remote r = GIT_http_push.Remote("", Option<GIT_http_push.Credentials>.None);
+    GIT_http_push.Remote remote = GIT_http_push.Remote("", Option<GIT_http_push.Credentials>.None);
     match (GIT_http_push.parse_remote(url)) {
-        case Ok(GIT_http_push.Remote v): {
-            r = v;
+        case Ok(GIT_http_push.Remote parsed): {
+            remote = parsed;
         }
-        case Err(GIT_http_push.Error e): {
-            fail(e.to_str());
+        case Err(GIT_http_push.Error error): {
+            fail(error.to_str());
         }
     }
-    match (GIT_pull.pull(gitdir, worktree, r)) {
-        case Ok(GIT_pull.Outcome o): {
-            if (o.moved) {
-                print("pulled " + o.old_id + " " + o.new_id + " " + o.objects.to_str());
+    match (GIT_pull.pull(gitdir, worktree, remote)) {
+        case Ok(GIT_pull.Outcome outcome): {
+            if (outcome.moved) {
+                print("pulled " + outcome.old_id + " " + outcome.new_id + " " + outcome.objects.to_str());
             } else {
-                print("up to date " + o.old_id);
+                print("up to date " + outcome.old_id);
             }
         }
-        case Err(GIT_pull.Error e): {
-            fail(e.to_str());
+        case Err(GIT_pull.Error error): {
+            fail(error.to_str());
         }
     }
 }
@@ -60,31 +60,31 @@ void do_pull(str gitdir, str worktree, str url) {
 void do_unpack(str gitdir, str path) {
     bytes raw = [];
     match (io.read_bytes(path)) {
-        case Ok(bytes b): {
-            raw = b;
+        case Ok(bytes contents): {
+            raw = contents;
         }
-        case Err(io.Error e): {
-            fail("cannot read " + path + ": " + e.to_str());
+        case Err(io.Error error): {
+            fail("cannot read " + path + ": " + error.to_str());
         }
     }
     match (GIT_pack.read_pack(gitdir, raw)) {
         case Ok(List<GIT_pack.Unpacked> objs): {
-            for (GIT_pack.Unpacked u in objs) {
-                match (GIT_object.write(gitdir, u.kind, u.content)) {
+            for (GIT_pack.Unpacked unpacked in objs) {
+                match (GIT_object.write(gitdir, unpacked.kind, unpacked.content)) {
                     case Ok(str id): {
-                        if (id != u.id) {
-                            fail("object name mismatch: " + id + " vs " + u.id);
+                        if (id != unpacked.id) {
+                            fail("object name mismatch: " + id + " vs " + unpacked.id);
                         }
                     }
-                    case Err(GIT_object.Error e): {
-                        fail("write: " + e.to_str());
+                    case Err(GIT_object.Error error): {
+                        fail("write: " + error.to_str());
                     }
                 }
             }
             print(objs.size().to_str());
         }
-        case Err(GIT_pack.Error e): {
-            fail(e.to_str());
+        case Err(GIT_pack.Error error): {
+            fail(error.to_str());
         }
     }
 }

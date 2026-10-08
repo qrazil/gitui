@@ -14,30 +14,30 @@ if (argv.size() < 3) {
     io.eprint("usage: t_status <gitdir> <worktree>");
     os.exit(2);
 }
-str gd = argv[1];
-str wt = argv[2];
-match (GIT_status.status(gd, wt)) {
-    case Ok(GIT_status.Status st): {
-        show(st);
+str git_directory = argv[1];
+str worktree = argv[2];
+match (GIT_status.status(git_directory, worktree)) {
+    case Ok(GIT_status.Status status): {
+        show(status);
     }
-    case Err(GIT_status.Error e): {
-        io.eprint(e.to_str());
+    case Err(GIT_status.Error error): {
+        io.eprint(error.to_str());
         os.exit(1);
     }
 }
 
-void show(GIT_status.Status st) {
-    Map<str, int> sc = {};
-    Map<str, int> uc = {};
+void show(GIT_status.Status status) {
+    Map<str, int> staged_counts = {};
+    Map<str, int> unstaged_counts = {};
     Map<str, bool> untr = {};
-    for (GIT_status.Delta d in st.staged) {
-        sc.set(d.path.utf8().or("<non-utf8>"), staged_char(d.kind));
+    for (GIT_status.Delta delta in status.staged) {
+        staged_counts.set(delta.path.utf8().or("<non-utf8>"), staged_char(delta.kind));
     }
-    for (GIT_status.Delta d in st.unstaged) {
-        uc.set(d.path.utf8().or("<non-utf8>"), unstaged_char(d.kind));
+    for (GIT_status.Delta delta in status.unstaged) {
+        unstaged_counts.set(delta.path.utf8().or("<non-utf8>"), unstaged_char(delta.kind));
     }
-    for (bytes b in st.untracked) {
-        untr.set(b.utf8().or("<non-utf8>"), true);
+    for (bytes path in status.untracked) {
+        untr.set(path.utf8().or("<non-utf8>"), true);
     }
     // `git status --short` prints two separate blocks, each sorted on its
     // own -- every tracked change (staged, unstaged, or both), then every
@@ -47,31 +47,31 @@ void show(GIT_status.Status st) {
     // exactly the reason its module header gives, and a caller with a
     // different presentation in mind is free to merge them however it likes.
     List<str> tracked = [];
-    for (str p in sc.keys()) {
-        tracked.push(p);
+    for (str path_text in staged_counts.keys()) {
+        tracked.push(path_text);
     }
-    for (str p in uc.keys()) {
-        if (!sc.contains(p)) {
-            tracked.push(p);
+    for (str path_text in unstaged_counts.keys()) {
+        if (!staged_counts.contains(path_text)) {
+            tracked.push(path_text);
         }
     }
     tracked.sort();
-    for (str p in tracked) {
-        bytes code = [sc.get(p).or(32), uc.get(p).or(32)];
-        print(code.utf8().or("??") + " " + p);
+    for (str path_text in tracked) {
+        bytes code = [staged_counts.get(path_text).or(32), unstaged_counts.get(path_text).or(32)];
+        print(code.utf8().or("??") + " " + path_text);
     }
     List<str> untracked = [];
-    for (str p in untr.keys()) {
-        untracked.push(p);
+    for (str path_text in untr.keys()) {
+        untracked.push(path_text);
     }
     untracked.sort();
-    for (str p in untracked) {
-        print("?? " + p);
+    for (str path_text in untracked) {
+        print("?? " + path_text);
     }
 }
 
-int staged_char(GIT_status.Change k) {
-    match (k) {
+int staged_char(GIT_status.Change change) {
+    match (change) {
         case Added: {
             return 'A';
         }
@@ -84,8 +84,8 @@ int staged_char(GIT_status.Change k) {
     }
 }
 
-int unstaged_char(GIT_status.Change k) {
-    match (k) {
+int unstaged_char(GIT_status.Change change) {
+    match (change) {
         case Added: {
             return 'A';
         }

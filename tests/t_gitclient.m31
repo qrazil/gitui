@@ -29,9 +29,9 @@ type Counter {
     int failed = 0;
 }
 
-void Counter.check(str name, bool ok, str detail) {
+void Counter.check(str name, bool is_ok, str detail) {
     checks = checks + 1;
-    if (ok) {
+    if (is_ok) {
         print(name + " ok");
     } else {
         failed = failed + 1;
@@ -43,31 +43,31 @@ Counter counter = Counter();
 
 // --- build_outline -----------------------------------------------------------
 
-GIT_status.Status st = GIT_status.Status([GIT_status.Delta("a.txt".to_bytes(), GIT_status.Change.Modified), GIT_status.Delta("newfile.txt".to_bytes(), GIT_status.Change.Added)], [GIT_status.Delta("b.txt".to_bytes(), GIT_status.Change.Modified)], ["c.txt".to_bytes()]);
+GIT_status.Status status = GIT_status.Status([GIT_status.Delta("a.txt".to_bytes(), GIT_status.Change.Modified), GIT_status.Delta("newfile.txt".to_bytes(), GIT_status.Change.Added)], [GIT_status.Delta("b.txt".to_bytes(), GIT_status.Change.Modified)], ["c.txt".to_bytes()]);
 GIT_object.Ident who = GIT_object.Ident("A U Thor".to_bytes(), "a@example.com".to_bytes(), 1700000000, 0, "+0000");
-GIT_object.Commit c1 = GIT_object.Commit("0000000000000000000000000000000000000000", [], who, who, [], "first commit\n\nwith a body\n".to_bytes());
-List<GIT_log.Entry> log = [GIT_log.Entry("1111111111111111111111111111111111111111", c1)];
+GIT_object.Commit first_commit = GIT_object.Commit("0000000000000000000000000000000000000000", [], who, who, [], "first commit\n\nwith a body\n".to_bytes());
+List<GIT_log.Entry> log = [GIT_log.Entry("1111111111111111111111111111111111111111", first_commit)];
 Map<str, bool> collapsed = {};
 Map<str, bytes> paths = {};
 Map<str, List<GIT_client.CommitFileDiff>> changes = {};
 changes.set("1111111111111111111111111111111111111111", [GIT_client.CommitFileDiff("x.txt".to_bytes(), GIT_status.Change.Modified, Option<str>.Some("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"), Option<str>.Some("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"), false, 3, 1)]);
 Map<str, GIT_client.CommitFileDiff> file_diffs = {};
-TUI_outline.Outline o = GIT_client.build_outline(st, log, changes, collapsed, paths, file_diffs, []);
-List<TUI_outline.Row> rows = o.rows();
+TUI_outline.Outline outline = GIT_client.build_outline(status, log, changes, collapsed, paths, file_diffs, []);
+List<TUI_outline.Row> rows = outline.rows();
 List<str> ids = [];
-for (TUI_outline.Row r in rows) {
-    ids.push(r.node.id);
+for (TUI_outline.Row row in rows) {
+    ids.push(row.node.id);
 }
 str joined = ids.join(",");
 counter.check("outline: five top-level sections plus their children, commits collapsed by default", joined == "untracked,untracked:c.txt,unstaged,unstaged:b.txt,staged,staged:a.txt,staged:newfile.txt,commits,commit:1111111111111111111111111111111111111111,branches", joined);
 List<GIT_client.BranchRow> brs = [GIT_client.BranchRow(GIT_checkout.Branch("feature", "refs/heads/feature", "2222222222222222222222222222222222222222", false), "second thing"), GIT_client.BranchRow(GIT_checkout.Branch("main", "refs/heads/main", "1111111111111111111111111111111111111111", true), "first commit")];
-TUI_outline.Outline bo = GIT_client.build_outline(st, log, changes, collapsed, paths, file_diffs, brs);
+TUI_outline.Outline branch_outline = GIT_client.build_outline(status, log, changes, collapsed, paths, file_diffs, brs);
 List<str> bids = [];
 List<str> blabels = [];
-for (TUI_outline.Row r in bo.rows()) {
-    if (r.node.id == "branches" || r.node.id.starts_with("branch:")) {
-        bids.push(r.node.id);
-        blabels.push(r.node.label);
+for (TUI_outline.Row row in branch_outline.rows()) {
+    if (row.node.id == "branches" || row.node.id.starts_with("branch:")) {
+        bids.push(row.node.id);
+        blabels.push(row.node.label);
     }
 }
 counter.check("outline: branches section lists one leaf per branch, expanded by default", bids.join(",") == "branches,branch:feature,branch:main", bids.join(","));
@@ -79,16 +79,16 @@ counter.check("outline: a staged, modified path is marked M", rows[5].node.label
 counter.check("outline: a staged, newly-added path is marked A", rows[6].node.label == "A  newfile.txt", rows[6].node.label);
 counter.check("outline: the commit row shows its short id and first message line", rows[8].node.label == "1111111  first commit", rows[8].node.label);
 match (paths.get("staged:a.txt")) {
-    case Some(bytes p): {
-        counter.check("outline: paths map recovers the real bytes for a staged row", p.utf8().or("") == "a.txt", p.utf8().or("<none>"));
+    case Some(bytes path): {
+        counter.check("outline: paths map recovers the real bytes for a staged row", path.utf8().or("") == "a.txt", path.utf8().or("<none>"));
     }
     case None: {
         counter.check("outline: paths map recovers the real bytes for a staged row", false, "no entry for staged:a.txt");
     }
 }
 match (paths.get("untracked:c.txt")) {
-    case Some(bytes p): {
-        counter.check("outline: paths map recovers the real bytes for an untracked row", p.utf8().or("") == "c.txt", p.utf8().or("<none>"));
+    case Some(bytes path): {
+        counter.check("outline: paths map recovers the real bytes for an untracked row", path.utf8().or("") == "c.txt", path.utf8().or("<none>"));
     }
     case None: {
         counter.check("outline: paths map recovers the real bytes for an untracked row", false, "no entry for untracked:c.txt");
@@ -105,40 +105,40 @@ for (str id in ids) {
 counter.check("outline: a commit's body is hidden until expanded", !saw_body, "body row leaked into the collapsed view");
 // Recorded as expanded (via `collapsed`), the same build must show it.
 collapsed.set("commit:1111111111111111111111111111111111111111", false);
-TUI_outline.Outline o2 = GIT_client.build_outline(st, log, changes, collapsed, paths, file_diffs, []);
+TUI_outline.Outline second_outline = GIT_client.build_outline(status, log, changes, collapsed, paths, file_diffs, []);
 bool saw_body2 = false;
-for (TUI_outline.Row r in o2.rows()) {
-    if (r.node.id == "commit:1111111111111111111111111111111111111111:author") {
+for (TUI_outline.Row row in second_outline.rows()) {
+    if (row.node.id == "commit:1111111111111111111111111111111111111111:author") {
         saw_body2 = true;
     }
 }
 counter.check("outline: an expanded commit shows its author/date/message rows", saw_body2, "author row missing after expanding");
 str files_label = "";
 bool saw_file_row = false;
-for (TUI_outline.Row r in o2.rows()) {
-    if (r.node.id == "commit:1111111111111111111111111111111111111111:files") {
-        files_label = r.node.label;
+for (TUI_outline.Row row in second_outline.rows()) {
+    if (row.node.id == "commit:1111111111111111111111111111111111111111:files") {
+        files_label = row.node.label;
     }
-    if (r.node.id == "commit:1111111111111111111111111111111111111111:file:0") {
+    if (row.node.id == "commit:1111111111111111111111111111111111111111:file:0") {
         saw_file_row = true;
     }
 }
 counter.check("outline: an expanded commit shows its own Files changed section, counting changes' entries", files_label == "Files changed (1)", files_label);
 counter.check("outline: a commit's Files changed section is open by default once the commit is", saw_file_row, "file row missing with the commit expanded and no fold recorded");
 str file_label = "";
-for (TUI_outline.Row r in o2.rows()) {
-    if (r.node.id == "commit:1111111111111111111111111111111111111111:file:0") {
-        file_label = r.node.label;
+for (TUI_outline.Row row in second_outline.rows()) {
+    if (row.node.id == "commit:1111111111111111111111111111111111111111:file:0") {
+        file_label = row.node.label;
     }
 }
 counter.check("outline: a commit's file row shows mark, path and +insertions -deletions", file_label == "M  x.txt  +3 -1", file_label);
 // A fold the user recorded on the Files changed section itself still wins
 // over that default, the same way every other section's does.
 collapsed.set("commit:1111111111111111111111111111111111111111:files", true);
-TUI_outline.Outline o2b = GIT_client.build_outline(st, log, changes, collapsed, paths, file_diffs, []);
+TUI_outline.Outline o2b = GIT_client.build_outline(status, log, changes, collapsed, paths, file_diffs, []);
 bool saw_file_row_folded = false;
-for (TUI_outline.Row r in o2b.rows()) {
-    if (r.node.id == "commit:1111111111111111111111111111111111111111:file:0") {
+for (TUI_outline.Row row in o2b.rows()) {
+    if (row.node.id == "commit:1111111111111111111111111111111111111111:file:0") {
         saw_file_row_folded = true;
     }
 }
@@ -149,33 +149,33 @@ collapsed.set("commit:1111111111111111111111111111111111111111:files", false);
 // log has no such row -- `o` above, one commit, proved the absence already
 // via its exact id list.
 List<GIT_log.Entry> long_log = [];
-int li = 0;
-while (li < 200) {
-    str hex = li.to_str();
+int line_index = 0;
+while (line_index < 200) {
+    str hex = line_index.to_str();
     while (hex.size() < 40) {
         hex = "0" + hex;
     }
-    long_log.push(GIT_log.Entry(hex, c1));
-    li = li + 1;
+    long_log.push(GIT_log.Entry(hex, first_commit));
+    line_index = line_index + 1;
 }
 Map<str, bool> collapsed_long = {};
 Map<str, bytes> paths_long = {};
 Map<str, List<GIT_client.CommitFileDiff>> changes_long = {};
 Map<str, GIT_client.CommitFileDiff> file_diffs_long = {};
-TUI_outline.Outline o_long = GIT_client.build_outline(st, long_log, changes_long, collapsed_long, paths_long, file_diffs_long, []);
+TUI_outline.Outline o_long = GIT_client.build_outline(status, long_log, changes_long, collapsed_long, paths_long, file_diffs_long, []);
 List<TUI_outline.Row> long_rows = o_long.rows();
 str last_id = long_rows[long_rows.size() - 1].node.id;
 str commits_label_long = "";
-for (TUI_outline.Row r in long_rows) {
-    if (r.node.id == "commits") {
-        commits_label_long = r.node.label;
+for (TUI_outline.Row row in long_rows) {
+    if (row.node.id == "commits") {
+        commits_label_long = row.node.label;
     }
 }
 counter.check("outline: a page-long log ends its Commits section with the load-more row", last_id == "commits:more", last_id);
 counter.check("outline: a page-long log's Commits count says there may be more", commits_label_long == "Commits (200+)", commits_label_long);
 match (file_diffs.get("commit:1111111111111111111111111111111111111111:file:0")) {
-    case Some(GIT_client.CommitFileDiff d): {
-        counter.check("outline: file_diffs recovers the same CommitFileDiff show_diff_current reads on Enter", d.path.utf8().or("") == "x.txt", d.path.utf8().or("<none>"));
+    case Some(GIT_client.CommitFileDiff commit_file_diff): {
+        counter.check("outline: file_diffs recovers the same CommitFileDiff show_diff_current reads on Enter", commit_file_diff.path.utf8().or("") == "x.txt", commit_file_diff.path.utf8().or("<none>"));
     }
     case None: {
         counter.check("outline: file_diffs recovers the same CommitFileDiff show_diff_current reads on Enter", false, "no entry for the file row");
@@ -191,27 +191,27 @@ match (file_diffs.get("commit:1111111111111111111111111111111111111111:file:0"))
 
 str long_words = "lorem ipsum dolor sit amet consectetur adipiscing elit sed do eiusmod ";
 str long_line = long_words.repeat(3).trim();
-GIT_object.Commit c2 = GIT_object.Commit("0000000000000000000000000000000000000000", [], who, who, [], (long_line + "\n\nshort tail line\n").to_bytes());
-List<GIT_log.Entry> log2 = [GIT_log.Entry("2222222222222222222222222222222222222222", c2)];
+GIT_object.Commit second_commit = GIT_object.Commit("0000000000000000000000000000000000000000", [], who, who, [], (long_line + "\n\nshort tail line\n").to_bytes());
+List<GIT_log.Entry> log2 = [GIT_log.Entry("2222222222222222222222222222222222222222", second_commit)];
 Map<str, bool> collapsed2 = {};
 collapsed2.set("commit:2222222222222222222222222222222222222222", false);
 Map<str, bytes> paths2 = {};
 Map<str, List<GIT_client.CommitFileDiff>> changes2 = {};
 Map<str, GIT_client.CommitFileDiff> file_diffs2 = {};
-TUI_outline.Outline o3 = GIT_client.build_outline(st, log2, changes2, collapsed2, paths2, file_diffs2, []);
+TUI_outline.Outline third_outline = GIT_client.build_outline(status, log2, changes2, collapsed2, paths2, file_diffs2, []);
 List<str> m0_rows = [];
 List<str> m2_rows = [];
 bool saw_blank_line_row = false;
-for (TUI_outline.Row r in o3.rows()) {
-    str rid = r.node.id;
+for (TUI_outline.Row row in third_outline.rows()) {
+    str rid = row.node.id;
     if (rid.starts_with("commit:2222222222222222222222222222222222222222:m0:")) {
-        m0_rows.push(r.node.label);
+        m0_rows.push(row.node.label);
     }
     if (rid == "commit:2222222222222222222222222222222222222222:m1:0") {
-        saw_blank_line_row = r.node.label == "  ";
+        saw_blank_line_row = row.node.label == "  ";
     }
     if (rid.starts_with("commit:2222222222222222222222222222222222222222:m2:")) {
-        m2_rows.push(r.node.label);
+        m2_rows.push(row.node.label);
     }
 }
 counter.check("commit message wrap: a line far longer than the fallback width becomes more than one leaf row", m0_rows.size() > 1, m0_rows.size().to_str() + " row(s)");
@@ -231,17 +231,17 @@ counter.check("commit message wrap: a line that already fits still yields exactl
 // An empty commit message: no message rows at all, matching `first_line`'s
 // own "nothing to show" reading of an empty message (just the author/date
 // leaves).
-GIT_object.Commit c3 = GIT_object.Commit("0000000000000000000000000000000000000000", [], who, who, [], "".to_bytes());
-List<GIT_log.Entry> log3 = [GIT_log.Entry("3333333333333333333333333333333333333333", c3)];
+GIT_object.Commit third_commit = GIT_object.Commit("0000000000000000000000000000000000000000", [], who, who, [], "".to_bytes());
+List<GIT_log.Entry> log3 = [GIT_log.Entry("3333333333333333333333333333333333333333", third_commit)];
 Map<str, bool> collapsed3 = {};
 collapsed3.set("commit:3333333333333333333333333333333333333333", false);
 Map<str, bytes> paths3 = {};
 Map<str, List<GIT_client.CommitFileDiff>> changes3 = {};
 Map<str, GIT_client.CommitFileDiff> file_diffs3 = {};
-TUI_outline.Outline o4 = GIT_client.build_outline(st, log3, changes3, collapsed3, paths3, file_diffs3, []);
+TUI_outline.Outline fourth_outline = GIT_client.build_outline(status, log3, changes3, collapsed3, paths3, file_diffs3, []);
 bool saw_any_message_row = false;
-for (TUI_outline.Row r in o4.rows()) {
-    if (r.node.id.starts_with("commit:3333333333333333333333333333333333333333:m")) {
+for (TUI_outline.Row row in fourth_outline.rows()) {
+    if (row.node.id.starts_with("commit:3333333333333333333333333333333333333333:m")) {
         saw_any_message_row = true;
     }
 }
@@ -264,18 +264,18 @@ counter.check("commit message: whitespace-only input strips to empty", GIT_clien
 // on-disk/index/HEAD comparison feeds `open_diff` for each of the
 // unstaged/staged/untracked cases is exercised against real git in
 // `test_gitui.sh` instead, since that needs an actual repository.
-GIT_client.State ds = GIT_client.State.open("", "");
-ds.open_diff("t.txt", "a\nb\nc\n".to_bytes(), "a\nB\nc\n".to_bytes());
-counter.check("open_diff: a one-line text change opens a non-binary, single-hunk view", ds.diff_open && !ds.diff_binary && ds.diff_view.hunks.size() == 1, "diff_open=" + ds.diff_open.to_str() + " binary=" + ds.diff_binary.to_str() + " hunks=" + ds.diff_view.hunks.size().to_str());
+GIT_client.State diff_state = GIT_client.State.open("", "");
+diff_state.open_diff("t.txt", "a\nb\nc\n".to_bytes(), "a\nB\nc\n".to_bytes());
+counter.check("open_diff: a one-line text change opens a non-binary, single-hunk view", diff_state.diff_open && !diff_state.diff_binary && diff_state.diff_view.hunks.size() == 1, "diff_open=" + diff_state.diff_open.to_str() + " binary=" + diff_state.diff_binary.to_str() + " hunks=" + diff_state.diff_view.hunks.size().to_str());
 str header0 = "<no hunk>";
-if (ds.diff_view.hunks.size() > 0) {
-    header0 = ds.diff_view.hunks[0].header;
+if (diff_state.diff_view.hunks.size() > 0) {
+    header0 = diff_state.diff_view.hunks[0].header;
 }
 counter.check("open_diff: the hunk header is a unified-diff @@ line", header0 == "@@ -1,3 +1,3 @@", header0);
-match (ds.diff_view.at()) {
-    case Some(TUI_diff_view.Row r): {
+match (diff_state.diff_view.at()) {
+    case Some(TUI_diff_view.Row row): {
         bool is_header = false;
-        match (r.kind) {
+        match (row.kind) {
             case Header: {
                 is_header = true;
             }
@@ -283,17 +283,17 @@ match (ds.diff_view.at()) {
                 is_header = false;
             }
         }
-        counter.check("open_diff: the cursor starts on the first hunk's header (DiffView.at addressing)", is_header && r.hunk == 0, "row: kind is not Header or hunk != 0");
+        counter.check("open_diff: the cursor starts on the first hunk's header (DiffView.at addressing)", is_header && row.hunk == 0, "row: kind is not Header or hunk != 0");
     }
     case None: {
         counter.check("open_diff: the cursor starts on the first hunk's header (DiffView.at addressing)", false, "at() returned None on a non-empty diff");
     }
 }
-ds.diff_view.move(1);
-match (ds.diff_view.at()) {
-    case Some(TUI_diff_view.Row r): {
+diff_state.diff_view.move(1);
+match (diff_state.diff_view.at()) {
+    case Some(TUI_diff_view.Row row): {
         bool is_body = false;
-        match (r.kind) {
+        match (row.kind) {
             case Header: {
                 is_body = false;
             }
@@ -301,30 +301,30 @@ match (ds.diff_view.at()) {
                 is_body = true;
             }
         }
-        counter.check("open_diff: moving the cursor addresses a body line of hunk 0", is_body && r.hunk == 0 && r.line == 0, "row did not address hunk 0's first body line");
+        counter.check("open_diff: moving the cursor addresses a body line of hunk 0", is_body && row.hunk == 0 && row.line == 0, "row did not address hunk 0's first body line");
     }
     case None: {
         counter.check("open_diff: moving the cursor addresses a body line of hunk 0", false, "at() returned None after move(1)");
     }
 }
-ds.close_diff();
-counter.check("close_diff: closing drops back to the outline and clears the view", !ds.diff_open && !ds.diff_binary && ds.diff_view.hunks.size() == 0, "diff_open=" + ds.diff_open.to_str() + " binary=" + ds.diff_binary.to_str() + " hunks=" + ds.diff_view.hunks.size().to_str());
+diff_state.close_diff();
+counter.check("close_diff: closing drops back to the outline and clears the view", !diff_state.diff_open && !diff_state.diff_binary && diff_state.diff_view.hunks.size() == 0, "diff_open=" + diff_state.diff_open.to_str() + " binary=" + diff_state.diff_binary.to_str() + " hunks=" + diff_state.diff_view.hunks.size().to_str());
 // A NUL on either side is `diff.is_binary`'s own heuristic (`lib/diff.m31`) --
 // checked here only to confirm `open_diff` reports it as `diff_binary` rather
 // than trying to line-diff it.
-GIT_client.State bs = GIT_client.State.open("", "");
+GIT_client.State branch_state = GIT_client.State.open("", "");
 bytes nul_old = [104, 101, 108, 108, 111, 0, 119, 111, 114, 108, 100, 10];
-bs.open_diff("bin.dat", nul_old, "hello world\n".to_bytes());
-counter.check("open_diff: a NUL-bearing old side reports diff_binary, not a garbled hunk view", bs.diff_open && bs.diff_binary && bs.diff_view.hunks.size() == 0, "diff_open=" + bs.diff_open.to_str() + " binary=" + bs.diff_binary.to_str() + " hunks=" + bs.diff_view.hunks.size().to_str());
+branch_state.open_diff("bin.dat", nul_old, "hello world\n".to_bytes());
+counter.check("open_diff: a NUL-bearing old side reports diff_binary, not a garbled hunk view", branch_state.diff_open && branch_state.diff_binary && branch_state.diff_view.hunks.size() == 0, "diff_open=" + branch_state.diff_open.to_str() + " binary=" + branch_state.diff_binary.to_str() + " hunks=" + branch_state.diff_view.hunks.size().to_str());
 // Untracked: no "old" side at all -- open_diff against an empty old, exactly
 // what `show_diff_current` does for an untracked row, should be one
 // all-added hunk covering the whole file.
-GIT_client.State us = GIT_client.State.open("", "");
-us.open_diff("new.txt", [], "one\ntwo\n".to_bytes());
-bool all_added = us.diff_view.hunks.size() == 1;
+GIT_client.State unstaged_state = GIT_client.State.open("", "");
+unstaged_state.open_diff("new.txt", [], "one\ntwo\n".to_bytes());
+bool all_added = unstaged_state.diff_view.hunks.size() == 1;
 if (all_added) {
-    for (TUI_diff_view.Line l in us.diff_view.hunks[0].lines) {
-        match (l.kind) {
+    for (TUI_diff_view.Line line in unstaged_state.diff_view.hunks[0].lines) {
+        match (line.kind) {
             case Add: {
             }
             case Context: {
@@ -336,7 +336,7 @@ if (all_added) {
         }
     }
 }
-counter.check("open_diff: an untracked file (empty old) is one all-added hunk", !us.diff_binary && all_added, "binary=" + us.diff_binary.to_str() + " hunks=" + us.diff_view.hunks.size().to_str());
+counter.check("open_diff: an untracked file (empty old) is one all-added hunk", !unstaged_state.diff_binary && all_added, "binary=" + unstaged_state.diff_binary.to_str() + " hunks=" + unstaged_state.diff_view.hunks.size().to_str());
 
 // --- pick_editor ---------------------------------------------------------------
 

@@ -46,8 +46,8 @@ void usage() {
     os.exit(2);
 }
 
-void fail(str msg) {
-    io.eprint("error: " + msg);
+void fail(str message) {
+    io.eprint("error: " + message);
     os.exit(1);
 }
 
@@ -58,8 +58,8 @@ void do_build(str gitdir, str out_path, List<str> ids) {
             case Ok(List<str> all): {
                 want = all;
             }
-            case Err(GIT_object.Error e): {
-                fail("object.all: " + e.to_str());
+            case Err(GIT_object.Error error): {
+                fail("object.all: " + error.to_str());
             }
         }
     }
@@ -69,33 +69,33 @@ void do_build(str gitdir, str out_path, List<str> ids) {
                 case Ok: {
                     print("pack " + pack.size().to_str() + " " + want.size().to_str());
                 }
-                case Err(io.Error e): {
-                    fail("write: " + e.to_str());
+                case Err(io.Error error): {
+                    fail("write: " + error.to_str());
                 }
             }
         }
-        case Err(GIT_pack_write.Error e): {
-            fail(e.to_str());
+        case Err(GIT_pack_write.Error error): {
+            fail(error.to_str());
         }
     }
 }
 
 void do_header(str type_text, str size_text) {
-    int t = type_text.parse_int().or(-1);
-    int n = size_text.parse_int().or(-1);
-    if (t < 0 || n < 0) {
+    int type_code = type_text.parse_int().or(-1);
+    int size = size_text.parse_int().or(-1);
+    if (type_code < 0 || size < 0) {
         fail("type and size must be non-negative integers");
     }
-    print(GIT_pack_write.entry_header(t, n).hex());
+    print(GIT_pack_write.entry_header(type_code, size).hex());
 }
 
 void do_stat(str gitdir, str id) {
     match (GIT_object.read(gitdir, id)) {
-        case Ok(GIT_object.Object o): {
-            print(o.kind() + " " + o.raw.size().to_str());
+        case Ok(GIT_object.Object object): {
+            print(object.kind() + " " + object.raw.size().to_str());
         }
-        case Err(GIT_object.Error e): {
-            fail(e.to_str());
+        case Err(GIT_object.Error error): {
+            fail(error.to_str());
         }
     }
 }

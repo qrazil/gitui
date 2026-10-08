@@ -26,11 +26,11 @@ print("448 " + GIT_sha1.hex("abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomno
 // fixture: the Python twin generates the same bytes from the same rule.
 
 bytes pattern = [];
-int n = 0;
-while (n <= 200) {
-    print("len" + n.to_str() + " " + GIT_sha1.hex(pattern));
-    pattern.push(n * 7 + 13 & 0xFF);
-    n = n + 1;
+int length = 0;
+while (length <= 200) {
+    print("len" + length.to_str() + " " + GIT_sha1.hex(pattern));
+    pattern.push(length * 7 + 13 & 0xFF);
+    length = length + 1;
 }
 
 // --- the million-a test, whole and in pieces ---------------------------------
@@ -45,17 +45,17 @@ print("million " + GIT_sha1.hex(million));
 const Array<int> CHUNKS = [1, 3, 63, 64, 65, 1000, 4096];
 
 for (int size in CHUNKS) {
-    GIT_sha1.Hasher h = GIT_sha1.Hasher();
-    int at = 0;
-    while (at < million.size()) {
-        int end = at + size;
+    GIT_sha1.Hasher hasher = GIT_sha1.Hasher();
+    int position = 0;
+    while (position < million.size()) {
+        int end = position + size;
         if (end > million.size()) {
             end = million.size();
         }
-        h.update(million.substr(at, end));
-        at = end;
+        hasher.update(million.substr(position, end));
+        position = end;
     }
-    print("million-by-" + size.to_str() + " " + h.digest().hex());
+    print("million-by-" + size.to_str() + " " + hasher.digest().hex());
 }
 
 // --- a real file, if one was named -------------------------------------------
@@ -64,14 +64,14 @@ List<str> argv = os.args();
 if (argv.size() > 1) {
     match (io.read_bytes(argv[1])) {
         case Ok(bytes data): {
-            int t0 = date.now_ns();
+            int start_nanoseconds = date.now_ns();
             str got = GIT_sha1.hex(data);
-            int ns = date.now_ns() - t0;
+            int elapsed_nanoseconds = date.now_ns() - start_nanoseconds;
             print("file " + got);
-            report(data.size(), ns);
+            report(data.size(), elapsed_nanoseconds);
         }
-        case Err(io.Error e): {
-            io.eprint("cannot read " + argv[1] + ": " + e.to_str());
+        case Err(io.Error error): {
+            io.eprint("cannot read " + argv[1] + ": " + error.to_str());
         }
     }
 }
@@ -80,9 +80,9 @@ if (argv.size() > 1) {
 // rounded megabyte per second is all anyone reads off a benchmark, and
 // because `float` would drag the float-formatting module into a program that
 // is otherwise pure integer work.
-void report(int size, int ns) {
-    if (ns <= 0) {
+void report(int size, int elapsed_nanoseconds) {
+    if (elapsed_nanoseconds <= 0) {
         return;
     }
-    io.eprint("sha1: " + size.to_str() + " bytes in " + (ns / 1_000_000).to_str() + " ms = " + (size * 1_000 / ns).to_str() + " MB/s");
+    io.eprint("sha1: " + size.to_str() + " bytes in " + (elapsed_nanoseconds / 1_000_000).to_str() + " ms = " + (size * 1_000 / elapsed_nanoseconds).to_str() + " MB/s");
 }

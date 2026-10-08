@@ -22,26 +22,26 @@ if (argv.size() < 4) {
     io.eprint("usage: t_checkout <gitdir> <worktree> branches|checkout <branch>|detach <id>|new <branch>");
     os.exit(2);
 }
-str gd = argv[1];
-str wt = argv[2];
-str op = argv[3];
-if (op == "branches") {
-    match (GIT_checkout.branches(gd)) {
-        case Ok(List<GIT_checkout.Branch> bs): {
-            for (GIT_checkout.Branch b in bs) {
+str git_directory = argv[1];
+str worktree = argv[2];
+str operation = argv[3];
+if (operation == "branches") {
+    match (GIT_checkout.branches(git_directory)) {
+        case Ok(List<GIT_checkout.Branch> branches): {
+            for (GIT_checkout.Branch branch in branches) {
                 str mark = "-";
-                if (b.current) {
+                if (branch.current) {
                     mark = "*";
                 }
-                print(mark + " " + b.name + " " + b.id);
+                print(mark + " " + branch.name + " " + branch.id);
             }
         }
-        case Err(GIT_checkout.Error e): {
-            io.eprint(e.to_str());
+        case Err(GIT_checkout.Error error): {
+            io.eprint(error.to_str());
             os.exit(1);
         }
     }
-} else if (op == "checkout") {
+} else if (operation == "checkout") {
     if (argv.size() < 5) {
         io.eprint("usage: t_checkout <gitdir> <worktree> checkout <branch>");
         os.exit(2);
@@ -49,17 +49,17 @@ if (op == "branches") {
     str want = argv[4];
     str id = "";
     str full = "";
-    match (GIT_checkout.branches(gd)) {
-        case Ok(List<GIT_checkout.Branch> bs): {
-            for (GIT_checkout.Branch b in bs) {
-                if (b.name == want) {
-                    id = b.id;
-                    full = b.full;
+    match (GIT_checkout.branches(git_directory)) {
+        case Ok(List<GIT_checkout.Branch> branches): {
+            for (GIT_checkout.Branch branch in branches) {
+                if (branch.name == want) {
+                    id = branch.id;
+                    full = branch.full;
                 }
             }
         }
-        case Err(GIT_checkout.Error e): {
-            io.eprint(e.to_str());
+        case Err(GIT_checkout.Error error): {
+            io.eprint(error.to_str());
             os.exit(1);
         }
     }
@@ -67,39 +67,39 @@ if (op == "branches") {
         io.eprint("no such branch: " + want);
         os.exit(2);
     }
-    report(GIT_checkout.checkout(gd, wt, id, full));
-} else if (op == "detach") {
+    report(GIT_checkout.checkout(git_directory, worktree, id, full));
+} else if (operation == "detach") {
     if (argv.size() < 5) {
         io.eprint("usage: t_checkout <gitdir> <worktree> detach <commit-id>");
         os.exit(2);
     }
-    report(GIT_checkout.checkout(gd, wt, argv[4], ""));
-} else if (op == "new") {
+    report(GIT_checkout.checkout(git_directory, worktree, argv[4], ""));
+} else if (operation == "new") {
     if (argv.size() < 5) {
         io.eprint("usage: t_checkout <gitdir> <worktree> new <branch>");
         os.exit(2);
     }
-    match (GIT_checkout.create_branch(gd, argv[4])) {
+    match (GIT_checkout.create_branch(git_directory, argv[4])) {
         case Ok: {
             print("ok");
         }
-        case Err(GIT_checkout.Error e): {
-            print("refused: " + e.to_str());
+        case Err(GIT_checkout.Error error): {
+            print("refused: " + error.to_str());
             os.exit(1);
         }
     }
 } else {
-    io.eprint("unknown op: " + op);
+    io.eprint("unknown op: " + operation);
     os.exit(2);
 }
 
-void report(Result<GIT_checkout.Summary, GIT_checkout.Error> r) {
-    match (r) {
-        case Ok(GIT_checkout.Summary s): {
-            print("ok written=" + s.written.to_str() + " removed=" + s.removed.to_str());
+void report(Result<GIT_checkout.Summary, GIT_checkout.Error> result) {
+    match (result) {
+        case Ok(GIT_checkout.Summary summary): {
+            print("ok written=" + summary.written.to_str() + " removed=" + summary.removed.to_str());
         }
-        case Err(GIT_checkout.Error e): {
-            print("refused: " + e.to_str());
+        case Err(GIT_checkout.Error error): {
+            print("refused: " + error.to_str());
             os.exit(1);
         }
     }

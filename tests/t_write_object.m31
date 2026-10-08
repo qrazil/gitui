@@ -14,37 +14,37 @@ if (argv.size() < 2) {
     io.eprint("usage: t_write_object <gitdir>");
     os.exit(2);
 }
-str gd = argv[1];
+str git_directory = argv[1];
 str blob_id = "";
-match (GIT_object.write_blob(gd, "hello from the write path\n".to_bytes())) {
+match (GIT_object.write_blob(git_directory, "hello from the write path\n".to_bytes())) {
     case Ok(str id): {
         blob_id = id;
     }
-    case Err(GIT_object.Error e): {
-        io.eprint("write_blob: " + e.to_str());
+    case Err(GIT_object.Error error): {
+        io.eprint("write_blob: " + error.to_str());
         os.exit(1);
     }
 }
 List<GIT_object.Entry> entries = [GIT_object.Entry(0o100644, "new.txt".to_bytes(), blob_id)];
 str tree_id = "";
-match (GIT_object.write_tree(gd, entries)) {
+match (GIT_object.write_tree(git_directory, entries)) {
     case Ok(str id): {
         tree_id = id;
     }
-    case Err(GIT_object.Error e): {
-        io.eprint("write_tree: " + e.to_str());
+    case Err(GIT_object.Error error): {
+        io.eprint("write_tree: " + error.to_str());
         os.exit(1);
     }
 }
 GIT_object.Ident who = GIT_object.Ident("Write Tester".to_bytes(), "w@example.com".to_bytes(), 1700000000, 0, "+0000");
-GIT_object.Commit c = GIT_object.Commit(tree_id, [], who, who, [], "write path test\n".to_bytes());
+GIT_object.Commit commit = GIT_object.Commit(tree_id, [], who, who, [], "write path test\n".to_bytes());
 str commit_id = "";
-match (GIT_object.write_commit(gd, c)) {
+match (GIT_object.write_commit(git_directory, commit)) {
     case Ok(str id): {
         commit_id = id;
     }
-    case Err(GIT_object.Error e): {
-        io.eprint("write_commit: " + e.to_str());
+    case Err(GIT_object.Error error): {
+        io.eprint("write_commit: " + error.to_str());
         os.exit(1);
     }
 }
@@ -53,15 +53,15 @@ print(tree_id);
 print(commit_id);
 // Write the blob a second time: this exercises the "already there" path
 // (`write_object`'s `fs.exists` check) and must answer the same name.
-match (GIT_object.write_blob(gd, "hello from the write path\n".to_bytes())) {
+match (GIT_object.write_blob(git_directory, "hello from the write path\n".to_bytes())) {
     case Ok(str id): {
         if (id != blob_id) {
             io.eprint("write_blob is not idempotent: " + id + " != " + blob_id);
             os.exit(1);
         }
     }
-    case Err(GIT_object.Error e): {
-        io.eprint("second write_blob: " + e.to_str());
+    case Err(GIT_object.Error error): {
+        io.eprint("second write_blob: " + error.to_str());
         os.exit(1);
     }
 }

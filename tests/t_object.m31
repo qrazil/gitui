@@ -28,90 +28,90 @@ if (argv.size() < 2) {
     io.eprint("usage: t_object <repo-or-gitdir>");
     os.exit(2);
 }
-str gd = gitdir(argv[1]);
+str git_directory = gitdir(argv[1]);
 List<str> names = [];
-match (GIT_object.all(gd)) {
+match (GIT_object.all(git_directory)) {
     case Ok(List<str> ids): {
         names = ids;
     }
-    case Err(GIT_object.Error e): {
-        io.eprint(e.to_str());
+    case Err(GIT_object.Error error): {
+        io.eprint(error.to_str());
         os.exit(2);
     }
 }
-int t0 = date.now_ns();
+int start_nanoseconds = date.now_ns();
 int total = 0;
 for (str id in names) {
-    match (GIT_object.read(gd, id)) {
-        case Ok(GIT_object.Object o): {
-            total = total + o.raw.size();
-            show(o);
+    match (GIT_object.read(git_directory, id)) {
+        case Ok(GIT_object.Object object): {
+            total = total + object.raw.size();
+            show(object);
         }
-        case Err(GIT_object.Error e): {
-            print(id + " ERROR " + e.to_str());
+        case Err(GIT_object.Error error): {
+            print(id + " ERROR " + error.to_str());
         }
     }
 }
-int ns = date.now_ns() - t0;
-if (ns > 0) {
-    io.eprint("objects: " + names.size().to_str() + " objects, " + total.to_str() + " octets of content in " + (ns / 1_000_000).to_str() + " ms = " + (total * 1_000 / ns).to_str() + " MB/s");
+int elapsed_nanoseconds = date.now_ns() - start_nanoseconds;
+if (elapsed_nanoseconds > 0) {
+    io.eprint("objects: " + names.size().to_str() + " objects, " + total.to_str() + " octets of content in " + (elapsed_nanoseconds / 1_000_000).to_str() + " ms = " + (total * 1_000 / elapsed_nanoseconds).to_str() + " MB/s");
 }
 
-void show(GIT_object.Object o) {
-    str id = o.id;
-    match (o.body) {
+void show(GIT_object.Object object) {
+    str id = object.id;
+    match (object.body) {
         case Blob: {
-            print(id + " blob " + o.raw.size().to_str() + " " + GIT_sha1.hex(o.raw));
+            print(id + " blob " + object.raw.size().to_str() + " " + GIT_sha1.hex(object.raw));
         }
-        case Tree(List<GIT_object.Entry> es): {
-            print(id + " tree " + o.raw.size().to_str() + " " + es.size().to_str());
-            for (int i in 0 .. es.size()) {
-                print(id + " tree-entry " + i.to_str() + " " + es[i].mode_text() + " " + es[i].id + " " + hx(es[i].name));
+        case Tree(List<GIT_object.Entry> entries): {
+            print(id + " tree " + object.raw.size().to_str() + " " + entries.size().to_str());
+            for (int i in 0 .. entries.size()) {
+                print(id + " tree-entry " + i.to_str() + " " + entries[i].mode_text() + " " + entries[i].id + " " + hex_or_dash(entries[i].name));
             }
         }
-        case Commit(GIT_object.Commit c): {
-            print(id + " commit " + o.raw.size().to_str() + " tree=" + c.tree + " parents=" + joined(c.parents) + " author=" + ident(c.author) + " committer=" + ident(c.committer) + " extra=" + c.extra.size().to_str() + "/" + GIT_sha1.hex(c.extra.join(nl())) + " msg=" + c.message.size().to_str() + "/" + GIT_sha1.hex(c.message));
+        case Commit(GIT_object.Commit commit): {
+            print(id + " commit " + object.raw.size().to_str() + " tree=" + commit.tree + " parents=" + joined(commit.parents) + " author=" + ident(commit.author) + " committer=" + ident(commit.committer) + " extra=" + commit.extra.size().to_str() + "/" + GIT_sha1.hex(commit.extra.join(newline_bytes())) + " msg=" + commit.message.size().to_str() + "/" + GIT_sha1.hex(commit.message));
         }
-        case Tag(GIT_object.Tag t): {
+        case Tag(GIT_object.Tag tag): {
             str tagger = "-";
-            match (t.tagger) {
+            match (tag.tagger) {
                 case Some(GIT_object.Ident who): {
                     tagger = ident(who);
                 }
                 case None: {
                 }
             }
-            print(id + " tag " + o.raw.size().to_str() + " object=" + t.object + " type=" + t.kind + " name=" + hx(t.name) + " tagger=" + tagger + " extra=" + t.extra.size().to_str() + "/" + GIT_sha1.hex(t.extra.join(nl())) + " msg=" + t.message.size().to_str() + "/" + GIT_sha1.hex(t.message));
+            print(id + " tag " + object.raw.size().to_str() + " object=" + tag.object + " type=" + tag.kind + " name=" + hex_or_dash(tag.name) + " tagger=" + tagger + " extra=" + tag.extra.size().to_str() + "/" + GIT_sha1.hex(tag.extra.join(newline_bytes())) + " msg=" + tag.message.size().to_str() + "/" + GIT_sha1.hex(tag.message));
         }
     }
 }
 
 str ident(GIT_object.Ident who) {
-    return hx(who.name) + "|" + hx(who.email) + "|" + who.when.to_str() + "|" + who.zone + "|" + who.offset.to_str();
+    return hex_or_dash(who.name) + "|" + hex_or_dash(who.email) + "|" + who.when.to_str() + "|" + who.zone + "|" + who.offset.to_str();
 }
 
 // Hex, or `-` for nothing at all: an empty field and a field of no octets
 // print the same in hex, and the two are told apart in the Python twin the
 // same way.
-str hx(bytes b) {
-    if (b.size() == 0) {
+str hex_or_dash(bytes data) {
+    if (data.size() == 0) {
         return "-";
     }
-    return b.hex();
+    return data.hex();
 }
 
-str joined(List<str> xs) {
-    if (xs.size() == 0) {
+str joined(List<str> items) {
+    if (items.size() == 0) {
         return "-";
     }
-    return xs.join(",");
+    return items.join(",");
 }
 
 // A one-octet `bytes` holding a newline. There is no `bytes` literal
 // (reference §3.10), and `join` on a `List<bytes>` takes a `bytes`, so the
 // separator has to be built -- and built here rather than at each call,
 // because a literal of a mutable type allocates every time it is evaluated.
-bytes nl() {
+bytes newline_bytes() {
     return "\n".to_bytes();
 }
 

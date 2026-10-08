@@ -16,84 +16,84 @@ if (argv.size() < 4) {
     io.eprint("usage: t_index_stage <gitdir> <worktree> <relative-path>");
     os.exit(2);
 }
-str gd = argv[1];
-str wt = argv[2];
+str git_directory = argv[1];
+str worktree = argv[2];
 str rel = argv[3];
-str full = fs.join(wt, rel);
+str full = fs.join(worktree, rel);
 bytes content = [];
 match (io.read_bytes(full)) {
-    case Ok(bytes b): {
-        content = b;
+    case Ok(bytes contents): {
+        content = contents;
     }
-    case Err(io.Error e): {
-        io.eprint("read: " + e.to_str());
+    case Err(io.Error error): {
+        io.eprint("read: " + error.to_str());
         os.exit(1);
     }
 }
 str blob_id = "";
-match (GIT_object.write_blob(gd, content)) {
+match (GIT_object.write_blob(git_directory, content)) {
     case Ok(str id): {
         blob_id = id;
     }
-    case Err(GIT_object.Error e): {
-        io.eprint("write_blob: " + e.to_str());
+    case Err(GIT_object.Error error): {
+        io.eprint("write_blob: " + error.to_str());
         os.exit(1);
     }
 }
-fs.Stat st = fs.Stat(0, 0, 0);
+fs.Stat file_stat = fs.Stat(0, 0, 0);
 match (fs.stat(full)) {
-    case Ok(fs.Stat s): {
-        st = s;
+    case Ok(fs.Stat stat): {
+        file_stat = stat;
     }
-    case Err(io.Error e): {
-        io.eprint("stat: " + e.to_str());
+    case Err(io.Error error): {
+        io.eprint("stat: " + error.to_str());
         os.exit(1);
     }
 }
-GIT_index.Entry entry = GIT_index.from_stat(rel.to_bytes(), st, fs.is_link(full), blob_id);
-GIT_index.Index ix = GIT_index.Index([]);
-match (GIT_index.read(gd)) {
-    case Ok(GIT_index.Index v): {
-        ix = v;
+GIT_index.Entry entry = GIT_index.from_stat(rel.to_bytes(), file_stat, fs.is_link(full), blob_id);
+GIT_index.Index original = GIT_index.Index([]);
+match (GIT_index.read(git_directory)) {
+    case Ok(GIT_index.Index index): {
+        original = index;
     }
-    case Err(GIT_index.Error e): {
-        match (e) {
+    case Err(GIT_index.Error error): {
+        match (error) {
             case NotFound: {
             }
             case Io: {
-                io.eprint("read: " + e.to_str());
+                io.eprint("read: " + error.to_str());
                 os.exit(1);
             }
             case BadSignature: {
-                io.eprint("read: " + e.to_str());
+                io.eprint("read: " + error.to_str());
                 os.exit(1);
             }
             case BadVersion: {
-                io.eprint("read: " + e.to_str());
+                io.eprint("read: " + error.to_str());
                 os.exit(1);
             }
             case Truncated: {
-                io.eprint("read: " + e.to_str());
+                io.eprint("read: " + error.to_str());
                 os.exit(1);
             }
             case BadExtension: {
-                io.eprint("read: " + e.to_str());
+                io.eprint("read: " + error.to_str());
                 os.exit(1);
             }
             case Checksum: {
-                io.eprint("read: " + e.to_str());
+                io.eprint("read: " + error.to_str());
                 os.exit(1);
             }
         }
     }
 }
-ix.entries.push(entry);
-match (GIT_index.write(gd, ix)) {
+original.entries.push(entry);
+match (GIT_index.write(git_directory, original)) {
     case Ok: {
         print("staged " + blob_id);
     }
-    case Err(GIT_index.Error e): {
-        io.eprint("write: " + e.to_str());
+    case Err(GIT_index.Error error): {
+        io.eprint("write: " + error.to_str());
         os.exit(1);
     }
 }

@@ -60,26 +60,26 @@ if (argv.size() < 4) {
     io.eprint("       t_gitclient_ops <gitdir> <worktree> commit");
     os.exit(2);
 }
-str gd = argv[1];
-str wt = argv[2];
-str op = argv[3];
-GIT_client.State state = GIT_client.State.open(gd, wt);
+str git_directory = argv[1];
+str worktree = argv[2];
+str operation = argv[3];
+GIT_client.State state = GIT_client.State.open(git_directory, worktree);
 state.refresh();
-if (op == "stage") {
+if (operation == "stage") {
     if (argv.size() < 5) {
         io.eprint("usage: t_gitclient_ops <gitdir> <worktree> stage <path>");
         os.exit(2);
     }
     state.stage_path(argv[4].to_bytes());
-} else if (op == "unstage") {
+} else if (operation == "unstage") {
     if (argv.size() < 5) {
         io.eprint("usage: t_gitclient_ops <gitdir> <worktree> unstage <path>");
         os.exit(2);
     }
     state.unstage_path(argv[4].to_bytes());
-} else if (op == "commit") {
+} else if (operation == "commit") {
     state.finish_commit();
-} else if (op == "diff") {
+} else if (operation == "diff") {
     if (argv.size() < 6) {
         io.eprint("usage: t_gitclient_ops <gitdir> <worktree> diff <untracked|unstaged|staged> <path>");
         os.exit(2);
@@ -92,10 +92,10 @@ if (op == "stage") {
             if (state.diff_binary) {
                 print("Binary files differ");
             } else {
-                for (TUI_diff_view.Hunk h in state.diff_view.hunks) {
-                    print(h.header);
-                    for (TUI_diff_view.Line l in h.lines) {
-                        print(marker(l.kind) + l.text);
+                for (TUI_diff_view.Hunk hunk in state.diff_view.hunks) {
+                    print(hunk.header);
+                    for (TUI_diff_view.Line line in hunk.lines) {
+                        print(marker(line.kind) + line.text);
                     }
                 }
             }
@@ -107,47 +107,47 @@ if (op == "stage") {
         io.eprint("no such row: " + id);
         os.exit(2);
     }
-} else if (op == "edit") {
+} else if (operation == "edit") {
     state.edit_message();
     state.launch_editor();
-} else if (op == "stage_hunk" || op == "unstage_hunk") {
+} else if (operation == "stage_hunk" || operation == "unstage_hunk") {
     if (argv.size() < 6) {
-        io.eprint("usage: t_gitclient_ops <gitdir> <worktree> " + op + " <path> <k>");
+        io.eprint("usage: t_gitclient_ops <gitdir> <worktree> " + operation + " <path> <k>");
         os.exit(2);
     }
-    int k = argv[5].parse_int().or(-1);
-    if (op == "stage_hunk") {
-        state.stage_hunk(argv[4].to_bytes(), k);
+    int hunk_index = argv[5].parse_int().or(-1);
+    if (operation == "stage_hunk") {
+        state.stage_hunk(argv[4].to_bytes(), hunk_index);
     } else {
-        state.unstage_hunk(argv[4].to_bytes(), k);
+        state.unstage_hunk(argv[4].to_bytes(), hunk_index);
     }
-} else if (op == "hunk_patch") {
+} else if (operation == "hunk_patch") {
     if (argv.size() < 7) {
         io.eprint("usage: t_gitclient_ops <gitdir> <worktree> hunk_patch <unstaged|staged> <path> <k>");
         os.exit(2);
     }
     state.reload();
     str id = argv[4] + ":" + argv[5];
-    int k = argv[6].parse_int().or(-1);
+    int hunk_index = argv[6].parse_int().or(-1);
     if (state.outline.select_id(id)) {
         state.show_diff_current();
-        if (state.diff_open && !state.diff_binary && k >= 0 && k < state.diff_view.hunks.size()) {
+        if (state.diff_open && !state.diff_binary && hunk_index >= 0 && hunk_index < state.diff_view.hunks.size()) {
             print("--- a/" + argv[5]);
             print("+++ b/" + argv[5]);
-            TUI_diff_view.Hunk h = state.diff_view.hunks[k];
-            print(h.header);
-            for (TUI_diff_view.Line l in h.lines) {
-                print(marker(l.kind) + l.text);
+            TUI_diff_view.Hunk hunk = state.diff_view.hunks[hunk_index];
+            print(hunk.header);
+            for (TUI_diff_view.Line line in hunk.lines) {
+                print(marker(line.kind) + line.text);
             }
             os.exit(0);
         }
-        io.eprint("no such hunk: " + id + " " + k.to_str() + " (" + state.message + ")");
+        io.eprint("no such hunk: " + id + " " + hunk_index.to_str() + " (" + state.message + ")");
         os.exit(2);
     } else {
         io.eprint("no such row: " + id);
         os.exit(2);
     }
-} else if (op == "discard") {
+} else if (operation == "discard") {
     // `discard <untracked|unstaged|staged> <path>`: `discard_path` directly,
     // the step the `x` prompt's own `y` takes -- the prompt itself is pure
     // key handling, covered under a pty by pty_e2e.py.
@@ -156,7 +156,7 @@ if (op == "stage") {
         os.exit(2);
     }
     state.discard_path(argv[4], argv[5].to_bytes());
-} else if (op == "amend") {
+} else if (operation == "amend") {
     // `amend`: `start_amend` (prefills COMMIT_EDITMSG with HEAD's message)
     // then `finish_commit` -- `c`, `A`, `f` with no edit in between, real
     // git's `--amend --no-edit`. A refusal leaves `start_amend`'s own
@@ -167,13 +167,13 @@ if (op == "stage") {
         state.finish_commit();
     }
 } else {
-    io.eprint("unknown op: " + op);
+    io.eprint("unknown op: " + operation);
     os.exit(2);
 }
 print(state.message);
 
-str marker(TUI_diff_view.Kind k) {
-    match (k) {
+str marker(TUI_diff_view.Kind kind) {
+    match (kind) {
         case Context: {
             return " ";
         }

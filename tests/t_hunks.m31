@@ -24,11 +24,11 @@ match (GIT_hunks.hunks(old, new)) {
     case Binary: {
         print("Binary files differ");
     }
-    case Hunks(List<TUI_diff_view.Hunk> hs): {
-        for (TUI_diff_view.Hunk h in hs) {
-            print(h.header);
-            for (TUI_diff_view.Line l in h.lines) {
-                print(marker(l.kind) + l.text);
+    case Hunks(List<TUI_diff_view.Hunk> hunks): {
+        for (TUI_diff_view.Hunk hunk in hunks) {
+            print(hunk.header);
+            for (TUI_diff_view.Line line in hunk.lines) {
+                print(marker(line.kind) + line.text);
             }
         }
     }
@@ -36,19 +36,19 @@ match (GIT_hunks.hunks(old, new)) {
 
 bytes read(str path) {
     match (io.read_bytes(path)) {
-        case Ok(bytes b): {
-            return b;
+        case Ok(bytes contents): {
+            return contents;
         }
-        case Err(io.Error e): {
-            print("cannot read " + path + ": " + e.to_str());
+        case Err(io.Error error): {
+            print("cannot read " + path + ": " + error.to_str());
             os.exit(1);
             return [];
         }
     }
 }
 
-str marker(TUI_diff_view.Kind k) {
-    match (k) {
+str marker(TUI_diff_view.Kind kind) {
+    match (kind) {
         case Context: {
             return " ";
         }

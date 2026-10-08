@@ -19,9 +19,9 @@ type Counter {
     int failed = 0;
 }
 
-void Counter.check(str name, bool ok, str detail) {
+void Counter.check(str name, bool is_ok, str detail) {
     checks = checks + 1;
-    if (ok) {
+    if (is_ok) {
         print(name + " ok");
     } else {
         failed = failed + 1;
@@ -31,18 +31,18 @@ void Counter.check(str name, bool ok, str detail) {
 
 Counter counter = Counter();
 
-str show(bytes b) {
-    return b.hex();
+str show(bytes data) {
+    return data.hex();
 }
 
 void round_trip(Counter counter, str name, bytes old, bytes new) {
-    int n = GIT_patch.hunk_count(old, new);
-    bytes cur = old;
+    int hunk_count = GIT_patch.hunk_count(old, new);
+    bytes current = old;
     int steps = 0;
-    while (steps < n) {
-        match (GIT_patch.apply_hunk(cur, new, 0)) {
+    while (steps < hunk_count) {
+        match (GIT_patch.apply_hunk(current, new, 0)) {
             case Some(bytes next): {
-                cur = next;
+                current = next;
             }
             case None: {
                 counter.check(name + ": apply step " + steps.to_str(), false, "apply_hunk returned None");
@@ -51,14 +51,14 @@ void round_trip(Counter counter, str name, bytes old, bytes new) {
         }
         steps = steps + 1;
     }
-    counter.check(name + ": applying hunk 0 " + n.to_str() + " time(s) reaches new", cur == new, show(cur) + " != " + show(new));
-    counter.check(name + ": nothing left to apply afterwards", GIT_patch.hunk_count(cur, new) == 0, GIT_patch.hunk_count(cur, new).to_str() + " hunks remain");
-    cur = new;
+    counter.check(name + ": applying hunk 0 " + hunk_count.to_str() + " time(s) reaches new", current == new, show(current) + " != " + show(new));
+    counter.check(name + ": nothing left to apply afterwards", GIT_patch.hunk_count(current, new) == 0, GIT_patch.hunk_count(current, new).to_str() + " hunks remain");
+    current = new;
     steps = 0;
-    while (steps < n) {
-        match (GIT_patch.revert_hunk(old, cur, 0)) {
+    while (steps < hunk_count) {
+        match (GIT_patch.revert_hunk(old, current, 0)) {
             case Some(bytes next): {
-                cur = next;
+                current = next;
             }
             case None: {
                 counter.check(name + ": revert step " + steps.to_str(), false, "revert_hunk returned None");
@@ -67,39 +67,39 @@ void round_trip(Counter counter, str name, bytes old, bytes new) {
         }
         steps = steps + 1;
     }
-    counter.check(name + ": reverting hunk 0 " + n.to_str() + " time(s) reaches old", cur == old, show(cur) + " != " + show(old));
+    counter.check(name + ": reverting hunk 0 " + hunk_count.to_str() + " time(s) reaches old", current == old, show(current) + " != " + show(old));
     // Every single hunk on its own: applied, it must leave exactly the other
     // n-1 hunks outstanding; so must reverting it from the new side.
-    int k = 0;
-    while (k < n) {
-        match (GIT_patch.apply_hunk(old, new, k)) {
+    int index = 0;
+    while (index < hunk_count) {
+        match (GIT_patch.apply_hunk(old, new, index)) {
             case Some(bytes one): {
-                counter.check(name + ": applying only hunk " + k.to_str() + " leaves n-1 hunks", GIT_patch.hunk_count(one, new) == n - 1, GIT_patch.hunk_count(one, new).to_str());
+                counter.check(name + ": applying only hunk " + index.to_str() + " leaves n-1 hunks", GIT_patch.hunk_count(one, new) == hunk_count - 1, GIT_patch.hunk_count(one, new).to_str());
             }
             case None: {
-                counter.check(name + ": applying only hunk " + k.to_str(), false, "None");
+                counter.check(name + ": applying only hunk " + index.to_str(), false, "None");
             }
         }
-        match (GIT_patch.revert_hunk(old, new, k)) {
+        match (GIT_patch.revert_hunk(old, new, index)) {
             case Some(bytes one): {
-                counter.check(name + ": reverting only hunk " + k.to_str() + " leaves n-1 hunks", GIT_patch.hunk_count(old, one) == n - 1, GIT_patch.hunk_count(old, one).to_str());
+                counter.check(name + ": reverting only hunk " + index.to_str() + " leaves n-1 hunks", GIT_patch.hunk_count(old, one) == hunk_count - 1, GIT_patch.hunk_count(old, one).to_str());
             }
             case None: {
-                counter.check(name + ": reverting only hunk " + k.to_str(), false, "None");
+                counter.check(name + ": reverting only hunk " + index.to_str(), false, "None");
             }
         }
-        k = k + 1;
+        index = index + 1;
     }
 }
 
-str many(int n) {
-    str s = "";
-    int i = 1;
-    while (i <= n) {
-        s = s + "line " + i.to_str() + "\n";
-        i = i + 1;
+str many(int count) {
+    str line_text = "";
+    int number = 1;
+    while (number <= count) {
+        line_text = line_text + "line " + number.to_str() + "\n";
+        number = number + 1;
     }
-    return s;
+    return line_text;
 }
 
 round_trip(counter, "one change", "a\nb\nc\n".to_bytes(), "a\nB\nc\n".to_bytes());

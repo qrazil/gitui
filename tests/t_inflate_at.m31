@@ -23,65 +23,65 @@ if (argv.size() < 2) {
     io.eprint("usage: t_inflate_at <fixture-dir>");
     os.exit(2);
 }
-str dir = argv[1];
+str directory = argv[1];
 bytes zbuf = [];
-match (io.read_bytes(fs.join(dir, "streams.zlib"))) {
-    case Ok(bytes b): {
-        zbuf = b;
+match (io.read_bytes(fs.join(directory, "streams.zlib"))) {
+    case Ok(bytes contents): {
+        zbuf = contents;
     }
-    case Err(io.Error e): {
-        io.eprint("cannot read streams.zlib: " + e.to_str());
+    case Err(io.Error error): {
+        io.eprint("cannot read streams.zlib: " + error.to_str());
         os.exit(2);
     }
 }
 bytes rbuf = [];
-match (io.read_bytes(fs.join(dir, "streams.raw"))) {
-    case Ok(bytes b): {
-        rbuf = b;
+match (io.read_bytes(fs.join(directory, "streams.raw"))) {
+    case Ok(bytes contents): {
+        rbuf = contents;
     }
-    case Err(io.Error e): {
-        io.eprint("cannot read streams.raw: " + e.to_str());
+    case Err(io.Error error): {
+        io.eprint("cannot read streams.raw: " + error.to_str());
         os.exit(2);
     }
 }
-int zi = 0;
+int zlib_index = 0;
 int zoff = 0;
 while (zoff < zbuf.size()) {
     match (GIT_zlib.decompress_at(zbuf, zoff)) {
-        case Ok(GIT_zlib.Decoded d): {
-            print("zlib " + zi.to_str() + " " + zoff.to_str() + " ok " + d.used.to_str() + " " + GIT_sha1.hex(d.data));
-            if (d.used <= 0) {
+        case Ok(GIT_zlib.Decoded decoded): {
+            print("zlib " + zlib_index.to_str() + " " + zoff.to_str() + " ok " + decoded.used.to_str() + " " + GIT_sha1.hex(decoded.data));
+            if (decoded.used <= 0) {
                 // Refuse to spin forever on a bug that reports no progress.
-                io.eprint("zlib stream " + zi.to_str() + " reported used <= 0");
+                io.eprint("zlib stream " + zlib_index.to_str() + " reported used <= 0");
                 os.exit(2);
             }
-            zoff = zoff + d.used;
+            zoff = zoff + decoded.used;
         }
-        case Err(GIT_zlib.Error e): {
-            print("zlib " + zi.to_str() + " " + zoff.to_str() + " err");
-            io.eprint("  zlib " + zi.to_str() + ": " + e.to_str());
+        case Err(GIT_zlib.Error error): {
+            print("zlib " + zlib_index.to_str() + " " + zoff.to_str() + " err");
+            io.eprint("  zlib " + zlib_index.to_str() + ": " + error.to_str());
             zoff = zbuf.size();
         }
     }
-    zi = zi + 1;
+    zlib_index = zlib_index + 1;
 }
-int ri = 0;
+int raw_index = 0;
 int roff = 0;
 while (roff < rbuf.size()) {
     match (GIT_zlib.inflate_at(rbuf, roff)) {
-        case Ok(GIT_zlib.Decoded d): {
-            print("raw " + ri.to_str() + " " + roff.to_str() + " ok " + d.used.to_str() + " " + GIT_sha1.hex(d.data));
-            if (d.used <= 0) {
-                io.eprint("raw stream " + ri.to_str() + " reported used <= 0");
+        case Ok(GIT_zlib.Decoded decoded): {
+            print("raw " + raw_index.to_str() + " " + roff.to_str() + " ok " + decoded.used.to_str() + " " + GIT_sha1.hex(decoded.data));
+            if (decoded.used <= 0) {
+                io.eprint("raw stream " + raw_index.to_str() + " reported used <= 0");
                 os.exit(2);
             }
-            roff = roff + d.used;
+            roff = roff + decoded.used;
         }
-        case Err(GIT_zlib.Error e): {
-            print("raw " + ri.to_str() + " " + roff.to_str() + " err");
-            io.eprint("  raw " + ri.to_str() + ": " + e.to_str());
+        case Err(GIT_zlib.Error error): {
+            print("raw " + raw_index.to_str() + " " + roff.to_str() + " err");
+            io.eprint("  raw " + raw_index.to_str() + ": " + error.to_str());
             roff = rbuf.size();
         }
     }
-    ri = ri + 1;
+    raw_index = raw_index + 1;
 }
