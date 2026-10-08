@@ -146,46 +146,46 @@ pub type CommitFileDiff {
 // `str` has no ordering operator (`GIT_refs.m31`'s own `before`, the same
 // reason, written out again here because a type with a `str` field has to
 // supply its own `cmp` and there is nothing to call).
-int str_cmp(str a, str b) {
-    int n = a.size();
-    if (b.size() < n) {
-        n = b.size();
+int str_cmp(str left, str right) {
+    int length = left.size();
+    if (right.size() < length) {
+        length = right.size();
     }
-    for (int i in 0 .. n) {
-        int x = a.byte_at(i);
-        int y = b.byte_at(i);
+    for (int i in 0 .. length) {
+        int x = left.byte_at(i);
+        int y = right.byte_at(i);
         if (x != y) {
             return x - y;
         }
     }
-    return a.size() - b.size();
+    return left.size() - right.size();
 }
 
-int cmp_bytes(bytes a, bytes b) {
-    int n = a.size();
-    if (b.size() < n) {
-        n = b.size();
+int cmp_bytes(bytes left, bytes right) {
+    int length = left.size();
+    if (right.size() < length) {
+        length = right.size();
     }
-    for (int i in 0 .. n) {
-        if (a[i] != b[i]) {
-            return a[i] - b[i];
+    for (int i in 0 .. length) {
+        if (left[i] != right[i]) {
+            return left[i] - right[i];
         }
     }
-    return a.size() - b.size();
+    return left.size() - right.size();
 }
 
-bool bytes_eq(bytes a, bytes b) {
-    return a.size() == b.size() && cmp_bytes(a, b) == 0;
+bool bytes_eq(bytes left, bytes right) {
+    return left.size() == right.size() && cmp_bytes(left, right) == 0;
 }
 
-int find_byte(bytes hay, int b, int from) {
-    int i = from;
-    int n = hay.size();
-    while (i < n) {
-        if (hay[i] == b) {
-            return i;
+int find_byte(bytes hay, int needle, int from) {
+    int index = from;
+    int length = hay.size();
+    while (index < length) {
+        if (hay[index] == needle) {
+            return index;
         }
-        i = i + 1;
+        index = index + 1;
     }
     return -1;
 }
@@ -194,8 +194,8 @@ int find_byte(bytes hay, int b, int from) {
 /// letter -- `rows_from_deltas`'s own `GIT_status.Change` -> `int` mapping,
 /// pulled out so `commit_node`'s file rows can share it instead of
 /// repeating the match.
-int change_mark(GIT_status.Change k) {
-    match (k) {
+int change_mark(GIT_status.Change kind) {
+    match (kind) {
         case Added: {
             return 'A';
         }
@@ -208,11 +208,11 @@ int change_mark(GIT_status.Change k) {
     }
 }
 
-str mark_str(int m) {
-    if (m == 'A') {
+str mark_str(int mark) {
+    if (mark == 'A') {
         return "A";
     }
-    if (m == 'D') {
+    if (mark == 'D') {
         return "D";
     }
     return "M";
@@ -222,9 +222,9 @@ str mark_str(int m) {
 /// `GIT_status.Change`'s own three variants.
 pub List<PathRow> rows_from_deltas(List<GIT_status.Delta> deltas) {
     List<PathRow> out = [];
-    for (GIT_status.Delta d in deltas) {
-        str p = d.path.utf8().or("<non-utf8 path>");
-        out.push(PathRow(p, d.path, change_mark(d.kind)));
+    for (GIT_status.Delta delta in deltas) {
+        str path_text = delta.path.utf8().or("<non-utf8 path>");
+        out.push(PathRow(path_text, delta.path, change_mark(delta.kind)));
     }
     out.sort();
     return out;
@@ -233,8 +233,8 @@ pub List<PathRow> rows_from_deltas(List<GIT_status.Delta> deltas) {
 /// `paths`, converted to sorted, markless `PathRow`s.
 pub List<PathRow> rows_from_untracked(List<bytes> paths) {
     List<PathRow> out = [];
-    for (bytes b in paths) {
-        out.push(PathRow(b.utf8().or("<non-utf8 path>"), b, 0));
+    for (bytes path in paths) {
+        out.push(PathRow(path.utf8().or("<non-utf8 path>"), path, 0));
     }
     out.sort();
     return out;
@@ -243,10 +243,10 @@ pub List<PathRow> rows_from_untracked(List<bytes> paths) {
 /// The first line of a commit message, decoded as far as it will go -- the
 /// one-line summary the outline's commit rows show.
 pub str first_line(bytes message) {
-    int nl = find_byte(message, '\n', 0);
+    int newline_index = find_byte(message, '\n', 0);
     bytes line = message;
-    if (nl >= 0) {
-        line = message.substr(0, nl);
+    if (newline_index >= 0) {
+        line = message.substr(0, newline_index);
     }
     return line.utf8().or("<non-utf8 message>");
 }
@@ -256,8 +256,8 @@ pub str first_line(bytes message) {
 /// survives a rebuild of the outline this way -- see `State.toggle_current`.
 bool expanded_for(Map<str, bool> collapsed, str id, bool default_expanded) {
     match (collapsed.get(id)) {
-        case Some(bool c): {
-            return !c;
+        case Some(bool is_collapsed): {
+            return !is_collapsed;
         }
         case None: {
             return default_expanded;
@@ -322,8 +322,8 @@ bytes commit_blob(str gitdir, Option<str> id) {
     match (id) {
         case Some(str oid): {
             match (GIT_object.read(gitdir, oid)) {
-                case Ok(GIT_object.Object o): {
-                    return o.raw;
+                case Ok(GIT_object.Object object): {
+                    return object.raw;
                 }
                 case Err: {
                     return [];
@@ -349,15 +349,15 @@ bytes commit_blob(str gitdir, Option<str> id) {
 /// makes between the index and HEAD's tree (added/modified/deleted) --
 /// unchanged paths (`old_id == new_id`) are left out entirely, the same way
 /// `GIT_status.status` only ever reports what actually differs.
-Result<List<CommitFileDiff>, GIT_object.Error> commit_changes(str gitdir, GIT_object.Commit c) {
-    Map<str, str> new_tree = GIT_object.flatten_tree(gitdir, c.tree)?;
+Result<List<CommitFileDiff>, GIT_object.Error> commit_changes(str gitdir, GIT_object.Commit commit) {
+    Map<str, str> new_tree = GIT_object.flatten_tree(gitdir, commit.tree)?;
     Map<str, str> old_tree = {};
-    if (c.parents.size() > 0) {
-        match (GIT_object.read(gitdir, c.parents[0])) {
-            case Ok(GIT_object.Object o): {
-                match (o.body) {
-                    case Commit(GIT_object.Commit pc): {
-                        old_tree = GIT_object.flatten_tree(gitdir, pc.tree)?;
+    if (commit.parents.size() > 0) {
+        match (GIT_object.read(gitdir, commit.parents[0])) {
+            case Ok(GIT_object.Object object): {
+                match (object.body) {
+                    case Commit(GIT_object.Commit parent_commit): {
+                        old_tree = GIT_object.flatten_tree(gitdir, parent_commit.tree)?;
                     }
                     case Blob: {
                     }
@@ -367,32 +367,32 @@ Result<List<CommitFileDiff>, GIT_object.Error> commit_changes(str gitdir, GIT_ob
                     }
                 }
             }
-            case Err(GIT_object.Error e): {
-                return Result<List<CommitFileDiff>, GIT_object.Error>.Err(e);
+            case Err(GIT_object.Error error): {
+                return Result<List<CommitFileDiff>, GIT_object.Error>.Err(error);
             }
         }
     }
     List<str> paths = [];
-    for (str p in new_tree.keys()) {
-        paths.push(p);
+    for (str path in new_tree.keys()) {
+        paths.push(path);
     }
-    for (str p in old_tree.keys()) {
-        if (!new_tree.contains(p)) {
-            paths.push(p);
+    for (str path in old_tree.keys()) {
+        if (!new_tree.contains(path)) {
+            paths.push(path);
         }
     }
     paths.sort();
     List<CommitFileDiff> out = [];
-    for (str p in paths) {
-        Option<str> oid = old_tree.get(p);
-        Option<str> nid = new_tree.get(p);
+    for (str path in paths) {
+        Option<str> oid = old_tree.get(path);
+        Option<str> nid = new_tree.get(path);
         GIT_status.Change kind = GIT_status.Change.Modified;
         bool skip = false;
         match (oid) {
-            case Some(str o): {
+            case Some(str old_id): {
                 match (nid) {
-                    case Some(str n): {
-                        if (o == n) {
+                    case Some(str new_id): {
+                        if (old_id == new_id) {
                             skip = true;
                         }
                     }
@@ -417,10 +417,10 @@ Result<List<CommitFileDiff>, GIT_object.Error> commit_changes(str gitdir, GIT_ob
             case Binary: {
                 binary = true;
             }
-            case Hunks(List<TUI_diff_view.Hunk> hs): {
-                for (TUI_diff_view.Hunk h in hs) {
-                    for (TUI_diff_view.Line l in h.lines) {
-                        match (l.kind) {
+            case Hunks(List<TUI_diff_view.Hunk> hunks): {
+                for (TUI_diff_view.Hunk hunk in hunks) {
+                    for (TUI_diff_view.Line line in hunk.lines) {
+                        match (line.kind) {
                             case Add: {
                                 insertions = insertions + 1;
                             }
@@ -434,7 +434,7 @@ Result<List<CommitFileDiff>, GIT_object.Error> commit_changes(str gitdir, GIT_ob
                 }
             }
         }
-        out.push(CommitFileDiff(p.to_bytes(), kind, oid, nid, binary, insertions, deletions));
+        out.push(CommitFileDiff(path.to_bytes(), kind, oid, nid, binary, insertions, deletions));
     }
     return Result<List<CommitFileDiff>, GIT_object.Error>.Ok(out);
 }
@@ -462,35 +462,35 @@ Result<List<CommitFileDiff>, GIT_object.Error> commit_changes(str gitdir, GIT_ob
 /// and then the files are what they asked for: `Enter` on a commit shows its
 /// files at once, `Enter` on a file shows its diff. A fold recorded in
 /// `collapsed` still wins, as everywhere else.
-List<TUI_outline.Node> commit_node(GIT_log.Entry en, List<CommitFileDiff> changes, Map<str, bool> collapsed, Map<str, CommitFileDiff> out_file_diffs) {
-    str id = "commit:" + en.id;
-    str label = en.id.substr(0, 7) + "  " + first_line(en.commit.message);
+List<TUI_outline.Node> commit_node(GIT_log.Entry entry, List<CommitFileDiff> changes, Map<str, bool> collapsed, Map<str, CommitFileDiff> out_file_diffs) {
+    str id = "commit:" + entry.id;
+    str label = entry.id.substr(0, 7) + "  " + first_line(entry.commit.message);
     List<TUI_outline.Node> body = [];
-    str author = en.commit.author.name.utf8().or("<non-utf8>") + " <" + en.commit.author.email.utf8().or("<non-utf8>") + ">";
+    str author = entry.commit.author.name.utf8().or("<non-utf8>") + " <" + entry.commit.author.email.utf8().or("<non-utf8>") + ">";
     body.push(TUI_outline.Node.leaf(id + ":author", "Author: " + author));
-    body.push(TUI_outline.Node.leaf(id + ":date", "Date:   " + date.iso(en.commit.author.when)));
-    str msg = en.commit.message.utf8().or("<non-utf8 message>");
-    int i = 0;
-    for (str line in text.lines(msg)) {
-        int j = 0;
+    body.push(TUI_outline.Node.leaf(id + ":date", "Date:   " + date.iso(entry.commit.author.when)));
+    str message = entry.commit.message.utf8().or("<non-utf8 message>");
+    int line_index = 0;
+    for (str line in text.lines(message)) {
+        int wrapped_index = 0;
         for (str wrapped in TUI_text.wrap(line, COMMIT_BODY_WRAP_COLS)) {
-            body.push(TUI_outline.Node.leaf(id + ":m" + i.to_str() + ":" + j.to_str(), "  " + wrapped));
-            j = j + 1;
+            body.push(TUI_outline.Node.leaf(id + ":m" + line_index.to_str() + ":" + wrapped_index.to_str(), "  " + wrapped));
+            wrapped_index = wrapped_index + 1;
         }
-        i = i + 1;
+        line_index = line_index + 1;
     }
     List<TUI_outline.Node> file_nodes = [];
-    int k = 0;
-    for (CommitFileDiff ch in changes) {
-        str file_id = id + ":file:" + k.to_str();
-        str p = ch.path.utf8().or("<non-utf8 path>");
-        str stat = "+" + ch.insertions.to_str() + " -" + ch.deletions.to_str();
-        if (ch.binary) {
+    int file_index = 0;
+    for (CommitFileDiff change in changes) {
+        str file_id = id + ":file:" + file_index.to_str();
+        str path_text = change.path.utf8().or("<non-utf8 path>");
+        str stat = "+" + change.insertions.to_str() + " -" + change.deletions.to_str();
+        if (change.binary) {
             stat = "(binary)";
         }
-        file_nodes.push(TUI_outline.Node.leaf(file_id, mark_str(change_mark(ch.kind)) + "  " + p + "  " + stat));
-        out_file_diffs.set(file_id, ch);
-        k = k + 1;
+        file_nodes.push(TUI_outline.Node.leaf(file_id, mark_str(change_mark(change.kind)) + "  " + path_text + "  " + stat));
+        out_file_diffs.set(file_id, change);
+        file_index = file_index + 1;
     }
     str files_id = id + ":files";
     body.push(TUI_outline.Node.section(files_id, "Files changed (" + file_nodes.size().to_str() + ")", file_nodes, expanded: expanded_for(collapsed, files_id, true)));
@@ -519,36 +519,36 @@ List<TUI_outline.Node> commit_node(GIT_log.Entry en, List<CommitFileDiff> change
 /// cache and rebuilds (`State.toggle_current`). The computing happens
 /// elsewhere, this only ever renders what it is handed, which is what keeps
 /// this function itself free of I/O (this doc comment's own first line).
-pub TUI_outline.Outline build_outline(GIT_status.Status st, List<GIT_log.Entry> log, Map<str, List<CommitFileDiff>> changes_by_commit, Map<str, bool> collapsed, Map<str, bytes> out_paths, Map<str, CommitFileDiff> out_file_diffs, List<BranchRow> branches) {
+pub TUI_outline.Outline build_outline(GIT_status.Status status, List<GIT_log.Entry> log, Map<str, List<CommitFileDiff>> changes_by_commit, Map<str, bool> collapsed, Map<str, bytes> out_paths, Map<str, CommitFileDiff> out_file_diffs, List<BranchRow> branches) {
     out_paths.clear();
     out_file_diffs.clear();
     List<TUI_outline.Node> roots = [];
     List<TUI_outline.Node> untracked_children = [];
-    for (PathRow row in rows_from_untracked(st.untracked)) {
+    for (PathRow row in rows_from_untracked(status.untracked)) {
         str id = "untracked:" + row.path;
         out_paths.set(id, row.raw);
         untracked_children.push(TUI_outline.Node.leaf(id, row.path));
     }
     roots.push(TUI_outline.Node.section("untracked", "Untracked files (" + untracked_children.size().to_str() + ")", untracked_children, expanded: expanded_for(collapsed, "untracked", true)));
     List<TUI_outline.Node> unstaged_children = [];
-    for (PathRow row in rows_from_deltas(st.unstaged)) {
+    for (PathRow row in rows_from_deltas(status.unstaged)) {
         str id = "unstaged:" + row.path;
         out_paths.set(id, row.raw);
         unstaged_children.push(TUI_outline.Node.leaf(id, mark_str(row.mark) + "  " + row.path));
     }
     roots.push(TUI_outline.Node.section("unstaged", "Unstaged changes (" + unstaged_children.size().to_str() + ")", unstaged_children, expanded: expanded_for(collapsed, "unstaged", true)));
     List<TUI_outline.Node> staged_children = [];
-    for (PathRow row in rows_from_deltas(st.staged)) {
+    for (PathRow row in rows_from_deltas(status.staged)) {
         str id = "staged:" + row.path;
         out_paths.set(id, row.raw);
         staged_children.push(TUI_outline.Node.leaf(id, mark_str(row.mark) + "  " + row.path));
     }
     roots.push(TUI_outline.Node.section("staged", "Staged changes (" + staged_children.size().to_str() + ")", staged_children, expanded: expanded_for(collapsed, "staged", true)));
     List<TUI_outline.Node> commit_children = [];
-    for (GIT_log.Entry en in log) {
-        List<CommitFileDiff> changes = changes_by_commit.get(en.id).or([]);
-        for (TUI_outline.Node n in commit_node(en, changes, collapsed, out_file_diffs)) {
-            commit_children.push(n);
+    for (GIT_log.Entry entry in log) {
+        List<CommitFileDiff> changes = changes_by_commit.get(entry.id).or([]);
+        for (TUI_outline.Node node in commit_node(entry, changes, collapsed, out_file_diffs)) {
+            commit_children.push(node);
         }
     }
     str commits_label = "Commits (" + log.size().to_str() + ")";
@@ -565,12 +565,12 @@ pub TUI_outline.Outline build_outline(GIT_status.Status st, List<GIT_log.Entry> 
     // fourth) are untouched; design.md's own Magit comparison lists branches
     // as one more section of the same document, not a panel of its own.
     List<TUI_outline.Node> branch_children = [];
-    for (BranchRow br in branches) {
+    for (BranchRow branch_row in branches) {
         str mark = "  ";
-        if (br.branch.current) {
+        if (branch_row.branch.current) {
             mark = "* ";
         }
-        branch_children.push(TUI_outline.Node.leaf("branch:" + br.branch.name, mark + br.branch.name + "  " + br.branch.id.substr(0, 7) + "  " + br.subject));
+        branch_children.push(TUI_outline.Node.leaf("branch:" + branch_row.branch.name, mark + branch_row.branch.name + "  " + branch_row.branch.id.substr(0, 7) + "  " + branch_row.subject));
     }
     roots.push(TUI_outline.Node.section("branches", "Branches (" + branch_children.size().to_str() + ")", branch_children, expanded: expanded_for(collapsed, "branches", true)));
     return TUI_outline.Outline(roots);
@@ -623,8 +623,8 @@ type Leaf {
 /// the commit, which is a correctness bug and not a display gap.
 pub Result<str, GIT_object.Error> build_tree(str gitdir, List<GIT_index.Entry> entries) {
     List<Leaf> leaves = [];
-    for (GIT_index.Entry e in entries) {
-        leaves.push(Leaf(e.mode, e.id, e.path));
+    for (GIT_index.Entry entry in entries) {
+        leaves.push(Leaf(entry.mode, entry.id, entry.path));
     }
     return build_tree_of(gitdir, leaves);
 }
@@ -633,39 +633,39 @@ Result<str, GIT_object.Error> build_tree_of(str gitdir, List<Leaf> leaves) {
     List<GIT_object.Entry> out = [];
     List<bytes> dirnames = [];
     List<List<Leaf>> groups = [];
-    for (Leaf l in leaves) {
-        int slash = find_byte(l.path, '/', 0);
+    for (Leaf leaf in leaves) {
+        int slash = find_byte(leaf.path, '/', 0);
         if (slash < 0) {
-            out.push(GIT_object.Entry(l.mode, l.path, l.id));
+            out.push(GIT_object.Entry(leaf.mode, leaf.path, leaf.id));
             continue;
         }
-        bytes dir = l.path.substr(0, slash);
-        bytes rest = l.path.substr(slash + 1, l.path.size());
-        Leaf sub = Leaf(l.mode, l.id, rest);
-        int idx = find_dir(dirnames, dir);
-        if (idx < 0) {
-            dirnames.push(dir);
+        bytes directory = leaf.path.substr(0, slash);
+        bytes rest = leaf.path.substr(slash + 1, leaf.path.size());
+        Leaf sub = Leaf(leaf.mode, leaf.id, rest);
+        int index = find_dir(dirnames, directory);
+        if (index < 0) {
+            dirnames.push(directory);
             groups.push([sub]);
         } else {
-            groups[idx].push(sub);
+            groups[index].push(sub);
         }
     }
-    int i = 0;
-    while (i < dirnames.size()) {
-        str sub_id = build_tree_of(gitdir, groups[i])?;
-        out.push(GIT_object.Entry(0o40000, dirnames[i], sub_id));
-        i = i + 1;
+    int index = 0;
+    while (index < dirnames.size()) {
+        str sub_id = build_tree_of(gitdir, groups[index])?;
+        out.push(GIT_object.Entry(0o40000, dirnames[index], sub_id));
+        index = index + 1;
     }
     return GIT_object.write_tree(gitdir, out);
 }
 
-int find_dir(List<bytes> dirnames, bytes dir) {
-    int i = 0;
-    while (i < dirnames.size()) {
-        if (bytes_eq(dirnames[i], dir)) {
-            return i;
+int find_dir(List<bytes> dirnames, bytes directory) {
+    int index = 0;
+    while (index < dirnames.size()) {
+        if (bytes_eq(dirnames[index], directory)) {
+            return index;
         }
-        i = i + 1;
+        index = index + 1;
     }
     return -1;
 }
@@ -677,8 +677,8 @@ int find_dir(List<bytes> dirnames, bytes dir) {
 /// error, since `unstage_path` only needs to know whether there is one.
 pub Option<str> head_tree_id(str gitdir) {
     match (GIT_refs.head(gitdir)) {
-        case Ok(GIT_refs.Head h): {
-            match (h) {
+        case Ok(GIT_refs.Head head): {
+            match (head) {
                 case Unborn(str name): {
                     return Option<str>.None;
                 }
@@ -690,7 +690,7 @@ pub Option<str> head_tree_id(str gitdir) {
                 }
             }
         }
-        case Err(GIT_refs.Error e): {
+        case Err(_): {
             return Option<str>.None;
         }
     }
@@ -698,10 +698,10 @@ pub Option<str> head_tree_id(str gitdir) {
 
 Option<str> commit_tree_id(str gitdir, str id) {
     match (GIT_object.read(gitdir, id)) {
-        case Ok(GIT_object.Object o): {
-            match (o.body) {
-                case Commit(GIT_object.Commit c): {
-                    return Option<str>.Some(c.tree);
+        case Ok(GIT_object.Object object): {
+            match (object.body) {
+                case Commit(GIT_object.Commit commit): {
+                    return Option<str>.Some(commit.tree);
                 }
                 case Blob: {
                     return Option<str>.None;
@@ -735,18 +735,18 @@ pub Option<GIT_object.Entry> find_in_tree(str gitdir, str tree_id, bytes path) {
         has_rest = true;
     }
     match (GIT_object.read(gitdir, tree_id)) {
-        case Ok(GIT_object.Object o): {
-            match (o.body) {
-                case Tree(List<GIT_object.Entry> es): {
-                    for (GIT_object.Entry e in es) {
-                        if (bytes_eq(e.name, seg)) {
+        case Ok(GIT_object.Object object): {
+            match (object.body) {
+                case Tree(List<GIT_object.Entry> entries): {
+                    for (GIT_object.Entry entry in entries) {
+                        if (bytes_eq(entry.name, seg)) {
                             if (has_rest) {
-                                if (e.is_tree()) {
-                                    return find_in_tree(gitdir, e.id, rest);
+                                if (entry.is_tree()) {
+                                    return find_in_tree(gitdir, entry.id, rest);
                                 }
                                 return Option<GIT_object.Entry>.None;
                             }
-                            return Option<GIT_object.Entry>.Some(e);
+                            return Option<GIT_object.Entry>.Some(entry);
                         }
                     }
                     return Option<GIT_object.Entry>.None;
@@ -870,10 +870,10 @@ pub type State {
 /// this constructor alone does no I/O, which is what makes it safe to build
 /// in a test that never touches a real repository.
 pub static State State.open(str gitdir, str worktree) {
-    State s = State(gitdir, worktree);
-    s.commit_msg_path = fs.join(gitdir, "COMMIT_EDITMSG");
-    s.branch_name_path = fs.join(gitdir, "GITUI_BRANCH_NAME");
-    return s;
+    State state = State(gitdir, worktree);
+    state.commit_msg_path = fs.join(gitdir, "COMMIT_EDITMSG");
+    state.branch_name_path = fs.join(gitdir, "GITUI_BRANCH_NAME");
+    return state;
 }
 
 /// Re-read the repository: `GIT_status.status` for the three change lists,
@@ -883,17 +883,17 @@ pub static State State.open(str gitdir, str worktree) {
 /// so it becomes an empty history rather than a message.
 pub void State.refresh() {
     match (GIT_status.status(gitdir, worktree)) {
-        case Ok(GIT_status.Status st): {
-            last_status = st;
+        case Ok(GIT_status.Status status): {
+            last_status = status;
         }
-        case Err(GIT_status.Error e): {
+        case Err(GIT_status.Error error): {
             last_status = GIT_status.Status([], [], []);
-            message = "status: " + e.to_str();
+            message = "status: " + error.to_str();
         }
     }
     match (GIT_log.walk(gitdir, "HEAD", log_limit)) {
-        case Ok(List<GIT_log.Entry> es): {
-            log = es;
+        case Ok(List<GIT_log.Entry> entries): {
+            log = entries;
         }
         case Err: {
             log = [];
@@ -901,17 +901,17 @@ pub void State.refresh() {
     }
     branch_rows = [];
     match (GIT_checkout.branches(gitdir)) {
-        case Ok(List<GIT_checkout.Branch> bs): {
-            for (GIT_checkout.Branch b in bs) {
-                branch_rows.push(BranchRow(b, tip_subject(b.id)));
+        case Ok(List<GIT_checkout.Branch> branches): {
+            for (GIT_checkout.Branch branch in branches) {
+                branch_rows.push(BranchRow(branch, tip_subject(branch.id)));
             }
         }
         case Err: {
         }
     }
     match (GIT_refs.head(gitdir)) {
-        case Ok(GIT_refs.Head h): {
-            match (h) {
+        case Ok(GIT_refs.Head head): {
+            match (head) {
                 case Born(str name, str id): {
                     branch_label = "on " + branch_name(name) + " @ " + id.substr(0, 7);
                 }
@@ -923,7 +923,7 @@ pub void State.refresh() {
                 }
             }
         }
-        case Err(GIT_refs.Error e): {
+        case Err(_): {
             branch_label = "?";
         }
     }
@@ -942,11 +942,11 @@ bool State.ensure_commit_changes(str id) {
     if (commit_changes_cache.contains(id)) {
         return false;
     }
-    for (GIT_log.Entry en in log) {
-        if (en.id == id) {
-            match (commit_changes(gitdir, en.commit)) {
-                case Ok(List<CommitFileDiff> cs): {
-                    commit_changes_cache.set(id, cs);
+    for (GIT_log.Entry entry in log) {
+        if (entry.id == id) {
+            match (commit_changes(gitdir, entry.commit)) {
+                case Ok(List<CommitFileDiff> changes): {
+                    commit_changes_cache.set(id, changes);
                 }
                 case Err: {
                     commit_changes_cache.set(id, []);
@@ -966,8 +966,8 @@ bool State.ensure_commit_changes(str id) {
 pub void State.reload() {
     str keep_id = "";
     match (outline.current()) {
-        case Some(TUI_outline.Row r): {
-            keep_id = r.node.id;
+        case Some(TUI_outline.Row row): {
+            keep_id = row.node.id;
         }
         case None: {
         }
@@ -996,11 +996,11 @@ pub void State.toggle_current() {
     str keep_id = "";
     bool rebuild = false;
     match (outline.current()) {
-        case Some(TUI_outline.Row r): {
-            collapsed.set(r.node.id, !r.node.expanded);
-            keep_id = r.node.id;
-            if (r.node.expanded) {
-                match (commit_id_of_unfoldable(r.node.id)) {
+        case Some(TUI_outline.Row row): {
+            collapsed.set(row.node.id, !row.node.expanded);
+            keep_id = row.node.id;
+            if (row.node.expanded) {
+                match (commit_id_of_unfoldable(row.node.id)) {
                     case Some(str cid): {
                         rebuild = ensure_commit_changes(cid);
                     }
@@ -1032,11 +1032,11 @@ pub void State.move_cursor(int delta) {
 /// whatever entry that path already had.
 pub void State.stage_current() {
     match (outline.current()) {
-        case Some(TUI_outline.Row r): {
-            if (r.node.id.starts_with("untracked:") || r.node.id.starts_with("unstaged:")) {
-                match (paths.get(r.node.id)) {
-                    case Some(bytes p): {
-                        stage_path(p);
+        case Some(TUI_outline.Row row): {
+            if (row.node.id.starts_with("untracked:") || row.node.id.starts_with("unstaged:")) {
+                match (paths.get(row.node.id)) {
+                    case Some(bytes path): {
+                        stage_path(path);
                     }
                     case None: {
                     }
@@ -1052,11 +1052,11 @@ pub void State.stage_path(bytes rel) {
     str full = fs.join(worktree, rel.utf8().or(""));
     bytes content = [];
     match (io.read_bytes(full)) {
-        case Ok(bytes b): {
-            content = b;
+        case Ok(bytes contents): {
+            content = contents;
         }
-        case Err(io.Error e): {
-            message = "cannot read " + rel.utf8().or("<non-utf8>") + ": " + e.to_str();
+        case Err(io.Error error): {
+            message = "cannot read " + rel.utf8().or("<non-utf8>") + ": " + error.to_str();
             return;
         }
     }
@@ -1065,30 +1065,30 @@ pub void State.stage_path(bytes rel) {
         case Ok(str id): {
             blob_id = id;
         }
-        case Err(GIT_object.Error e): {
-            message = "write_blob: " + e.to_str();
+        case Err(GIT_object.Error error): {
+            message = "write_blob: " + error.to_str();
             return;
         }
     }
-    fs.Stat st = fs.Stat(0, 0, 0);
+    fs.Stat file_stat = fs.Stat(0, 0, 0);
     match (fs.stat(full)) {
-        case Ok(fs.Stat s): {
-            st = s;
+        case Ok(fs.Stat fetched): {
+            file_stat = fetched;
         }
-        case Err(io.Error e): {
-            message = "stat: " + e.to_str();
+        case Err(io.Error error): {
+            message = "stat: " + error.to_str();
             return;
         }
     }
-    GIT_index.Entry entry = GIT_index.from_stat(rel, st, fs.is_link(full), blob_id);
-    GIT_index.Index ix = read_index(gitdir);
-    replace_entry(ix, entry);
-    match (GIT_index.write(gitdir, ix)) {
+    GIT_index.Entry entry = GIT_index.from_stat(rel, file_stat, fs.is_link(full), blob_id);
+    GIT_index.Index index = read_index(gitdir);
+    replace_entry(index, entry);
+    match (GIT_index.write(gitdir, index)) {
         case Ok: {
             message = "staged " + rel.utf8().or("<non-utf8>");
         }
-        case Err(GIT_index.Error e): {
-            message = "index write: " + e.to_str();
+        case Err(GIT_index.Error error): {
+            message = "index write: " + error.to_str();
             return;
         }
     }
@@ -1107,11 +1107,11 @@ pub void State.stage_path(bytes rel) {
 /// again, not deleted from disk).
 pub void State.unstage_current() {
     match (outline.current()) {
-        case Some(TUI_outline.Row r): {
-            if (r.node.id.starts_with("staged:")) {
-                match (paths.get(r.node.id)) {
-                    case Some(bytes p): {
-                        unstage_path(p);
+        case Some(TUI_outline.Row row): {
+            if (row.node.id.starts_with("staged:")) {
+                match (paths.get(row.node.id)) {
+                    case Some(bytes path): {
+                        unstage_path(path);
                     }
                     case None: {
                     }
@@ -1124,34 +1124,34 @@ pub void State.unstage_current() {
 }
 
 pub void State.unstage_path(bytes rel) {
-    GIT_index.Index ix = read_index(gitdir);
+    GIT_index.Index index = read_index(gitdir);
     Option<str> tree = head_tree_id(gitdir);
     match (tree) {
         case Some(str tid): {
             match (find_in_tree(gitdir, tid, rel)) {
-                case Some(GIT_object.Entry e): {
+                case Some(GIT_object.Entry entry): {
                     // size: -1 can never equal a real `fs.stat` size (always
                     // >= 0), so `GIT_status.status`'s mtime/size shortcut always
                     // re-hashes this entry instead of trusting a snapshot
                     // that was never actually taken.
-                    GIT_index.Entry restored = GIT_index.Entry(0, 0, 0, 0, 0, 0, e.mode, 0, 0, -1, e.id, 0, false, rel);
-                    replace_entry(ix, restored);
+                    GIT_index.Entry restored = GIT_index.Entry(0, 0, 0, 0, 0, 0, entry.mode, 0, 0, -1, entry.id, 0, false, rel);
+                    replace_entry(index, restored);
                 }
                 case None: {
-                    remove_entry(ix, rel);
+                    remove_entry(index, rel);
                 }
             }
         }
         case None: {
-            remove_entry(ix, rel);
+            remove_entry(index, rel);
         }
     }
-    match (GIT_index.write(gitdir, ix)) {
+    match (GIT_index.write(gitdir, index)) {
         case Ok: {
             message = "unstaged " + rel.utf8().or("<non-utf8>");
         }
-        case Err(GIT_index.Error e): {
-            message = "index write: " + e.to_str();
+        case Err(GIT_index.Error error): {
+            message = "index write: " + error.to_str();
             return;
         }
     }
@@ -1165,23 +1165,23 @@ pub void State.unstage_path(bytes rel) {
 /// Nothing is touched until `handle_confirm_key` sees `y`.
 pub void State.discard_current() {
     match (outline.current()) {
-        case Some(TUI_outline.Row r): {
+        case Some(TUI_outline.Row row): {
             str kind = "";
-            if (r.node.id.starts_with("untracked:")) {
+            if (row.node.id.starts_with("untracked:")) {
                 kind = "untracked";
-            } else if (r.node.id.starts_with("unstaged:")) {
+            } else if (row.node.id.starts_with("unstaged:")) {
                 kind = "unstaged";
-            } else if (r.node.id.starts_with("staged:")) {
+            } else if (row.node.id.starts_with("staged:")) {
                 kind = "staged";
             }
             if (kind == "") {
                 message = "discard: nothing to discard here";
                 return;
             }
-            match (paths.get(r.node.id)) {
-                case Some(bytes p): {
+            match (paths.get(row.node.id)) {
+                case Some(bytes path): {
                     confirm_kind = kind;
-                    confirm_path = p;
+                    confirm_path = path;
                     confirm_open = true;
                     message = "";
                 }
@@ -1228,8 +1228,8 @@ pub void State.discard_path(str kind, bytes rel) {
         match (fs.remove(full)) {
             case Ok: {
             }
-            case Err(io.Error e): {
-                message = "cannot remove " + shown + ": " + e.to_str();
+            case Err(io.Error error): {
+                message = "cannot remove " + shown + ": " + error.to_str();
                 return;
             }
         }
@@ -1239,10 +1239,10 @@ pub void State.discard_path(str kind, bytes rel) {
         return;
     }
     if (kind == "unstaged") {
-        GIT_index.Index ix = read_index(gitdir);
-        match (find_index_entry(ix, rel)) {
-            case Some(GIT_index.Entry e): {
-                if (!write_worktree(rel, e.mode, read_blob(e.id))) {
+        GIT_index.Index index = read_index(gitdir);
+        match (find_index_entry(index, rel)) {
+            case Some(GIT_index.Entry entry): {
+                if (!write_worktree(rel, entry.mode, read_blob(entry.id))) {
                     return;
                 }
                 message = "discarded changes to " + shown;
@@ -1255,7 +1255,7 @@ pub void State.discard_path(str kind, bytes rel) {
         return;
     }
     if (kind == "staged") {
-        GIT_index.Index ix = read_index(gitdir);
+        GIT_index.Index index = read_index(gitdir);
         Option<GIT_object.Entry> in_head = Option<GIT_object.Entry>.None;
         match (head_tree_id(gitdir)) {
             case Some(str tid): {
@@ -1265,35 +1265,35 @@ pub void State.discard_path(str kind, bytes rel) {
             }
         }
         match (in_head) {
-            case Some(GIT_object.Entry e): {
-                if (!write_worktree(rel, e.mode, read_blob(e.id))) {
+            case Some(GIT_object.Entry entry): {
+                if (!write_worktree(rel, entry.mode, read_blob(entry.id))) {
                     return;
                 }
                 // The file was just rewritten, so its real stat goes in the
                 // entry (as `stage_path` records it): a zeroed stat makes real
                 // git report the path modified until something refreshes it.
-                fs.Stat st = fs.Stat(0, 0, 0);
+                fs.Stat file_stat = fs.Stat(0, 0, 0);
                 match (fs.stat(full)) {
-                    case Ok(fs.Stat s): {
-                        st = s;
+                    case Ok(fs.Stat fetched): {
+                        file_stat = fetched;
                     }
-                    case Err(io.Error err): {
-                        message = "stat: " + err.to_str();
+                    case Err(io.Error error): {
+                        message = "stat: " + error.to_str();
                         return;
                     }
                 }
-                GIT_index.Entry fresh = GIT_index.from_stat(rel, st, fs.is_link(full), e.id);
-                GIT_index.Entry restored = GIT_index.Entry(fresh.ctime_s, fresh.ctime_ns, fresh.mtime_s, fresh.mtime_ns, 0, 0, e.mode, 0, 0, fresh.size, e.id, 0, false, rel);
-                replace_entry(ix, restored);
+                GIT_index.Entry fresh = GIT_index.from_stat(rel, file_stat, fs.is_link(full), entry.id);
+                GIT_index.Entry restored = GIT_index.Entry(fresh.ctime_s, fresh.ctime_ns, fresh.mtime_s, fresh.mtime_ns, 0, 0, entry.mode, 0, 0, fresh.size, entry.id, 0, false, rel);
+                replace_entry(index, restored);
             }
             case None: {
-                remove_entry(ix, rel);
+                remove_entry(index, rel);
                 if (fs.exists(full) || fs.is_link(full)) {
                     match (fs.remove(full)) {
                         case Ok: {
                         }
-                        case Err(io.Error e): {
-                            message = "cannot remove " + shown + ": " + e.to_str();
+                        case Err(io.Error error): {
+                            message = "cannot remove " + shown + ": " + error.to_str();
                             return;
                         }
                     }
@@ -1301,12 +1301,12 @@ pub void State.discard_path(str kind, bytes rel) {
                 }
             }
         }
-        match (GIT_index.write(gitdir, ix)) {
+        match (GIT_index.write(gitdir, index)) {
             case Ok: {
                 message = "discarded staged changes to " + shown;
             }
-            case Err(GIT_index.Error e): {
-                message = "index write: " + e.to_str();
+            case Err(GIT_index.Error error): {
+                message = "index write: " + error.to_str();
                 return;
             }
         }
@@ -1324,13 +1324,13 @@ pub void State.discard_path(str kind, bytes rel) {
 bool State.write_worktree(bytes rel, int mode, bytes content) {
     str shown = rel.utf8().or("<non-utf8>");
     str full = fs.join(worktree, rel.utf8().or(""));
-    str dir = dir_of(full);
-    if (dir != "." && !fs.is_dir(dir)) {
-        match (fs.makedirs(dir)) {
+    str directory = dir_of(full);
+    if (directory != "." && !fs.is_dir(directory)) {
+        match (fs.makedirs(directory)) {
             case Ok: {
             }
-            case Err(io.Error e): {
-                message = "cannot create " + dir + ": " + e.to_str();
+            case Err(io.Error error): {
+                message = "cannot create " + directory + ": " + error.to_str();
                 return false;
             }
         }
@@ -1340,8 +1340,8 @@ bool State.write_worktree(bytes rel, int mode, bytes content) {
             match (fs.remove(full)) {
                 case Ok: {
                 }
-                case Err(io.Error e): {
-                    message = "cannot replace " + shown + ": " + e.to_str();
+                case Err(io.Error error): {
+                    message = "cannot replace " + shown + ": " + error.to_str();
                     return false;
                 }
             }
@@ -1350,8 +1350,8 @@ bool State.write_worktree(bytes rel, int mode, bytes content) {
             case Ok: {
                 return true;
             }
-            case Err(io.Error e): {
-                message = "cannot link " + shown + ": " + e.to_str();
+            case Err(io.Error error): {
+                message = "cannot link " + shown + ": " + error.to_str();
                 return false;
             }
         }
@@ -1362,8 +1362,8 @@ bool State.write_worktree(bytes rel, int mode, bytes content) {
         match (fs.remove(full)) {
             case Ok: {
             }
-            case Err(io.Error e): {
-                message = "cannot replace " + shown + ": " + e.to_str();
+            case Err(io.Error error): {
+                message = "cannot replace " + shown + ": " + error.to_str();
                 return false;
             }
         }
@@ -1372,8 +1372,8 @@ bool State.write_worktree(bytes rel, int mode, bytes content) {
         case Ok: {
             return true;
         }
-        case Err(io.Error e): {
-            message = "cannot write " + shown + ": " + e.to_str();
+        case Err(io.Error error): {
+            message = "cannot write " + shown + ": " + error.to_str();
             return false;
         }
     }
@@ -1384,16 +1384,16 @@ bool State.write_worktree(bytes rel, int mode, bytes content) {
 /// working tree's own root, which is never touched) -- `git clean`'s own
 /// tidying of a directory it emptied.
 void State.prune_empty_parents(bytes rel) {
-    str p = dir_of(rel.utf8().or(""));
-    while (p != "." && p != "") {
-        match (fs.rmdir(fs.join(worktree, p))) {
+    str parent_path = dir_of(rel.utf8().or(""));
+    while (parent_path != "." && parent_path != "") {
+        match (fs.rmdir(fs.join(worktree, parent_path))) {
             case Ok: {
             }
             case Err: {
                 return;
             }
         }
-        p = dir_of(p);
+        parent_path = dir_of(parent_path);
     }
 }
 
@@ -1440,13 +1440,13 @@ void State.prune_empty_parents(bytes rel) {
 /// than attempting to render binary content as text.
 pub void State.show_diff_current() {
     match (outline.current()) {
-        case Some(TUI_outline.Row r): {
-            if (r.node.id.contains(":file:")) {
-                match (file_diffs.get(r.node.id)) {
-                    case Some(CommitFileDiff d): {
-                        open_diff(r.node.label, commit_blob(gitdir, d.old_id), commit_blob(gitdir, d.new_id));
+        case Some(TUI_outline.Row row): {
+            if (row.node.id.contains(":file:")) {
+                match (file_diffs.get(row.node.id)) {
+                    case Some(CommitFileDiff commit_file_diff): {
+                        open_diff(row.node.label, commit_blob(gitdir, commit_file_diff.old_id), commit_blob(gitdir, commit_file_diff.new_id));
                         diff_section = "commit";
-                        diff_path = d.path;
+                        diff_path = commit_file_diff.path;
                     }
                     case None: {
                         message = "diff: nothing to show here";
@@ -1454,20 +1454,20 @@ pub void State.show_diff_current() {
                 }
                 return;
             }
-            match (paths.get(r.node.id)) {
-                case Some(bytes p): {
-                    if (r.node.id.starts_with("untracked:")) {
-                        open_diff(r.node.label, [], read_worktree(p));
+            match (paths.get(row.node.id)) {
+                case Some(bytes path): {
+                    if (row.node.id.starts_with("untracked:")) {
+                        open_diff(row.node.label, [], read_worktree(path));
                         diff_section = "untracked";
-                        diff_path = p;
-                    } else if (r.node.id.starts_with("unstaged:")) {
-                        open_diff(r.node.label, index_blob(p), read_worktree(p));
+                        diff_path = path;
+                    } else if (row.node.id.starts_with("unstaged:")) {
+                        open_diff(row.node.label, index_blob(path), read_worktree(path));
                         diff_section = "unstaged";
-                        diff_path = p;
-                    } else if (r.node.id.starts_with("staged:")) {
-                        open_diff(r.node.label, head_blob(p), index_blob(p));
+                        diff_path = path;
+                    } else if (row.node.id.starts_with("staged:")) {
+                        open_diff(row.node.label, head_blob(path), index_blob(path));
                         diff_section = "staged";
-                        diff_path = p;
+                        diff_path = path;
                     } else {
                         message = "diff: nothing to show here";
                     }
@@ -1488,8 +1488,8 @@ pub void State.show_diff_current() {
 bytes State.read_worktree(bytes rel) {
     str full = fs.join(worktree, rel.utf8().or(""));
     match (io.read_bytes(full)) {
-        case Ok(bytes b): {
-            return b;
+        case Ok(bytes contents): {
+            return contents;
         }
         case Err: {
             return [];
@@ -1503,10 +1503,10 @@ bytes State.read_worktree(bytes rel) {
 /// actually hit (every unstaged row's path is, by construction, in the
 /// index).
 bytes State.index_blob(bytes rel) {
-    GIT_index.Index ix = read_index(gitdir);
-    match (find_index_entry(ix, rel)) {
-        case Some(GIT_index.Entry e): {
-            return read_blob(e.id);
+    GIT_index.Index index = read_index(gitdir);
+    match (find_index_entry(index, rel)) {
+        case Some(GIT_index.Entry entry): {
+            return read_blob(entry.id);
         }
         case None: {
             return [];
@@ -1521,8 +1521,8 @@ bytes State.head_blob(bytes rel) {
     match (head_tree_id(gitdir)) {
         case Some(str tid): {
             match (find_in_tree(gitdir, tid, rel)) {
-                case Some(GIT_object.Entry e): {
-                    return read_blob(e.id);
+                case Some(GIT_object.Entry entry): {
+                    return read_blob(entry.id);
                 }
                 case None: {
                     return [];
@@ -1537,11 +1537,11 @@ bytes State.head_blob(bytes rel) {
 
 bytes State.read_blob(str id) {
     match (GIT_object.read(gitdir, id)) {
-        case Ok(GIT_object.Object o): {
-            return o.raw;
+        case Ok(GIT_object.Object object): {
+            return object.raw;
         }
-        case Err(GIT_object.Error e): {
-            message = "object read: " + e.to_str();
+        case Err(GIT_object.Error error): {
+            message = "object read: " + error.to_str();
             return [];
         }
     }
@@ -1561,9 +1561,9 @@ pub void State.open_diff(str title, bytes old, bytes new) {
             diff_binary = true;
             diff_view = TUI_diff_view.DiffView([]);
         }
-        case Hunks(List<TUI_diff_view.Hunk> hs): {
+        case Hunks(List<TUI_diff_view.Hunk> hunks): {
             diff_binary = false;
-            diff_view = TUI_diff_view.DiffView(hs);
+            diff_view = TUI_diff_view.DiffView(hunks);
         }
     }
     diff_open = true;
@@ -1653,16 +1653,16 @@ pub void State.unstage_hunk_current() {
 /// is dropped instead. `pub`, like `stage_path`, so `t_gitclient_ops.m31`
 /// can drive it against a real fixture and real git. True when the index
 /// changed.
-pub bool State.stage_hunk(bytes rel, int k) {
+pub bool State.stage_hunk(bytes rel, int hunk_index) {
     bytes old = index_blob(rel);
     bytes new = read_worktree(rel);
-    match (GIT_patch.apply_hunk(old, new, k)) {
+    match (GIT_patch.apply_hunk(old, new, hunk_index)) {
         case Some(bytes content): {
             str full = fs.join(worktree, rel.utf8().or(""));
             if (content.size() == 0 && !fs.exists(full)) {
                 return drop_index_entry(rel, "staged deletion of " + rel.utf8().or("<non-utf8>"));
             }
-            return set_index_blob(rel, content, "staged hunk " + (k + 1).to_str() + " of " + rel.utf8().or("<non-utf8>"));
+            return set_index_blob(rel, content, "staged hunk " + (hunk_index + 1).to_str() + " of " + rel.utf8().or("<non-utf8>"));
         }
         case None: {
             message = "no such hunk to stage";
@@ -1677,15 +1677,15 @@ pub bool State.stage_hunk(bytes rel, int k) {
 /// one all-added hunk of a path HEAD does not have leaves nothing, which is
 /// `git reset -p`'s "unstage addition": the entry is dropped, the file is
 /// untracked again. True when the index changed.
-pub bool State.unstage_hunk(bytes rel, int k) {
+pub bool State.unstage_hunk(bytes rel, int hunk_index) {
     bytes old = head_blob(rel);
     bytes new = index_blob(rel);
-    match (GIT_patch.revert_hunk(old, new, k)) {
+    match (GIT_patch.revert_hunk(old, new, hunk_index)) {
         case Some(bytes content): {
             if (content.size() == 0 && !head_has(rel)) {
                 return drop_index_entry(rel, "unstaged addition of " + rel.utf8().or("<non-utf8>"));
             }
-            return set_index_blob(rel, content, "unstaged hunk " + (k + 1).to_str() + " of " + rel.utf8().or("<non-utf8>"));
+            return set_index_blob(rel, content, "unstaged hunk " + (hunk_index + 1).to_str() + " of " + rel.utf8().or("<non-utf8>"));
         }
         case None: {
             message = "no such hunk to unstage";
@@ -1701,16 +1701,16 @@ pub bool State.unstage_hunk(bytes rel, int k) {
 /// already rebuilt by `reload`, no longer has that row either.
 void State.reopen_diff(int keep_cursor) {
     str section = diff_section;
-    bytes p = diff_path;
+    bytes path = diff_path;
     str title = diff_title;
     bytes old = [];
     bytes new = [];
     if (section == "unstaged") {
-        old = index_blob(p);
-        new = read_worktree(p);
+        old = index_blob(path);
+        new = read_worktree(path);
     } else if (section == "staged") {
-        old = head_blob(p);
-        new = index_blob(p);
+        old = head_blob(path);
+        new = index_blob(path);
     } else {
         return;
     }
@@ -1720,7 +1720,7 @@ void State.reopen_diff(int keep_cursor) {
     }
     open_diff(title, old, new);
     diff_section = section;
-    diff_path = p;
+    diff_path = path;
     diff_view.cursor = keep_cursor;
     diff_view.move(0);
 }
@@ -1746,43 +1746,43 @@ bool State.set_index_blob(bytes rel, bytes content, str said) {
         case Ok(str id): {
             blob_id = id;
         }
-        case Err(GIT_object.Error e): {
-            message = "write_blob: " + e.to_str();
+        case Err(GIT_object.Error error): {
+            message = "write_blob: " + error.to_str();
             return false;
         }
     }
-    GIT_index.Index ix = read_index(gitdir);
+    GIT_index.Index index = read_index(gitdir);
     int mode = 0o100644;
-    match (find_index_entry(ix, rel)) {
-        case Some(GIT_index.Entry e): {
-            mode = e.mode;
+    match (find_index_entry(index, rel)) {
+        case Some(GIT_index.Entry entry): {
+            mode = entry.mode;
         }
         case None: {
         }
     }
-    replace_entry(ix, GIT_index.Entry(0, 0, 0, 0, 0, 0, mode, 0, 0, -1, blob_id, 0, false, rel));
-    match (GIT_index.write(gitdir, ix)) {
+    replace_entry(index, GIT_index.Entry(0, 0, 0, 0, 0, 0, mode, 0, 0, -1, blob_id, 0, false, rel));
+    match (GIT_index.write(gitdir, index)) {
         case Ok: {
             message = said;
             return true;
         }
-        case Err(GIT_index.Error e): {
-            message = "index write: " + e.to_str();
+        case Err(GIT_index.Error error): {
+            message = "index write: " + error.to_str();
             return false;
         }
     }
 }
 
 bool State.drop_index_entry(bytes rel, str said) {
-    GIT_index.Index ix = read_index(gitdir);
-    remove_entry(ix, rel);
-    match (GIT_index.write(gitdir, ix)) {
+    GIT_index.Index index = read_index(gitdir);
+    remove_entry(index, rel);
+    match (GIT_index.write(gitdir, index)) {
         case Ok: {
             message = said;
             return true;
         }
-        case Err(GIT_index.Error e): {
-            message = "index write: " + e.to_str();
+        case Err(GIT_index.Error error): {
+            message = "index write: " + error.to_str();
             return false;
         }
     }
@@ -1805,8 +1805,8 @@ pub void State.edit_message() {
         match (io.write(commit_msg_path, commit_template())) {
             case Ok: {
             }
-            case Err(io.Error e): {
-                message = "cannot write " + commit_msg_path + ": " + e.to_str();
+            case Err(io.Error error): {
+                message = "cannot write " + commit_msg_path + ": " + error.to_str();
                 return;
             }
         }
@@ -1848,8 +1848,8 @@ pub void State.launch_editor() {
     }
     str editor = pick_editor(os.env("EDITOR"));
     match (os.run([editor, commit_msg_path])) {
-        case Ok(os.ExitStatus st): {
-            match (st) {
+        case Ok(os.ExitStatus exit_status): {
+            match (exit_status) {
                 case Exited(int code): {
                     if (code == 0) {
                         finish_commit();
@@ -1862,8 +1862,8 @@ pub void State.launch_editor() {
                 }
             }
         }
-        case Err(io.Error e): {
-            message = "cannot launch '" + editor + "' (" + e.to_str() + "); edit " + commit_msg_path + " in another terminal, then press f to finish or a to abort";
+        case Err(io.Error error): {
+            message = "cannot launch '" + editor + "' (" + error.to_str() + "); edit " + commit_msg_path + " in another terminal, then press f to finish or a to abort";
         }
     }
 }
@@ -1877,15 +1877,15 @@ pub void State.launch_editor() {
 /// name and id alone rather than hidden).
 str State.tip_subject(str tip) {
     match (GIT_object.read(gitdir, tip)) {
-        case Ok(GIT_object.Object o): {
-            match (o.body) {
-                case Commit(GIT_object.Commit c): {
-                    return first_line(c.message);
+        case Ok(GIT_object.Object object): {
+            match (object.body) {
+                case Commit(GIT_object.Commit commit): {
+                    return first_line(commit.message);
                 }
                 case Blob: {
                     return "";
                 }
-                case Tree(List<GIT_object.Entry> es): {
+                case Tree(_): {
                     return "";
                 }
                 case Tag: {
@@ -1906,9 +1906,9 @@ str State.tip_subject(str tip) {
 pub void State.checkout_current() {
     str name = "";
     match (outline.current()) {
-        case Some(TUI_outline.Row r): {
-            if (r.node.id.starts_with("branch:")) {
-                name = r.node.id.substr(7, r.node.id.size());
+        case Some(TUI_outline.Row row): {
+            if (row.node.id.starts_with("branch:")) {
+                name = row.node.id.substr(7, row.node.id.size());
             }
         }
         case None: {
@@ -1924,19 +1924,19 @@ pub void State.checkout_current() {
 /// `git switch <name>`, by name -- `checkout_current`'s work, callable from a
 /// test harness without an outline.
 pub void State.checkout_branch(str name) {
-    for (BranchRow br in branch_rows) {
-        if (br.branch.name == name) {
-            if (br.branch.current) {
+    for (BranchRow branch_row in branch_rows) {
+        if (branch_row.branch.name == name) {
+            if (branch_row.branch.current) {
                 message = "already on " + name;
                 return;
             }
-            match (GIT_checkout.checkout(gitdir, worktree, br.branch.id, br.branch.full)) {
-                case Ok(GIT_checkout.Summary sm): {
-                    message = "switched to " + name + " (" + sm.written.to_str() + " written, " + sm.removed.to_str() + " removed)";
+            match (GIT_checkout.checkout(gitdir, worktree, branch_row.branch.id, branch_row.branch.full)) {
+                case Ok(GIT_checkout.Summary summary): {
+                    message = "switched to " + name + " (" + summary.written.to_str() + " written, " + summary.removed.to_str() + " removed)";
                     reload();
                 }
-                case Err(GIT_checkout.Error e): {
-                    message = "checkout refused: " + e.to_str();
+                case Err(GIT_checkout.Error error): {
+                    message = "checkout refused: " + error.to_str();
                 }
             }
             return;
@@ -1953,8 +1953,8 @@ pub void State.new_branch() {
     match (io.write(branch_name_path, "\n# Name the new branch on the first line. It starts at HEAD and\n# becomes the current branch. An empty name aborts.\n")) {
         case Ok: {
         }
-        case Err(io.Error e): {
-            message = "cannot write " + branch_name_path + ": " + e.to_str();
+        case Err(io.Error error): {
+            message = "cannot write " + branch_name_path + ": " + error.to_str();
             return;
         }
     }
@@ -1969,8 +1969,8 @@ pub void State.launch_branch_editor() {
     str editor = pick_editor(os.env("EDITOR"));
     bool ran = false;
     match (os.run([editor, branch_name_path])) {
-        case Ok(os.ExitStatus st): {
-            match (st) {
+        case Ok(os.ExitStatus exit_status): {
+            match (exit_status) {
                 case Exited(int code): {
                     if (code == 0) {
                         ran = true;
@@ -1983,8 +1983,8 @@ pub void State.launch_branch_editor() {
                 }
             }
         }
-        case Err(io.Error e): {
-            message = "cannot launch '" + editor + "' (" + e.to_str() + "); no branch created";
+        case Err(io.Error error): {
+            message = "cannot launch '" + editor + "' (" + error.to_str() + "); no branch created";
         }
     }
     if (ran) {
@@ -2007,11 +2007,11 @@ pub void State.launch_branch_editor() {
 pub void State.finish_new_branch() {
     str raw = "";
     match (io.read(branch_name_path)) {
-        case Ok(str s): {
-            raw = s;
+        case Ok(str branch_text): {
+            raw = branch_text;
         }
-        case Err(io.Error e): {
-            message = "cannot read " + branch_name_path + ": " + e.to_str();
+        case Err(io.Error error): {
+            message = "cannot read " + branch_name_path + ": " + error.to_str();
             return;
         }
     }
@@ -2025,8 +2025,8 @@ pub void State.finish_new_branch() {
             message = "created and switched to " + name;
             reload();
         }
-        case Err(GIT_checkout.Error e): {
-            message = "new branch refused: " + e.to_str();
+        case Err(GIT_checkout.Error error): {
+            message = "new branch refused: " + error.to_str();
         }
     }
 }
@@ -2055,8 +2055,8 @@ pub void State.abort_commit() {
 pub void State.start_amend() {
     str head_id = "";
     match (GIT_refs.head(gitdir)) {
-        case Ok(GIT_refs.Head h): {
-            match (h) {
+        case Ok(GIT_refs.Head head): {
+            match (head) {
                 case Born(str name, str id): {
                     head_id = id;
                 }
@@ -2069,17 +2069,17 @@ pub void State.start_amend() {
                 }
             }
         }
-        case Err(GIT_refs.Error e): {
-            message = "nothing to amend: refs.head: " + e.to_str();
+        case Err(GIT_refs.Error error): {
+            message = "nothing to amend: refs.head: " + error.to_str();
             return;
         }
     }
     bytes head_msg = [];
     match (GIT_object.read(gitdir, head_id)) {
-        case Ok(GIT_object.Object o): {
-            match (o.body) {
-                case Commit(GIT_object.Commit cm): {
-                    head_msg = cm.message;
+        case Ok(GIT_object.Object object): {
+            match (object.body) {
+                case Commit(GIT_object.Commit commit): {
+                    head_msg = commit.message;
                 }
                 case Blob: {
                     message = "nothing to amend: HEAD is not a commit";
@@ -2095,8 +2095,8 @@ pub void State.start_amend() {
                 }
             }
         }
-        case Err(GIT_object.Error e): {
-            message = "nothing to amend: cannot read HEAD's commit: " + e.to_str();
+        case Err(GIT_object.Error error): {
+            message = "nothing to amend: cannot read HEAD's commit: " + error.to_str();
             return;
         }
     }
@@ -2107,8 +2107,8 @@ pub void State.start_amend() {
     match (io.write(commit_msg_path, prefill + commit_template())) {
         case Ok: {
         }
-        case Err(io.Error e): {
-            message = "cannot write " + commit_msg_path + ": " + e.to_str();
+        case Err(io.Error error): {
+            message = "cannot write " + commit_msg_path + ": " + error.to_str();
             return;
         }
     }
@@ -2127,29 +2127,29 @@ pub void State.start_amend() {
 pub void State.finish_commit() {
     str raw = "";
     match (io.read(commit_msg_path)) {
-        case Ok(str s): {
-            raw = s;
+        case Ok(str edited_text): {
+            raw = edited_text;
         }
-        case Err(io.Error e): {
-            message = "cannot read " + commit_msg_path + ": " + e.to_str();
+        case Err(io.Error error): {
+            message = "cannot read " + commit_msg_path + ": " + error.to_str();
             return;
         }
     }
-    str msg = strip_comment_lines(raw);
-    if (msg == "") {
+    str commit_message = strip_comment_lines(raw);
+    if (commit_message == "") {
         message = "aborting commit due to empty commit message";
         commit_open = false;
         amending = false;
         return;
     }
-    GIT_index.Index ix = read_index(gitdir);
+    GIT_index.Index index = read_index(gitdir);
     str tree_id = "";
-    match (build_tree(gitdir, ix.entries)) {
-        case Ok(str t): {
-            tree_id = t;
+    match (build_tree(gitdir, index.entries)) {
+        case Ok(str tree): {
+            tree_id = tree;
         }
-        case Err(GIT_object.Error e): {
-            message = "write_tree: " + e.to_str();
+        case Err(GIT_object.Error error): {
+            message = "write_tree: " + error.to_str();
             return;
         }
     }
@@ -2158,8 +2158,8 @@ pub void State.finish_commit() {
     str expect_old = "";
     bool have_old = false;
     match (GIT_refs.head(gitdir)) {
-        case Ok(GIT_refs.Head h): {
-            match (h) {
+        case Ok(GIT_refs.Head head): {
+            match (head) {
                 case Born(str name, str id): {
                     parents.push(id);
                     ref_name = name;
@@ -2179,8 +2179,8 @@ pub void State.finish_commit() {
                 }
             }
         }
-        case Err(GIT_refs.Error e): {
-            message = "refs.head: " + e.to_str();
+        case Err(GIT_refs.Error error): {
+            message = "refs.head: " + error.to_str();
             return;
         }
     }
@@ -2195,11 +2195,11 @@ pub void State.finish_commit() {
             return;
         }
         match (GIT_object.read(gitdir, parents[0])) {
-            case Ok(GIT_object.Object o): {
-                match (o.body) {
-                    case Commit(GIT_object.Commit cm): {
-                        parents = cm.parents;
-                        author = cm.author;
+            case Ok(GIT_object.Object object): {
+                match (object.body) {
+                    case Commit(GIT_object.Commit commit): {
+                        parents = commit.parents;
+                        author = commit.author;
                     }
                     case Blob: {
                         message = "amend: HEAD is not a commit";
@@ -2215,20 +2215,20 @@ pub void State.finish_commit() {
                     }
                 }
             }
-            case Err(GIT_object.Error e): {
-                message = "amend: cannot read HEAD's commit: " + e.to_str();
+            case Err(GIT_object.Error error): {
+                message = "amend: cannot read HEAD's commit: " + error.to_str();
                 return;
             }
         }
     }
-    GIT_object.Commit c = GIT_object.Commit(tree_id, parents, author, committer_ident(), [], (msg + "\n").to_bytes());
+    GIT_object.Commit commit = GIT_object.Commit(tree_id, parents, author, committer_ident(), [], (commit_message + "\n").to_bytes());
     str commit_id = "";
-    match (GIT_object.write_commit(gitdir, c)) {
+    match (GIT_object.write_commit(gitdir, commit)) {
         case Ok(str id): {
             commit_id = id;
         }
-        case Err(GIT_object.Error e): {
-            message = "write_commit: " + e.to_str();
+        case Err(GIT_object.Error error): {
+            message = "write_commit: " + error.to_str();
             return;
         }
     }
@@ -2239,8 +2239,8 @@ pub void State.finish_commit() {
     match (GIT_refs.update(gitdir, ref_name, commit_id, want)) {
         case Ok: {
         }
-        case Err(GIT_refs.Error e): {
-            message = "refs.update: " + e.to_str();
+        case Err(GIT_refs.Error error): {
+            message = "refs.update: " + error.to_str();
             return;
         }
     }
@@ -2330,36 +2330,36 @@ List<TUI_widget.Span> State.footer_spans(TUI_style.Theme theme) {
 /// REPLACES the document the way `apps/tui/browse.m31`'s preview pane
 /// changes with the selection, which is why the jump list (synced to the
 /// outline's own entries) is not shown alongside it.
-pub void State.draw(TUI_buffer.Buffer buf, TUI_geometry.Rect area) {
+pub void State.draw(TUI_buffer.Buffer buffer, TUI_geometry.Rect area) {
     TUI_style.Theme theme = TUI_style.Theme.plain;
     str frame_title = worktree;
     if (frame_title == ".") {
         frame_title = "git";
     }
     TUI_widget.Block frame = TUI_widget.Block(title: frame_title, borders: TUI_widget.Borders.Rounded);
-    frame.render(buf, area);
+    frame.render(buffer, area);
     TUI_geometry.Rect body = frame.inner(area);
     List<TUI_geometry.Rect> bands = TUI_footer.split(body, 2);
     TUI_geometry.Rect main = bands[0];
     TUI_geometry.Rect footer_area = bands[1];
     if (diff_open) {
-        draw_diff(buf, main);
+        draw_diff(buffer, main);
     } else {
         TUI_geometry.Rect outline_area = main;
         if (show_jump) {
             List<TUI_geometry.Rect> cols = TUI_geometry.cols(main, [TUI_geometry.Constraint.Fill(1), TUI_geometry.Constraint.Length(28)]);
             outline_area = cols[0];
-            outline.render(buf, outline_area);
-            TUI_widget.Block jb = TUI_widget.Block(title: "jump", borders: TUI_widget.Borders.Single);
-            jb.render(buf, cols[1]);
-            jump.render(buf, jb.inner(cols[1]));
+            outline.render(buffer, outline_area);
+            TUI_widget.Block jump_block = TUI_widget.Block(title: "jump", borders: TUI_widget.Borders.Single);
+            jump_block.render(buffer, cols[1]);
+            jump.render(buffer, jump_block.inner(cols[1]));
         } else {
-            outline.render(buf, outline_area);
+            outline.render(buffer, outline_area);
         }
     }
     TUI_widget.Line status_row = TUI_widget.Line([TUI_widget.Span(" " + status_line(), style: theme.dim)]);
-    status_row.render(buf, TUI_geometry.Rect(footer_area.x, footer_area.y, footer_area.width, 1));
-    TUI_footer.Footer(footer_spans(theme)).render(buf, TUI_geometry.Rect(footer_area.x, footer_area.y + 1, footer_area.width, 1));
+    status_row.render(buffer, TUI_geometry.Rect(footer_area.x, footer_area.y, footer_area.width, 1));
+    TUI_footer.Footer(footer_spans(theme)).render(buffer, TUI_geometry.Rect(footer_area.x, footer_area.y + 1, footer_area.width, 1));
     if (commit_open) {
         str title = "commit";
         str finish = "finish: write the commit";
@@ -2367,8 +2367,8 @@ pub void State.draw(TUI_buffer.Buffer buf, TUI_geometry.Rect area) {
             title = "amend HEAD";
             finish = "finish: replace HEAD with the amended commit";
         }
-        TUI_menu.WhichKey wk = TUI_menu.WhichKey(title, [TUI_menu.Item("e", "edit message in $EDITOR (" + commit_msg_path + ")"), TUI_menu.Item("f", finish), TUI_menu.Item("A", "amend HEAD: its message prefilled, its parents and author kept"), TUI_menu.Item("a", "abort")]);
-        wk.render(buf, body);
+        TUI_menu.WhichKey which_key = TUI_menu.WhichKey(title, [TUI_menu.Item("e", "edit message in $EDITOR (" + commit_msg_path + ")"), TUI_menu.Item("f", finish), TUI_menu.Item("A", "amend HEAD: its message prefilled, its parents and author kept"), TUI_menu.Item("a", "abort")]);
+        which_key.render(buffer, body);
     }
     if (confirm_open) {
         str what = "changes to " + confirm_path.utf8().or("<non-utf8>");
@@ -2377,20 +2377,20 @@ pub void State.draw(TUI_buffer.Buffer buf, TUI_geometry.Rect area) {
         } else if (confirm_kind == "staged") {
             what = "staged changes to " + confirm_path.utf8().or("<non-utf8>") + " (index and working tree)";
         }
-        TUI_menu.WhichKey wk = TUI_menu.WhichKey("discard " + what + "?", [TUI_menu.Item("y", "yes, discard"), TUI_menu.Item("any other key", "no, keep it")]);
-        wk.render(buf, body);
+        TUI_menu.WhichKey which_key = TUI_menu.WhichKey("discard " + what + "?", [TUI_menu.Item("y", "yes, discard"), TUI_menu.Item("any other key", "no, keep it")]);
+        which_key.render(buffer, body);
     }
     if (branch_open) {
-        TUI_menu.WhichKey bk = TUI_menu.WhichKey("branch", [TUI_menu.Item("c", "check out the branch under the cursor"), TUI_menu.Item("n", "new branch from HEAD: name it in $EDITOR, then switch to it"), TUI_menu.Item("a", "abort")]);
-        bk.render(buf, body);
+        TUI_menu.WhichKey which_key = TUI_menu.WhichKey("branch", [TUI_menu.Item("c", "check out the branch under the cursor"), TUI_menu.Item("n", "new branch from HEAD: name it in $EDITOR, then switch to it"), TUI_menu.Item("a", "abort")]);
+        which_key.render(buffer, body);
     }
     if (push_open) {
-        TUI_menu.WhichKey wk = TUI_menu.WhichKey("push", [TUI_menu.Item("p", "push current branch to origin (fast-forward only)")]);
-        wk.render(buf, body);
+        TUI_menu.WhichKey which_key = TUI_menu.WhichKey("push", [TUI_menu.Item("p", "push current branch to origin (fast-forward only)")]);
+        which_key.render(buffer, body);
     }
     if (pull_open) {
-        TUI_menu.WhichKey wk = TUI_menu.WhichKey("pull", [TUI_menu.Item("p", "pull current branch from origin (fast-forward only)")]);
-        wk.render(buf, body);
+        TUI_menu.WhichKey which_key = TUI_menu.WhichKey("pull", [TUI_menu.Item("p", "pull current branch from origin (fast-forward only)")]);
+        which_key.render(buffer, body);
     }
 }
 
@@ -2399,33 +2399,33 @@ pub void State.draw(TUI_buffer.Buffer buf, TUI_geometry.Rect area) {
 /// wording, `diff_binary`) or `diff_view` itself -- a `DiffView` whose
 /// `at()`/`move()` already give hunk- and line-granular addressing, even
 /// though nothing in this change acts on that address yet.
-void State.draw_diff(TUI_buffer.Buffer buf, TUI_geometry.Rect area) {
+void State.draw_diff(TUI_buffer.Buffer buffer, TUI_geometry.Rect area) {
     TUI_widget.Block block = TUI_widget.Block(title: "diff: " + diff_title, borders: TUI_widget.Borders.Single);
-    block.render(buf, area);
+    block.render(buffer, area);
     TUI_geometry.Rect inner = block.inner(area);
     if (diff_binary) {
-        TUI_widget.Paragraph("binary files differ").render(buf, inner);
+        TUI_widget.Paragraph("binary files differ").render(buffer, inner);
         return;
     }
-    diff_view.render(buf, inner);
+    diff_view.render(buffer, inner);
 }
 
 /// One decoded key, dispatched exactly as `apps/tui/browse.m31`'s own
 /// `State.handle` is: every `term.Code` variant named, so a key this client
 /// does not use is `Continue` rather than missing from the match entirely
 /// (there is no `default`, reference §5.6).
-pub TUI_app.Action State.handle(term.Event ev) {
-    match (ev) {
-        case Key(term.Key k): {
-            return handle_key(k.code);
+pub TUI_app.Action State.handle(term.Event event) {
+    match (event) {
+        case Key(term.Key key): {
+            return handle_key(key.code);
         }
-        case Mouse(term.Mouse m): {
+        case Mouse(_): {
             return TUI_app.Action.Continue;
         }
-        case Paste(str p): {
+        case Paste(_): {
             return TUI_app.Action.Continue;
         }
-        case Unknown(bytes u): {
+        case Unknown(_): {
             return TUI_app.Action.Continue;
         }
     }
@@ -2451,8 +2451,8 @@ TUI_app.Action State.handle_key(term.Code code) {
         return handle_diff_key(code);
     }
     match (code) {
-        case Char(int c): {
-            return handle_char(c);
+        case Char(int character): {
+            return handle_char(character);
         }
         case Enter: {
             handle_enter();
@@ -2504,74 +2504,74 @@ TUI_app.Action State.handle_key(term.Code code) {
         case Delete: {
             return TUI_app.Action.Continue;
         }
-        case F(int n): {
+        case F(_): {
             return TUI_app.Action.Continue;
         }
     }
 }
 
-TUI_app.Action State.handle_char(int c) {
-    if (c == 'q') {
+TUI_app.Action State.handle_char(int character) {
+    if (character == 'q') {
         return TUI_app.Action.Quit;
     }
-    if (c == 'j') {
+    if (character == 'j') {
         step_or_move(1);
         return TUI_app.Action.Redraw;
     }
-    if (c == 'k') {
+    if (character == 'k') {
         step_or_move(-1);
         return TUI_app.Action.Redraw;
     }
-    if (c == 'h') {
+    if (character == 'h') {
         outline.scroll_h(-SCROLL_H_STEP);
         return TUI_app.Action.Redraw;
     }
-    if (c == 'l') {
+    if (character == 'l') {
         outline.scroll_h(SCROLL_H_STEP);
         return TUI_app.Action.Redraw;
     }
-    if (c == 's') {
+    if (character == 's') {
         stage_current();
         return TUI_app.Action.Redraw;
     }
-    if (c == 'u') {
+    if (character == 'u') {
         unstage_current();
         return TUI_app.Action.Redraw;
     }
-    if (c == 'd') {
+    if (character == 'd') {
         show_diff_current();
         return TUI_app.Action.Redraw;
     }
-    if (c == 'c') {
+    if (character == 'c') {
         commit_open = true;
         amending = false;
         return TUI_app.Action.Redraw;
     }
-    if (c == 'x') {
+    if (character == 'x') {
         discard_current();
         return TUI_app.Action.Redraw;
     }
-    if (c == 'b') {
+    if (character == 'b') {
         branch_open = true;
         return TUI_app.Action.Redraw;
     }
-    if (c == 'P') {
+    if (character == 'P') {
         push_open = true;
         return TUI_app.Action.Redraw;
     }
-    if (c == 'F') {
+    if (character == 'F') {
         pull_open = true;
         return TUI_app.Action.Redraw;
     }
-    if (c == 'r') {
+    if (character == 'r') {
         reload();
         return TUI_app.Action.Redraw;
     }
-    if (c == 'J') {
+    if (character == 'J') {
         show_jump = !show_jump;
         return TUI_app.Action.Redraw;
     }
-    if (c == 'w') {
+    if (character == 'w') {
         jump_focused = !jump_focused;
         return TUI_app.Action.Redraw;
     }
@@ -2601,12 +2601,12 @@ void State.handle_enter() {
         return;
     }
     match (outline.current()) {
-        case Some(TUI_outline.Row r): {
-            if (r.node.id.contains(":file:")) {
+        case Some(TUI_outline.Row row): {
+            if (row.node.id.contains(":file:")) {
                 show_diff_current();
                 return;
             }
-            if (r.node.id == LOAD_MORE_ID) {
+            if (row.node.id == LOAD_MORE_ID) {
                 log_limit = log_limit + LOG_PAGE;
                 reload();
                 return;
@@ -2628,8 +2628,8 @@ pub void State.push_current() {
     str refname = "";
     str id = "";
     match (GIT_refs.head(gitdir)) {
-        case Ok(GIT_refs.Head h): {
-            match (h) {
+        case Ok(GIT_refs.Head head): {
+            match (head) {
                 case Born(str name, str oid): {
                     refname = name;
                     id = oid;
@@ -2644,8 +2644,8 @@ pub void State.push_current() {
                 }
             }
         }
-        case Err(GIT_refs.Error e): {
-            message = "push: " + e.to_str();
+        case Err(GIT_refs.Error error): {
+            message = "push: " + error.to_str();
             return;
         }
     }
@@ -2656,11 +2656,11 @@ pub void State.push_current() {
     }
     GIT_http_push.Remote remote = GIT_http_push.Remote("", Option<GIT_http_push.Credentials>.None);
     match (GIT_http_push.parse_remote(url.or(""))) {
-        case Ok(GIT_http_push.Remote r): {
-            remote = r;
+        case Ok(GIT_http_push.Remote parsed): {
+            remote = parsed;
         }
-        case Err(GIT_http_push.Error e): {
-            message = "push: " + e.to_str();
+        case Err(GIT_http_push.Error error): {
+            message = "push: " + error.to_str();
             return;
         }
     }
@@ -2672,8 +2672,8 @@ pub void State.push_current() {
                 message = "push refused by origin: " + rep.reason;
             }
         }
-        case Err(GIT_http_push.Error e): {
-            message = "push: " + e.to_str();
+        case Err(GIT_http_push.Error error): {
+            message = "push: " + error.to_str();
         }
     }
     reload();
@@ -2681,8 +2681,8 @@ pub void State.push_current() {
 
 TUI_app.Action State.handle_push_key(term.Code code) {
     match (code) {
-        case Char(int c): {
-            if (c == 'p') {
+        case Char(int character): {
+            if (character == 'p') {
                 push_current();
                 return TUI_app.Action.Redraw;
             }
@@ -2734,7 +2734,7 @@ TUI_app.Action State.handle_push_key(term.Code code) {
         case Delete: {
             return TUI_app.Action.Continue;
         }
-        case F(int n): {
+        case F(_): {
             return TUI_app.Action.Continue;
         }
     }
@@ -2752,24 +2752,24 @@ pub void State.pull_current() {
     }
     GIT_http_push.Remote remote = GIT_http_push.Remote("", Option<GIT_http_push.Credentials>.None);
     match (GIT_http_push.parse_remote(url.or(""))) {
-        case Ok(GIT_http_push.Remote r): {
-            remote = r;
+        case Ok(GIT_http_push.Remote parsed): {
+            remote = parsed;
         }
-        case Err(GIT_http_push.Error e): {
-            message = "pull: " + e.to_str();
+        case Err(GIT_http_push.Error error): {
+            message = "pull: " + error.to_str();
             return;
         }
     }
     match (GIT_pull.pull(gitdir, worktree, remote)) {
-        case Ok(GIT_pull.Outcome o): {
-            if (o.moved) {
-                message = "pulled: fast-forwarded " + o.old_id.substr(0, 7) + ".." + o.new_id.substr(0, 7);
+        case Ok(GIT_pull.Outcome outcome): {
+            if (outcome.moved) {
+                message = "pulled: fast-forwarded " + outcome.old_id.substr(0, 7) + ".." + outcome.new_id.substr(0, 7);
             } else {
                 message = "pull: already up to date";
             }
         }
-        case Err(GIT_pull.Error e): {
-            message = "pull: " + e.to_str();
+        case Err(GIT_pull.Error error): {
+            message = "pull: " + error.to_str();
         }
     }
     reload();
@@ -2777,8 +2777,8 @@ pub void State.pull_current() {
 
 TUI_app.Action State.handle_pull_key(term.Code code) {
     match (code) {
-        case Char(int c): {
-            if (c == 'p') {
+        case Char(int character): {
+            if (character == 'p') {
                 pull_current();
                 return TUI_app.Action.Redraw;
             }
@@ -2830,7 +2830,7 @@ TUI_app.Action State.handle_pull_key(term.Code code) {
         case Delete: {
             return TUI_app.Action.Continue;
         }
-        case F(int n): {
+        case F(_): {
             return TUI_app.Action.Continue;
         }
     }
@@ -2838,8 +2838,8 @@ TUI_app.Action State.handle_pull_key(term.Code code) {
 
 TUI_app.Action State.handle_commit_key(term.Code code) {
     match (code) {
-        case Char(int c): {
-            if (c == 'e') {
+        case Char(int character): {
+            if (character == 'e') {
                 edit_message();
                 // `Quit` unwinds `TUI_app.Loop.run`'s own `Session`, which is
                 // what actually leaves raw mode and the alternate screen --
@@ -2848,15 +2848,15 @@ TUI_app.Action State.handle_commit_key(term.Code code) {
                 // again once `launch_editor` is done.
                 return TUI_app.Action.Quit;
             }
-            if (c == 'f') {
+            if (character == 'f') {
                 finish_commit();
                 return TUI_app.Action.Redraw;
             }
-            if (c == 'a') {
+            if (character == 'a') {
                 abort_commit();
                 return TUI_app.Action.Redraw;
             }
-            if (c == 'A') {
+            if (character == 'A') {
                 start_amend();
                 return TUI_app.Action.Redraw;
             }
@@ -2908,7 +2908,7 @@ TUI_app.Action State.handle_commit_key(term.Code code) {
         case Delete: {
             return TUI_app.Action.Continue;
         }
-        case F(int n): {
+        case F(_): {
             return TUI_app.Action.Continue;
         }
     }
@@ -2925,8 +2925,8 @@ TUI_app.Action State.handle_confirm_key(term.Code code) {
     confirm_kind = "";
     confirm_path = [];
     match (code) {
-        case Char(int c): {
-            if (c == 'y') {
+        case Char(int character): {
+            if (character == 'y') {
                 discard_path(kind, rel);
                 return TUI_app.Action.Redraw;
             }
@@ -2961,7 +2961,7 @@ TUI_app.Action State.handle_confirm_key(term.Code code) {
         }
         case Delete: {
         }
-        case F(int n): {
+        case F(_): {
         }
     }
     message = "discard cancelled";
@@ -2975,13 +2975,13 @@ TUI_app.Action State.handle_confirm_key(term.Code code) {
 /// swallowed while the overlay is up, exactly like the commit overlay.
 TUI_app.Action State.handle_branch_key(term.Code code) {
     match (code) {
-        case Char(int c): {
-            if (c == 'c') {
+        case Char(int character): {
+            if (character == 'c') {
                 branch_open = false;
                 checkout_current();
                 return TUI_app.Action.Redraw;
             }
-            if (c == 'n') {
+            if (character == 'n') {
                 branch_open = false;
                 new_branch();
                 if (want_editor) {
@@ -2989,7 +2989,7 @@ TUI_app.Action State.handle_branch_key(term.Code code) {
                 }
                 return TUI_app.Action.Redraw;
             }
-            if (c == 'a') {
+            if (character == 'a') {
                 branch_open = false;
                 return TUI_app.Action.Redraw;
             }
@@ -3041,7 +3041,7 @@ TUI_app.Action State.handle_branch_key(term.Code code) {
         case Delete: {
             return TUI_app.Action.Continue;
         }
-        case F(int n): {
+        case F(_): {
             return TUI_app.Action.Continue;
         }
     }
@@ -3058,24 +3058,24 @@ TUI_app.Action State.handle_branch_key(term.Code code) {
 /// that surprised. `q` in the outline still quits.
 TUI_app.Action State.handle_diff_key(term.Code code) {
     match (code) {
-        case Char(int c): {
-            if (c == 'q') {
+        case Char(int character): {
+            if (character == 'q') {
                 close_diff();
                 return TUI_app.Action.Redraw;
             }
-            if (c == 'j') {
+            if (character == 'j') {
                 diff_view.move(1);
                 return TUI_app.Action.Redraw;
             }
-            if (c == 'k') {
+            if (character == 'k') {
                 diff_view.move(-1);
                 return TUI_app.Action.Redraw;
             }
-            if (c == 's') {
+            if (character == 's') {
                 stage_hunk_current();
                 return TUI_app.Action.Redraw;
             }
-            if (c == 'u') {
+            if (character == 'u') {
                 unstage_hunk_current();
                 return TUI_app.Action.Redraw;
             }
@@ -3130,7 +3130,7 @@ TUI_app.Action State.handle_diff_key(term.Code code) {
         case Delete: {
             return TUI_app.Action.Continue;
         }
-        case F(int n): {
+        case F(_): {
             return TUI_app.Action.Continue;
         }
     }
@@ -3156,24 +3156,24 @@ Option<str> commit_id_of_unfoldable(str id) {
 /// `GIT_http_fetch.m31`'s own `dir_of`, private to it, repeated here rather than
 /// exported from a module about the wire protocol.
 str dir_of(str path) {
-    int i = path.size() - 1;
-    while (i >= 0 && path.byte_at(i) != '/') {
-        i = i - 1;
+    int index = path.size() - 1;
+    while (index >= 0 && path.byte_at(index) != '/') {
+        index = index - 1;
     }
-    if (i < 0) {
+    if (index < 0) {
         return ".";
     }
-    return path.substr(0, i);
+    return path.substr(0, index);
 }
 
 /// `path`'s entry in `ix`, if it has one.
-Option<GIT_index.Entry> find_index_entry(GIT_index.Index ix, bytes path) {
-    int i = 0;
-    while (i < ix.entries.size()) {
-        if (bytes_eq(ix.entries[i].path, path)) {
-            return Option<GIT_index.Entry>.Some(ix.entries[i]);
+Option<GIT_index.Entry> find_index_entry(GIT_index.Index index, bytes path) {
+    int entry_index = 0;
+    while (entry_index < index.entries.size()) {
+        if (bytes_eq(index.entries[entry_index].path, path)) {
+            return Option<GIT_index.Entry>.Some(index.entries[entry_index]);
         }
-        i = i + 1;
+        entry_index = entry_index + 1;
     }
     return Option<GIT_index.Entry>.None;
 }
@@ -3200,8 +3200,8 @@ str branch_name(str full) {
 
 GIT_index.Index read_index(str gitdir) {
     match (GIT_index.read(gitdir)) {
-        case Ok(GIT_index.Index ix): {
-            return ix;
+        case Ok(GIT_index.Index index): {
+            return index;
         }
         case Err: {
             return GIT_index.Index([]);
@@ -3209,26 +3209,26 @@ GIT_index.Index read_index(str gitdir) {
     }
 }
 
-void replace_entry(GIT_index.Index ix, GIT_index.Entry e) {
-    int i = 0;
-    while (i < ix.entries.size()) {
-        if (bytes_eq(ix.entries[i].path, e.path)) {
-            ix.entries[i] = e;
+void replace_entry(GIT_index.Index index, GIT_index.Entry entry) {
+    int entry_index = 0;
+    while (entry_index < index.entries.size()) {
+        if (bytes_eq(index.entries[entry_index].path, entry.path)) {
+            index.entries[entry_index] = entry;
             return;
         }
-        i = i + 1;
+        entry_index = entry_index + 1;
     }
-    ix.entries.push(e);
+    index.entries.push(entry);
 }
 
-void remove_entry(GIT_index.Index ix, bytes path) {
-    int i = 0;
-    while (i < ix.entries.size()) {
-        if (bytes_eq(ix.entries[i].path, path)) {
-            ix.entries.remove_at(i);
+void remove_entry(GIT_index.Index index, bytes path) {
+    int entry_index = 0;
+    while (entry_index < index.entries.size()) {
+        if (bytes_eq(index.entries[entry_index].path, path)) {
+            index.entries.remove_at(entry_index);
             return;
         }
-        i = i + 1;
+        entry_index = entry_index + 1;
     }
 }
 
