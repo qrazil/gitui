@@ -45,36 +45,36 @@ import GIT_refs;
 import GIT_repository;
 import GIT_log;
 
-args.Parser p = args.Parser("ourgit", summary: "read-only git plumbing over loose objects");
-p.value("git-dir", help: "the repository's git directory", placeholder: "DIR");
-args.Parser cat = p.command("cat-file", "print an object's type, size or contents");
+args.Parser parser = args.Parser("ourgit", summary: "read-only git plumbing over loose objects");
+parser.value("git-dir", help: "the repository's git directory", placeholder: "DIR");
+args.Parser cat = parser.command("cat-file", "print an object's type, size or contents");
 cat.flag("type", help: "print the object's type word");
 cat.flag("size", help: "print the size of the object's content");
 cat.flag("pretty", help: "print the object itself (the default)");
 cat.positional("object", help: "an object name, or an unambiguous prefix of one", placeholder: "OBJECT");
-args.Parser ls = p.command("ls-tree", "list a tree's entries");
-ls.positional("tree", help: "a tree, or a commit whose tree to list", placeholder: "TREE");
-args.Parser lg = p.command("log", "commits reachable from a revision, newest commit date first");
-lg.integer("max", help: "stop after this many commits", placeholder: "N");
-lg.optional("rev", "HEAD", help: "where to start", placeholder: "REV");
-args.Parser rp = p.command("rev-parse", "the object name a revision resolves to");
-rp.positional("rev", help: "a ref, or an object name", placeholder: "REV");
-args.Parser rf = p.command("refs", "every ref in the repository, with what it points at");
+args.Parser list_command = parser.command("ls-tree", "list a tree's entries");
+list_command.positional("tree", help: "a tree, or a commit whose tree to list", placeholder: "TREE");
+args.Parser log_command = parser.command("log", "commits reachable from a revision, newest commit date first");
+log_command.integer("max", help: "stop after this many commits", placeholder: "N");
+log_command.optional("rev", "HEAD", help: "where to start", placeholder: "REV");
+args.Parser rev_parse_command = parser.command("rev-parse", "the object name a revision resolves to");
+rev_parse_command.positional("rev", help: "a ref, or an object name", placeholder: "REV");
+args.Parser refs_command = parser.command("refs", "every ref in the repository, with what it points at");
 List<str> argv = os.args();
-match (p.parse(argv.slice(1, argv.size()))) {
-    case Ok(args.Parsed r): {
-        match (r.help()) {
-            case Some(str h): {
-                print(h);
+match (parser.parse(argv.slice(1, argv.size()))) {
+    case Ok(args.Parsed parsed): {
+        match (parsed.help()) {
+            case Some(str help_text): {
+                print(help_text);
             }
             case None: {
-                os.exit(dispatch(p, r));
+                os.exit(dispatch(parser, parsed));
             }
         }
     }
-    case Err(args.UsageError e): {
-        io.eprint(e.to_str());
-        io.eprint(p.usage());
+    case Err(args.UsageError error): {
+        io.eprint(error.to_str());
+        io.eprint(parser.usage());
         os.exit(2);
     }
 }
@@ -86,16 +86,16 @@ match (p.parse(argv.slice(1, argv.size()))) {
 /// at the top level, and the top level's variables are locals of the program
 /// body that no function can see (reference §2). There is no module state to
 /// put it in. See docs/FRICTION.md.
-int dispatch(args.Parser parser, args.Parsed r) {
-    str gd = "";
-    match (r.value("git-dir")) {
-        case Some(str d): {
-            gd = d;
+int dispatch(args.Parser parser, args.Parsed parsed) {
+    str git_directory = "";
+    match (parsed.value("git-dir")) {
+        case Some(str directory): {
+            git_directory = directory;
         }
         case None: {
             match (discover(".")) {
-                case Some(str d): {
-                    gd = d;
+                case Some(str directory): {
+                    git_directory = directory;
                 }
                 case None: {
                     io.eprint("not a git repository (or any parent up to /): no .git directory");
@@ -104,27 +104,27 @@ int dispatch(args.Parser parser, args.Parsed r) {
             }
         }
     }
-    List<args.Parsed> cmds = r.commands();
+    List<args.Parsed> cmds = parsed.commands();
     if (cmds.size() == 0) {
         io.eprint(parser.usage());
         return 2;
     }
     int status = 0;
-    for (args.Parsed c in cmds) {
-        int rc = 0;
-        if (c.word() == "cat-file") {
-            rc = cat_file(gd, c);
-        } else if (c.word() == "ls-tree") {
-            rc = ls_tree(gd, c.positional("tree"));
-        } else if (c.word() == "log") {
-            rc = log(gd, c);
-        } else if (c.word() == "rev-parse") {
-            rc = rev_parse(gd, c.positional("rev"));
+    for (args.Parsed parsed_command in cmds) {
+        int exit_code = 0;
+        if (parsed_command.word() == "cat-file") {
+            exit_code = cat_file(git_directory, parsed_command);
+        } else if (parsed_command.word() == "ls-tree") {
+            exit_code = ls_tree(git_directory, parsed_command.positional("tree"));
+        } else if (parsed_command.word() == "log") {
+            exit_code = log(git_directory, parsed_command);
+        } else if (parsed_command.word() == "rev-parse") {
+            exit_code = rev_parse(git_directory, parsed_command.positional("rev"));
         } else {
-            rc = list_refs(gd);
+            exit_code = list_refs(git_directory);
         }
-        if (rc != 0) {
-            status = rc;
+        if (exit_code != 0) {
+            status = exit_code;
         }
     }
     return status;
@@ -132,77 +132,77 @@ int dispatch(args.Parser parser, args.Parsed r) {
 
 // --- the commands ------------------------------------------------------------
 
-int cat_file(str gd, args.Parsed c) {
-    str spec = c.positional("object");
+int cat_file(str git_directory, args.Parsed parsed_command) {
+    str spec = parsed_command.positional("object");
     str id = "";
-    match (GIT_refs.rev_parse(gd, spec)) {
-        case Ok(str v): {
-            id = v;
+    match (GIT_refs.rev_parse(git_directory, spec)) {
+        case Ok(str resolved): {
+            id = resolved;
         }
-        case Err(GIT_refs.Error e): {
-            io.eprint(e.to_str());
+        case Err(GIT_refs.Error error): {
+            io.eprint(error.to_str());
             return 1;
         }
     }
-    match (GIT_object.read(gd, id)) {
-        case Ok(GIT_object.Object o): {
-            if (c.flag("type")) {
-                say(o.kind());
+    match (GIT_object.read(git_directory, id)) {
+        case Ok(GIT_object.Object object): {
+            if (parsed_command.flag("type")) {
+                say(object.kind());
                 return 0;
             }
-            if (c.flag("size")) {
-                say(o.raw.size().to_str());
+            if (parsed_command.flag("size")) {
+                say(object.raw.size().to_str());
                 return 0;
             }
-            match (o.body) {
-                case Tree(List<GIT_object.Entry> es): {
-                    write(tree_text(es));
+            match (object.body) {
+                case Tree(List<GIT_object.Entry> entries): {
+                    write(tree_text(entries));
                 }
                 case Blob: {
-                    write(o.raw);
+                    write(object.raw);
                 }
                 case Commit: {
-                    write(o.raw);
+                    write(object.raw);
                 }
                 case Tag: {
-                    write(o.raw);
+                    write(object.raw);
                 }
             }
             return 0;
         }
-        case Err(GIT_object.Error e): {
-            io.eprint(e.to_str());
+        case Err(GIT_object.Error error): {
+            io.eprint(error.to_str());
             return 1;
         }
     }
 }
 
-int ls_tree(str gd, str spec) {
+int ls_tree(str git_directory, str spec) {
     str id = "";
-    match (GIT_refs.rev_parse(gd, spec)) {
-        case Ok(str v): {
-            id = v;
+    match (GIT_refs.rev_parse(git_directory, spec)) {
+        case Ok(str resolved): {
+            id = resolved;
         }
-        case Err(GIT_refs.Error e): {
-            io.eprint(e.to_str());
+        case Err(GIT_refs.Error error): {
+            io.eprint(error.to_str());
             return 1;
         }
     }
     // `git ls-tree` takes a tree-ish, so a commit means its tree. A tag is
     // peeled to a commit first, and then the same rule applies.
     for (int hops in 0 .. 12) {
-        match (GIT_object.read(gd, id)) {
-            case Ok(GIT_object.Object o): {
-                match (o.body) {
-                    case Tree(List<GIT_object.Entry> es): {
-                        write(tree_text(es));
+        match (GIT_object.read(git_directory, id)) {
+            case Ok(GIT_object.Object object): {
+                match (object.body) {
+                    case Tree(List<GIT_object.Entry> entries): {
+                        write(tree_text(entries));
                         return 0;
                     }
-                    case Commit(GIT_object.Commit c): {
-                        id = c.tree;
+                    case Commit(GIT_object.Commit commit): {
+                        id = commit.tree;
                     }
-                    case Tag(GIT_object.Tag t): {
-                        id = t.object;
+                    case Tag(GIT_object.Tag tag): {
+                        id = tag.object;
                     }
                     case Blob: {
                         io.eprint("not a tree object: " + spec);
@@ -210,8 +210,8 @@ int ls_tree(str gd, str spec) {
                     }
                 }
             }
-            case Err(GIT_object.Error e): {
-                io.eprint(e.to_str());
+            case Err(GIT_object.Error error): {
+                io.eprint(error.to_str());
                 return 1;
             }
         }
@@ -220,40 +220,40 @@ int ls_tree(str gd, str spec) {
     return 1;
 }
 
-int rev_parse(str gd, str spec) {
-    match (GIT_refs.rev_parse(gd, spec)) {
+int rev_parse(str git_directory, str spec) {
+    match (GIT_refs.rev_parse(git_directory, spec)) {
         case Ok(str id): {
             say(id);
             return 0;
         }
-        case Err(GIT_refs.Error e): {
-            io.eprint(e.to_str());
+        case Err(GIT_refs.Error error): {
+            io.eprint(error.to_str());
             return 1;
         }
     }
 }
 
-int list_refs(str gd) {
-    match (GIT_refs.all(gd)) {
-        case Ok(List<GIT_refs.Ref> rs): {
-            for (GIT_refs.Ref one in rs) {
+int list_refs(str git_directory) {
+    match (GIT_refs.all(git_directory)) {
+        case Ok(List<GIT_refs.Ref> ref_list): {
+            for (GIT_refs.Ref one in ref_list) {
                 say(one.id + " " + one.name);
             }
             return 0;
         }
-        case Err(GIT_refs.Error e): {
-            io.eprint(e.to_str());
+        case Err(GIT_refs.Error error): {
+            io.eprint(error.to_str());
             return 1;
         }
     }
 }
 
-int log(str gd, args.Parsed c) {
-    str spec = c.optional("rev");
+int log(str git_directory, args.Parsed parsed_command) {
+    str spec = parsed_command.optional("rev");
     int limit = -1;
-    match (c.integer("max")) {
-        case Some(int n): {
-            limit = n;
+    match (parsed_command.integer("max")) {
+        case Some(int maximum): {
+            limit = maximum;
         }
         case None: {
         }
@@ -261,23 +261,23 @@ int log(str gd, args.Parsed c) {
     // The walk itself -- git's date-ordered queue -- lives in `GIT_log.m31`
     // now, shared with the interactive client (`gitui.m31`) so there is one
     // implementation of it rather than two (`docs/design.md`).
-    match (GIT_log.walk(gd, spec, limit)) {
+    match (GIT_log.walk(git_directory, spec, limit)) {
         case Ok(List<GIT_log.Entry> entries): {
             int shown = 0;
-            for (GIT_log.Entry en in entries) {
+            for (GIT_log.Entry entry in entries) {
                 // The blank line goes BETWEEN commits and not after each one:
                 // git separates rather than terminates, so `log` of one
                 // commit ends at the last line of its message.
                 if (shown > 0) {
                     write("\n".to_bytes());
                 }
-                write(commit_text(en.id, en.commit));
+                write(commit_text(entry.id, entry.commit));
                 shown = shown + 1;
             }
             return 0;
         }
-        case Err(GIT_log.Error e): {
-            io.eprint(e.to_str());
+        case Err(GIT_log.Error error): {
+            io.eprint(error.to_str());
             return 1;
         }
     }
@@ -288,14 +288,14 @@ int log(str gd, args.Parsed c) {
 // `git ls-tree` and `git cat-file -p` on a tree print the same four fields:
 // the six-digit mode, the type word, the object name, a TAB, and the name --
 // quoted if it needs it, which is why this builds `bytes` and not a `str`.
-bytes tree_text(List<GIT_object.Entry> es) {
-    bytes b = [];
-    for (GIT_object.Entry e in es) {
-        b.extend((e.mode_text() + " " + e.type_word() + " " + e.id + "\t").to_bytes());
-        b.extend(quoted(e.name));
-        b.push('\n');
+bytes tree_text(List<GIT_object.Entry> entries) {
+    bytes output = [];
+    for (GIT_object.Entry entry in entries) {
+        output.extend((entry.mode_text() + " " + entry.type_word() + " " + entry.id + "\t").to_bytes());
+        output.extend(quoted(entry.name));
+        output.push('\n');
     }
-    return b;
+    return output;
 }
 
 // git's `quote_c_style`, which is what `core.quotePath` turns on and which
@@ -309,85 +309,85 @@ bytes tree_text(List<GIT_object.Entry> es) {
 // more idea than this does what encoding a path is in.
 bytes quoted(bytes name) {
     bool need = false;
-    for (int c in name) {
-        if (c < ' ' || c == '"' || c == '\\' || c >= 127) {
+    for (int byte_value in name) {
+        if (byte_value < ' ' || byte_value == '"' || byte_value == '\\' || byte_value >= 127) {
             need = true;
         }
     }
     if (!need) {
         return name;
     }
-    bytes b = [];
-    b.push('"');
-    for (int c in name) {
-        if (c == 7) {
-            escape(b, 97);
-        } else if (c == 8) {
-            escape(b, 98);
-        } else if (c == '\t') {
-            escape(b, 116);
-        } else if (c == '\n') {
-            escape(b, 110);
-        } else if (c == 11) {
-            escape(b, 118);
-        } else if (c == 12) {
-            escape(b, 102);
-        } else if (c == '\r') {
-            escape(b, 114);
-        } else if (c == '"' || c == '\\') {
-            escape(b, c);
-        } else if (c < ' ' || c >= 127) {
-            b.push('\\');
-            b.push(48 + (c >> 6 & 7));
-            b.push(48 + (c >> 3 & 7));
-            b.push(48 + (c & 7));
+    bytes output = [];
+    output.push('"');
+    for (int byte_value in name) {
+        if (byte_value == 7) {
+            escape(output, 97);
+        } else if (byte_value == 8) {
+            escape(output, 98);
+        } else if (byte_value == '\t') {
+            escape(output, 116);
+        } else if (byte_value == '\n') {
+            escape(output, 110);
+        } else if (byte_value == 11) {
+            escape(output, 118);
+        } else if (byte_value == 12) {
+            escape(output, 102);
+        } else if (byte_value == '\r') {
+            escape(output, 114);
+        } else if (byte_value == '"' || byte_value == '\\') {
+            escape(output, byte_value);
+        } else if (byte_value < ' ' || byte_value >= 127) {
+            output.push('\\');
+            output.push(48 + (byte_value >> 6 & 7));
+            output.push(48 + (byte_value >> 3 & 7));
+            output.push(48 + (byte_value & 7));
         } else {
-            b.push(c);
+            output.push(byte_value);
         }
     }
-    b.push('"');
-    return b;
+    output.push('"');
+    return output;
 }
 
-void escape(bytes b, int c) {
-    b.push('\\');
-    b.push(c);
+void escape(bytes output, int byte_value) {
+    output.push('\\');
+    output.push(byte_value);
 }
 
 // One commit in `git log`'s default format.
-bytes commit_text(str id, GIT_object.Commit c) {
-    bytes b = [];
-    b.extend(("commit " + id + "\n").to_bytes());
-    if (c.parents.size() > 1) {
+bytes commit_text(str id, GIT_object.Commit commit) {
+    bytes output = [];
+    output.extend(("commit " + id + "\n").to_bytes());
+    if (commit.parents.size() > 1) {
         str line = "Merge:";
-        for (str par in c.parents) {
+        for (str par in commit.parents) {
             line = line + " " + par.substr(0, 7);
         }
-        b.extend((line + "\n").to_bytes());
+        output.extend((line + "\n").to_bytes());
     }
-    b.extend("Author: ".to_bytes());
-    b.extend(c.author.name);
-    b.extend(" <".to_bytes());
-    b.extend(c.author.email);
-    b.extend((">\nDate:   " + stamp(c.author) + "\n\n").to_bytes());
-    b.extend(indented(c.message));
+    output.extend("Author: ".to_bytes());
+    output.extend(commit.author.name);
+    output.extend(" <".to_bytes());
+    output.extend(commit.author.email);
+    output.extend((">\nDate:   " + stamp(commit.author) + "\n\n").to_bytes());
+    output.extend(indented(commit.message));
     // git's `pretty_print_commit` trims trailing whitespace from the WHOLE
     // buffer and then `show_log` writes one newline. That is why a commit
     // whose message ends in blank lines shows none of them, why trailing
     // spaces on the last line are gone while the same spaces on a blank line
     // in the middle survive as an indent, and why a commit with no message at
     // all has no blank line after its `Date:`.
-    int n = b.size();
-    while (n > 0 && blank_octet(b[n - 1])) {
-        n = n - 1;
+    int length = output.size();
+    while (length > 0 && blank_octet(output[length - 1])) {
+        length = length - 1;
     }
-    b.truncate(n);
-    b.push('\n');
-    return b;
+    output.truncate(length);
+    output.push('\n');
+    return output;
 }
 
-bool blank_octet(int c) {
-    return c == ' ' || c == '\t' || c == '\n' || c == '\r' || c == 11 || c == 12;
+bool blank_octet(int byte_value) {
+    return byte_value == ' ' || byte_value == '\t' || byte_value == '\n' || byte_value == '\r' || byte_value == 11 || byte_value == 12;
 }
 
 const Array<str> WEEKDAY = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
@@ -401,25 +401,25 @@ const Array<str> MONTH = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug"
 // number and prints `%+05d` of it, so a commit written `-0000` prints
 // `+0000`.
 str stamp(GIT_object.Ident who) {
-    date.Civil t = date.civil(who.when + who.offset * 60);
-    return WEEKDAY[t.weekday] + " " + MONTH[t.month - 1] + " " + t.day.to_str() + " " + two(t.hour) + ":" + two(t.minute) + ":" + two(t.second) + " " + t.year.to_str() + " " + zone(who.offset);
+    date.Civil civil_time = date.civil(who.when + who.offset * 60);
+    return WEEKDAY[civil_time.weekday] + " " + MONTH[civil_time.month - 1] + " " + civil_time.day.to_str() + " " + two(civil_time.hour) + ":" + two(civil_time.minute) + ":" + two(civil_time.second) + " " + civil_time.year.to_str() + " " + zone(who.offset);
 }
 
-str two(int v) {
-    if (v < 10) {
-        return "0" + v.to_str();
+str two(int number) {
+    if (number < 10) {
+        return "0" + number.to_str();
     }
-    return v.to_str();
+    return number.to_str();
 }
 
 str zone(int minutes) {
-    int m = minutes;
+    int absolute_minutes = minutes;
     str sign = "+";
-    if (m < 0) {
+    if (absolute_minutes < 0) {
         sign = "-";
-        m = 0 - m;
+        absolute_minutes = 0 - absolute_minutes;
     }
-    return sign + two(m / 60) + two(m % 60);
+    return sign + two(absolute_minutes / 60) + two(absolute_minutes % 60);
 }
 
 // git's `pp_remainder` at indent 4, which is the `medium` format's body.
@@ -437,58 +437,58 @@ str zone(int minutes) {
 //     that indent, and it is why `#\tsrc/lower.rs` in a commit message prints
 //     with seven spaces and not with three.
 bytes indented(bytes message) {
-    bytes b = [];
-    int at = 0;
-    int n = message.size();
+    bytes output = [];
+    int position = 0;
+    int length = message.size();
     bool first = true;
-    while (at < n) {
-        int e = at;
-        while (e < n && message[e] != '\n') {
-            e = e + 1;
+    while (position < length) {
+        int line_end = position;
+        while (line_end < length && message[line_end] != '\n') {
+            line_end = line_end + 1;
         }
-        int end = e;
+        int end = line_end;
         bool empty = true;
-        for (int k in at .. e) {
-            if (!blank_octet(message[k])) {
+        for (int index in position .. line_end) {
+            if (!blank_octet(message[index])) {
                 empty = false;
             }
         }
         if (empty) {
-            end = at;
+            end = position;
             if (first) {
-                at = e + 1;
+                position = line_end + 1;
                 continue;
             }
         }
         first = false;
-        b.extend("    ".to_bytes());
+        output.extend("    ".to_bytes());
         int col = 0;
-        for (int i in at .. end) {
-            int c = message[i];
-            if (c == '\t') {
+        for (int i in position .. end) {
+            int byte_value = message[i];
+            if (byte_value == '\t') {
                 int width = 8 - col % 8;
-                for (int s in 0 .. width) {
-                    b.push(' ');
+                for (int j in 0 .. width) {
+                    output.push(' ');
                 }
                 col = col + width;
             } else {
-                b.push(c);
+                output.push(byte_value);
                 col = col + 1;
             }
         }
-        b.push('\n');
-        at = e + 1;
+        output.push('\n');
+        position = line_end + 1;
     }
-    return b;
+    return output;
 }
 
 // --- plumbing ------------------------------------------------------------------
 
-void say(str s) {
-    write((s + "\n").to_bytes());
+void say(str message) {
+    write((message + "\n").to_bytes());
 }
 
-void write(bytes b) {
+void write(bytes data) {
     // `io.stdout()` afresh on every call, for the same reason `dispatch`
     // takes its parser as a parameter: a `File` held in a top-level local is
     // invisible inside a function, and the alternative was threading one
@@ -496,7 +496,7 @@ void write(bytes b) {
     // stream's `File` marks that `File` closed and leaves the descriptor
     // alone (`lib/io.m31`, `File.release`).
     io.File out = io.stdout();
-    match (out.write(b)) {
+    match (out.write(data)) {
         case Ok: {
         }
         case Err: {

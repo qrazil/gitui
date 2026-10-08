@@ -214,28 +214,28 @@ pub str Entry.type_word() {
 /// off disk is already in this order -- git never writes one that is not, and
 /// `tree_entries` does not check -- so this is needed only for writing.
 pub int Entry.cmp(Entry other) {
-    bytes a = name;
+    bytes left_name = name;
     if (is_tree()) {
-        a = clone(name);
-        a.push('/');
+        left_name = clone(name);
+        left_name.push('/');
     }
-    bytes b = other.name;
+    bytes right_name = other.name;
     if (other.is_tree()) {
-        b = clone(other.name);
-        b.push('/');
+        right_name = clone(other.name);
+        right_name.push('/');
     }
-    return cmp_bytes(a, b);
+    return cmp_bytes(left_name, right_name);
 }
 
 /// The six-digit octal git prints, zero-padded -- `040000`, not `40000`.
 pub str Entry.mode_text() {
-    str s = "";
-    int i = 5;
-    while (i >= 0) {
-        s = s + (mode >> i * 3 & 7).to_str();
-        i = i - 1;
+    str text = "";
+    int digit_index = 5;
+    while (digit_index >= 0) {
+        text = text + (mode >> digit_index * 3 & 7).to_str();
+        digit_index = digit_index - 1;
     }
-    return s;
+    return text;
 }
 
 /// An `author` or `committer` line, taken apart. Everything before the last
@@ -333,10 +333,10 @@ pub Result<Object, Error> read(str gitdir, str id) {
     if (fs.exists(path)) {
         bytes stream = [];
         match (io.read_bytes(path)) {
-            case Ok(bytes b): {
-                stream = b;
+            case Ok(bytes contents): {
+                stream = contents;
             }
-            case Err(io.Error e): {
+            case Err(_): {
                 return Result<Object, Error>.Err(Error.Io);
             }
         }
@@ -344,26 +344,26 @@ pub Result<Object, Error> read(str gitdir, str id) {
             case Ok(bytes plain): {
                 return parse(id, plain);
             }
-            case Err(GIT_zlib.Error e): {
+            case Err(_): {
                 return Result<Object, Error>.Err(Error.Zlib);
             }
         }
     }
     match (GIT_pack.read(gitdir, id)) {
-        case Ok(GIT_pack.Found f): {
+        case Ok(GIT_pack.Found found): {
             bytes plain = [];
-            plain.extend(f.kind.to_bytes());
+            plain.extend(found.kind.to_bytes());
             plain.push(' ');
-            plain.extend(f.content.size().to_str().to_bytes());
+            plain.extend(found.content.size().to_str().to_bytes());
             plain.push(0);
-            plain.extend(f.content);
+            plain.extend(found.content);
             return parse(id, plain);
         }
-        case Err(GIT_pack.Error e): {
+        case Err(GIT_pack.Error error): {
             // `NotFound` alone means genuinely missing -- everything else
             // GIT_pack.m31 can say means it found the id but could not read the
             // object out, which is `Error.Packed` here.
-            match (e) {
+            match (error) {
                 case NotFound: {
                     return Result<Object, Error>.Err(Error.NotFound);
                 }
@@ -407,28 +407,28 @@ pub Result<Map<str, str>, Error> flatten_tree(str gitdir, str id) {
         case Ok: {
             return Result<Map<str, str>, Error>.Ok(out);
         }
-        case Err(Error e): {
-            return Result<Map<str, str>, Error>.Err(e);
+        case Err(Error error): {
+            return Result<Map<str, str>, Error>.Err(error);
         }
     }
 }
 
 Result<bool, Error> flatten_tree_into(str gitdir, str id, str prefix, Map<str, str> out) {
     match (read(gitdir, id)) {
-        case Ok(Object o): {
-            match (o.body) {
-                case Tree(List<Entry> es): {
-                    for (Entry e in es) {
-                        match (e.name.utf8()) {
+        case Ok(Object object): {
+            match (object.body) {
+                case Tree(List<Entry> entries): {
+                    for (Entry entry in entries) {
+                        match (entry.name.utf8()) {
                             case Some(str name): {
                                 str full = name;
                                 if (prefix != "") {
                                     full = prefix + "/" + name;
                                 }
-                                if (e.is_tree()) {
-                                    flatten_tree_into(gitdir, e.id, full, out)?;
+                                if (entry.is_tree()) {
+                                    flatten_tree_into(gitdir, entry.id, full, out)?;
                                 } else {
-                                    out.set(full, e.id);
+                                    out.set(full, entry.id);
                                 }
                             }
                             case None: {
@@ -448,8 +448,8 @@ Result<bool, Error> flatten_tree_into(str gitdir, str id, str prefix, Map<str, s
                 }
             }
         }
-        case Err(Error e): {
-            return Result<bool, Error>.Err(e);
+        case Err(Error error): {
+            return Result<bool, Error>.Err(error);
         }
     }
 }
@@ -466,12 +466,12 @@ pub Result<Object, Error> parse(str id, bytes plain) {
     if (nul < 0) {
         return Result<Object, Error>.Err(Error.NoHeader);
     }
-    int sp = find(plain, 32, 0);
-    if (sp < 0 || sp > nul) {
+    int space_index = find(plain, 32, 0);
+    if (space_index < 0 || space_index > nul) {
         return Result<Object, Error>.Err(Error.NoHeader);
     }
-    str word = ascii(plain.substr(0, sp));
-    int said = decimal(plain.substr(sp + 1, nul));
+    str word = ascii(plain.substr(0, space_index));
+    int said = decimal(plain.substr(space_index + 1, nul));
     if (said < 0) {
         return Result<Object, Error>.Err(Error.NoHeader);
     }
@@ -487,12 +487,12 @@ pub Result<Object, Error> parse(str id, bytes plain) {
         return Result<Object, Error>.Ok(Object(id, Body.Tree(entries), content));
     }
     if (word == "commit") {
-        Commit c = commit_of(id, content)?;
-        return Result<Object, Error>.Ok(Object(id, Body.Commit(c), content));
+        Commit commit = commit_of(id, content)?;
+        return Result<Object, Error>.Ok(Object(id, Body.Commit(commit), content));
     }
     if (word == "tag") {
-        Tag t = tag_of(id, content)?;
-        return Result<Object, Error>.Ok(Object(id, Body.Tag(t), content));
+        Tag tag = tag_of(id, content)?;
+        return Result<Object, Error>.Ok(Object(id, Body.Tag(tag), content));
     }
     return Result<Object, Error>.Err(Error.UnknownType);
 }
@@ -508,17 +508,17 @@ pub Result<Object, Error> parse(str id, bytes plain) {
 /// reader that does not have to know which kind of store it is looking at.
 pub List<str> matching(str gitdir, str prefix) {
     List<str> hits = [];
-    str p = prefix.to_lower();
-    if (!is_name(p) || p.size() < 4 || p.size() > 40) {
+    str lowered = prefix.to_lower();
+    if (!is_name(lowered) || lowered.size() < 4 || lowered.size() > 40) {
         return hits;
     }
-    str two = p.substr(0, 2);
-    str rest = p.substr(2, p.size());
+    str two = lowered.substr(0, 2);
+    str rest = lowered.substr(2, lowered.size());
     match (fs.listdir(fs.join(fs.join(GIT_repository.common(gitdir), "objects"), two))) {
         case Ok(List<str> names): {
-            for (str n in names) {
-                if (n.size() == 38 && n.starts_with(rest)) {
-                    hits.push(two + n);
+            for (str name in names) {
+                if (name.size() == 38 && name.starts_with(rest)) {
+                    hits.push(two + name);
                 }
             }
         }
@@ -528,7 +528,7 @@ pub List<str> matching(str gitdir, str prefix) {
     match (GIT_pack.ids(gitdir)) {
         case Ok(List<str> names): {
             for (str id in names) {
-                if (id.starts_with(p)) {
+                if (id.starts_with(lowered)) {
                     hits.push(id);
                 }
             }
@@ -538,12 +538,12 @@ pub List<str> matching(str gitdir, str prefix) {
     }
     hits.sort();
     List<str> dedup = [];
-    str prev = "";
-    for (str h in hits) {
-        if (dedup.size() == 0 || h != prev) {
-            dedup.push(h);
+    str previous = "";
+    for (str hit in hits) {
+        if (dedup.size() == 0 || hit != previous) {
+            dedup.push(hit);
         }
-        prev = h;
+        previous = hit;
     }
     return dedup;
 }
@@ -573,7 +573,7 @@ pub Result<List<str>, Error> loose(str gitdir) {
         case Ok(List<str> names): {
             fanout = names;
         }
-        case Err(io.Error e): {
+        case Err(_): {
             return Result<List<str>, Error>.Err(Error.Io);
         }
     }
@@ -584,9 +584,9 @@ pub Result<List<str>, Error> loose(str gitdir) {
         }
         match (fs.listdir(fs.join(root, two))) {
             case Ok(List<str> files): {
-                for (str f in files) {
-                    if (f.size() == 38 && is_name(f)) {
-                        out.push(two + f);
+                for (str file_name in files) {
+                    if (file_name.size() == 38 && is_name(file_name)) {
+                        out.push(two + file_name);
                     }
                 }
             }
@@ -612,17 +612,17 @@ pub Result<List<str>, Error> all(str gitdir) {
                 out.push(id);
             }
         }
-        case Err(GIT_pack.Error e): {
+        case Err(_): {
         }
     }
     out.sort();
     List<str> dedup = [];
-    str prev = "";
+    str previous = "";
     for (str id in out) {
-        if (dedup.size() == 0 || id != prev) {
+        if (dedup.size() == 0 || id != previous) {
             dedup.push(id);
         }
-        prev = id;
+        previous = id;
     }
     return Result<List<str>, Error>.Ok(dedup);
 }
@@ -636,46 +636,46 @@ pub Result<List<str>, Error> all(str gitdir) {
 // entry.
 Result<List<Entry>, Error> tree_entries(str id, bytes content) {
     List<Entry> out = [];
-    int at = 0;
-    int n = content.size();
-    while (at < n) {
-        int sp = find(content, 32, at);
-        if (sp < 0) {
+    int position = 0;
+    int length = content.size();
+    while (position < length) {
+        int space_index = find(content, 32, position);
+        if (space_index < 0) {
             return Result<List<Entry>, Error>.Err(Error.BadTree);
         }
-        int mode = octal(content.substr(at, sp));
+        int mode = octal(content.substr(position, space_index));
         if (mode < 0) {
             return Result<List<Entry>, Error>.Err(Error.BadTree);
         }
-        int nul = find(content, 0, sp + 1);
+        int nul = find(content, 0, space_index + 1);
         if (nul < 0) {
             return Result<List<Entry>, Error>.Err(Error.BadTree);
         }
-        if (nul + 21 > n) {
+        if (nul + 21 > length) {
             return Result<List<Entry>, Error>.Err(Error.BadTree);
         }
-        out.push(Entry(mode, content.substr(sp + 1, nul), content.substr(nul + 1, nul + 21).hex()));
-        at = nul + 21;
+        out.push(Entry(mode, content.substr(space_index + 1, nul), content.substr(nul + 1, nul + 21).hex()));
+        position = nul + 21;
     }
     return Result<List<Entry>, Error>.Ok(out);
 }
 
 Result<Commit, Error> commit_of(str id, bytes content) {
-    Headers h = headers(content);
+    Headers header = headers(content);
     str tree = "";
     List<str> parents = [];
     Option<Ident> author = Option<Ident>.None;
     Option<Ident> committer = Option<Ident>.None;
     List<bytes> extra = [];
-    for (bytes line in h.lines) {
-        int sp = find(line, 32, 0);
+    for (bytes line in header.lines) {
+        int space_index = find(line, 32, 0);
         str key = "";
         bytes value = [];
-        if (sp < 0) {
+        if (space_index < 0) {
             key = ascii(line);
         } else {
-            key = ascii(line.substr(0, sp));
-            value = line.substr(sp + 1, line.size());
+            key = ascii(line.substr(0, space_index));
+            value = line.substr(space_index + 1, line.size());
         }
         if (key == "tree" && tree == "") {
             tree = ascii(value);
@@ -692,16 +692,16 @@ Result<Commit, Error> commit_of(str id, bytes content) {
     if (tree.size() != 40 || !is_name(tree)) {
         return Result<Commit, Error>.Err(Error.BadHeaders);
     }
-    for (str p in parents) {
-        if (p.size() != 40 || !is_name(p)) {
+    for (str parent in parents) {
+        if (parent.size() != 40 || !is_name(parent)) {
             return Result<Commit, Error>.Err(Error.BadHeaders);
         }
     }
     match (author) {
-        case Some(Ident a): {
+        case Some(Ident author_ident): {
             match (committer) {
-                case Some(Ident c): {
-                    return Result<Commit, Error>.Ok(Commit(tree, parents, a, c, extra, h.message));
+                case Some(Ident committer_ident): {
+                    return Result<Commit, Error>.Ok(Commit(tree, parents, author_ident, committer_ident, extra, header.message));
                 }
                 case None: {
                     return Result<Commit, Error>.Err(Error.BadHeaders);
@@ -715,21 +715,21 @@ Result<Commit, Error> commit_of(str id, bytes content) {
 }
 
 Result<Tag, Error> tag_of(str id, bytes content) {
-    Headers h = headers(content);
+    Headers header = headers(content);
     str object = "";
     str kind = "";
     bytes name = [];
     Option<Ident> tagger = Option<Ident>.None;
     List<bytes> extra = [];
-    for (bytes line in h.lines) {
-        int sp = find(line, 32, 0);
+    for (bytes line in header.lines) {
+        int space_index = find(line, 32, 0);
         str key = "";
         bytes value = [];
-        if (sp < 0) {
+        if (space_index < 0) {
             key = ascii(line);
         } else {
-            key = ascii(line.substr(0, sp));
-            value = line.substr(sp + 1, line.size());
+            key = ascii(line.substr(0, space_index));
+            value = line.substr(space_index + 1, line.size());
         }
         if (key == "object" && object == "") {
             object = ascii(value);
@@ -746,7 +746,7 @@ Result<Tag, Error> tag_of(str id, bytes content) {
     if (object.size() != 40 || !is_name(object)) {
         return Result<Tag, Error>.Err(Error.BadHeaders);
     }
-    return Result<Tag, Error>.Ok(Tag(object, kind, name, extra, h.message, tagger));
+    return Result<Tag, Error>.Ok(Tag(object, kind, name, extra, header.message, tagger));
 }
 
 // The header block of a commit or a tag, and the message after it. A struct
@@ -763,27 +763,27 @@ type Headers {
 // signature as it was written.
 Headers headers(bytes content) {
     List<bytes> lines = [];
-    int at = 0;
-    int n = content.size();
-    while (at < n) {
-        int e = find(content, 10, at);
-        if (e < 0) {
-            e = n;
+    int position = 0;
+    int length = content.size();
+    while (position < length) {
+        int line_end = find(content, 10, position);
+        if (line_end < 0) {
+            line_end = length;
         }
-        if (e == at) {
-            at = e + 1;
-            return Headers(lines, content.substr(at, n));
+        if (line_end == position) {
+            position = line_end + 1;
+            return Headers(lines, content.substr(position, length));
         }
-        bytes line = content.substr(at, e);
-        at = e + 1;
-        while (at < n && content[at] == ' ') {
-            int c = find(content, 10, at);
-            if (c < 0) {
-                c = n;
+        bytes line = content.substr(position, line_end);
+        position = line_end + 1;
+        while (position < length && content[position] == ' ') {
+            int continuation_end = find(content, 10, position);
+            if (continuation_end < 0) {
+                continuation_end = length;
             }
             line.push('\n');
-            line.extend(content.substr(at + 1, c));
-            at = c + 1;
+            line.extend(content.substr(position + 1, continuation_end));
+            position = continuation_end + 1;
         }
         lines.push(line);
     }
@@ -798,53 +798,53 @@ Headers headers(bytes content) {
 // prints it back, and a commit whose author line is strange is still a commit
 // whose parents can be walked. What cannot be read becomes an empty field and
 // a zero timestamp.
-Ident ident(bytes v) {
-    int lt = rfind(v, 60);
-    int gt = -1;
-    if (lt >= 0) {
-        gt = find(v, 62, lt + 1);
+Ident ident(bytes signature) {
+    int open_angle = rfind(signature, 60);
+    int close_angle = -1;
+    if (open_angle >= 0) {
+        close_angle = find(signature, 62, open_angle + 1);
     }
     bytes name = [];
     bytes email = [];
     int rest = 0;
-    if (lt >= 0 && gt >= 0) {
-        int end = lt;
-        while (end > 0 && v[end - 1] == ' ') {
+    if (open_angle >= 0 && close_angle >= 0) {
+        int end = open_angle;
+        while (end > 0 && signature[end - 1] == ' ') {
             end = end - 1;
         }
-        name = v.substr(0, end);
-        email = v.substr(lt + 1, gt);
-        rest = gt + 1;
+        name = signature.substr(0, end);
+        email = signature.substr(open_angle + 1, close_angle);
+        rest = close_angle + 1;
     } else {
-        name = v;
-        rest = v.size();
+        name = signature;
+        rest = signature.size();
     }
-    while (rest < v.size() && v[rest] == ' ') {
+    while (rest < signature.size() && signature[rest] == ' ') {
         rest = rest + 1;
     }
-    int sp = find(v, 32, rest);
+    int space_index = find(signature, 32, rest);
     int when = 0;
     str zone = "+0000";
     int offset = 0;
-    if (rest < v.size()) {
-        int end = v.size();
-        if (sp >= 0) {
-            end = sp;
+    if (rest < signature.size()) {
+        int end = signature.size();
+        if (space_index >= 0) {
+            end = space_index;
         }
-        when = decimal(v.substr(rest, end));
+        when = decimal(signature.substr(rest, end));
         if (when < 0) {
             when = 0;
         }
-        if (sp >= 0) {
-            bytes z = v.substr(sp + 1, v.size()).trim();
-            str zs = ascii(z);
-            if (zs.size() == 5 && (z[0] == '+' || z[0] == '-')) {
-                int hh = decimal(z.substr(1, 3));
-                int mm = decimal(z.substr(3, 5));
-                if (hh >= 0 && mm >= 0) {
-                    zone = zs;
-                    offset = hh * 60 + mm;
-                    if (z[0] == '-') {
+        if (space_index >= 0) {
+            bytes zone_bytes = signature.substr(space_index + 1, signature.size()).trim();
+            str zone_text = ascii(zone_bytes);
+            if (zone_text.size() == 5 && (zone_bytes[0] == '+' || zone_bytes[0] == '-')) {
+                int hours = decimal(zone_bytes.substr(1, 3));
+                int minutes = decimal(zone_bytes.substr(3, 5));
+                if (hours >= 0 && minutes >= 0) {
+                    zone = zone_text;
+                    offset = hours * 60 + minutes;
+                    if (zone_bytes[0] == '-') {
                         offset = 0 - offset;
                     }
                 }
@@ -859,26 +859,26 @@ Ident ident(bytes v) {
 // The index of octet `b` at or after `from`, or -1. `bytes.index_of` takes a
 // needle and has no starting offset, so every scan over a structured buffer
 // has to be written out; see docs/FRICTION.md.
-int find(bytes hay, int b, int from) {
-    int i = from;
-    int n = hay.size();
-    while (i < n) {
-        if (hay[i] == b) {
-            return i;
+int find(bytes hay, int needle, int from) {
+    int index = from;
+    int length = hay.size();
+    while (index < length) {
+        if (hay[index] == needle) {
+            return index;
         }
-        i = i + 1;
+        index = index + 1;
     }
     return -1;
 }
 
 // The index of the LAST octet `b`, or -1.
-int rfind(bytes hay, int b) {
-    int i = hay.size() - 1;
-    while (i >= 0) {
-        if (hay[i] == b) {
-            return i;
+int rfind(bytes hay, int needle) {
+    int index = hay.size() - 1;
+    while (index >= 0) {
+        if (hay[index] == needle) {
+            return index;
         }
-        i = i - 1;
+        index = index - 1;
     }
     return -1;
 }
@@ -886,11 +886,11 @@ int rfind(bytes hay, int b) {
 // ASCII octets as text. Anything above 127 becomes `?`, which is safe because
 // every caller here uses it on a field git defines as ASCII -- a type word, a
 // hex name, a header key. A name or a message never goes through it.
-str ascii(bytes b) {
+str ascii(bytes data) {
     bytes safe = [];
-    for (int c in b) {
-        if (c < 128) {
-            safe.push(c);
+    for (int byte_value in data) {
+        if (byte_value < 128) {
+            safe.push(byte_value);
         } else {
             safe.push('?');
         }
@@ -902,43 +902,43 @@ str ascii(bytes b) {
 // it: the digits are octets, and going through a `str` would mean building
 // one first and would accept `+5` and leading space, which this format does
 // not have.
-int decimal(bytes b) {
-    if (b.size() == 0) {
+int decimal(bytes data) {
+    if (data.size() == 0) {
         return -1;
     }
-    int v = 0;
-    for (int c in b) {
-        if (c < '0' || c > '9') {
+    int value = 0;
+    for (int byte_value in data) {
+        if (byte_value < '0' || byte_value > '9') {
             return -1;
         }
-        v = v * 10 + (c - 48);
+        value = value * 10 + (byte_value - 48);
     }
-    return v;
+    return value;
 }
 
 // A non-negative octal, or -1.
-int octal(bytes b) {
-    if (b.size() == 0) {
+int octal(bytes data) {
+    if (data.size() == 0) {
         return -1;
     }
-    int v = 0;
-    for (int c in b) {
-        if (c < '0' || c > '7') {
+    int value = 0;
+    for (int byte_value in data) {
+        if (byte_value < '0' || byte_value > '7') {
             return -1;
         }
-        v = v * 8 + (c - 48);
+        value = value * 8 + (byte_value - 48);
     }
-    return v;
+    return value;
 }
 
 // Is every character a lowercase hex digit?
-pub bool is_name(str s) {
-    if (s.size() == 0) {
+pub bool is_name(str name_text) {
+    if (name_text.size() == 0) {
         return false;
     }
-    for (int i in 0 .. s.size()) {
-        int c = s.byte_at(i);
-        if (!(c >= '0' && c <= '9') && !(c >= 'a' && c <= 'f')) {
+    for (int i in 0 .. name_text.size()) {
+        int byte_value = name_text.byte_at(i);
+        if (!(byte_value >= '0' && byte_value <= '9') && !(byte_value >= 'a' && byte_value <= 'f')) {
             return false;
         }
     }
@@ -958,12 +958,12 @@ pub Result<str, Error> write_tree(str gitdir, List<Entry> entries) {
     List<Entry> sorted = clone(entries);
     sorted.sort();
     bytes content = [];
-    for (Entry e in sorted) {
-        content.extend(mode_octal(e.mode));
+    for (Entry entry in sorted) {
+        content.extend(mode_octal(entry.mode));
         content.push(' ');
-        content.extend(e.name);
+        content.extend(entry.name);
         content.push(0);
-        content.extend(hex_decode(e.id));
+        content.extend(hex_decode(entry.id));
     }
     return write_object(gitdir, "tree", content);
 }
@@ -973,24 +973,24 @@ pub Result<str, Error> write_tree(str gitdir, List<Entry> entries) {
 /// line of `c.extra` verbatim (folded back onto multiple physical lines if it
 /// holds one, the exact inverse of what `headers()` did to read it), a blank
 /// line, and `c.message`.
-pub Result<str, Error> write_commit(str gitdir, Commit c) {
+pub Result<str, Error> write_commit(str gitdir, Commit commit) {
     bytes content = [];
     content.extend("tree ".to_bytes());
-    content.extend(c.tree.to_bytes());
+    content.extend(commit.tree.to_bytes());
     content.push('\n');
-    for (str p in c.parents) {
+    for (str parent in commit.parents) {
         content.extend("parent ".to_bytes());
-        content.extend(p.to_bytes());
+        content.extend(parent.to_bytes());
         content.push('\n');
     }
-    content.extend(ident_line("author", c.author));
-    content.extend(ident_line("committer", c.committer));
-    for (bytes line in c.extra) {
+    content.extend(ident_line("author", commit.author));
+    content.extend(ident_line("committer", commit.committer));
+    for (bytes line in commit.extra) {
         content.extend(fold_header(line));
         content.push('\n');
     }
     content.push('\n');
-    content.extend(c.message);
+    content.extend(commit.message);
     return write_object(gitdir, "commit", content);
 }
 
@@ -1016,9 +1016,9 @@ bytes ident_line(str key, Ident who) {
 // writing it back re-inserts exactly one space after every embedded `\n`.
 bytes fold_header(bytes line) {
     bytes out = [];
-    for (int c in line) {
-        out.push(c);
-        if (c == '\n') {
+    for (int byte_value in line) {
+        out.push(byte_value);
+        if (byte_value == '\n') {
             out.push(' ');
         }
     }
@@ -1069,33 +1069,33 @@ Result<str, Error> write_object(str gitdir, str kind, bytes content) {
     header.push(0);
     header.extend(content);
     str id = object_id(kind, content);
-    str dir = fs.join(fs.join(GIT_repository.common(gitdir), "objects"), id.substr(0, 2));
-    str path = fs.join(dir, id.substr(2, 40));
+    str directory = fs.join(fs.join(GIT_repository.common(gitdir), "objects"), id.substr(0, 2));
+    str path = fs.join(directory, id.substr(2, 40));
     if (fs.exists(path)) {
         return Result<str, Error>.Ok(id);
     }
-    match (fs.makedirs(dir)) {
+    match (fs.makedirs(directory)) {
         case Ok: {
         }
-        case Err(io.Error e): {
+        case Err(_): {
             return Result<str, Error>.Err(Error.Io);
         }
     }
     bytes compressed = GIT_zlib.compress(header);
     random.System rnd = random.system();
-    str tmp = fs.join(dir, "tmp" + rnd.hex(12));
-    match (io.write_bytes(tmp, compressed)) {
+    str temp = fs.join(directory, "tmp" + rnd.hex(12));
+    match (io.write_bytes(temp, compressed)) {
         case Ok: {
         }
-        case Err(io.Error e): {
+        case Err(_): {
             return Result<str, Error>.Err(Error.Io);
         }
     }
-    match (fs.rename(tmp, path)) {
+    match (fs.rename(temp, path)) {
         case Ok: {
             return Result<str, Error>.Ok(id);
         }
-        case Err(io.Error e): {
+        case Err(_): {
             return Result<str, Error>.Err(Error.Io);
         }
     }
@@ -1109,16 +1109,16 @@ bytes mode_octal(int mode) {
         return "0".to_bytes();
     }
     List<int> digits = [];
-    int m = mode;
-    while (m > 0) {
-        digits.push(m % 8);
-        m = m / 8;
+    int remaining = mode;
+    while (remaining > 0) {
+        digits.push(remaining % 8);
+        remaining = remaining / 8;
     }
     bytes out = [];
-    int i = digits.size() - 1;
-    while (i >= 0) {
-        out.push('0' + digits[i]);
-        i = i - 1;
+    int digit_index = digits.size() - 1;
+    while (digit_index >= 0) {
+        out.push('0' + digits[digit_index]);
+        digit_index = digit_index - 1;
     }
     return out;
 }
@@ -1127,40 +1127,40 @@ bytes mode_octal(int mode) {
 // this module already trusts -- `GIT_sha1.hex`'s own output, or an `Entry.id`
 // that came from `tree_entries` parsing 20 raw octets in the first place --
 // so an invalid digit cannot arise and is not checked for.
-bytes hex_decode(str s) {
+bytes hex_decode(str hex_text) {
     bytes out = [];
-    int i = 0;
-    while (i + 1 < s.size()) {
-        out.push(hex_val(s.byte_at(i)) << 4 | hex_val(s.byte_at(i + 1)));
-        i = i + 2;
+    int index = 0;
+    while (index + 1 < hex_text.size()) {
+        out.push(hex_val(hex_text.byte_at(index)) << 4 | hex_val(hex_text.byte_at(index + 1)));
+        index = index + 2;
     }
     return out;
 }
 
-int hex_val(int c) {
-    if (c >= '0' && c <= '9') {
-        return c - '0';
+int hex_val(int digit) {
+    if (digit >= '0' && digit <= '9') {
+        return digit - '0';
     }
-    if (c >= 'a' && c <= 'f') {
-        return c - 'a' + 10;
+    if (digit >= 'a' && digit <= 'f') {
+        return digit - 'a' + 10;
     }
-    if (c >= 'A' && c <= 'F') {
-        return c - 'A' + 10;
+    if (digit >= 'A' && digit <= 'F') {
+        return digit - 'A' + 10;
     }
     return 0;
 }
 
 // Byte comparison of two runs, negative/zero/positive -- `GIT_refs.m31`'s
 // `before`, over `bytes` rather than `str`, needed here for `Entry.cmp`.
-int cmp_bytes(bytes a, bytes b) {
-    int n = a.size();
-    if (b.size() < n) {
-        n = b.size();
+int cmp_bytes(bytes left, bytes right) {
+    int length = left.size();
+    if (right.size() < length) {
+        length = right.size();
     }
-    for (int i in 0 .. n) {
-        if (a[i] != b[i]) {
-            return a[i] - b[i];
+    for (int i in 0 .. length) {
+        if (left[i] != right[i]) {
+            return left[i] - right[i];
         }
     }
-    return a.size() - b.size();
+    return left.size() - right.size();
 }

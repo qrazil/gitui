@@ -9,14 +9,14 @@
 //
 // API
 // ---
-//   GIT_zlib.decompress(src)            -> Result<bytes, Error>   RFC 1950, checked
-//   GIT_zlib.decompress(src, limit: n)  -> the same, refusing to emit more than n
-//   GIT_zlib.decompress_at(src, start)  -> Result<Decoded, Error> RFC 1950,
-//                                      starting at `src[start]`, reporting how
+//   GIT_zlib.decompress(source)            -> Result<bytes, Error>   RFC 1950, checked
+//   GIT_zlib.decompress(source, limit: n)  -> the same, refusing to emit more than n
+//   GIT_zlib.decompress_at(source, start)  -> Result<Decoded, Error> RFC 1950,
+//                                      starting at `source[start]`, reporting how
 //                                      many input octets it consumed
-//   GIT_zlib.inflate(src)               -> Result<bytes, Error>   raw RFC 1951
-//   GIT_zlib.inflate_at(src, start)     -> Result<Decoded, Error> raw RFC 1951,
-//                                      starting at `src[start]`, reporting how
+//   GIT_zlib.inflate(source)               -> Result<bytes, Error>   raw RFC 1951
+//   GIT_zlib.inflate_at(source, start)     -> Result<Decoded, Error> raw RFC 1951,
+//                                      starting at `source[start]`, reporting how
 //                                      many input octets it consumed
 //   GIT_zlib.adler32(b)                 -> int, the RFC 1950 check value
 //   GIT_zlib.deflate_stored(data)       -> bytes   RFC 1951, uncompressed stored blocks
@@ -37,17 +37,17 @@
 // (an end-of-block symbol, RFC 1951 §3.2.3), so this never needs to be told in
 // advance how long the stream is, only where it starts.
 //
-// `Bits` already carries its own read position (`at`) rather than assuming
-// its `src` starts at octet zero -- `decompress` above already begins reading
-// at `at: 2`, past the two-octet zlib header -- so `inflate_at` costs nothing
+// `Bits` already carries its own read position (`position`) rather than assuming
+// its `source` starts at octet zero -- `decompress` above already begins reading
+// at `position: 2`, past the two-octet zlib header -- so `inflate_at` costs nothing
 // new in the reader itself: it is `inflate`'s `Bits` construction with a
 // caller-given start instead of zero, plus `align()` afterwards (exactly the
 // alignment `decompress` already does before reading its trailing Adler-32)
 // to round the stopping point up to the octet boundary the next object starts
-// on, and `b.at - start` for how many input octets that was.
+// on, and `bits.position - start` for how many input octets that was.
 //
 // **No copy.** `bytes` is a reference type (reference §3.10): passing the
-// whole packfile buffer into `Bits(src, at: start)` aliases it, it does not
+// whole packfile buffer into `Bits(source, position: start)` aliases it, it does not
 // clone it, so decompressing one small object from partway through a large
 // pack costs nothing proportional to the pack's size or to how far into it
 // the object sits -- only to the object's own compressed length.
@@ -202,60 +202,60 @@ const Array<int> CLEN_ORDER = [16, 17, 18, 0, 8, 7, 9, 6, 10, 5, 11, 4, 12, 3, 1
 // --- the bit reader ----------------------------------------------------------
 
 /// A DEFLATE stream is read least-significant-bit first within each octet, and
-/// the octets themselves are in order. `val` holds `cnt` bits not yet handed
+/// the octets themselves are in order. `value` holds `count` bits not yet handed
 /// out, low bits first.
 type Bits {
-    bytes src;
-    int at = 0;
-    int val = 0;
-    int cnt = 0;
+    bytes source;
+    int position = 0;
+    int value = 0;
+    int count = 0;
     /// Set the first time a read went past the end. See the module header:
     /// the reader answers zero bits rather than failing, and the caller's loop
     /// checks this once per symbol.
     bool over = false;
 }
 
-/// The next `n` bits as an integer, low bit first. `n` is at most 16 here, so
-/// `val` never holds more than 23 bits and nothing can overflow.
-int Bits.take(int n) {
-    while (cnt < n) {
-        if (at >= src.size()) {
+/// The next `bit_count` bits as an integer, low bit first. `bit_count` is at most 16 here, so
+/// `value` never holds more than 23 bits and nothing can overflow.
+int Bits.take(int bit_count) {
+    while (count < bit_count) {
+        if (position >= source.size()) {
             over = true;
-            cnt = cnt + 8;
+            count = count + 8;
         } else {
-            val = val | src[at] << cnt;
-            at = at + 1;
-            cnt = cnt + 8;
+            value = value | source[position] << count;
+            position = position + 1;
+            count = count + 8;
         }
     }
-    int v = val & (1 << n) - 1;
-    val = val >> n;
-    cnt = cnt - n;
-    return v;
+    int taken = value & (1 << bit_count) - 1;
+    value = value >> bit_count;
+    count = count - bit_count;
+    return taken;
 }
 
 /// Drop to the next octet boundary and give back to the stream any whole
-/// octets the accumulator was holding, so `at` is again where reading should
+/// octets the accumulator was holding, so `position` is again where reading should
 /// continue. A stored block starts here.
 void Bits.align() {
-    int back = cnt / 8;
-    if (back > at) {
-        back = at;
+    int back = count / 8;
+    if (back > position) {
+        back = position;
     }
-    at = at - back;
-    val = 0;
-    cnt = 0;
+    position = position - back;
+    value = 0;
+    count = 0;
 }
 
 /// One octet, read directly. Only valid straight after `align`.
 int Bits.byte() {
-    if (at >= src.size()) {
+    if (position >= source.size()) {
         over = true;
         return 0;
     }
-    int v = src[at];
-    at = at + 1;
-    return v;
+    int octet = source[position];
+    position = position + 1;
+    return octet;
 }
 
 // --- canonical Huffman codes -------------------------------------------------
@@ -273,91 +273,91 @@ type Huff {
 /// The next symbol, or -1 if the bits match no code. One bit at a time, the
 /// way §3.2.2 defines the code: `first` is the smallest code of this length,
 /// `index` where its symbols start.
-int Huff.decode(Bits b) {
+int Huff.decode(Bits bits) {
     int code = 0;
     int first = 0;
     int index = 0;
-    int len = 1;
-    while (len <= 15) {
-        code = code | b.take(1);
-        int here = count[len];
+    int length = 1;
+    while (length <= 15) {
+        code = code | bits.take(1);
+        int here = count[length];
         if (code - first < here) {
             return symbol[index + code - first];
         }
         index = index + here;
         first = first + here << 1;
         code = code << 1;
-        len = len + 1;
+        length = length + 1;
     }
     return -1;
 }
 
 /// The code `lengths[off .. off+n]` describes.
-Huff build(Array<int> lengths, int off, int n) {
-    Huff h = Huff();
+Huff build(Array<int> lengths, int off, int symbol_count) {
+    Huff huff = Huff();
     int sym = 0;
-    while (sym < n) {
-        int len = lengths[off + sym];
-        h.count[len] = h.count[len] + 1;
+    while (sym < symbol_count) {
+        int length = lengths[off + sym];
+        huff.count[length] = huff.count[length] + 1;
         sym = sym + 1;
     }
-    if (h.count[0] == n) {
-        return h;
+    if (huff.count[0] == symbol_count) {
+        return huff;
     }
     int left = 1;
-    int len = 1;
-    while (len <= 15) {
+    int length = 1;
+    while (length <= 15) {
         left = left << 1;
-        left = left - h.count[len];
+        left = left - huff.count[length];
         if (left < 0) {
-            h.left = left;
-            return h;
+            huff.left = left;
+            return huff;
         }
-        len = len + 1;
+        length = length + 1;
     }
-    h.left = left;
+    huff.left = left;
     Array<int> offs = [0; 17];
-    len = 1;
-    while (len < 15) {
-        offs[len + 1] = offs[len] + h.count[len];
-        len = len + 1;
+    length = 1;
+    while (length < 15) {
+        offs[length + 1] = offs[length] + huff.count[length];
+        length = length + 1;
     }
     sym = 0;
-    while (sym < n) {
-        int l = lengths[off + sym];
-        if (l != 0) {
-            h.symbol[offs[l]] = sym;
-            offs[l] = offs[l] + 1;
+    while (sym < symbol_count) {
+        int code_length = lengths[off + sym];
+        if (code_length != 0) {
+            huff.symbol[offs[code_length]] = sym;
+            offs[code_length] = offs[code_length] + 1;
         }
         sym = sym + 1;
     }
-    return h;
+    return huff;
 }
 
 // --- the three block types ---------------------------------------------------
 
-Result<void, Error> stored(Bits b, bytes out, int limit) {
-    b.align();
-    int l0 = b.byte();
-    int l1 = b.byte();
-    int n0 = b.byte();
-    int n1 = b.byte();
-    if (b.over) {
+Result<void, Error> stored(Bits bits, bytes out, int limit) {
+    bits.align();
+    int length_low = bits.byte();
+    int length_high = bits.byte();
+    int complement_low = bits.byte();
+    int complement_high = bits.byte();
+    if (bits.over) {
         return Result<void, Error>.Err(Error.Truncated);
     }
-    int len = l0 | l1 << 8;
-    int nlen = n0 | n1 << 8;
-    if (nlen != len ^ 0xFFFF) {
+    int length = length_low | length_high << 8;
+    int nlen = complement_low | complement_high << 8;
+    if (nlen != length ^ 0xFFFF) {
         return Result<void, Error>.Err(Error.StoredLength);
     }
-    if (b.at + len > b.src.size()) {
+    if (bits.position + length > bits.source.size()) {
         return Result<void, Error>.Err(Error.Truncated);
     }
-    if (limit >= 0 && out.size() + len > limit) {
+    if (limit >= 0 && out.size() + length > limit) {
         return Result<void, Error>.Err(Error.TooBig);
     }
-    out.extend(b.src.substr(b.at, b.at + len));
-    b.at = b.at + len;
+    out.extend(bits.source.substr(bits.position, bits.position + length));
+    bits.position = bits.position + length;
     return Result<void, Error>.Ok;
 }
 
@@ -367,22 +367,22 @@ Result<void, Error> stored(Bits b, bytes out, int limit) {
 /// rather than left out of the table, which would make it incomplete.
 Huff fixed_literal() {
     Array<int> lengths = [0; 320];
-    int i = 0;
-    while (i < 144) {
-        lengths[i] = 8;
-        i = i + 1;
+    int index = 0;
+    while (index < 144) {
+        lengths[index] = 8;
+        index = index + 1;
     }
-    while (i < 256) {
-        lengths[i] = 9;
-        i = i + 1;
+    while (index < 256) {
+        lengths[index] = 9;
+        index = index + 1;
     }
-    while (i < 280) {
-        lengths[i] = 7;
-        i = i + 1;
+    while (index < 280) {
+        lengths[index] = 7;
+        index = index + 1;
     }
-    while (i < 288) {
-        lengths[i] = 8;
-        i = i + 1;
+    while (index < 288) {
+        lengths[index] = 8;
+        index = index + 1;
     }
     return build(lengths, 0, 288);
 }
@@ -399,11 +399,11 @@ type Tables {
     Huff dist;
 }
 
-Result<Tables, Error> dynamic_tables(Bits b) {
-    int nlen = b.take(5) + 257;
-    int ndist = b.take(5) + 1;
-    int ncode = b.take(4) + 4;
-    if (b.over) {
+Result<Tables, Error> dynamic_tables(Bits bits) {
+    int nlen = bits.take(5) + 257;
+    int ndist = bits.take(5) + 1;
+    int ncode = bits.take(4) + 4;
+    if (bits.over) {
         return Result<Tables, Error>.Err(Error.Truncated);
     }
     if (nlen > 286 || ndist > 30) {
@@ -411,54 +411,54 @@ Result<Tables, Error> dynamic_tables(Bits b) {
     }
     Array<int> clen = [0; 19];
     for (int i in 0 .. ncode) {
-        clen[CLEN_ORDER[i]] = b.take(3);
+        clen[CLEN_ORDER[i]] = bits.take(3);
     }
-    Huff cl = build(clen, 0, 19);
-    if (cl.left < 0) {
+    Huff length_huff = build(clen, 0, 19);
+    if (length_huff.left < 0) {
         return Result<Tables, Error>.Err(Error.OverSubscribed);
     }
-    if (cl.left > 0) {
+    if (length_huff.left > 0) {
         return Result<Tables, Error>.Err(Error.Incomplete);
     }
     Array<int> lengths = [0; 320];
-    int idx = 0;
+    int index = 0;
     int want = nlen + ndist;
-    while (idx < want) {
-        int sym = cl.decode(b);
-        if (b.over) {
+    while (index < want) {
+        int sym = length_huff.decode(bits);
+        if (bits.over) {
             return Result<Tables, Error>.Err(Error.Truncated);
         }
         if (sym < 0) {
             return Result<Tables, Error>.Err(Error.BadCode);
         }
         if (sym < 16) {
-            lengths[idx] = sym;
-            idx = idx + 1;
+            lengths[index] = sym;
+            index = index + 1;
         } else {
-            int v = 0;
+            int previous_length = 0;
             int rep = 0;
             if (sym == 16) {
-                if (idx == 0) {
+                if (index == 0) {
                     return Result<Tables, Error>.Err(Error.NothingToRepeat);
                 }
-                v = lengths[idx - 1];
-                rep = 3 + b.take(2);
+                previous_length = lengths[index - 1];
+                rep = 3 + bits.take(2);
             } else if (sym == 17) {
-                rep = 3 + b.take(3);
+                rep = 3 + bits.take(3);
             } else {
-                rep = 11 + b.take(7);
+                rep = 11 + bits.take(7);
             }
-            if (idx + rep > want) {
+            if (index + rep > want) {
                 return Result<Tables, Error>.Err(Error.TooManyLengths);
             }
             while (rep > 0) {
-                lengths[idx] = v;
-                idx = idx + 1;
+                lengths[index] = previous_length;
+                index = index + 1;
                 rep = rep - 1;
             }
         }
     }
-    if (b.over) {
+    if (bits.over) {
         return Result<Tables, Error>.Err(Error.Truncated);
     }
     if (lengths[256] == 0) {
@@ -486,10 +486,10 @@ Result<Tables, Error> dynamic_tables(Bits b) {
 
 /// The symbols of one compressed block, literal by literal and match by
 /// match, until end-of-block.
-Result<void, Error> symbols(Bits b, Huff lit, Huff dist, bytes out, int limit) {
+Result<void, Error> symbols(Bits bits, Huff lit, Huff dist, bytes out, int limit) {
     while (true) {
-        int sym = lit.decode(b);
-        if (b.over) {
+        int sym = lit.decode(bits);
+        if (bits.over) {
             return Result<void, Error>.Err(Error.Truncated);
         }
         if (sym < 0) {
@@ -503,39 +503,39 @@ Result<void, Error> symbols(Bits b, Huff lit, Huff dist, bytes out, int limit) {
         } else if (sym == 256) {
             return Result<void, Error>.Ok;
         } else {
-            int ls = sym - 257;
-            if (ls >= 29) {
+            int length_symbol = sym - 257;
+            if (length_symbol >= 29) {
                 return Result<void, Error>.Err(Error.BadLength);
             }
-            int len = LENGTH_BASE[ls] + b.take(LENGTH_EXTRA[ls]);
-            int ds = dist.decode(b);
-            if (b.over) {
+            int length = LENGTH_BASE[length_symbol] + bits.take(LENGTH_EXTRA[length_symbol]);
+            int distance_symbol = dist.decode(bits);
+            if (bits.over) {
                 return Result<void, Error>.Err(Error.Truncated);
             }
-            if (ds < 0) {
+            if (distance_symbol < 0) {
                 return Result<void, Error>.Err(Error.BadCode);
             }
-            if (ds >= 30) {
+            if (distance_symbol >= 30) {
                 return Result<void, Error>.Err(Error.BadDistance);
             }
-            int d = DIST_BASE[ds] + b.take(DIST_EXTRA[ds]);
-            if (b.over) {
+            int distance = DIST_BASE[distance_symbol] + bits.take(DIST_EXTRA[distance_symbol]);
+            if (bits.over) {
                 return Result<void, Error>.Err(Error.Truncated);
             }
-            if (d > out.size()) {
+            if (distance > out.size()) {
                 return Result<void, Error>.Err(Error.TooFar);
             }
-            if (limit >= 0 && out.size() + len > limit) {
+            if (limit >= 0 && out.size() + length > limit) {
                 return Result<void, Error>.Err(Error.TooBig);
             }
-            int from = out.size() - d;
-            int k = 0;
+            int from = out.size() - distance;
+            int index = 0;
             // One octet at a time on purpose: the ranges overlap when the
             // distance is shorter than the length, which is how DEFLATE
             // spells a run, and a block copy would get that wrong.
-            while (k < len) {
-                out.push(out[from + k]);
-                k = k + 1;
+            while (index < length) {
+                out.push(out[from + index]);
+                index = index + 1;
             }
         }
     }
@@ -543,21 +543,21 @@ Result<void, Error> symbols(Bits b, Huff lit, Huff dist, bytes out, int limit) {
 
 // --- the stream --------------------------------------------------------------
 
-Result<void, Error> run(Bits b, bytes out, int limit) {
+Result<void, Error> run(Bits bits, bytes out, int limit) {
     bool last = false;
     while (!last) {
-        last = b.take(1) == 1;
-        int kind = b.take(2);
-        if (b.over) {
+        last = bits.take(1) == 1;
+        int kind = bits.take(2);
+        if (bits.over) {
             return Result<void, Error>.Err(Error.Truncated);
         }
         if (kind == 0) {
-            stored(b, out, limit)?;
+            stored(bits, out, limit)?;
         } else if (kind == 1) {
-            symbols(b, fixed_literal(), fixed_distance(), out, limit)?;
+            symbols(bits, fixed_literal(), fixed_distance(), out, limit)?;
         } else if (kind == 2) {
-            Tables t = dynamic_tables(b)?;
-            symbols(b, t.lit, t.dist, out, limit)?;
+            Tables tables = dynamic_tables(bits)?;
+            symbols(bits, tables.lit, tables.dist, out, limit)?;
         } else {
             return Result<void, Error>.Err(Error.BlockType);
         }
@@ -568,33 +568,33 @@ Result<void, Error> run(Bits b, bytes out, int limit) {
 /// A raw DEFLATE stream (RFC 1951), with no zlib header and no check value.
 /// `limit` is the most output that will be produced before the stream is
 /// refused; -1, the default, is no limit.
-pub Result<bytes, Error> inflate(bytes src, int limit = -1) {
+pub Result<bytes, Error> inflate(bytes source, int limit = -1) {
     bytes out = [];
-    Bits b = Bits(src);
-    run(b, out, limit)?;
+    Bits bits = Bits(source);
+    run(bits, out, limit)?;
     return Result<bytes, Error>.Ok(out);
 }
 
-/// `inflate_at`'s answer: the plaintext, and how many octets of `src` (from
+/// `inflate_at`'s answer: the plaintext, and how many octets of `source` (from
 /// the `start` it was given) the stream actually occupied.
 pub type Decoded {
     pub bytes data;
     pub int used;
 }
 
-/// A raw DEFLATE stream (RFC 1951) that begins at `src[start]` rather than at
-/// `src[0]` -- one object's compressed data inside a packfile that holds many
+/// A raw DEFLATE stream (RFC 1951) that begins at `source[start]` rather than at
+/// `source[0]` -- one object's compressed data inside a packfile that holds many
 /// more before and after it. See the module header, "one DEFLATE stream among
-/// several in the same buffer": this does not copy `src`, and `used` is
+/// several in the same buffer": this does not copy `source`, and `used` is
 /// exactly the number of input octets between `start` and the octet boundary
 /// the stream's end-of-block symbol aligns up to, which is where the next
 /// object (or whatever else the caller placed after this one) begins.
-pub Result<Decoded, Error> inflate_at(bytes src, int start, int limit = -1) {
+pub Result<Decoded, Error> inflate_at(bytes source, int start, int limit = -1) {
     bytes out = [];
-    Bits b = Bits(src, at: start);
-    run(b, out, limit)?;
-    b.align();
-    return Result<Decoded, Error>.Ok(Decoded(out, b.at - start));
+    Bits bits = Bits(source, position: start);
+    run(bits, out, limit)?;
+    bits.align();
+    return Result<Decoded, Error>.Ok(Decoded(out, bits.position - start));
 }
 
 // --- writing: stored blocks only ---------------------------------------------
@@ -617,26 +617,26 @@ pub Result<Decoded, Error> inflate_at(bytes src, int start, int limit = -1) {
 /// DEFLATE. See the note above: this is the whole of the compressor.
 pub bytes deflate_stored(bytes data) {
     bytes out = [];
-    int at = 0;
-    int n = data.size();
+    int position = 0;
+    int data_length = data.size();
     while (true) {
-        int len = n - at;
-        if (len > 65535) {
-            len = 65535;
+        int length = data_length - position;
+        if (length > 65535) {
+            length = 65535;
         }
-        bool last = at + len == n;
+        bool last = position + length == data_length;
         int hdr = 0;
         if (last) {
             hdr = 1;
         }
         out.push(hdr);
-        int nlen = len ^ 0xFFFF;
-        out.push(len & 0xFF);
-        out.push(len >> 8 & 0xFF);
+        int nlen = length ^ 0xFFFF;
+        out.push(length & 0xFF);
+        out.push(length >> 8 & 0xFF);
         out.push(nlen & 0xFF);
         out.push(nlen >> 8 & 0xFF);
-        out.extend(data.substr(at, at + len));
-        at = at + len;
+        out.extend(data.substr(position, position + length));
+        position = position + length;
         if (last) {
             return out;
         }
@@ -671,31 +671,31 @@ pub bytes compress(bytes data) {
 /// behaviour in Python and C. A caller that wants the stream to be the whole
 /// file compares the object's declared size with what came out, which is what
 /// `GIT_object.m31` does.
-pub Result<bytes, Error> decompress(bytes src, int limit = -1) {
-    Decoded d = decompress_from(src, 0, limit)?;
-    return Result<bytes, Error>.Ok(d.data);
+pub Result<bytes, Error> decompress(bytes source, int limit = -1) {
+    Decoded decoded = decompress_from(source, 0, limit)?;
+    return Result<bytes, Error>.Ok(decoded.data);
 }
 
-/// `decompress`, starting at `src[start]` instead of `src[0]` and reporting
-/// how many octets of `src` -- header, DEFLATE stream and trailing Adler-32
+/// `decompress`, starting at `source[start]` instead of `source[0]` and reporting
+/// how many octets of `source` -- header, DEFLATE stream and trailing Adler-32
 /// together -- the object occupied, the same pairing `inflate_at` gives the
 /// raw format. This is the call `apps/git/GIT_pack.m31` actually makes: a
 /// packfile entry is a full RFC 1950 stream exactly like a loose object's,
 /// just not alone in its buffer, so it needs everything `decompress` checks
 /// (the header, the preset-dictionary bit, the checksum) and not merely
 /// `inflate_at`'s raw DEFLATE. No copy, for the same reason `inflate_at` does
-/// not need one: `bytes` is a reference type, so `src` is aliased, not cloned,
+/// not need one: `bytes` is a reference type, so `source` is aliased, not cloned,
 /// however large the packfile around this one object is.
-pub Result<Decoded, Error> decompress_at(bytes src, int start, int limit = -1) {
-    return decompress_from(src, start, limit);
+pub Result<Decoded, Error> decompress_at(bytes source, int start, int limit = -1) {
+    return decompress_from(source, start, limit);
 }
 
-Result<Decoded, Error> decompress_from(bytes src, int start, int limit) {
-    if (start + 2 > src.size()) {
+Result<Decoded, Error> decompress_from(bytes source, int start, int limit) {
+    if (start + 2 > source.size()) {
         return Result<Decoded, Error>.Err(Error.Truncated);
     }
-    int cmf = src[start];
-    int flg = src[start + 1];
+    int cmf = source[start];
+    int flg = source[start + 1];
     if ((cmf & 0x0F) != 8 || cmf >> 4 > 7 || (cmf * 256 + flg) % 31 != 0) {
         return Result<Decoded, Error>.Err(Error.BadHeader);
     }
@@ -703,22 +703,22 @@ Result<Decoded, Error> decompress_from(bytes src, int start, int limit) {
         return Result<Decoded, Error>.Err(Error.PresetDictionary);
     }
     bytes out = [];
-    Bits b = Bits(src, at: start + 2);
-    run(b, out, limit)?;
-    b.align();
-    int a0 = b.byte();
-    int a1 = b.byte();
-    int a2 = b.byte();
-    int a3 = b.byte();
-    if (b.over) {
+    Bits bits = Bits(source, position: start + 2);
+    run(bits, out, limit)?;
+    bits.align();
+    int adler_first = bits.byte();
+    int adler_second = bits.byte();
+    int adler_third = bits.byte();
+    int adler_fourth = bits.byte();
+    if (bits.over) {
         return Result<Decoded, Error>.Err(Error.Truncated);
     }
-    int want = a0 << 24 | a1 << 16 | a2 << 8 | a3;
+    int want = adler_first << 24 | adler_second << 16 | adler_third << 8 | adler_fourth;
     int got = adler32(out);
     if (want != got) {
         return Result<Decoded, Error>.Err(Error.Checksum);
     }
-    return Result<Decoded, Error>.Ok(Decoded(out, b.at - start));
+    return Result<Decoded, Error>.Ok(Decoded(out, bits.position - start));
 }
 
 /// RFC 1950's check value: two sums modulo 65521, the second of the first.
@@ -729,22 +729,22 @@ Result<Decoded, Error> decompress_from(bytes src, int start, int limit) {
 /// it is the one every other implementation uses and a reader checking this
 /// against zlib's `adler32.c` should find it.
 pub int adler32(bytes data) {
-    int a = 1;
-    int b = 0;
-    int i = 0;
-    int n = data.size();
-    while (i < n) {
-        int end = i + 5552;
-        if (end > n) {
-            end = n;
+    int low_sum = 1;
+    int high_sum = 0;
+    int index = 0;
+    int data_length = data.size();
+    while (index < data_length) {
+        int end = index + 5552;
+        if (end > data_length) {
+            end = data_length;
         }
-        while (i < end) {
-            a = a + data[i];
-            b = b + a;
-            i = i + 1;
+        while (index < end) {
+            low_sum = low_sum + data[index];
+            high_sum = high_sum + low_sum;
+            index = index + 1;
         }
-        a = a % 65521;
-        b = b % 65521;
+        low_sum = low_sum % 65521;
+        high_sum = high_sum % 65521;
     }
-    return b << 16 | a;
+    return high_sum << 16 | low_sum;
 }
