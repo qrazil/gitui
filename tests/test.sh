@@ -204,7 +204,7 @@ with a body'
 # little enough to build in a fraction of a second and similar enough that
 # `git repack -ad` chooses to delta most of it -- `OBJ_OFS_DELTA`, git's own
 # default. A second pack built from the same history with `git pack-objects
-# --no-delta-base-offset` (repack does not honour `GIT_pack.deltaBaseOffset` the
+# --no-delta-base-offset` (repack does not honour `pack.deltaBaseOffset` the
 # same way; asking `pack-objects` directly does) is real `OBJ_REF_DELTA`
 # instead, still against bases in the one pack, which is what proves the
 # in-`.idx` fast path in `GIT_pack.m31`'s own `resolve_offset` and not only its
