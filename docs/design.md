@@ -1,8 +1,8 @@
 # The interactive client — design, locked 2026-09-28
 
-Written before stage 2 of `apps/tui` exists, so the widget list there is
+Written before stage 2 of `tui` exists, so the widget list there is
 built toward this rather than guessed at afterward. Not implementation —
-`apps/git` is stage 1 (read-only plumbing) and this waits on `apps/tui`
+`git.m31` is stage 1 (read-only plumbing) and this waits on `tui`
 stage 2/3 per its own README. Recorded now so the direction survives the
 gap.
 
@@ -62,7 +62,7 @@ not a copy of either.
     opens the transient. Nothing is ever hidden behind a key with no visible
     hint of what it does.
 
-## What this needs from `apps/tui`
+## What this needs from `tui`
 
 Flagging these because they are library primitives, not client-specific
 widgets, and belong in stage 2's scope rather than being built once inside
@@ -85,24 +85,24 @@ the git client and stuck there:
     whatever the main view is currently showing.
 
 None of this is scoped or estimated yet — this is the shape, not the plan.
-Revisit once `apps/tui` stage 2 lands and `lib/term.m31` exists.
+Revisit once `tui` stage 2 lands and `lib/term.m31` exists.
 
 ## The dependency chain to an actual client, 2026-09-28
 
 Checked before starting: `lib/term.m31` already exists (raw mode, key
 decoding, window size, one-write flush, read-with-timeout — everything
-`apps/tui`'s own README implies is still pending under "being written
+`tui`'s own README implies is still pending under "being written
 separately", which is now stale). What's actually missing splits into three
 independent pieces, plus one that depends on all of them:
 
   - **The `io`/`net`/`term` errno gap** `docs/errors-decision.md` §4 records
     B leaving open — orthogonal to everything else here, done in parallel.
-  - **`apps/git` has no write path at all.** No `.git/index` (read or
+  - **`git.m31` has no write path at all.** No `.git/index` (read or
     write), no object writing (blobs, trees, commits), no ref writing, no
     working-tree diff. Status, staging and committing all need this, and
     none of it is TUI work — it's plumbing this design has been silently
     assuming exists.
-  - **`apps/tui` stage 2** (styling layer) plus the primitives this design
+  - **`tui` stage 2** (styling layer) plus the primitives this design
     names (outline, jump list, which-key/transient, addressable diff
     cursor, footer) plus stage 3's actual remaining piece — the application
     loop joining the renderer to the *existing* `lib/term.m31`, since
@@ -111,16 +111,16 @@ independent pieces, plus one that depends on all of them:
     before they land — a second wave, not this one.
 
 Deliberately not in this wave, each already a named, separate gap rather
-than a silent omission: packfiles (`apps/git/README.md`'s own stage 2 —
+than a silent omission: packfiles (`README.md`'s own stage 2 —
 neither `oro` nor this repo needs it, since neither has ever been packed);
-`.gitignore`; the dashboard-shaped widgets from `apps/tui`'s original
+`.gitignore`; the dashboard-shaped widgets from `tui`'s original
 stage-2 list (`Gauge`, `Sparkline`, `BarChart`, `Chart`) and mouse support,
 none of which a keyboard-driven, document-shaped client needs.
 
 ## Starting the client, 2026-09-28
 
 Checked before starting: no line-diff algorithm exists anywhere in this
-codebase. `apps/tui`'s `DiffView` only renders a `Hunk`/`Line` sequence —
+codebase. `tui`'s `DiffView` only renders a `Hunk`/`Line` sequence —
 nothing computes one from two texts. That's load-bearing for hunk-level
 staging, Magit's whole interaction model, so it's a foundational piece on
 its own rather than something the client builds inline.
@@ -137,7 +137,7 @@ Split into two tracks:
     the existing log/object read side), whole-file stage/unstage (already
     buildable from `GIT_index.m31`/`GIT_object.m31`), commit via `$EDITOR` for the
     message (matching real git's own fallback when `-m` isn't given, and
-    sidestepping a dependency on `TextInput`, which `apps/tui` deferred for
+    sidestepping a dependency on `TextInput`, which `tui` deferred for
     lack of a caller — this is that caller, later, not now), and the loop
     wiring the outline, the jump list, the footer and the which-key overlay
     together per the locked design above.
@@ -167,12 +167,12 @@ without them: a `clone`, a `fetch` and a `push` all traffic in packfiles,
 and this already matters with no network involved at all — 6 of the 31
 repositories on this project's own orogit server, and any repository a real
 `git clone` ever produced, are unreadable by this tool today for exactly
-this reason (`apps/git/README.md`'s own long-standing table). Fully
+this reason (`README.md`'s own long-standing table). Fully
 independent of HTTP or SSH, and fully oracle-testable against real `git` in
 disposable fixtures, the same discipline as everything else here. Reading
 only for this pass -- writing a packfile (needed for `push`) is a named,
 separate follow-up, the same shape as the index/object/ref read-before-write
-split the rest of `apps/git` already went through.
+split the rest of this repo already went through.
 
 **Smart HTTP next, fetch/clone only, no push yet.** Builds on packfile
 reading (a fetched pack is only useful once something can unpack it) but its
@@ -199,7 +199,7 @@ exists as its own document, rather than riding in as a third parallel track.
 
   - Exact keybindings (mnemonic, one key per base verb, is the only
     constraint fixed so far).
-  - Colour/theme (waits on `apps/tui`'s styling layer).
+  - Colour/theme (waits on `tui`'s styling layer).
   - Whether jump-list entries carry a status marker (modified, untracked,
     ahead/behind) or are plain labels — a real decision, deferred rather
     than defaulted.

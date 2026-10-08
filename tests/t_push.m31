@@ -185,8 +185,8 @@ void do_ancestor(str gitdir, str anc, str desc) {
     }
 }
 
-str bool_text(bool flag) {
-    if (flag) {
+str bool_text(bool is_true) {
+    if (is_true) {
         return "true";
     }
     return "false";

@@ -1,8 +1,8 @@
 // Packfiles: the `.idx`/`.pack` pair under `.git/objects/pack/` that a real
 // `git clone` writes instead of loose objects, and that `git gc`/`git repack`
-// collapse a repository's loose objects into later. `apps/git/README.md`'s
+// collapse a repository's loose objects into later. `README.md`'s
 // "What a real repository needs that this cannot do" names this as the whole
-// remaining gap, and `apps/git/GIT_object.m31` wires this module in underneath
+// remaining gap, and `GIT_object.m31` wires this module in underneath
 // `GIT_object.read` so that everything above it -- `log`, `cat-file`, `ls-tree`,
 // `rev-parse`'s short names, the interactive client -- reads a packed
 // repository exactly as it reads a loose one, with no call site changed.
@@ -51,7 +51,7 @@
 // a backward BYTE OFFSET from the START OF ITS OWN TYPE+SIZE HEADER, encoded
 // in the same "groups of 7 bits, continuation in the top bit" shape but with
 // a `+1` folded into every continuation (RFC-less and easy to get off by one
-// -- `resolve_offset` below has the arithmetic, and `apps/git/test.sh`'s
+// -- `resolve_offset` below has the arithmetic, and `tests/test.sh`'s
 // packed fixture is what proves it against real objects). `OBJ_REF_DELTA`
 // names its base by the base's own 20-byte id instead of an offset, which is
 // how a THIN pack (one built assuming the receiver already has the base) can
@@ -66,7 +66,7 @@
 // costs fifty decompressions and one call frame, not fifty. Recursion (via
 // `resolve_id`) is used only where the chain can actually leave this walk --
 // an `OBJ_REF_DELTA` whose base is not in this pack's own `.idx`, which
-// `apps/git/README.md`'s packed repositories never produce (a full repack's
+// `README.md`'s packed repositories never produce (a full repack's
 // bases are always in the one pack it writes) but a thin pack could. Each
 // base is therefore decompressed exactly once for one lookup, in the order
 // the chain is walked, with no cache needed to avoid a second decompression of
@@ -77,7 +77,7 @@
 //
 // --- what is NOT here ---------------------------------------------------------
 //
-// Writing a packfile -- `apps/git/README.md` and `docs/design.md`
+// Writing a packfile -- `README.md` and `docs/design.md`
 // ("Going remote") both name this as later, separate work, once `push` needs
 // it. Reading a pack's own trailing checksums (the CRC32 per object, the pack
 // and idx SHA-1s) is skipped for the reason the header above gives: the
@@ -210,7 +210,7 @@ pub Result<List<Unpacked>, Error> read_pack(str gitdir, bytes pack) {
     int current = 12;
     for (int i in 0 .. count) {
         ObjHeader header = read_obj_header(pack, current)?;
-        int position = current + header.header_len;
+        int position = current + header.header_length;
         int base_off = -1;
         bytes base_id = [];
         if (header.kind == 6) {
@@ -343,9 +343,9 @@ pub Result<List<str>, Error> ids(str gitdir) {
     List<PackFile> packs = discover(gitdir);
     List<str> out = [];
     for (PackFile pack_file in packs) {
-        match (io.read_bytes(pack_file.idx_path)) {
+        match (io.read_bytes(pack_file.index_path)) {
             case Ok(bytes data): {
-                match (parse_idx(data)) {
+                match (parse_index(data)) {
                     case Ok(Idx pack_index): {
                         for (str id in pack_index.all_ids()) {
                             out.push(id);
@@ -375,7 +375,7 @@ pub Result<List<str>, Error> ids(str gitdir) {
 
 // One pack: its index and the packfile it indexes, both real files.
 type PackFile {
-    str idx_path;
+    str index_path;
     str pack_path;
 }
 
@@ -486,9 +486,9 @@ Result<Found, Error> resolve_id(str gitdir, List<PackFile> packs, str id, int de
     }
     bytes id20 = hex_decode(id);
     for (PackFile pack_file in packs) {
-        match (io.read_bytes(pack_file.idx_path)) {
+        match (io.read_bytes(pack_file.index_path)) {
             case Ok(bytes idata): {
-                match (parse_idx(idata)) {
+                match (parse_index(idata)) {
                     case Ok(Idx pack_index): {
                         match (pack_index.offset_of(id20)) {
                             case Some(int off): {
@@ -534,7 +534,7 @@ Result<Found, Error> resolve_offset(str gitdir, List<PackFile> packs, Idx pack_i
         }
         ObjHeader header = read_obj_header(pack, current)?;
         if (header.kind == 1 || header.kind == 2 || header.kind == 3 || header.kind == 4) {
-            GIT_zlib.Decoded decoded = inflate_pack_zlib(pack, current + header.header_len)?;
+            GIT_zlib.Decoded decoded = inflate_pack_zlib(pack, current + header.header_length)?;
             base_kind = kind_name(header.kind);
             base_content = decoded.data;
             break;
@@ -547,7 +547,7 @@ Result<Found, Error> resolve_offset(str gitdir, List<PackFile> packs, Idx pack_i
             // own trick for not wasting a representable value on 0, which a
             // plain base-128 varint would); see the header note on why this
             // is the easiest arithmetic here to get subtly wrong.
-            int position = current + header.header_len;
+            int position = current + header.header_length;
             if (position >= pack.size()) {
                 return Result<Found, Error>.Err(Error.BadPack);
             }
@@ -580,7 +580,7 @@ Result<Found, Error> resolve_offset(str gitdir, List<PackFile> packs, Idx pack_i
             // purpose) -- checked against `pack_index` first, since that is the
             // common case and stays inside this iterative loop; only a miss
             // falls back to `resolve_id`'s general search.
-            int position = current + header.header_len;
+            int position = current + header.header_length;
             if (position + 20 > pack.size()) {
                 return Result<Found, Error>.Err(Error.BadPack);
             }
@@ -777,7 +777,7 @@ Result<bytes, Error> apply_delta(bytes base, bytes delta) {
 type ObjHeader {
     int kind;
     int size;
-    int header_len;
+    int header_length;
 }
 
 Result<ObjHeader, Error> read_obj_header(bytes pack, int offset) {
@@ -891,7 +891,7 @@ List<str> Idx.all_ids() {
     return out;
 }
 
-Result<Idx, Error> parse_idx(bytes data) {
+Result<Idx, Error> parse_index(bytes data) {
     if (data.size() < 8) {
         return Result<Idx, Error>.Err(Error.BadIdx);
     }
@@ -966,13 +966,13 @@ bytes hex_decode(str hex_text) {
     bytes out = [];
     int index = 0;
     while (index + 1 < hex_text.size()) {
-        out.push(hex_val(hex_text.byte_at(index)) << 4 | hex_val(hex_text.byte_at(index + 1)));
+        out.push(hex_value(hex_text.byte_at(index)) << 4 | hex_value(hex_text.byte_at(index + 1)));
         index = index + 2;
     }
     return out;
 }
 
-int hex_val(int digit) {
+int hex_value(int digit) {
     if (digit >= '0' && digit <= '9') {
         return digit - '0';
     }

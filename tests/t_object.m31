@@ -1,7 +1,7 @@
 // Every object in a repository -- loose or packed -- read and printed
 // canonically, for `oracle_object.py` to be diffed against.
 //
-//   ./build.sh apps/git/t_object.m31 -o t_object && ./t_object <repo>
+//   bash scripts/build.sh tests/t_object.m31 -o t_object && ./t_object <repo>
 //
 // This is the end-to-end check: it runs `GIT_object.read` (loose, then
 // `GIT_pack.m31`, exactly as every other reader in this program does) over every
@@ -12,7 +12,7 @@
 // characters. So a disagreement is a disagreement about the format and not
 // about UTF-8. `GIT_object.all` rather than `GIT_object.loose` is what makes this the
 // same check on a packed repository as on a loose one: on an all-loose
-// fixture (everything `apps/git/test.sh` built before packfiles existed
+// fixture (everything `tests/test.sh` built before packfiles existed
 // here) the two name exactly the same ids, so nothing about this file's
 // output changes for them.
 

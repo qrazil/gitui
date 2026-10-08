@@ -20,17 +20,17 @@
 // have left there -- and prints `State.message` afterward either way, so the
 // shell test can tell a refusal (an empty message) from an actual commit.
 //
-// `diff` moves the outline's cursor onto the named row (`select_id`, the
+// `diff` moves the outline's cursor onto the named row (`did_select_id`, the
 // same lookup `State.reload()` itself uses to keep the cursor on a rebuild)
 // and calls `show_diff_current()`, then prints the result the same way
-// `apps/git/t_hunks.m31` prints `GIT_hunks.hunks`'s own output -- one `@@ ...`
+// `tests/t_hunks.m31` prints `GIT_hunks.hunks`'s own output -- one `@@ ...`
 // header line per hunk, one marker-prefixed line per body row -- so a shell
 // test can diff this against real `git diff`/`git diff --cached`'s body
 // exactly as `test_hunks.sh` already does against `diff -u`'s. `Binary files
 // differ` on its own line if the pair was binary; `no diff shown: <message>`
 // if the row could not be found at all (a bad section/path argument).
 //
-// `stage_hunk`/`unstage_hunk` drive `State.stage_hunk`/`unstage_hunk` --
+// `stage_hunk`/`unstage_hunk` drive `State.did_stage_hunk`/`did_unstage_hunk` --
 // the diff view's own `s`/`u` -- on hunk `k` (0-based, in the order
 // `diff` above prints them) and print `State.message`, so `test_gitui.sh`
 // can check the index against real git's `add -p`/`reset -p` outcome.
@@ -86,7 +86,7 @@ if (operation == "stage") {
     }
     state.reload();
     str id = argv[4] + ":" + argv[5];
-    if (state.outline.select_id(id)) {
+    if (state.outline.did_select_id(id)) {
         state.show_diff_current();
         if (state.is_diff_open) {
             if (state.is_diff_binary) {
@@ -117,9 +117,9 @@ if (operation == "stage") {
     }
     int hunk_index = argv[5].parse_int().or(-1);
     if (operation == "stage_hunk") {
-        state.stage_hunk(argv[4].to_bytes(), hunk_index);
+        state.did_stage_hunk(argv[4].to_bytes(), hunk_index);
     } else {
-        state.unstage_hunk(argv[4].to_bytes(), hunk_index);
+        state.did_unstage_hunk(argv[4].to_bytes(), hunk_index);
     }
 } else if (operation == "hunk_patch") {
     if (argv.size() < 7) {
@@ -129,7 +129,7 @@ if (operation == "stage") {
     state.reload();
     str id = argv[4] + ":" + argv[5];
     int hunk_index = argv[6].parse_int().or(-1);
-    if (state.outline.select_id(id)) {
+    if (state.outline.did_select_id(id)) {
         state.show_diff_current();
         if (state.is_diff_open && !state.is_diff_binary && hunk_index >= 0 && hunk_index < state.diff_view.hunks.size()) {
             print("--- a/" + argv[5]);

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# `.gitignore` filtering (`apps/git/GIT_ignore.m31`), checked against real
+# `.gitignore` filtering (`GIT_ignore.m31`), checked against real
 # `git` in disposable fixtures -- the same philosophy `test_write.sh` already
 # uses for the rest of the write path (its own header).
 #

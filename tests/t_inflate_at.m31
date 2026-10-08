@@ -2,8 +2,8 @@
 // two concatenated-stream fixtures -- isolated from `GIT_pack.m31`'s own framing,
 // exactly as that oracle's own header explains.
 //
-//   python3 apps/git/oracle_inflate_at.py DIR > want
-//   ./build.sh apps/git/t_inflate_at.m31 -o t_inflate_at
+//   python3 tests/oracles/oracle_inflate_at.py DIR > want
+//   bash scripts/build.sh tests/t_inflate_at.m31 -o t_inflate_at
 //   ./t_inflate_at DIR > got
 //   diff got want
 //

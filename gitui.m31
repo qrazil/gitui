@@ -4,7 +4,7 @@
 // commit; a persistent footer of the base commands; a which-key overlay for
 // commit's follow-ups; and a synced jump list, toggled on demand.
 //
-//   ./build.sh apps/git/gitui.m31 -o ourgitui
+//   bash scripts/build-gitui.sh -o ourgitui
 //   ./ourgitui [path]                      # default: "."
 //
 // `path` is where the repository is, exactly like `git status` run from
@@ -16,7 +16,7 @@
 // This file is deliberately thin: every piece a test needs to call directly
 // -- building the outline, staging or unstaging a path, stripping a commit
 // message -- lives in `GIT_client.m31`, which has no top-level statements and
-// can be imported. This is `apps/tui/browse.m31`'s own shape, one file
+// can be imported. This is `tui's `browse.m31``'s own shape, one file
 // further split because this program, unlike that demo, has a real test
 // obligation for its logic (`docs/design.md`'s "how you'll know you're
 // done").

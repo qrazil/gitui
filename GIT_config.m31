@@ -57,7 +57,7 @@ pub Option<str> find(str text, str section, str subsection, str key) {
             continue;
         }
         if (line.starts_with("[")) {
-            is_in_section = header_matches(close_header(line), want_section, subsection);
+            is_in_section = is_matching_header(close_header(line), want_section, subsection);
             continue;
         }
         if (!is_in_section) {
@@ -113,7 +113,7 @@ str strip_comment(str value) {
 }
 
 // Does a `[...]` header line name `section`/`subsection`?
-bool header_matches(str line, str want_section, str want_sub) {
+bool is_matching_header(str line, str want_section, str want_sub) {
     if (!line.ends_with("]")) {
         return false;
     }

@@ -15,12 +15,11 @@
 # repositories this script builds under its own temporary directory.
 #
 # M31_ROOT (a checkout of github.com/qrazil/m31, or an extracted release's
-# bundled runtime SDK, containing config.sh and runtime/) and TUI_ROOT (a
-# checkout of github.com/qrazil/tui, pinned to whatever commit this repo's
-# own CI/docs name) stand in for this repo's own former monorepo
-# neighbours -- see build-gitui.sh's own header for the full reasoning,
-# which this mirrors. Only test_gitui.sh/test_hunks.sh need TUI_ROOT; the
-# rest of this suite needs only M31_ROOT.
+# bundled runtime SDK, containing config.sh and runtime/) supplies the runtime
+# this suite links against -- see build-gitui.sh's own header for the full
+# reasoning, which this mirrors. tui is not a separate checkout: the `deps`
+# file at the repo root pins it, and the first compile fetches it into
+# `.m31-deps/`.
 set -uo pipefail
 cd "$(dirname "$0")/.."
 

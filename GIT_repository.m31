@@ -10,7 +10,7 @@
 //   GIT_repository.common(gitdir)    the git directory that holds `objects` and the
 //                          shared refs, which is a DIFFERENT directory in a
 //                          linked worktree
-//   GIT_repository.per_worktree(ref) whether a ref name is one of the few that stay in
+//   GIT_repository.is_per_worktree(ref) whether a ref name is one of the few that stay in
 //                          the worktree's own directory
 //
 // --- linked worktrees ---------------------------------------------------------
@@ -23,7 +23,7 @@
 // worktree's git directory and looks for `objects` inside it finds nothing,
 // and reports a repository with no history.
 //
-// This was found by running `apps/git/compare.sh` against the checkout this
+// This was found by running `scripts/compare.sh` against the checkout this
 // program was written in, which is a linked worktree: every ref resolved to
 // "unknown revision" while `git` in the same directory answered fine. It is
 // fifteen lines to get right and a whole repository to get wrong.
@@ -90,7 +90,7 @@ pub str common(str gitdir) {
 /// `refs/bisect/`, `refs/worktree/` and `refs/rewritten/`. Everything else --
 /// every branch, every tag, every remote -- is shared, and lives in the
 /// common directory.
-pub bool per_worktree(str name) {
+pub bool is_per_worktree(str name) {
     if (name == "HEAD" || name == "ORIG_HEAD" || name == "FETCH_HEAD" || name == "MERGE_HEAD") {
         return true;
     }

@@ -20,7 +20,7 @@ import tui.TUI_outline;
 import tui.TUI_text;
 
 // A local of the top-level program body is invisible to a function
-// (`apps/git/FRICTION.md` §6, `git.m31`'s own `dispatch` comment) -- so the
+// (`docs/FRICTION.md` §6, `git.m31`'s own `dispatch` comment) -- so the
 // running totals live in a small struct, passed to `check` and mutated
 // through it, the way `GIT_index.Index.entries` is mutated through every
 // staging function above.
@@ -184,7 +184,7 @@ match (file_diffs.get("commit:1111111111111111111111111111111111111111:file:0"))
 
 // --- commit_node: wrapping a long message line into multiple leaf rows -------
 //
-// `commit_node` wraps each logical message line to `COMMIT_BODY_WRAP_COLS`
+// `commit_node` wraps each logical message line to `COMMIT_BODY_WRAP_COLUMNS`
 // (72, see its own comment in `GIT_client.m31`) rather than clipping it --
 // this is the fix itself, so it gets its own commit and its own checks
 // rather than piggybacking on `first_commit` above.
@@ -256,8 +256,8 @@ counter.check("commit message: whitespace-only input strips to empty", GIT_clien
 // --- open_diff / close_diff: the GIT_hunks.hunks/DiffView wiring, no repository ---
 //
 // `open_diff` and the comparison it feeds are `GIT_hunks.hunks(old, new)` and
-// `TUI_diff_view.DiffView`, both already tested elsewhere (`apps/git/t_hunks.m31`,
-// `apps/tui`'s own suite) -- what these checks are actually for is that
+// `TUI_diff_view.DiffView`, both already tested elsewhere (`tests/t_hunks.m31`,
+// `tui`'s own suite) -- what these checks are actually for is that
 // `GIT_client.State` wires the two together correctly: a text change becomes a
 // non-binary `DiffView` with an addressable cursor, and a NUL-bearing buffer
 // on either side becomes `is_diff_binary` instead of a garbled render. Which

@@ -1,8 +1,8 @@
 // `GIT_zlib.decompress` against Python's `zlib`, over the fixtures
 // `oracle_inflate.py` writes.
 //
-//   python3 apps/git/oracle_inflate.py DIR > want
-//   ./build.sh apps/git/t_inflate.m31 -o t_inflate && ./t_inflate DIR > got
+//   python3 tests/oracles/oracle_inflate.py DIR > want
+//   bash scripts/build.sh tests/t_inflate.m31 -o t_inflate && ./t_inflate DIR > got
 //   diff got want
 //
 // One line per `.z` file in DIR, sorted by name:

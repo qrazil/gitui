@@ -187,14 +187,14 @@ without ever copying the pack to get to the next one.
 names and the interactive client's own reading -- checks the loose store
 first and a repository's packs second, with nothing above `GIT_object.m31`
 changed to make that true. Checked the same way everything else here is:
-`apps/git/oracle_object.py`'s from-scratch reader grew its own independent
+`tests/oracles/oracle_object.py`'s from-scratch reader grew its own independent
 `.idx`/pack/delta implementation (Python's `zlib.decompressobj`, fed from an
 offset, stands in for `inflate_at`) and walks every object of a fixture
 `git repack -ad` packs into real `OBJ_OFS_DELTA` chains and, separately,
 `git pack-objects --no-delta-base-offset` packs into real `OBJ_REF_DELTA`
-ones instead; `apps/git/compare.sh`'s full command comparison against real
+ones instead; `scripts/compare.sh`'s full command comparison against real
 `git` runs against both packed fixtures exactly as it runs against the loose
-one; and `apps/git/oracle_inflate_at.py` checks the mid-offset codec on its
+one; and `tests/oracles/oracle_inflate_at.py` checks the mid-offset codec on its
 own, isolated from the packfile format around it.
 
 Counted by walking from every ref with loose objects alone, at the time of

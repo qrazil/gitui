@@ -77,7 +77,7 @@
 // explicitly not the bar (`docs/design.md`'s own task note). Computing
 // the `have` list itself -- which commits this program already possesses --
 // is the caller's job, not this module's: walk `GIT_refs.all(gitdir)` and
-// `GIT_log.walk(gitdir, ref.name, -1)` for each, exactly as `apps/git`'s own
+// `GIT_log.walk(gitdir, ref.name, -1)` for each, exactly as `gitui`'s own
 // `-log` does, and hand the object names to `fetch`. For a first `clone`
 // that list is empty, which is the simpler case and the one to prove first;
 // a `fetch` against a repository that already has history is where `have`
@@ -304,7 +304,7 @@ pub Result<Packet, Error> read_packet(bytes buffer, int offset) {
     }
     int length = 0;
     for (int i in 0 .. 4) {
-        int digit = hex_val(buffer[offset + i]);
+        int digit = hex_value(buffer[offset + i]);
         if (digit < 0) {
             return Result<Packet, Error>.Err(Error.Syntax);
         }
@@ -328,7 +328,7 @@ pub Result<Packet, Error> read_packet(bytes buffer, int offset) {
 /// lowercase hex digits, then the payload verbatim. Never used for a flush --
 /// callers append `FLUSH_PKT` directly.
 pub bytes pkt_line(bytes payload) {
-    bytes out = len_hex(payload.size() + 4);
+    bytes out = length_hex(payload.size() + 4);
     out.extend(payload);
     return out;
 }
@@ -336,12 +336,12 @@ pub bytes pkt_line(bytes payload) {
 // The length-prefix trick: two big-endian octets, then `bytes.hex()` --
 // which zero-pads every octet to two digits -- gives exactly the four hex
 // digits a pkt-line length is, with no hand-written digit table.
-bytes len_hex(int value) {
+bytes length_hex(int value) {
     bytes two = [value >> 8 & 0xFF, value & 0xFF];
     return two.hex().to_bytes();
 }
 
-int hex_val(int character) {
+int hex_value(int character) {
     if (character >= '0' && character <= '9') {
         return character - 48;
     }
@@ -808,7 +808,7 @@ str base_of(str url) {
 // copy is private to that module (`docs/FRICTION.md`'s `before`/`str_cmp`
 // are the same trade already made twice in this program).
 Result<bool, io.Error> write_atomic(str path, bytes content) {
-    match (fs.makedirs(dir_of(path))) {
+    match (fs.makedirs(directory_of(path))) {
         case Ok: {
         }
         case Err(io.Error error): {
@@ -827,7 +827,7 @@ Result<bool, io.Error> write_atomic(str path, bytes content) {
     return fs.rename(temp, path);
 }
 
-str dir_of(str path) {
+str directory_of(str path) {
     int position = path.size() - 1;
     while (position >= 0 && path.byte_at(position) != '/') {
         position = position - 1;

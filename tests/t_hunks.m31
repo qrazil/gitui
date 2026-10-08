@@ -2,7 +2,7 @@
 // ` `/`+`/`-` and the line, `@@ ... @@` before each group -- so `test.sh` can
 // diff this output directly against a real `diff -u`'s (with its `---`/`+++`
 // file-header lines stripped) as an oracle for hunk boundaries and line
-// classification. Not part of `apps/git`'s command surface: a throwaway
+// classification. Not part of `gitui`'s command surface: a throwaway
 // harness for `GIT_hunks.m31`'s own tests, the same role `t_object.m31` and
 // friends play for the rest of this program.
 //

@@ -1,6 +1,6 @@
 # Friction: writing a git client in this language
 
-Stage 1 of `apps/git` is about 2 700 lines of the language (five library
+Stage 1 of the git CLI (`git.m31`) is about 2 700 lines of the language (five library
 modules and a CLI) plus 300 lines of test programs. Everything in it was
 written against `docs/reference.md` and nothing in the compiler or `lib/` was
 changed to make it easier. This is the record of what got in the way, what was
@@ -16,7 +16,7 @@ It is ordered by how much it cost, not by how interesting it is.
 > impossible to write, and a formatter that keeps the parentheses the author
 > wrote, so `GIT_sha1.m31`'s rounds are back in the shape FIPS 180-4 gives them
 > (§10). A character literal, which this report did not ask for and
-> `apps/markdown`'s did, is in too. Everything else below still stands.
+> `term-markdown`'s did, is in too. Everything else below still stands.
 > `docs/reference.md` §1.5, §5.5, §5.6 and §6.1 have the rules.
 
 ---
@@ -520,7 +520,7 @@ This is not politeness; these are things that measurably did not go wrong.
     name is arbitrary octets; a commit message is arbitrary octets. In Python
     I would have written `str` somewhere and found out on a repository with a
     Latin-1 filename in it. Here the types forced `bytes` all the way to the
-    `write()` call, and `apps/git/test.sh` builds a fixture with a `\xe9` in a
+    `write()` call, and `tests/test.sh` builds a fixture with a `\xe9` in a
     filename that passed the first time it ran. `print(b)` being **refused**,
     naming `hex()` and `utf8()`, is the rule that makes it stick.
   - **Overflow trapping never fired, and that is the point.** SHA-1 and

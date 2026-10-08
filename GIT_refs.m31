@@ -171,7 +171,7 @@ pub Result<Head, Error> head(str gitdir) {
         // from the others needs a `match` over every variant there is
         // (reference §5.6 -- no `default`), which is six arms that all say
         // the same thing. See docs/FRICTION.md.
-        if (!exists(gitdir, target)) {
+        if (!has_ref(gitdir, target)) {
             return Result<Head, Error>.Ok(Head.Unborn(target));
         }
         str id = resolve(gitdir, target)?;
@@ -184,7 +184,7 @@ pub Result<Head, Error> head(str gitdir) {
 }
 
 /// Is there a ref of this name at all -- a loose file, or a packed line?
-pub bool exists(str gitdir, str name) {
+pub bool has_ref(str gitdir, str name) {
     match (loose_ref(gitdir, name)) {
         case Some: {
             return true;
@@ -304,7 +304,7 @@ pub Result<str, Error> rev_parse(str gitdir, str spec) {
     }
     List<str> tries = [spec, "refs/" + spec, "refs/tags/" + spec, "refs/heads/" + spec, "refs/remotes/" + spec, "refs/remotes/" + spec + "/HEAD"];
     for (str name in tries) {
-        if (!safe_name(name)) {
+        if (!is_safe_name(name)) {
             continue;
         }
         match (resolve(gitdir, name)) {
@@ -373,14 +373,14 @@ Result<str, Error> contents(str gitdir, str name) {
 // with `..` or a leading `/` in it never reaches the filesystem: `rev_parse`
 // builds paths out of what a user typed.
 Option<str> loose_ref(str gitdir, str name) {
-    if (!safe_name(name)) {
+    if (!is_safe_name(name)) {
         return Option<str>.None;
     }
     // HEAD and the handful of pseudo-refs beside it belong to this worktree;
     // every branch, tag and remote lives in the shared directory, which is
     // the same directory unless this is a linked worktree (`GIT_repository.m31`).
     str where = gitdir;
-    if (!GIT_repository.per_worktree(name)) {
+    if (!GIT_repository.is_per_worktree(name)) {
         where = GIT_repository.common(gitdir);
     }
     str path = fs.join(where, name);
@@ -450,7 +450,7 @@ List<Ref> packed_all(str gitdir) {
 // Is this a ref name that may be turned into a path? No empty part, no `..`,
 // no absolute path, no backslash -- the checks that stop a name typed on a
 // command line from reading a file outside the repository.
-bool safe_name(str name) {
+bool is_safe_name(str name) {
     if (name.size() == 0 || name.starts_with("/") || name.contains("\\")) {
         return false;
     }
@@ -473,7 +473,7 @@ bool safe_name(str name) {
 /// nothing written. See the module header for exactly what this does and does
 /// not guarantee against a second writer.
 pub Result<bool, Error> update(str gitdir, str name, str new_id, Option<str> expect_old) {
-    if (!safe_name(name)) {
+    if (!is_safe_name(name)) {
         return Result<bool, Error>.Err(Error.Malformed);
     }
     if (!GIT_object.is_name(new_id) || new_id.size() != 40) {
@@ -497,7 +497,7 @@ pub Result<bool, Error> update(str gitdir, str name, str new_id, Option<str> exp
 /// before that branch has a first commit (an "unborn" branch, `Head.Unborn`)
 /// is exactly this and is not an error.
 pub Result<bool, Error> update_symbolic(str gitdir, str name, str target) {
-    if (!safe_name(name) || !safe_name(target)) {
+    if (!is_safe_name(name) || !is_safe_name(target)) {
         return Result<bool, Error>.Err(Error.Malformed);
     }
     return write_atomic(where_for(gitdir, name), "ref: " + target + "\n");
@@ -556,7 +556,7 @@ Result<str, Error> current_or_empty(str gitdir, str name) {
 // the same split `loose_ref` reads by.
 str where_for(str gitdir, str name) {
     str where = gitdir;
-    if (!GIT_repository.per_worktree(name)) {
+    if (!GIT_repository.is_per_worktree(name)) {
         where = GIT_repository.common(gitdir);
     }
     return fs.join(where, name);
@@ -569,7 +569,7 @@ str where_for(str gitdir, str name) {
 // rename either lands or it does not, and either way `path` holds a complete
 // file, old or new.
 Result<bool, Error> write_atomic(str path, str content) {
-    match (fs.makedirs(dir_of(path))) {
+    match (fs.makedirs(directory_of(path))) {
         case Ok: {
         }
         case Err(_): {
@@ -598,7 +598,7 @@ Result<bool, Error> write_atomic(str path, str content) {
 // The directory `path` is in -- `fs` has `join` and nothing that goes the
 // other way, so the split is written out here: back from the end to the last
 // `/`, or `"."` if there is none.
-str dir_of(str path) {
+str directory_of(str path) {
     int position = path.size() - 1;
     while (position >= 0 && path.byte_at(position) != '/') {
         position = position - 1;

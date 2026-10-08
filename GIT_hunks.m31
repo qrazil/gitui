@@ -1,4 +1,4 @@
-// Turning `diff.diff`'s edit script into what `apps/tui/TUI_diff_view.DiffView`
+// Turning `diff.diff`'s edit script into what `TUI_diff_view.DiffView`
 // renders: `Hunk`s, grouped with a few lines of unchanged context on each
 // side, the way `git diff`/`diff -u` group theirs.
 //
@@ -14,13 +14,13 @@
 // `lib/diff.m31` computes the generic edit script -- keep, add or remove,
 // line by line -- and knows nothing about hunks, context, or
 // `TUI_diff_view.Hunk`/`Line`; it cannot, because `lib/` does not depend on
-// `apps/tui` (`docs/design.md`'s "Starting the client" section, and
+// `tui` (`docs/design.md`'s "Starting the client" section, and
 // `lib/diff.m31`'s own header, say why at more length). Grouping that script
 // into hunks and turning each `diff.Op`'s `bytes` line into the `str`
 // `TUI_diff_view.Line.text` wants is presentation, not algorithm, so it lives
-// here instead -- `apps/git` is the one place today that needs both
-// `lib/diff` and `apps/tui`, and the client this is for (`docs/design.md`) is
-// itself an `apps/git` program.
+// here instead -- `gitui` is the one place today that needs both
+// `lib/diff` and `tui`, and the client this is for (`docs/design.md`) is
+// itself an `gitui` program.
 //
 // --- grouping into hunks, with context -----------------------------------------
 //

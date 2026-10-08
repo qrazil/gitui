@@ -1,7 +1,7 @@
 // A read-only git plumbing client: `cat-file`, `ls-tree`, `log`, `rev-parse`
 // and `refs`, over loose objects only.
 //
-//   ./build.sh apps/git/git.m31 -o ourgit
+//   bash scripts/build.sh git.m31 -o ourgit
 //
 //   ourgit -cat-file --type <object>
 //   ourgit -cat-file --size <object>
@@ -23,7 +23,7 @@
 //
 // --- the output is git's, octet for octet -------------------------------------
 //
-// `apps/git/compare.sh` runs each of these beside the real `git` on a real
+// `scripts/compare.sh` runs each of these beside the real `git` on a real
 // repository and diffs the bytes. Where this program prints something git
 // does not, or spells a date differently, that script fails. Two deliberate
 // pins, both because the alternative is a moving target rather than a format:
@@ -378,7 +378,7 @@ bytes commit_text(str id, GIT_object.Commit commit) {
     // in the middle survive as an indent, and why a commit with no message at
     // all has no blank line after its `Date:`.
     int length = output.size();
-    while (length > 0 && blank_octet(output[length - 1])) {
+    while (length > 0 && is_blank_octet(output[length - 1])) {
         length = length - 1;
     }
     output.truncate(length);
@@ -386,7 +386,7 @@ bytes commit_text(str id, GIT_object.Commit commit) {
     return output;
 }
 
-bool blank_octet(int byte_value) {
+bool is_blank_octet(int byte_value) {
     return byte_value == ' ' || byte_value == '\t' || byte_value == '\n' || byte_value == '\r' || byte_value == 11 || byte_value == 12;
 }
 
@@ -449,7 +449,7 @@ bytes indented(bytes message) {
         int end = line_end;
         bool is_empty = true;
         for (int index in position .. line_end) {
-            if (!blank_octet(message[index])) {
+            if (!is_blank_octet(message[index])) {
                 is_empty = false;
             }
         }

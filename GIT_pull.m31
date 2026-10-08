@@ -151,7 +151,7 @@ pub Result<Outcome, Error> pull(str gitdir, str worktree, GIT_http_push.Remote r
         return Result<Outcome, Error>.Err(Error.NoRemoteBranch);
     }
     int objects = 0;
-    if (!have(gitdir, remote_tip)) {
+    if (!has_object(gitdir, remote_tip)) {
         match (fetch_into(gitdir, remote, advertisement, remote_tip, authz)) {
             case Ok(int object_count): {
                 objects = object_count;
@@ -193,7 +193,7 @@ pub Result<Outcome, Error> pull(str gitdir, str worktree, GIT_http_push.Remote r
     return Result<Outcome, Error>.Ok(Outcome(true, old, remote_tip, objects));
 }
 
-bool have(str gitdir, str id) {
+bool has_object(str gitdir, str id) {
     match (GIT_object.read(gitdir, id)) {
         case Ok(_): {
             return true;

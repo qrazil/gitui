@@ -113,10 +113,10 @@ type Pattern {
 
 // One ignore file's rules, and the directory (repository-relative, split on
 // `/`, empty for the repository root) it applies from. `.git/info/exclude`
-// is represented the same way, with an empty `base_segs` -- it behaves
+// is represented the same way, with an empty `base_segments` -- it behaves
 // exactly like a root `.gitignore`, only checked first (lowest precedence).
 type IgnoreFile {
-    List<str> base_segs;
+    List<str> base_segments;
     List<Pattern> patterns;
 }
 
@@ -127,7 +127,7 @@ type IgnoreFile {
 // before any depth-0 `.gitignore` is found, whose place at the very front
 // `sort()`'s stability (`lib/sort.m31`) then preserves.
 int IgnoreFile.cmp(IgnoreFile other) {
-    return base_segs.size() - other.base_segs.size();
+    return base_segments.size() - other.base_segments.size();
 }
 
 /// Every ignore rule that applies anywhere under `worktree`: `.git/info/exclude`
@@ -149,11 +149,11 @@ pub bool Ignore.is_ignored(str relpath) {
     List<str> segments = split_segments(relpath);
     int segment_count = segments.size();
     for (int depth in 1 .. segment_count) {
-        if (matched(files, segments, depth, true)) {
+        if (is_path_matched(files, segments, depth, true)) {
             return true;
         }
     }
-    return matched(files, segments, segment_count, false);
+    return is_path_matched(files, segments, segment_count, false);
 }
 
 /// Load every applicable ignore file for the repository at `gitdir`/`worktree`.
@@ -174,11 +174,11 @@ pub Result<Ignore, Error> load(str gitdir, str worktree) {
         case Ok(List<str> paths): {
             str base = fs.join(worktree, "");
             for (str file_path in paths) {
-                str rel = text.strip_prefix(file_path, base);
-                if (rel == ".git" || rel.starts_with(".git/")) {
+                str relative_path = text.strip_prefix(file_path, base);
+                if (relative_path == ".git" || relative_path.starts_with(".git/")) {
                     continue;
                 }
-                if (rel != ".gitignore" && !rel.ends_with("/.gitignore")) {
+                if (relative_path != ".gitignore" && !relative_path.ends_with("/.gitignore")) {
                     continue;
                 }
                 if (!fs.is_file(file_path)) {
@@ -187,8 +187,8 @@ pub Result<Ignore, Error> load(str gitdir, str worktree) {
                 match (io.read(file_path)) {
                     case Ok(str contents): {
                         str directory = "";
-                        if (rel != ".gitignore") {
-                            directory = text.strip_suffix(rel, "/.gitignore");
+                        if (relative_path != ".gitignore") {
+                            directory = text.strip_suffix(relative_path, "/.gitignore");
                         }
                         files.push(IgnoreFile(split_segments(directory), parse_patterns(contents)));
                     }
@@ -207,20 +207,20 @@ pub Result<Ignore, Error> load(str gitdir, str worktree) {
 
 // The last-match-wins answer for the candidate made of `segs[0 .. k)`, over
 // every ignore file whose directory is a strict ancestor of it, in
-// precedence order (the list is already sorted shallowest first). `is_dir`
+// precedence order (the list is already sorted shallowest first). `is_directory`
 // says whether that candidate is a directory (every ancestor is; the final
 // path itself, checked by `is_ignored`'s own last call, never is -- a leaf
 // from `GIT_status.m31`'s walk is always a file or a symlink).
-bool matched(List<IgnoreFile> files, List<str> segments, int depth, bool is_dir) {
+bool is_path_matched(List<IgnoreFile> files, List<str> segments, int depth, bool is_directory) {
     bool is_matched = false;
     for (IgnoreFile ignore_file in files) {
-        int bdepth = ignore_file.base_segs.size();
+        int bdepth = ignore_file.base_segments.size();
         if (bdepth >= depth) {
             continue;
         }
         bool is_under = true;
         for (int i in 0 .. bdepth) {
-            if (ignore_file.base_segs[i] != segments[i]) {
+            if (ignore_file.base_segments[i] != segments[i]) {
                 is_under = false;
                 break;
             }
@@ -228,12 +228,12 @@ bool matched(List<IgnoreFile> files, List<str> segments, int depth, bool is_dir)
         if (!is_under) {
             continue;
         }
-        List<str> rel = sub_segments(segments, bdepth, depth);
+        List<str> relative_segments = sub_segments(segments, bdepth, depth);
         for (Pattern pattern in ignore_file.patterns) {
-            if (pattern.is_directory_only && !is_dir) {
+            if (pattern.is_directory_only && !is_directory) {
                 continue;
             }
-            if (match_segments(pattern.segments, 0, rel, 0)) {
+            if (is_matching_segments(pattern.segments, 0, relative_segments, 0)) {
                 is_matched = !pattern.is_negated;
             }
         }
@@ -334,14 +334,14 @@ List<str> sub_segments(List<str> segments, int start, int end) {
 // number of path segments it could consume, zero included, which is what
 // makes it cross directories; any other segment must consume exactly one
 // path segment and glob-match it.
-bool match_segments(List<str> pattern, int pattern_index, List<str> path, int segment_index) {
+bool is_matching_segments(List<str> pattern, int pattern_index, List<str> path, int segment_index) {
     if (pattern_index == pattern.size()) {
         return segment_index == path.size();
     }
     if (pattern[pattern_index] == "**") {
         int candidate = segment_index;
         while (candidate <= path.size()) {
-            if (match_segments(pattern, pattern_index + 1, path, candidate)) {
+            if (is_matching_segments(pattern, pattern_index + 1, path, candidate)) {
                 return true;
             }
             candidate = candidate + 1;
@@ -351,10 +351,10 @@ bool match_segments(List<str> pattern, int pattern_index, List<str> path, int se
     if (segment_index == path.size()) {
         return false;
     }
-    if (!seg_match(chars_of(path[segment_index]), chars_of(pattern[pattern_index]))) {
+    if (!is_segment_match(chars_of(path[segment_index]), chars_of(pattern[pattern_index]))) {
         return false;
     }
-    return match_segments(pattern, pattern_index + 1, path, segment_index + 1);
+    return is_matching_segments(pattern, pattern_index + 1, path, segment_index + 1);
 }
 
 // One path component against one pattern component: `*` (any run, zero
@@ -362,7 +362,7 @@ bool match_segments(List<str> pattern, int pattern_index, List<str> path, int se
 // backtracking matcher (`fs.m31`'s `matches`, minus its shell-only
 // leading-dot rule -- `.gitignore` patterns match a leading dot like any
 // other character -- and minus `[...]` classes, out of scope here).
-bool seg_match(List<int> name, List<int> pattern) {
+bool is_segment_match(List<int> name, List<int> pattern) {
     int name_length = name.size();
     int pattern_length = pattern.size();
     int name_index = 0;

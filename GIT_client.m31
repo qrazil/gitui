@@ -6,7 +6,7 @@
 // `.m31` that actually runs the terminal loop.
 //
 // `gitui.m31` is the thin driver: parse a path off the command line, build a
-// `State`, and hand it to `TUI_app.Loop` exactly as `apps/tui/browse.m31`
+// `State`, and hand it to `TUI_app.Loop` exactly as `tui's `browse.m31``
 // hands its own `State` to the same loop. Everything a test needs --
 // building the outline from a `GIT_status.Status`, staging or unstaging one
 // path, stripping a commit message down to what git would actually commit --
@@ -28,7 +28,7 @@
 // (`COMMIT_EDITMSG`, git's own name), edited by *something*, read back and
 // refused if empty after stripping comments. `os.run` is now that
 // "something": the which-key overlay's `e` actually launches `$EDITOR` (`vi`
-// if unset, real git's own fallback) on `commit_msg_path`.
+// if unset, real git's own fallback) on `commit_message_path`.
 //
 // The wrinkle `os.run`'s own header does not have to solve, and this client
 // does: `os.run` leaves stdin/stdout/stderr untouched precisely so an
@@ -41,7 +41,7 @@
 // its own function scope and hands a caller only an `Action`
 // (`Continue`/`Redraw`/`Quit`) -- there is no `Suspend` a `Handler` can ask
 // for, and adding one to that enum would ripple through every `match` on
-// `Action` in `apps/tui`, which this task does not own.
+// `Action` in `tui`, which this task does not own.
 //
 // So `edit_message` does not call `os.run` itself. It sets `is_editor_wanted` and
 // returns `Quit` from the which-key's `e`, which unwinds `Loop.run` exactly
@@ -174,7 +174,7 @@ int cmp_bytes(bytes left, bytes right) {
     return left.size() - right.size();
 }
 
-bool bytes_eq(bytes left, bytes right) {
+bool is_bytes_equal(bytes left, bytes right) {
     return left.size() == right.size() && cmp_bytes(left, right) == 0;
 }
 
@@ -254,7 +254,7 @@ pub str first_line(bytes message) {
 /// Is `id` expanded, given what the caller has recorded about it and what it
 /// defaults to when nothing has been recorded yet? A toggled-closed section
 /// survives a rebuild of the outline this way -- see `State.toggle_current`.
-bool expanded_for(Map<str, bool> collapsed, str id, bool is_default_expanded) {
+bool is_expanded_for(Map<str, bool> collapsed, str id, bool is_default_expanded) {
     match (collapsed.get(id)) {
         case Some(bool is_collapsed): {
             return !is_collapsed;
@@ -280,12 +280,12 @@ bool expanded_for(Map<str, bool> collapsed, str id, bool is_default_expanded) {
 // Making `TUI_outline` itself wrap-aware -- so a resize could reflow without
 // a full rebuild -- would mean one logical `Row` can occupy a *variable*
 // number of physical lines, which reaches into `rows()`, `move()`,
-// `select_id()` and the `Viewport.reveal`/`clamped` scroll math that all
+// `did_select_id()` and the `Viewport.reveal`/`clamped` scroll math that all
 // currently assume "one row is one line". That is a real feature, but a
 // bigger one than this fix: it would change the widget's row model for
-// every caller (`apps/tui/browse.m31` included), not just this one.
+// every caller (`tui's `browse.m31`` included), not just this one.
 //
-// So this wraps eagerly, here, against `COMMIT_BODY_WRAP_COLS` -- a stand-in
+// So this wraps eagerly, here, against `COMMIT_BODY_WRAP_COLUMNS` -- a stand-in
 // for a typical terminal, chosen so it still looks right at the common case
 // rather than picking an arbitrary round number. Neither direction loses a
 // character: `TUI_text.wrap` only drops whitespace exactly at a line break
@@ -301,7 +301,7 @@ bool expanded_for(Map<str, bool> collapsed, str id, bool is_default_expanded) {
 // `TUI_outline.Outline.scroll_h`, rather than waiting on wrap-awareness to
 // close it. Content is reachable by scrolling sideways; it no longer just
 // clips with no way back.
-const int COMMIT_BODY_WRAP_COLS = 72;
+const int COMMIT_BODY_WRAP_COLUMNS = 72;
 /// Columns `h`/`l`/the left and right arrows move the outline's horizontal
 /// scroll per press -- a whole word or two at a time, not one column, so a
 /// long line clears in a handful of presses.
@@ -473,7 +473,7 @@ List<TUI_outline.Node> commit_node(GIT_log.Entry entry, List<CommitFileDiff> cha
     int line_index = 0;
     for (str line in text.lines(message)) {
         int wrapped_index = 0;
-        for (str wrapped in TUI_text.wrap(line, COMMIT_BODY_WRAP_COLS)) {
+        for (str wrapped in TUI_text.wrap(line, COMMIT_BODY_WRAP_COLUMNS)) {
             body.push(TUI_outline.Node.leaf(id + ":m" + line_index.to_str() + ":" + wrapped_index.to_str(), "  " + wrapped));
             wrapped_index = wrapped_index + 1;
         }
@@ -493,8 +493,8 @@ List<TUI_outline.Node> commit_node(GIT_log.Entry entry, List<CommitFileDiff> cha
         file_index = file_index + 1;
     }
     str files_id = id + ":files";
-    body.push(TUI_outline.Node.section(files_id, "Files changed (" + file_nodes.size().to_str() + ")", file_nodes, expanded: expanded_for(collapsed, files_id, true)));
-    return [TUI_outline.Node.section(id, label, body, expanded: expanded_for(collapsed, id, false))];
+    body.push(TUI_outline.Node.section(files_id, "Files changed (" + file_nodes.size().to_str() + ")", file_nodes, is_expanded: is_expanded_for(collapsed, files_id, true)));
+    return [TUI_outline.Node.section(id, label, body, is_expanded: is_expanded_for(collapsed, id, false))];
 }
 
 /// The primary document, from a `Status` and a commit walk alone -- no
@@ -529,21 +529,21 @@ pub TUI_outline.Outline build_outline(GIT_status.Status status, List<GIT_log.Ent
         out_paths.set(id, row.raw);
         untracked_children.push(TUI_outline.Node.leaf(id, row.path));
     }
-    roots.push(TUI_outline.Node.section("untracked", "Untracked files (" + untracked_children.size().to_str() + ")", untracked_children, expanded: expanded_for(collapsed, "untracked", true)));
+    roots.push(TUI_outline.Node.section("untracked", "Untracked files (" + untracked_children.size().to_str() + ")", untracked_children, is_expanded: is_expanded_for(collapsed, "untracked", true)));
     List<TUI_outline.Node> unstaged_children = [];
     for (PathRow row in rows_from_deltas(status.unstaged)) {
         str id = "unstaged:" + row.path;
         out_paths.set(id, row.raw);
         unstaged_children.push(TUI_outline.Node.leaf(id, mark_str(row.mark) + "  " + row.path));
     }
-    roots.push(TUI_outline.Node.section("unstaged", "Unstaged changes (" + unstaged_children.size().to_str() + ")", unstaged_children, expanded: expanded_for(collapsed, "unstaged", true)));
+    roots.push(TUI_outline.Node.section("unstaged", "Unstaged changes (" + unstaged_children.size().to_str() + ")", unstaged_children, is_expanded: is_expanded_for(collapsed, "unstaged", true)));
     List<TUI_outline.Node> staged_children = [];
     for (PathRow row in rows_from_deltas(status.staged)) {
         str id = "staged:" + row.path;
         out_paths.set(id, row.raw);
         staged_children.push(TUI_outline.Node.leaf(id, mark_str(row.mark) + "  " + row.path));
     }
-    roots.push(TUI_outline.Node.section("staged", "Staged changes (" + staged_children.size().to_str() + ")", staged_children, expanded: expanded_for(collapsed, "staged", true)));
+    roots.push(TUI_outline.Node.section("staged", "Staged changes (" + staged_children.size().to_str() + ")", staged_children, is_expanded: is_expanded_for(collapsed, "staged", true)));
     List<TUI_outline.Node> commit_children = [];
     for (GIT_log.Entry entry in log) {
         List<CommitFileDiff> changes = changes_by_commit.get(entry.id).or([]);
@@ -558,7 +558,7 @@ pub TUI_outline.Outline build_outline(GIT_status.Status status, List<GIT_log.Ent
         commit_children.push(TUI_outline.Node.leaf(LOAD_MORE_ID, "… load " + LOG_PAGE.to_str() + " more commits"));
         commits_label = "Commits (" + log.size().to_str() + "+)";
     }
-    roots.push(TUI_outline.Node.section("commits", commits_label, commit_children, expanded: expanded_for(collapsed, "commits", true)));
+    roots.push(TUI_outline.Node.section("commits", commits_label, commit_children, is_expanded: is_expanded_for(collapsed, "commits", true)));
     // Local branches, the current one starred -- `b` acts on the row under
     // the cursor (`checkout_current`). Last, after the commits, so the row
     // positions every existing check counts on (untracked first, commits
@@ -572,7 +572,7 @@ pub TUI_outline.Outline build_outline(GIT_status.Status status, List<GIT_log.Ent
         }
         branch_children.push(TUI_outline.Node.leaf("branch:" + branch_row.branch.name, mark + branch_row.branch.name + "  " + branch_row.branch.id.substr(0, 7) + "  " + branch_row.subject));
     }
-    roots.push(TUI_outline.Node.section("branches", "Branches (" + branch_children.size().to_str() + ")", branch_children, expanded: expanded_for(collapsed, "branches", true)));
+    roots.push(TUI_outline.Node.section("branches", "Branches (" + branch_children.size().to_str() + ")", branch_children, is_expanded: is_expanded_for(collapsed, "branches", true)));
     return TUI_outline.Outline(roots);
 }
 
@@ -642,7 +642,7 @@ Result<str, GIT_object.Error> build_tree_of(str gitdir, List<Leaf> leaves) {
         bytes directory = leaf.path.substr(0, slash);
         bytes rest = leaf.path.substr(slash + 1, leaf.path.size());
         Leaf sub = Leaf(leaf.mode, leaf.id, rest);
-        int index = find_dir(dirnames, directory);
+        int index = find_directory(dirnames, directory);
         if (index < 0) {
             dirnames.push(directory);
             groups.push([sub]);
@@ -659,10 +659,10 @@ Result<str, GIT_object.Error> build_tree_of(str gitdir, List<Leaf> leaves) {
     return GIT_object.write_tree(gitdir, out);
 }
 
-int find_dir(List<bytes> dirnames, bytes directory) {
+int find_directory(List<bytes> dirnames, bytes directory) {
     int index = 0;
     while (index < dirnames.size()) {
-        if (bytes_eq(dirnames[index], directory)) {
+        if (is_bytes_equal(dirnames[index], directory)) {
             return index;
         }
         index = index + 1;
@@ -739,7 +739,7 @@ pub Option<GIT_object.Entry> find_in_tree(str gitdir, str tree_id, bytes path) {
             match (object.body) {
                 case Tree(List<GIT_object.Entry> entries): {
                     for (GIT_object.Entry entry in entries) {
-                        if (bytes_eq(entry.name, seg)) {
+                        if (is_bytes_equal(entry.name, seg)) {
                             if (has_rest) {
                                 if (entry.is_tree()) {
                                     return find_in_tree(gitdir, entry.id, rest);
@@ -772,7 +772,7 @@ pub Option<GIT_object.Entry> find_in_tree(str gitdir, str tree_id, bytes path) {
 
 /// Everything the interactive client is showing and doing right now. One
 /// value, held by `gitui.m31`'s top-level driver and reached by the
-/// `draw`/`handle` lambdas the same way `apps/tui/browse.m31`'s own `State`
+/// `draw`/`handle` lambdas the same way `tui's `browse.m31``'s own `State`
 /// is -- there is no mutable module state to put it in instead (reference
 /// §2).
 pub type State {
@@ -801,7 +801,7 @@ pub type State {
     /// The `b` which-key overlay (check out / new branch) is open.
     pub bool is_branch_open = false;
     /// Where `n` (new branch) asks for the name: a file `$EDITOR` is launched
-    /// on, exactly like `commit_msg_path`, since there is no text-input
+    /// on, exactly like `commit_message_path`, since there is no text-input
     /// widget to type into -- see `new_branch`.
     pub str branch_name_path = "";
     /// Which file the pending `$EDITOR` launch is for -- `launch_editor`
@@ -818,7 +818,7 @@ pub type State {
     /// `q`. See this module's own header, "launching `$EDITOR`, and the
     /// terminal handoff that takes".
     pub bool is_editor_wanted = false;
-    pub str commit_msg_path = "";
+    pub str commit_message_path = "";
     pub str branch_label = "";
     pub str message = "";
     /// Whether the primary document is currently showing a hunk-level diff
@@ -851,7 +851,7 @@ pub type State {
     Map<str, bytes> paths = {};
     Map<str, CommitFileDiff> file_diffs = {};
     /// `commit_changes`'s result per commit id, filled on demand the first
-    /// time that commit is unfolded (`ensure_commit_changes`, from
+    /// time that commit is unfolded (`did_compute_commit_changes`, from
     /// `toggle_current`) and never again: a commit is immutable, so what it
     /// changed against its parent is too. A commit nobody has unfolded costs
     /// no tree read at all -- `reload` rebuilds the outline from this map as
@@ -871,7 +871,7 @@ pub type State {
 /// in a test that never touches a real repository.
 pub static State State.open(str gitdir, str worktree) {
     State state = State(gitdir, worktree);
-    state.commit_msg_path = fs.join(gitdir, "COMMIT_EDITMSG");
+    state.commit_message_path = fs.join(gitdir, "COMMIT_EDITMSG");
     state.branch_name_path = fs.join(gitdir, "GITUI_BRANCH_NAME");
     return state;
 }
@@ -938,7 +938,7 @@ pub void State.refresh() {
 /// file. Answers whether anything new was computed, so the caller knows the
 /// outline it is looking at was built without this commit's files and needs
 /// rebuilding.
-bool State.ensure_commit_changes(str id) {
+bool State.did_compute_commit_changes(str id) {
     if (commit_changes_cache.contains(id)) {
         return false;
     }
@@ -975,7 +975,7 @@ pub void State.reload() {
     refresh();
     outline = build_outline(last_status, log, commit_changes_cache, collapsed, paths, file_diffs, branch_rows);
     if (keep_id != "") {
-        outline.select_id(keep_id);
+        outline.did_select_id(keep_id);
     }
     jump.sync_from(outline);
     jump.follow(outline);
@@ -985,7 +985,7 @@ pub void State.reload() {
 /// next `reload()` (which rebuilds the outline from nothing) respects it.
 ///
 /// Unfolding a commit (or its "Files changed" subsection) is also the moment
-/// its file list is first computed -- `ensure_commit_changes` -- and when
+/// its file list is first computed -- `did_compute_commit_changes` -- and when
 /// that actually computed something, the outline is rebuilt in place from
 /// the now-filled cache (the one on screen was built with an empty list for
 /// this commit) with the cursor kept on the same row by id, the same way
@@ -997,12 +997,12 @@ pub void State.toggle_current() {
     bool is_rebuilding = false;
     match (outline.current()) {
         case Some(TUI_outline.Row row): {
-            collapsed.set(row.node.id, !row.node.expanded);
+            collapsed.set(row.node.id, !row.node.is_expanded);
             keep_id = row.node.id;
-            if (row.node.expanded) {
+            if (row.node.is_expanded) {
                 match (commit_id_of_unfoldable(row.node.id)) {
                     case Some(str cid): {
-                        is_rebuilding = ensure_commit_changes(cid);
+                        is_rebuilding = did_compute_commit_changes(cid);
                     }
                     case None: {
                     }
@@ -1014,7 +1014,7 @@ pub void State.toggle_current() {
     }
     if (is_rebuilding) {
         outline = build_outline(last_status, log, commit_changes_cache, collapsed, paths, file_diffs, branch_rows);
-        outline.select_id(keep_id);
+        outline.did_select_id(keep_id);
     }
     jump.sync_from(outline);
     jump.follow(outline);
@@ -1196,7 +1196,7 @@ pub void State.discard_current() {
 }
 
 /// Throw away the working-tree (and, for a staged row, index) changes to
-/// `rel`, by section -- each the exact effect of the real git command named,
+/// `relative_path`, by section -- each the exact effect of the real git command named,
 /// on that one path and nothing else:
 ///
 ///   - **untracked** -- `git clean -f -- <path>`: the file is removed, and
@@ -1242,7 +1242,7 @@ pub void State.discard_path(str kind, bytes relative_path) {
         GIT_index.Index index = read_index(gitdir);
         match (find_index_entry(index, relative_path)) {
             case Some(GIT_index.Entry entry): {
-                if (!write_worktree(relative_path, entry.mode, read_blob(entry.id))) {
+                if (!did_write_worktree(relative_path, entry.mode, read_blob(entry.id))) {
                     return;
                 }
                 message = "discarded changes to " + shown;
@@ -1266,7 +1266,7 @@ pub void State.discard_path(str kind, bytes relative_path) {
         }
         match (in_head) {
             case Some(GIT_object.Entry entry): {
-                if (!write_worktree(relative_path, entry.mode, read_blob(entry.id))) {
+                if (!did_write_worktree(relative_path, entry.mode, read_blob(entry.id))) {
                     return;
                 }
                 // The file was just rewritten, so its real stat goes in the
@@ -1316,15 +1316,15 @@ pub void State.discard_path(str kind, bytes relative_path) {
     message = "discard: unknown section " + kind;
 }
 
-/// Put `content` at `rel` in the working tree as a blob of `mode` would be
+/// Put `content` at `relative_path` in the working tree as a blob of `mode` would be
 /// checked out: a symlink (0o120000) whose target is the content, otherwise
 /// a regular file, its parent directories created as needed. A symlink
 /// already there is removed first (`fs.symlink` never replaces). False, with
 /// `message` set, on any failure.
-bool State.write_worktree(bytes relative_path, int mode, bytes content) {
+bool State.did_write_worktree(bytes relative_path, int mode, bytes content) {
     str shown = relative_path.utf8().or("<non-utf8>");
     str full = fs.join(worktree, relative_path.utf8().or(""));
-    str directory = dir_of(full);
+    str directory = directory_of(full);
     if (directory != "." && !fs.is_dir(directory)) {
         match (fs.makedirs(directory)) {
             case Ok: {
@@ -1379,12 +1379,12 @@ bool State.write_worktree(bytes relative_path, int mode, bytes content) {
     }
 }
 
-/// After removing `rel`, remove each of its parent directories that is now
+/// After removing `relative_path`, remove each of its parent directories that is now
 /// empty, deepest first, stopping at the first that is not (or at the
 /// working tree's own root, which is never touched) -- `git clean`'s own
 /// tidying of a directory it emptied.
 void State.prune_empty_parents(bytes relative_path) {
-    str parent_path = dir_of(relative_path.utf8().or(""));
+    str parent_path = directory_of(relative_path.utf8().or(""));
     while (parent_path != "." && parent_path != "") {
         match (fs.rmdir(fs.join(worktree, parent_path))) {
             case Ok: {
@@ -1393,13 +1393,13 @@ void State.prune_empty_parents(bytes relative_path) {
                 return;
             }
         }
-        parent_path = dir_of(parent_path);
+        parent_path = directory_of(parent_path);
     }
 }
 
 /// Real, hunk-level diff for the row under the cursor -- the diff-algorithm
-/// track (`lib/diff.m31`/`apps/git/GIT_hunks.m31`) and the rendering widget
-/// (`apps/tui/TUI_diff_view.DiffView`) both already existed; this is the
+/// track (`lib/diff.m31`/`GIT_hunks.m31`) and the rendering widget
+/// (`TUI_diff_view.DiffView`) both already existed; this is the
 /// wiring `docs/design.md`'s "Starting the client" section named as the
 /// follow-up once they did. A no-op on anything that is not a path row (a
 /// section heading or a commit).
@@ -1482,7 +1482,7 @@ pub void State.show_diff_current() {
     }
 }
 
-/// `rel`'s content on disk right now, or empty if it cannot be read (missing,
+/// `relative_path`'s content on disk right now, or empty if it cannot be read (missing,
 /// a permissions error) -- the same "missing reads as empty" the unstaged
 /// comparison's deleted-on-disk case needs.
 bytes State.read_worktree(bytes relative_path) {
@@ -1497,7 +1497,7 @@ bytes State.read_worktree(bytes relative_path) {
     }
 }
 
-/// `rel`'s blob content as the current index has it, or empty if the index
+/// `relative_path`'s blob content as the current index has it, or empty if the index
 /// has no entry for it -- the staged comparison's "no longer in the index"
 /// case, and a defensive default the unstaged comparison should never
 /// actually hit (every unstaged row's path is, by construction, in the
@@ -1514,7 +1514,7 @@ bytes State.index_blob(bytes relative_path) {
     }
 }
 
-/// `rel`'s blob content as HEAD's tree has it, or empty if HEAD has no entry
+/// `relative_path`'s blob content as HEAD's tree has it, or empty if HEAD has no entry
 /// there (an unborn branch, or a path newly staged with nothing committed
 /// yet) -- the staged comparison's "old" side.
 bytes State.head_blob(bytes relative_path) {
@@ -1571,7 +1571,7 @@ pub void State.open_diff(str title, bytes old, bytes new) {
 }
 
 /// Back out of the diff view to the outline -- `backspace`, the same "go
-/// back" key `apps/tui/browse.m31` already uses for leaving a drilled-into
+/// back" key `tui's `browse.m31`` already uses for leaving a drilled-into
 /// view, and `q`/`Escape` too (`handle_diff_key`'s own comment has why).
 pub void State.close_diff() {
     is_diff_open = false;
@@ -1604,7 +1604,7 @@ pub void State.stage_hunk_current() {
     match (diff_view.at()) {
         case Some(TUI_diff_view.Row row): {
             int keep = diff_view.cursor;
-            if (stage_hunk(diff_path, row.hunk)) {
+            if (did_stage_hunk(diff_path, row.hunk)) {
                 str said = message;
                 reload();
                 reopen_diff(keep);
@@ -1630,7 +1630,7 @@ pub void State.unstage_hunk_current() {
     match (diff_view.at()) {
         case Some(TUI_diff_view.Row row): {
             int keep = diff_view.cursor;
-            if (unstage_hunk(diff_path, row.hunk)) {
+            if (did_unstage_hunk(diff_path, row.hunk)) {
                 str said = message;
                 reload();
                 reopen_diff(keep);
@@ -1644,7 +1644,7 @@ pub void State.unstage_hunk_current() {
 }
 
 /// Stage hunk `k` (0-based, in `GIT_hunks.hunks(index, worktree)`'s order) of
-/// `rel`'s unstaged change: `GIT_patch.apply_hunk` over the index's blob and
+/// `relative_path`'s unstaged change: `GIT_patch.apply_hunk` over the index's blob and
 /// the file on disk, written as a new blob and put in the index with the
 /// entry's stat fields reset (the same `size: -1` rule `unstage_path`
 /// uses, so `GIT_status.status` re-hashes it rather than trusting a snapshot
@@ -1653,16 +1653,16 @@ pub void State.unstage_hunk_current() {
 /// is dropped instead. `pub`, like `stage_path`, so `t_gitclient_ops.m31`
 /// can drive it against a real fixture and real git. True when the index
 /// changed.
-pub bool State.stage_hunk(bytes relative_path, int hunk_index) {
+pub bool State.did_stage_hunk(bytes relative_path, int hunk_index) {
     bytes old = index_blob(relative_path);
     bytes new = read_worktree(relative_path);
     match (GIT_patch.apply_hunk(old, new, hunk_index)) {
         case Some(bytes content): {
             str full = fs.join(worktree, relative_path.utf8().or(""));
             if (content.size() == 0 && !fs.exists(full)) {
-                return drop_index_entry(relative_path, "staged deletion of " + relative_path.utf8().or("<non-utf8>"));
+                return did_drop_index_entry(relative_path, "staged deletion of " + relative_path.utf8().or("<non-utf8>"));
             }
-            return set_index_blob(relative_path, content, "staged hunk " + (hunk_index + 1).to_str() + " of " + relative_path.utf8().or("<non-utf8>"));
+            return did_set_index_blob(relative_path, content, "staged hunk " + (hunk_index + 1).to_str() + " of " + relative_path.utf8().or("<non-utf8>"));
         }
         case None: {
             message = "no such hunk to stage";
@@ -1672,20 +1672,20 @@ pub bool State.stage_hunk(bytes relative_path, int hunk_index) {
 }
 
 /// Unstage hunk `k` (0-based, in `GIT_hunks.hunks(HEAD, index)`'s order) of
-/// `rel`'s staged change: `GIT_patch.revert_hunk` over HEAD's blob and the
-/// index's, written back the same way `stage_hunk` writes. Reverting the
+/// `relative_path`'s staged change: `GIT_patch.revert_hunk` over HEAD's blob and the
+/// index's, written back the same way `did_stage_hunk` writes. Reverting the
 /// one all-added hunk of a path HEAD does not have leaves nothing, which is
 /// `git reset -p`'s "unstage addition": the entry is dropped, the file is
 /// untracked again. True when the index changed.
-pub bool State.unstage_hunk(bytes relative_path, int hunk_index) {
+pub bool State.did_unstage_hunk(bytes relative_path, int hunk_index) {
     bytes old = head_blob(relative_path);
     bytes new = index_blob(relative_path);
     match (GIT_patch.revert_hunk(old, new, hunk_index)) {
         case Some(bytes content): {
-            if (content.size() == 0 && !head_has(relative_path)) {
-                return drop_index_entry(relative_path, "unstaged addition of " + relative_path.utf8().or("<non-utf8>"));
+            if (content.size() == 0 && !is_in_head_tree(relative_path)) {
+                return did_drop_index_entry(relative_path, "unstaged addition of " + relative_path.utf8().or("<non-utf8>"));
             }
-            return set_index_blob(relative_path, content, "unstaged hunk " + (hunk_index + 1).to_str() + " of " + relative_path.utf8().or("<non-utf8>"));
+            return did_set_index_blob(relative_path, content, "unstaged hunk " + (hunk_index + 1).to_str() + " of " + relative_path.utf8().or("<non-utf8>"));
         }
         case None: {
             message = "no such hunk to unstage";
@@ -1725,8 +1725,8 @@ void State.reopen_diff(int keep_cursor) {
     diff_view.move(0);
 }
 
-/// Does HEAD's tree have `rel` at all? False on an unborn branch too.
-bool State.head_has(bytes relative_path) {
+/// Does HEAD's tree have `relative_path` at all? False on an unborn branch too.
+bool State.is_in_head_tree(bytes relative_path) {
     match (head_tree_id(gitdir)) {
         case Some(str tid): {
             return find_in_tree(gitdir, tid, relative_path).is_some();
@@ -1737,10 +1737,10 @@ bool State.head_has(bytes relative_path) {
     }
 }
 
-/// `rel`'s index entry now names a fresh blob of `content`, mode kept,
+/// `relative_path`'s index entry now names a fresh blob of `content`, mode kept,
 /// stat fields reset so the next `status` re-hashes it. `said` becomes the
 /// status-line message on success.
-bool State.set_index_blob(bytes relative_path, bytes content, str said) {
+bool State.did_set_index_blob(bytes relative_path, bytes content, str said) {
     str blob_id = "";
     match (GIT_object.write_blob(gitdir, content)) {
         case Ok(str id): {
@@ -1773,7 +1773,7 @@ bool State.set_index_blob(bytes relative_path, bytes content, str said) {
     }
 }
 
-bool State.drop_index_entry(bytes relative_path, str said) {
+bool State.did_drop_index_entry(bytes relative_path, str said) {
     GIT_index.Index index = read_index(gitdir);
     remove_entry(index, relative_path);
     match (GIT_index.write(gitdir, index)) {
@@ -1788,7 +1788,7 @@ bool State.drop_index_entry(bytes relative_path, str said) {
     }
 }
 
-/// Write the commit-message template at `commit_msg_path`, unless something
+/// Write the commit-message template at `commit_message_path`, unless something
 /// -- a previous `e`, or a person's own `git commit` in another terminal --
 /// already left one there, and ask `gitui.m31`'s own driver to actually
 /// launch `$EDITOR` on it once the terminal is safe to hand over.
@@ -1801,12 +1801,12 @@ bool State.drop_index_entry(bytes relative_path, str said) {
 /// handoff that takes" -- so `launch_editor` below is where the actual
 /// launch happens, called back once the terminal is cooked again.
 pub void State.edit_message() {
-    if (!fs.exists(commit_msg_path)) {
-        match (io.write(commit_msg_path, commit_template())) {
+    if (!fs.exists(commit_message_path)) {
+        match (io.write(commit_message_path, commit_template())) {
             case Ok: {
             }
             case Err(io.Error error): {
-                message = "cannot write " + commit_msg_path + ": " + error.to_str();
+                message = "cannot write " + commit_message_path + ": " + error.to_str();
                 return;
             }
         }
@@ -1815,7 +1815,7 @@ pub void State.edit_message() {
     message = "launching editor...";
 }
 
-/// Actually launch `$EDITOR` (or `vi`) on `commit_msg_path` and act on how it
+/// Actually launch `$EDITOR` (or `vi`) on `commit_message_path` and act on how it
 /// ended -- called by `gitui.m31`'s driver after `TUI_app.Loop.run` has
 /// returned with `is_editor_wanted` set, so the terminal `os.run`'s child
 /// inherits is the real, cooked one, not the raw alternate screen this
@@ -1823,7 +1823,7 @@ pub void State.edit_message() {
 ///
 /// Every `os.run` outcome the caller needs handled:
 ///
-///   - exited 0: read `commit_msg_path` back and try to finish the commit --
+///   - exited 0: read `commit_message_path` back and try to finish the commit --
 ///     `finish_commit` is exactly "the same stripping/empty-message-refusal
 ///     logic that already exists", so this calls it rather than repeating
 ///     it, which also keeps `f`'s own behaviour the one place it is defined.
@@ -1847,23 +1847,23 @@ pub void State.launch_editor() {
         return;
     }
     str editor = pick_editor(os.env("EDITOR"));
-    match (os.run([editor, commit_msg_path])) {
+    match (os.run([editor, commit_message_path])) {
         case Ok(os.ExitStatus exit_status): {
             match (exit_status) {
                 case Exited(int code): {
                     if (code == 0) {
                         finish_commit();
                     } else {
-                        message = "editor '" + editor + "' exited " + code.to_str() + "; message left at " + commit_msg_path + " -- e to edit again, f to finish, a to abort";
+                        message = "editor '" + editor + "' exited " + code.to_str() + "; message left at " + commit_message_path + " -- e to edit again, f to finish, a to abort";
                     }
                 }
                 case Signaled(int sig): {
-                    message = "editor '" + editor + "' was killed by signal " + sig.to_str() + "; message left at " + commit_msg_path + " -- e to edit again, f to finish, a to abort";
+                    message = "editor '" + editor + "' was killed by signal " + sig.to_str() + "; message left at " + commit_message_path + " -- e to edit again, f to finish, a to abort";
                 }
             }
         }
         case Err(io.Error error): {
-            message = "cannot launch '" + editor + "' (" + error.to_str() + "); edit " + commit_msg_path + " in another terminal, then press f to finish or a to abort";
+            message = "cannot launch '" + editor + "' (" + error.to_str() + "); edit " + commit_message_path + " in another terminal, then press f to finish or a to abort";
         }
     }
 }
@@ -2032,8 +2032,8 @@ pub void State.finish_new_branch() {
 }
 
 pub void State.abort_commit() {
-    if (fs.exists(commit_msg_path)) {
-        match (fs.remove(commit_msg_path)) {
+    if (fs.exists(commit_message_path)) {
+        match (fs.remove(commit_message_path)) {
             case Ok: {
             }
             case Err: {
@@ -2046,7 +2046,7 @@ pub void State.abort_commit() {
 }
 
 /// `c` then `A`: turn the open commit overlay into `git commit --amend`.
-/// HEAD's own message is written to `commit_msg_path` (with the template's
+/// HEAD's own message is written to `commit_message_path` (with the template's
 /// comment lines after it, so `e` opens something a person recognises and
 /// `f` straight away is `--amend --no-edit`), and `is_amending` tells
 /// `finish_commit` to replace HEAD rather than add to it. Refused, with the
@@ -2074,12 +2074,12 @@ pub void State.start_amend() {
             return;
         }
     }
-    bytes head_msg = [];
+    bytes head_message = [];
     match (GIT_object.read(gitdir, head_id)) {
         case Ok(GIT_object.Object object): {
             match (object.body) {
                 case Commit(GIT_object.Commit commit): {
-                    head_msg = commit.message;
+                    head_message = commit.message;
                 }
                 case Blob: {
                     message = "nothing to amend: HEAD is not a commit";
@@ -2100,15 +2100,15 @@ pub void State.start_amend() {
             return;
         }
     }
-    str prefill = head_msg.utf8().or("");
+    str prefill = head_message.utf8().or("");
     if (!prefill.ends_with("\n")) {
         prefill = prefill + "\n";
     }
-    match (io.write(commit_msg_path, prefill + commit_template())) {
+    match (io.write(commit_message_path, prefill + commit_template())) {
         case Ok: {
         }
         case Err(io.Error error): {
-            message = "cannot write " + commit_msg_path + ": " + error.to_str();
+            message = "cannot write " + commit_message_path + ": " + error.to_str();
             return;
         }
     }
@@ -2116,7 +2116,7 @@ pub void State.start_amend() {
     message = "amending " + head_id.substr(0, 7) + ": e to edit its message, f to finish, a to abort";
 }
 
-/// Read `commit_msg_path` back, strip it the way git's default cleanup does,
+/// Read `commit_message_path` back, strip it the way git's default cleanup does,
 /// and either refuse (an empty result, git's own "Aborting commit due to
 /// empty commit message") or actually commit: `build_tree` over the current
 /// index, `GIT_object.write_commit` with HEAD as the sole parent (none for an
@@ -2126,12 +2126,12 @@ pub void State.start_amend() {
 /// (`GIT_refs.m31`'s own guarantee).
 pub void State.finish_commit() {
     str raw = "";
-    match (io.read(commit_msg_path)) {
+    match (io.read(commit_message_path)) {
         case Ok(str edited_text): {
             raw = edited_text;
         }
         case Err(io.Error error): {
-            message = "cannot read " + commit_msg_path + ": " + error.to_str();
+            message = "cannot read " + commit_message_path + ": " + error.to_str();
             return;
         }
     }
@@ -2244,8 +2244,8 @@ pub void State.finish_commit() {
             return;
         }
     }
-    if (fs.exists(commit_msg_path)) {
-        match (fs.remove(commit_msg_path)) {
+    if (fs.exists(commit_message_path)) {
+        match (fs.remove(commit_message_path)) {
             case Ok: {
             }
             case Err: {
@@ -2327,7 +2327,7 @@ List<TUI_widget.Span> State.footer_spans(TUI_style.Theme theme) {
 /// `docs/design.md`'s locked layout: one primary document, one optional
 /// jump-list panel, a persistent footer, and overlays drawn over all of it
 /// rather than replacing any of it. The diff view is not an overlay: it
-/// REPLACES the document the way `apps/tui/browse.m31`'s preview pane
+/// REPLACES the document the way `tui's `browse.m31``'s preview pane
 /// changes with the selection, which is why the jump list (synced to the
 /// outline's own entries) is not shown alongside it.
 pub void State.draw(TUI_buffer.Buffer buffer, TUI_geometry.Rect area) {
@@ -2347,12 +2347,12 @@ pub void State.draw(TUI_buffer.Buffer buffer, TUI_geometry.Rect area) {
     } else {
         TUI_geometry.Rect outline_area = main;
         if (is_jump_shown) {
-            List<TUI_geometry.Rect> cols = TUI_geometry.cols(main, [TUI_geometry.Constraint.Fill(1), TUI_geometry.Constraint.Length(28)]);
-            outline_area = cols[0];
+            List<TUI_geometry.Rect> columns = TUI_geometry.columns(main, [TUI_geometry.Constraint.Fill(1), TUI_geometry.Constraint.Length(28)]);
+            outline_area = columns[0];
             outline.render(buffer, outline_area);
             TUI_widget.Block jump_block = TUI_widget.Block(title: "jump", borders: TUI_widget.Borders.Single);
-            jump_block.render(buffer, cols[1]);
-            jump.render(buffer, jump_block.inner(cols[1]));
+            jump_block.render(buffer, columns[1]);
+            jump.render(buffer, jump_block.inner(columns[1]));
         } else {
             outline.render(buffer, outline_area);
         }
@@ -2367,7 +2367,7 @@ pub void State.draw(TUI_buffer.Buffer buffer, TUI_geometry.Rect area) {
             title = "amend HEAD";
             finish = "finish: replace HEAD with the amended commit";
         }
-        TUI_menu.WhichKey which_key = TUI_menu.WhichKey(title, [TUI_menu.Item("e", "edit message in $EDITOR (" + commit_msg_path + ")"), TUI_menu.Item("f", finish), TUI_menu.Item("A", "amend HEAD: its message prefilled, its parents and author kept"), TUI_menu.Item("a", "abort")]);
+        TUI_menu.WhichKey which_key = TUI_menu.WhichKey(title, [TUI_menu.Item("e", "edit message in $EDITOR (" + commit_message_path + ")"), TUI_menu.Item("f", finish), TUI_menu.Item("A", "amend HEAD: its message prefilled, its parents and author kept"), TUI_menu.Item("a", "abort")]);
         which_key.render(buffer, body);
     }
     if (is_confirm_open) {
@@ -2410,7 +2410,7 @@ void State.draw_diff(TUI_buffer.Buffer buffer, TUI_geometry.Rect area) {
     diff_view.render(buffer, inner);
 }
 
-/// One decoded key, dispatched exactly as `apps/tui/browse.m31`'s own
+/// One decoded key, dispatched exactly as `tui's `browse.m31``'s own
 /// `State.handle` is: every `term.Code` variant named, so a key this client
 /// does not use is `Continue` rather than missing from the match entirely
 /// (there is no `default`, reference §5.6).
@@ -2596,7 +2596,7 @@ void State.step_or_move(int delta) {
 /// merge whose first-parent diff touched no files) still just folds.
 void State.handle_enter() {
     if (is_jump_focused && is_jump_shown) {
-        jump.activate(outline);
+        jump.did_activate(outline);
         is_jump_focused = false;
         return;
     }
@@ -3049,7 +3049,7 @@ TUI_app.Action State.handle_branch_key(term.Code code) {
 
 /// (`DiffView.move`, which is what keeps `at()` meaningful), and `q`,
 /// `Escape` and `Backspace` all back out to the outline (`close_diff`).
-/// `Backspace` is the "go back" key `apps/tui/browse.m31`'s own directory
+/// `Backspace` is the "go back" key `tui's `browse.m31``'s own directory
 /// descent already uses (see its `up`); `q` and `Escape` join it because a
 /// drilled-into diff is what a reader stepping through history opens and
 /// closes most, and the key that closes everything else they open here (the
@@ -3153,9 +3153,9 @@ Option<str> commit_id_of_unfoldable(str id) {
 }
 
 /// The directory part of a slash-separated path, `.` for a bare name --
-/// `GIT_http_fetch.m31`'s own `dir_of`, private to it, repeated here rather than
+/// `GIT_http_fetch.m31`'s own `directory_of`, private to it, repeated here rather than
 /// exported from a module about the wire protocol.
-str dir_of(str path) {
+str directory_of(str path) {
     int index = path.size() - 1;
     while (index >= 0 && path.byte_at(index) != '/') {
         index = index - 1;
@@ -3170,7 +3170,7 @@ str dir_of(str path) {
 Option<GIT_index.Entry> find_index_entry(GIT_index.Index index, bytes path) {
     int entry_index = 0;
     while (entry_index < index.entries.size()) {
-        if (bytes_eq(index.entries[entry_index].path, path)) {
+        if (is_bytes_equal(index.entries[entry_index].path, path)) {
             return Option<GIT_index.Entry>.Some(index.entries[entry_index]);
         }
         entry_index = entry_index + 1;
@@ -3212,7 +3212,7 @@ GIT_index.Index read_index(str gitdir) {
 void replace_entry(GIT_index.Index index, GIT_index.Entry entry) {
     int entry_index = 0;
     while (entry_index < index.entries.size()) {
-        if (bytes_eq(index.entries[entry_index].path, entry.path)) {
+        if (is_bytes_equal(index.entries[entry_index].path, entry.path)) {
             index.entries[entry_index] = entry;
             return;
         }
@@ -3224,7 +3224,7 @@ void replace_entry(GIT_index.Index index, GIT_index.Entry entry) {
 void remove_entry(GIT_index.Index index, bytes path) {
     int entry_index = 0;
     while (entry_index < index.entries.size()) {
-        if (bytes_eq(index.entries[entry_index].path, path)) {
+        if (is_bytes_equal(index.entries[entry_index].path, path)) {
             index.entries.remove_at(entry_index);
             return;
         }

@@ -83,10 +83,10 @@ pub int type_number(str kind) {
 /// four bits of the size below it, then the rest of the size seven bits a
 /// byte, least significant first, every byte but the last with its top bit
 /// set -- `GIT_pack.m31`'s own reader, inverted.
-pub bytes entry_header(int type_num, int size) {
+pub bytes entry_header(int type_code, int size) {
     bytes out = [];
     int rest = size >> 4;
-    int first = type_num << 4 | size & 0x0F;
+    int first = type_code << 4 | size & 0x0F;
     if (rest > 0) {
         first = first | 0x80;
     }

@@ -433,13 +433,13 @@ bytes hex_decode(str text) {
     bytes out = [];
     int position = 0;
     while (position + 1 < text.size()) {
-        out.push(hex_val(text.byte_at(position)) << 4 | hex_val(text.byte_at(position + 1)));
+        out.push(hex_value(text.byte_at(position)) << 4 | hex_value(text.byte_at(position + 1)));
         position = position + 2;
     }
     return out;
 }
 
-int hex_val(int digit) {
+int hex_value(int digit) {
     if (digit >= '0' && digit <= '9') {
         return digit - '0';
     }

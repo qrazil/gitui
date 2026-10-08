@@ -176,11 +176,11 @@ pub Result<List<Branch>, Error> branches(str gitdir) {
 /// already exists, and a name git itself would refuse (empty, a leading `-`,
 /// `..`, whitespace, a control character, `.lock`, a slash at either end).
 pub Result<bool, Error> create_branch(str gitdir, str name) {
-    if (!plausible_branch_name(name)) {
+    if (!is_plausible_branch_name(name)) {
         return Result<bool, Error>.Err(Error.BadName);
     }
     str full = "refs/heads/" + name;
-    if (GIT_refs.exists(gitdir, full)) {
+    if (GIT_refs.has_ref(gitdir, full)) {
         return Result<bool, Error>.Err(Error.BranchExists);
     }
     str head_id = "";
@@ -229,7 +229,7 @@ pub Result<bool, Error> create_branch(str gitdir, str name) {
     }
 }
 
-bool plausible_branch_name(str name) {
+bool is_plausible_branch_name(str name) {
     if (name == "" || name == "HEAD" || name.starts_with("-") || name.starts_with("/") || name.ends_with("/") || name.ends_with(".lock") || name.ends_with(".")) {
         return false;
     }
@@ -558,7 +558,7 @@ Result<bool, Error> walk(str gitdir, str id, str prefix, Map<str, TreeEntry> out
 // permission only applies to a file it creates, so an executable bit that
 // changed would otherwise be kept as it was.
 Result<bool, Error> write_path(str full, bytes content, int mode) {
-    str parent = parent_dir(full);
+    str parent = parent_directory(full);
     if (parent != "") {
         match (fs.makedirs(parent)) {
             case Ok: {
@@ -637,7 +637,7 @@ Result<bool, Error> remove_path(str worktree, str full) {
             }
         }
     }
-    str directory = parent_dir(full);
+    str directory = parent_directory(full);
     str root = fs.join(worktree, "");
     while (directory != "" && directory != worktree && directory != root && directory.starts_with(worktree)) {
         match (fs.rmdir(directory)) {
@@ -647,13 +647,13 @@ Result<bool, Error> remove_path(str worktree, str full) {
                 return Result<bool, Error>.Ok(true);
             }
         }
-        directory = parent_dir(directory);
+        directory = parent_directory(directory);
     }
     return Result<bool, Error>.Ok(true);
 }
 
 // Everything before the last `/`, or `""` when there is none.
-str parent_dir(str path) {
+str parent_directory(str path) {
     int cut = -1;
     for (int i in 0 .. path.size()) {
         if (path.byte_at(i) == '/') {
@@ -669,7 +669,7 @@ str parent_dir(str path) {
 void put_entry(GIT_index.Index index, GIT_index.Entry entry) {
     int position = 0;
     while (position < index.entries.size()) {
-        if (same_bytes(index.entries[position].path, entry.path)) {
+        if (is_same_bytes(index.entries[position].path, entry.path)) {
             index.entries[position] = entry;
             return;
         }
@@ -681,7 +681,7 @@ void put_entry(GIT_index.Index index, GIT_index.Entry entry) {
 void drop_entry(GIT_index.Index index, bytes path) {
     int position = 0;
     while (position < index.entries.size()) {
-        if (same_bytes(index.entries[position].path, path)) {
+        if (is_same_bytes(index.entries[position].path, path)) {
             index.entries.remove_at(position);
             return;
         }
@@ -689,7 +689,7 @@ void drop_entry(GIT_index.Index index, bytes path) {
     }
 }
 
-bool same_bytes(bytes left, bytes right) {
+bool is_same_bytes(bytes left, bytes right) {
     if (left.size() != right.size()) {
         return false;
     }

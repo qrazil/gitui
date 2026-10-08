@@ -2,7 +2,7 @@
 """Oracle for `zlib.inflate_at`/`zlib.decompress_at`: several independent
 streams concatenated back to back in one buffer, each one decoded starting
 exactly where the previous stream's reported `used` said the next one
-begins -- a packfile's own shape, but with none of `apps/git/pack.m31`'s
+begins -- a packfile's own shape, but with none of `GIT_pack.m31`'s
 framing (no idx, no object headers, no deltas) around it, so a bug in the
 mid-offset codec and a bug in the packfile format reader cannot hide one
 behind the other.

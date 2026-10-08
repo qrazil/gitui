@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Drive the compiled `ourgitui` binary under a real pty, against disposable
 git fixtures this script builds and destroys itself -- the same discipline
-`apps/git/test.sh`/`test_write.sh` already use for the write-path work, and
+`tests/test.sh`/`test_write.sh` already use for the write-path work, and
 `docs/design.md`'s own "Safety" section names for this client
 specifically: never a real repository, real `git` as the oracle throughout.
 
@@ -129,7 +129,7 @@ def write_editor_script(path, message):
     fixed line and exit 0. `e` now actually runs `$EDITOR` via `os.run` and
     waits for it, so the pty tests below drive a real (if trivial) child
     process rather than editing `COMMIT_EDITMSG` out of band from Python --
-    the same thing `apps/git/test_gitui.sh`'s own stand-in editors do for the
+    the same thing `tests/test_gitui.sh`'s own stand-in editors do for the
     non-pty, oracle-level checks of every `os.run` outcome."""
     with open(path, "w") as f:
         f.write("#!/bin/sh\n")
@@ -255,7 +255,7 @@ def main():
     # it -- see `GIT_client.m31`'s own header, "launching `$EDITOR`, and the
     # terminal handoff that takes" -- so this drives that for real, with a
     # stand-in editor standing in for `$EDITOR` exactly as
-    # `apps/git/test_gitui.sh`'s own non-pty checks do for every `os.run`
+    # `tests/test_gitui.sh`'s own non-pty checks do for every `os.run`
     # outcome. What only a pty can prove is the terminal handoff itself: raw
     # mode and the alternate screen are left before the editor (a real child
     # process) runs, at all -- this session would simply hang or scribble
@@ -455,7 +455,7 @@ def main():
     s9.send("jjj")  # row3: commits section
     s9.send("j")  # row4: "second", the most recent commit
     # Unfolding a commit is also what first computes its file list (lazily,
-    # cached per commit -- GIT_client.m31's `ensure_commit_changes`), and its
+    # cached per commit -- GIT_client.m31's `did_compute_commit_changes`), and its
     # "Files changed" subsection opens with it by default, so one Enter shows
     # author, date, message, the subsection heading and the file rows.
     out = s9.send("\r")

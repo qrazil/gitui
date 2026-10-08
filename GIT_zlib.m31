@@ -30,7 +30,7 @@
 //
 // --- `inflate_at`: one DEFLATE stream among several in the same buffer -------
 //
-// A packfile (`apps/git/GIT_pack.m31`) is many independently-compressed objects
+// A packfile (`GIT_pack.m31`) is many independently-compressed objects
 // back to back, so reading one of them means starting to decompress partway
 // into a buffer that holds many more objects after it, and stopping exactly
 // where that one object's stream ends -- DEFLATE streams are self-terminating
@@ -679,7 +679,7 @@ pub Result<bytes, Error> decompress(bytes source, int limit = -1) {
 /// `decompress`, starting at `source[start]` instead of `source[0]` and reporting
 /// how many octets of `source` -- header, DEFLATE stream and trailing Adler-32
 /// together -- the object occupied, the same pairing `inflate_at` gives the
-/// raw format. This is the call `apps/git/GIT_pack.m31` actually makes: a
+/// raw format. This is the call `GIT_pack.m31` actually makes: a
 /// packfile entry is a full RFC 1950 stream exactly like a loose object's,
 /// just not alone in its buffer, so it needs everything `decompress` checks
 /// (the header, the preset-dictionary bit, the checksum) and not merely

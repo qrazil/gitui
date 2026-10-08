@@ -1,4 +1,4 @@
-// Git's object store: loose objects, and -- `apps/git/GIT_pack.m31` -- packed
+// Git's object store: loose objects, and -- `GIT_pack.m31` -- packed
 // ones, read through exactly the same API.
 //
 // An object lives at `.git/objects/ab/cdef...` -- the first two hex digits of
@@ -601,7 +601,7 @@ pub Result<List<str>, Error> loose(str gitdir) {
 
 /// Every object name in the repository, loose or packed, sorted and
 /// deduplicated -- what a caller that must see the whole store (an oracle
-/// walking every object the way `apps/git/oracle_object.py` does, or a future
+/// walking every object the way `tests/oracles/oracle_object.py` does, or a future
 /// `fsck`) uses instead of `loose`, which -- unchanged, on purpose -- still
 /// answers only "every LOOSE object", exactly as it always has.
 pub Result<List<str>, Error> all(str gitdir) {
@@ -1131,13 +1131,13 @@ bytes hex_decode(str hex_text) {
     bytes out = [];
     int index = 0;
     while (index + 1 < hex_text.size()) {
-        out.push(hex_val(hex_text.byte_at(index)) << 4 | hex_val(hex_text.byte_at(index + 1)));
+        out.push(hex_value(hex_text.byte_at(index)) << 4 | hex_value(hex_text.byte_at(index + 1)));
         index = index + 2;
     }
     return out;
 }
 
-int hex_val(int digit) {
+int hex_value(int digit) {
     if (digit >= '0' && digit <= '9') {
         return digit - '0';
     }

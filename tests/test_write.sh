@@ -1,13 +1,13 @@
 #!/usr/bin/env bash
 # The write path -- `.git/index`, loose objects, refs, working-tree status --
 # checked against real `git` in disposable fixtures, the same philosophy
-# `test.sh` already uses for the read side (`apps/git/README.md`'s table).
+# `test.sh` already uses for the read side (`README.md`'s table).
 #
 # Sourced from `test.sh`, which is why there is no `set`, no `cd` and no
 # `trap` here: it runs in `test.sh`'s own shell, after `test.sh` has already
 # `cd`'d to the repository root and built `$LANGC`, and shares its `WORK`
 # scratch directory, its `build`/`note`/`bad` functions, and its `pass`/`fail`
-# counters. `bash apps/git/test.sh` is still the one command that runs
+# counters. `bash tests/test.sh` is still the one command that runs
 # everything.
 #
 # Every fixture below is built fresh under `$WORK` (a `mktemp -d` `test.sh`

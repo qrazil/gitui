@@ -71,7 +71,7 @@ check "refs" "$WORK/a" "$WORK/b"
 # (`--batch-all-objects`, which walks loose AND packed objects alike) rather
 # than a loose-only directory listing, so this sample -- and so every
 # cat-file/ls-tree comparison below -- covers a packed repository exactly as
-# it covers a loose one; `apps/git/test.sh` runs this same script against a
+# it covers a loose one; `tests/test.sh` runs this same script against a
 # packed fixture for exactly that reason.
 
 common=$(cd "$REPO" && git rev-parse --path-format=absolute --git-common-dir)
