@@ -1,4 +1,4 @@
-# `pull.m31` and `pack.read_pack`, against real git as the oracle: packs real
+# `GIT_pull.m31` and `GIT_pack.read_pack`, against real git as the oracle: packs real
 # git writes (delta-compressed, ofs-delta, ref-delta and thin) are unpacked
 # and judged by `git fsck --full`, and a pull from the real `git http-backend`
 # servers `test_push.sh` left running is judged by `git status`, `git fsck`,
@@ -75,7 +75,7 @@ if build t_pull; then
         "$WORK/t_pull" unpack "$pl_own" "$pl_root/own.pack" >/dev/null 2>&1 &&
         git -C "$pl_own" update-ref refs/heads/main "$(git -C "$pl_src" rev-parse main)" &&
         git -C "$pl_own" fsck --full >/dev/null 2>&1; then
-        note "pack.read_pack: a pack written by packwrite.m31 reads back and fsck is clean"
+        note "pack.read_pack: a pack written by GIT_pack_write.m31 reads back and fsck is clean"
     else
         bad "pack.read_pack (packwrite round trip)"
     fi

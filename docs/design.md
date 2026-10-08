@@ -133,9 +133,9 @@ Split into two tracks:
     in the first several KB) so a binary diff reports as one rather than
     garbling. Self-contained; the client doesn't need it to get started.
   - **The client** — the document (outline sections for untracked,
-    unstaged, staged, recent commits, populated from `status.status()` and
+    unstaged, staged, recent commits, populated from `GIT_status.status()` and
     the existing log/object read side), whole-file stage/unstage (already
-    buildable from `index.m31`/`object.m31`), commit via `$EDITOR` for the
+    buildable from `GIT_index.m31`/`GIT_object.m31`), commit via `$EDITOR` for the
     message (matching real git's own fallback when `-m` isn't given, and
     sidestepping a dependency on `TextInput`, which `apps/tui` deferred for
     lack of a caller — this is that caller, later, not now), and the loop

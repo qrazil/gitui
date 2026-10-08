@@ -1,4 +1,4 @@
-# `httpfetch.m31`: git's smart-HTTP protocol, against a real `git
+# `GIT_http_fetch.m31`: git's smart-HTTP protocol, against a real `git
 # http-backend` -- the task this file exists for names it plainly: "stand up
 # your own real smart-HTTP git server as the test oracle", never a hand-rolled
 # stand-in, so this is `git http-backend` run as a genuine CGI script behind

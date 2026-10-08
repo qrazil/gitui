@@ -1,9 +1,9 @@
-// Round-trip checks for `patch.m31`: applying hunk 0 of diff(cur, new) to
+// Round-trip checks for `GIT_patch.m31`: applying hunk 0 of diff(cur, new) to
 // `cur` repeatedly turns `old` into `new`, exactly; reverting hunk 0 of
 // diff(old, cur) from `cur` repeatedly turns `new` back into `old`. Pairs
 // cover CRLF, a missing final newline, an empty side, several well-separated
 // hunks and two changes close enough to merge into one hunk -- the exact
-// shapes a rendered `Line.text` would lose (see patch.m31's header for why
+// shapes a rendered `Line.text` would lose (see GIT_patch.m31's header for why
 // it works on `diff.Op`s instead).
 //
 //   ./t_patch
@@ -11,7 +11,7 @@
 // Prints `<case> ok` or `<case> FAIL ...` per check, the convention
 // `t_gitclient.m31` uses; `test_patch.sh` greps for a FAIL line.
 
-import patch;
+import GIT_patch;
 import text;
 
 type Counter {
@@ -36,11 +36,11 @@ str show(bytes b) {
 }
 
 void round_trip(Counter counter, str name, bytes old, bytes new) {
-    int n = patch.hunk_count(old, new);
+    int n = GIT_patch.hunk_count(old, new);
     bytes cur = old;
     int steps = 0;
     while (steps < n) {
-        match (patch.apply_hunk(cur, new, 0)) {
+        match (GIT_patch.apply_hunk(cur, new, 0)) {
             case Some(bytes next): {
                 cur = next;
             }
@@ -52,11 +52,11 @@ void round_trip(Counter counter, str name, bytes old, bytes new) {
         steps = steps + 1;
     }
     counter.check(name + ": applying hunk 0 " + n.to_str() + " time(s) reaches new", cur == new, show(cur) + " != " + show(new));
-    counter.check(name + ": nothing left to apply afterwards", patch.hunk_count(cur, new) == 0, patch.hunk_count(cur, new).to_str() + " hunks remain");
+    counter.check(name + ": nothing left to apply afterwards", GIT_patch.hunk_count(cur, new) == 0, GIT_patch.hunk_count(cur, new).to_str() + " hunks remain");
     cur = new;
     steps = 0;
     while (steps < n) {
-        match (patch.revert_hunk(old, cur, 0)) {
+        match (GIT_patch.revert_hunk(old, cur, 0)) {
             case Some(bytes next): {
                 cur = next;
             }
@@ -72,17 +72,17 @@ void round_trip(Counter counter, str name, bytes old, bytes new) {
     // n-1 hunks outstanding; so must reverting it from the new side.
     int k = 0;
     while (k < n) {
-        match (patch.apply_hunk(old, new, k)) {
+        match (GIT_patch.apply_hunk(old, new, k)) {
             case Some(bytes one): {
-                counter.check(name + ": applying only hunk " + k.to_str() + " leaves n-1 hunks", patch.hunk_count(one, new) == n - 1, patch.hunk_count(one, new).to_str());
+                counter.check(name + ": applying only hunk " + k.to_str() + " leaves n-1 hunks", GIT_patch.hunk_count(one, new) == n - 1, GIT_patch.hunk_count(one, new).to_str());
             }
             case None: {
                 counter.check(name + ": applying only hunk " + k.to_str(), false, "None");
             }
         }
-        match (patch.revert_hunk(old, new, k)) {
+        match (GIT_patch.revert_hunk(old, new, k)) {
             case Some(bytes one): {
-                counter.check(name + ": reverting only hunk " + k.to_str() + " leaves n-1 hunks", patch.hunk_count(old, one) == n - 1, patch.hunk_count(old, one).to_str());
+                counter.check(name + ": reverting only hunk " + k.to_str() + " leaves n-1 hunks", GIT_patch.hunk_count(old, one) == n - 1, GIT_patch.hunk_count(old, one).to_str());
             }
             case None: {
                 counter.check(name + ": reverting only hunk " + k.to_str(), false, "None");
@@ -112,7 +112,7 @@ round_trip(counter, "no trailing newline, new side", "a\nb\nc\n".to_bytes(), "a\
 round_trip(counter, "empty old (whole file added)", [], "x\ny\n".to_bytes());
 round_trip(counter, "empty new (whole file removed)", "x\ny\n".to_bytes(), []);
 round_trip(counter, "identical", "same\n".to_bytes(), "same\n".to_bytes());
-counter.check("binary pair: apply_hunk is None", patch.apply_hunk([0, 1, 2], [0, 1, 3], 0).is_none(), "got Some");
-counter.check("out of range: apply_hunk is None", patch.apply_hunk("a\n".to_bytes(), "b\n".to_bytes(), 5).is_none(), "got Some");
-counter.check("out of range: revert_hunk is None", patch.revert_hunk("a\n".to_bytes(), "b\n".to_bytes(), -1).is_none(), "got Some");
+counter.check("binary pair: apply_hunk is None", GIT_patch.apply_hunk([0, 1, 2], [0, 1, 3], 0).is_none(), "got Some");
+counter.check("out of range: apply_hunk is None", GIT_patch.apply_hunk("a\n".to_bytes(), "b\n".to_bytes(), 5).is_none(), "got Some");
+counter.check("out of range: revert_hunk is None", GIT_patch.revert_hunk("a\n".to_bytes(), "b\n".to_bytes(), -1).is_none(), "got Some");
 print(counter.checks.to_str() + " checks, " + counter.failed.to_str() + " failed");

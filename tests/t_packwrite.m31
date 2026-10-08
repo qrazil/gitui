@@ -1,8 +1,8 @@
-// Drives `packwrite.m31` for `test_push.sh`.
+// Drives `GIT_pack_write.m31` for `test_push.sh`.
 //
 //   ./t_packwrite build <gitdir> <out.pack> [<id> ...]
 //       A pack of exactly the ids given -- every object in the repository
-//       (`object.all`) if none are -- written to `out.pack`. Prints
+//       (`GIT_object.all`) if none are -- written to `out.pack`. Prints
 //       "pack <bytes> <count>". Real `git index-pack --strict` is what then
 //       judges the bytes.
 //
@@ -11,8 +11,8 @@
 //       against the values the format's own definition gives.
 //
 //   ./t_packwrite stat <gitdir> <id>
-//       "<kind> <size>" for one object, read through `object.read` -- which,
-//       once `index-pack` has built the `.idx`, means through `pack.m31`'s
+//       "<kind> <size>" for one object, read through `GIT_object.read` -- which,
+//       once `index-pack` has built the `.idx`, means through `GIT_pack.m31`'s
 //       own reader: the round trip "wrote it, git indexed it, this program
 //       reads it back and the SHA-1 still checks" in one call.
 //
@@ -20,9 +20,9 @@
 // failure.
 
 import io;
-import object;
+import GIT_object;
 import os;
-import packwrite;
+import GIT_pack_write;
 
 List<str> argv = os.args();
 if (argv.size() < 2) {
@@ -54,16 +54,16 @@ void fail(str msg) {
 void do_build(str gitdir, str out_path, List<str> ids) {
     List<str> want = ids;
     if (want.size() == 0) {
-        match (object.all(gitdir)) {
+        match (GIT_object.all(gitdir)) {
             case Ok(List<str> all): {
                 want = all;
             }
-            case Err(object.Error e): {
+            case Err(GIT_object.Error e): {
                 fail("object.all: " + e.to_str());
             }
         }
     }
-    match (packwrite.build(gitdir, want)) {
+    match (GIT_pack_write.build(gitdir, want)) {
         case Ok(bytes pack): {
             match (io.write_bytes(out_path, pack)) {
                 case Ok: {
@@ -74,7 +74,7 @@ void do_build(str gitdir, str out_path, List<str> ids) {
                 }
             }
         }
-        case Err(packwrite.Error e): {
+        case Err(GIT_pack_write.Error e): {
             fail(e.to_str());
         }
     }
@@ -86,15 +86,15 @@ void do_header(str type_text, str size_text) {
     if (t < 0 || n < 0) {
         fail("type and size must be non-negative integers");
     }
-    print(packwrite.entry_header(t, n).hex());
+    print(GIT_pack_write.entry_header(t, n).hex());
 }
 
 void do_stat(str gitdir, str id) {
-    match (object.read(gitdir, id)) {
-        case Ok(object.Object o): {
+    match (GIT_object.read(gitdir, id)) {
+        case Ok(GIT_object.Object o): {
             print(o.kind() + " " + o.raw.size().to_str());
         }
-        case Err(object.Error e): {
+        case Err(GIT_object.Error e): {
             fail(e.to_str());
         }
     }

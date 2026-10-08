@@ -1,11 +1,11 @@
-// Runs `status.status` on the repository named on the command line and
+// Runs `GIT_status.status` on the repository named on the command line and
 // prints it in `git status --short`'s own shape -- `XY path`, one combined,
 // path-sorted list, `??` for untracked -- so `test_write.sh` can diff this
 // program's output against that command's, unmodified.
 //
 //   ./t_status <gitdir> <worktree>
 
-import status;
+import GIT_status;
 import io;
 import os;
 
@@ -16,24 +16,24 @@ if (argv.size() < 3) {
 }
 str gd = argv[1];
 str wt = argv[2];
-match (status.status(gd, wt)) {
-    case Ok(status.Status st): {
+match (GIT_status.status(gd, wt)) {
+    case Ok(GIT_status.Status st): {
         show(st);
     }
-    case Err(status.Error e): {
+    case Err(GIT_status.Error e): {
         io.eprint(e.to_str());
         os.exit(1);
     }
 }
 
-void show(status.Status st) {
+void show(GIT_status.Status st) {
     Map<str, int> sc = {};
     Map<str, int> uc = {};
     Map<str, bool> untr = {};
-    for (status.Delta d in st.staged) {
+    for (GIT_status.Delta d in st.staged) {
         sc.set(d.path.utf8().or("<non-utf8>"), staged_char(d.kind));
     }
-    for (status.Delta d in st.unstaged) {
+    for (GIT_status.Delta d in st.unstaged) {
         uc.set(d.path.utf8().or("<non-utf8>"), unstaged_char(d.kind));
     }
     for (bytes b in st.untracked) {
@@ -43,7 +43,7 @@ void show(status.Status st) {
     // own -- every tracked change (staged, unstaged, or both), then every
     // untracked path -- not one merge across both. Matching that grouping
     // here is purely about matching that command's output for the test to
-    // diff against; `status.Status` itself keeps the three lists apart for
+    // diff against; `GIT_status.Status` itself keeps the three lists apart for
     // exactly the reason its module header gives, and a caller with a
     // different presentation in mind is free to merge them however it likes.
     List<str> tracked = [];
@@ -70,7 +70,7 @@ void show(status.Status st) {
     }
 }
 
-int staged_char(status.Change k) {
+int staged_char(GIT_status.Change k) {
     match (k) {
         case Added: {
             return 'A';
@@ -84,7 +84,7 @@ int staged_char(status.Change k) {
     }
 }
 
-int unstaged_char(status.Change k) {
+int unstaged_char(GIT_status.Change k) {
     match (k) {
         case Added: {
             return 'A';

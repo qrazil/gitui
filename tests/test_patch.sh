@@ -1,4 +1,4 @@
-# `patch.m31`: applying or reverting exactly one hunk of a diff, byte for
+# `GIT_patch.m31`: applying or reverting exactly one hunk of a diff, byte for
 # byte -- the piece the diff view's `s`/`u` (hunk-level staging) is built
 # on. `t_patch.m31` checks the round-trip properties with no repository at
 # all; `test_gitui.sh`'s own "gitui hunk:" checks are where the result is

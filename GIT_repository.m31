@@ -4,13 +4,13 @@
 // easy to get wrong because in the ordinary case all three answers are the
 // same directory:
 //
-//   repo.find(path)        the git directory for a working tree, or "" --
+//   GIT_repository.find(path)        the git directory for a working tree, or "" --
 //                          `.git` here or in a parent, and `.git` may be a
 //                          FILE rather than a directory
-//   repo.common(gitdir)    the git directory that holds `objects` and the
+//   GIT_repository.common(gitdir)    the git directory that holds `objects` and the
 //                          shared refs, which is a DIFFERENT directory in a
 //                          linked worktree
-//   repo.per_worktree(ref) whether a ref name is one of the few that stay in
+//   GIT_repository.per_worktree(ref) whether a ref name is one of the few that stay in
 //                          the worktree's own directory
 //
 // --- linked worktrees ---------------------------------------------------------
@@ -86,7 +86,7 @@ pub str common(str gitdir) {
 
 /// Does this ref belong to one worktree rather than to the repository?
 ///
-/// git's list, from `refs.c`: HEAD and the pseudo-refs beside it, plus
+/// git's list, from `GIT_refs.c`: HEAD and the pseudo-refs beside it, plus
 /// `refs/bisect/`, `refs/worktree/` and `refs/rewritten/`. Everything else --
 /// every branch, every tag, every remote -- is shared, and lives in the
 /// common directory.

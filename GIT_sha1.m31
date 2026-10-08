@@ -9,12 +9,12 @@
 //
 // API
 // ---
-//   sha1.Hasher h = sha1.Hasher();
+//   GIT_sha1.Hasher h = GIT_sha1.Hasher();
 //   h.update(chunk);            // as many times as you like
 //   bytes d = h.digest();       // 20 octets; ends the hash
 //
-//   sha1.sum(data)              -> bytes, the 20 octets
-//   sha1.hex(data)              -> str, 40 lowercase hex digits
+//   GIT_sha1.sum(data)              -> bytes, the 20 octets
+//   GIT_sha1.hex(data)              -> str, 40 lowercase hex digits
 //
 // --- 32-bit arithmetic on a 64-bit int ---------------------------------------
 //

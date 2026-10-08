@@ -107,7 +107,7 @@ if build t_inflate; then
     grep '^inflate:' "$WORK/z.time" | sed 's/^/     /'
 fi
 
-# --- inflate from a mid-file offset, isolated from pack.m31 -----------
+# --- inflate from a mid-file offset, isolated from GIT_pack.m31 -----------
 
 if build t_inflate_at; then
     python3 tests/oracles/oracle_inflate_at.py "$WORK/za" >"$WORK/za.want"
@@ -198,16 +198,16 @@ with a body'
 # entirely loose, and everything from here on runs against one that is
 # entirely packed instead, the same "walk every object, compare canonically"
 # and "every command, compared to real git" discipline, unchanged, applied to
-# the other storage format `object.m31`/`pack.m31` now read transparently.
+# the other storage format `GIT_object.m31`/`GIT_pack.m31` now read transparently.
 #
 # 30 commits touching two files with a shared line of boilerplate text is
 # little enough to build in a fraction of a second and similar enough that
 # `git repack -ad` chooses to delta most of it -- `OBJ_OFS_DELTA`, git's own
 # default. A second pack built from the same history with `git pack-objects
-# --no-delta-base-offset` (repack does not honour `pack.deltaBaseOffset` the
+# --no-delta-base-offset` (repack does not honour `GIT_pack.deltaBaseOffset` the
 # same way; asking `pack-objects` directly does) is real `OBJ_REF_DELTA`
 # instead, still against bases in the one pack, which is what proves the
-# in-`.idx` fast path in `pack.m31`'s own `resolve_offset` and not only its
+# in-`.idx` fast path in `GIT_pack.m31`'s own `resolve_offset` and not only its
 # cross-pack/loose fallback. The new pack has to be written *before* the old
 # one is removed -- `pack-objects` reads the objects it is packing from
 # wherever they already are.
@@ -286,7 +286,7 @@ source tests/test_gitignore.sh
 
 source tests/test_hunks.sh
 
-# --- one hunk at a time: patch.m31's apply/revert round trips ---------------
+# --- one hunk at a time: GIT_patch.m31's apply/revert round trips ---------------
 
 source tests/test_patch.sh
 

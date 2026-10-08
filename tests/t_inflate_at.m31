@@ -1,5 +1,5 @@
-// `zlib.decompress_at`/`zlib.inflate_at` against `oracle_inflate_at.py`'s
-// two concatenated-stream fixtures -- isolated from `pack.m31`'s own framing,
+// `GIT_zlib.decompress_at`/`GIT_zlib.inflate_at` against `oracle_inflate_at.py`'s
+// two concatenated-stream fixtures -- isolated from `GIT_pack.m31`'s own framing,
 // exactly as that oracle's own header explains.
 //
 //   python3 apps/git/oracle_inflate_at.py DIR > want
@@ -12,8 +12,8 @@
 //   <kind> <index> <start> ok <used> <sha1-of-the-payload>
 //   <kind> <index> <start> err
 
-import zlib;
-import sha1;
+import GIT_zlib;
+import GIT_sha1;
 import io;
 import os;
 import fs;
@@ -47,9 +47,9 @@ match (io.read_bytes(fs.join(dir, "streams.raw"))) {
 int zi = 0;
 int zoff = 0;
 while (zoff < zbuf.size()) {
-    match (zlib.decompress_at(zbuf, zoff)) {
-        case Ok(zlib.Decoded d): {
-            print("zlib " + zi.to_str() + " " + zoff.to_str() + " ok " + d.used.to_str() + " " + sha1.hex(d.data));
+    match (GIT_zlib.decompress_at(zbuf, zoff)) {
+        case Ok(GIT_zlib.Decoded d): {
+            print("zlib " + zi.to_str() + " " + zoff.to_str() + " ok " + d.used.to_str() + " " + GIT_sha1.hex(d.data));
             if (d.used <= 0) {
                 // Refuse to spin forever on a bug that reports no progress.
                 io.eprint("zlib stream " + zi.to_str() + " reported used <= 0");
@@ -57,7 +57,7 @@ while (zoff < zbuf.size()) {
             }
             zoff = zoff + d.used;
         }
-        case Err(zlib.Error e): {
+        case Err(GIT_zlib.Error e): {
             print("zlib " + zi.to_str() + " " + zoff.to_str() + " err");
             io.eprint("  zlib " + zi.to_str() + ": " + e.to_str());
             zoff = zbuf.size();
@@ -68,16 +68,16 @@ while (zoff < zbuf.size()) {
 int ri = 0;
 int roff = 0;
 while (roff < rbuf.size()) {
-    match (zlib.inflate_at(rbuf, roff)) {
-        case Ok(zlib.Decoded d): {
-            print("raw " + ri.to_str() + " " + roff.to_str() + " ok " + d.used.to_str() + " " + sha1.hex(d.data));
+    match (GIT_zlib.inflate_at(rbuf, roff)) {
+        case Ok(GIT_zlib.Decoded d): {
+            print("raw " + ri.to_str() + " " + roff.to_str() + " ok " + d.used.to_str() + " " + GIT_sha1.hex(d.data));
             if (d.used <= 0) {
                 io.eprint("raw stream " + ri.to_str() + " reported used <= 0");
                 os.exit(2);
             }
             roff = roff + d.used;
         }
-        case Err(zlib.Error e): {
+        case Err(GIT_zlib.Error e): {
             print("raw " + ri.to_str() + " " + roff.to_str() + " err");
             io.eprint("  raw " + ri.to_str() + ": " + e.to_str());
             roff = rbuf.size();

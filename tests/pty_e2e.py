@@ -252,7 +252,7 @@ def main():
     # --- committing: a real $EDITOR launch (a stand-in script), finish -------
     #
     # `e` now actually runs `os.run([$EDITOR, COMMIT_EDITMSG])` and waits for
-    # it -- see `gitclient.m31`'s own header, "launching `$EDITOR`, and the
+    # it -- see `GIT_client.m31`'s own header, "launching `$EDITOR`, and the
     # terminal handoff that takes" -- so this drives that for real, with a
     # stand-in editor standing in for `$EDITOR` exactly as
     # `apps/git/test_gitui.sh`'s own non-pty checks do for every `os.run`
@@ -430,7 +430,7 @@ def main():
     # the oracle for the counts, `git diff -- <path>` for the hunk a file
     # row's own `Enter` pops -- the one row `Enter` opens a diff on directly
     # rather than folding, since a commit's own file row has nothing to fold
-    # (gitclient.m31's `State.handle_enter`).
+    # (GIT_client.m31's `State.handle_enter`).
     fx9 = make_fixture(root, "commitlog")
     with open(os.path.join(fx9, "a.txt"), "w") as f:
         f.write("line1\nline2\nline3\n")
@@ -455,7 +455,7 @@ def main():
     s9.send("jjj")  # row3: commits section
     s9.send("j")  # row4: "second", the most recent commit
     # Unfolding a commit is also what first computes its file list (lazily,
-    # cached per commit -- gitclient.m31's `ensure_commit_changes`), and its
+    # cached per commit -- GIT_client.m31's `ensure_commit_changes`), and its
     # "Files changed" subsection opens with it by default, so one Enter shows
     # author, date, message, the subsection heading and the file rows.
     out = s9.send("\r")
@@ -547,7 +547,7 @@ def main():
     # One unstaged change is all this needs. The point is the key, not the
     # diff: `q`/`Escape` inside an open diff used to quit the whole program,
     # which is the one place a reader stepping through diffs gets surprised
-    # (gitclient.m31's `handle_diff_key`). The session's own exit code at
+    # (GIT_client.m31's `handle_diff_key`). The session's own exit code at
     # the end proves the outline's `q` still quits -- `Session.quit` sends
     # it and waits, and a process that ignored it would be killed instead
     # and report a nonzero code.

@@ -9,21 +9,21 @@
 //
 // `path` is where the repository is, exactly like `git status` run from
 // that directory -- it is not walked up through parents the way `ourgit`'s
-// own `--git-dir` discovery is (`repo.find` still walks up to *find*
+// own `--git-dir` discovery is (`GIT_repository.find` still walks up to *find*
 // `.git`, but the working tree this client reads and writes is `path`
 // itself). Run it from the repository's own top level.
 //
 // This file is deliberately thin: every piece a test needs to call directly
 // -- building the outline, staging or unstaging a path, stripping a commit
-// message -- lives in `gitclient.m31`, which has no top-level statements and
+// message -- lives in `GIT_client.m31`, which has no top-level statements and
 // can be imported. This is `apps/tui/browse.m31`'s own shape, one file
 // further split because this program, unlike that demo, has a real test
 // obligation for its logic (`docs/design.md`'s "how you'll know you're
 // done").
 //
-// See `gitclient.m31`'s own header, "launching `$EDITOR`, and the terminal
+// See `GIT_client.m31`'s own header, "launching `$EDITOR`, and the terminal
 // handoff that takes", for why the loop below is a `while`, not a single
-// `loop.run` call: `gitclient.State.edit_message` cannot launch `$EDITOR`
+// `loop.run` call: `GIT_client.State.edit_message` cannot launch `$EDITOR`
 // itself (it has no access to the `term.Session` `TUI_app.Loop.run` owns), so
 // it sets `state.want_editor` and returns `Quit`, which unwinds that
 // `Session` and hands the now-cooked, normal-screen terminal back here. This
@@ -38,19 +38,19 @@
 import fs;
 import io;
 import os;
-import repo;
+import GIT_repository;
 import term;
 import tui.TUI_app;
 import tui.TUI_buffer;
 import tui.TUI_geometry;
-import gitclient;
+import GIT_client;
 
 List<str> argv = os.args();
 str path = ".";
 if (argv.size() > 1) {
     path = argv[1];
 }
-str gd = repo.find(path);
+str gd = GIT_repository.find(path);
 if (gd == "") {
     io.eprint("gitui: not a git repository (or any parent up to /): no .git directory");
     return;
@@ -59,7 +59,7 @@ if (!term.is_terminal(0)) {
     io.eprint("gitui: standard input is not a terminal");
     return;
 }
-gitclient.State state = gitclient.State.open(gd, path);
+GIT_client.State state = GIT_client.State.open(gd, path);
 state.reload();
 TUI_app.Loop loop = TUI_app.Loop();
 bool running = true;

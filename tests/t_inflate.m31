@@ -1,4 +1,4 @@
-// `zlib.decompress` against Python's `zlib`, over the fixtures
+// `GIT_zlib.decompress` against Python's `zlib`, over the fixtures
 // `oracle_inflate.py` writes.
 //
 //   python3 apps/git/oracle_inflate.py DIR > want
@@ -14,8 +14,8 @@
 // megabyte case and a diff of two megabytes of binary is not a diagnostic.
 // `t_object.m31` compares real objects octet for octet.
 
-import zlib;
-import sha1;
+import GIT_zlib;
+import GIT_sha1;
 import io;
 import os;
 import fs;
@@ -55,17 +55,17 @@ for (str name in names) {
     match (io.read_bytes(fs.join(dir, name + ".z"))) {
         case Ok(bytes stream): {
             int t0 = date.now_ns();
-            match (zlib.decompress(stream)) {
+            match (GIT_zlib.decompress(stream)) {
                 case Ok(bytes out): {
                     int ns = date.now_ns() - t0;
-                    print(name + " ok " + out.size().to_str() + " " + sha1.hex(out));
+                    print(name + " ok " + out.size().to_str() + " " + GIT_sha1.hex(out));
                     if (out.size() > slowest_bytes) {
                         slowest_bytes = out.size();
                         slowest = ns;
                         slowest_name = name;
                     }
                 }
-                case Err(zlib.Error e): {
+                case Err(GIT_zlib.Error e): {
                     print(name + " err");
                     // The message is not compared -- no oracle has an opinion
                     // about it -- but a refusal nobody can read is not much of

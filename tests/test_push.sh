@@ -1,4 +1,4 @@
-# `packwrite.m31`, `httppush.m31` and `gitconfig.m31`, against real git as the
+# `GIT_pack_write.m31`, `GIT_http_push.m31` and `GIT_config.m31`, against real git as the
 # oracle: `git index-pack --strict` judges every pack this writes, and a real
 # `git http-backend` (the same CGI-behind-python arrangement `test_httpfetch.sh`
 # uses, but with `http.receivepack` on) is the server a push goes to -- the
@@ -69,7 +69,7 @@ if build t_packwrite; then
             else
                 bad "packwrite object count" "index-pack indexed $pp_got, repository has $pp_want"
             fi
-            # Round trip through pack.m31's own reader.
+            # Round trip through GIT_pack.m31's own reader.
             pp_rt_ok=1
             pp_checked=0
             for id in $(git -C "$pp_cl" cat-file --batch-all-objects --batch-check='%(objectname)'); do
@@ -79,9 +79,9 @@ if build t_packwrite; then
                 pp_checked=$((pp_checked + 1))
             done
             if [ "$pp_rt_ok" = 1 ]; then
-                note "packwrite: all $pp_checked objects read back through pack.m31 with the right kind, size and SHA-1"
+                note "packwrite: all $pp_checked objects read back through GIT_pack.m31 with the right kind, size and SHA-1"
             else
-                bad "packwrite round trip through pack.m31" "see notes above"
+                bad "packwrite round trip through GIT_pack.m31" "see notes above"
             fi
         else
             bad "packwrite: index-pack --strict" "$(cat "$WORK/push-idx.err")"

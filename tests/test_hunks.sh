@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# `hunks.m31`: the generic edit script from `lib/diff.m31`, grouped into
+# `GIT_hunks.m31`: the generic edit script from `lib/diff.m31`, grouped into
 # qrazil/tui's `TUI_diff_view.Hunk`/`Line` with context -- checked against real
 # `diff -u` (hunk boundaries and line classification) and real `git diff`
 # (the binary-file case, since git's own NUL heuristic is what

@@ -2,15 +2,15 @@
 // `git clone` writes instead of loose objects, and that `git gc`/`git repack`
 // collapse a repository's loose objects into later. `apps/git/README.md`'s
 // "What a real repository needs that this cannot do" names this as the whole
-// remaining gap, and `apps/git/object.m31` wires this module in underneath
-// `object.read` so that everything above it -- `log`, `cat-file`, `ls-tree`,
+// remaining gap, and `apps/git/GIT_object.m31` wires this module in underneath
+// `GIT_object.read` so that everything above it -- `log`, `cat-file`, `ls-tree`,
 // `rev-parse`'s short names, the interactive client -- reads a packed
 // repository exactly as it reads a loose one, with no call site changed.
 //
 // API
 // ---
-//   pack.read(gitdir, id)   -> Result<Found, Error>    kind + content, or NotFound
-//   pack.ids(gitdir)        -> Result<List<str>, Error> every packed object's id
+//   GIT_pack.read(gitdir, id)   -> Result<Found, Error>    kind + content, or NotFound
+//   GIT_pack.ids(gitdir)        -> Result<List<str>, Error> every packed object's id
 //   f.kind, f.content                                  what `Found` carries
 //
 // --- the `.idx`, format v2 only ----------------------------------------------
@@ -27,7 +27,7 @@
 // `fanout[first-1] .. fanout[first]` is the slice to binary-search for any id
 // starting with byte `first`); the sorted table of 20-byte object ids itself;
 // a CRC32 per object (unused here -- nothing above this module asks for it,
-// and the final SHA-1 check in `object.parse` is the stronger guarantee
+// and the final SHA-1 check in `GIT_object.parse` is the stronger guarantee
 // anyway); a 4-byte offset per object, whose top bit, when set, is not part of
 // the offset but a flag: the low 31 bits are an INDEX into a trailing table of
 // 8-byte big-endian offsets, for any object living past 2 GB into the pack;
@@ -40,8 +40,8 @@
 // back to back: a variable-length type+size header (3 type bits and 4 size
 // bits in the first octet, each further octet's top bit a continuation flag
 // and its low 7 bits the next size bits, least-significant group first), then
-// one zlib stream (RFC 1950 -- the exact format `zlib.m31` already reads for a
-// loose object, which is why `zlib.decompress_at` exists: this is that
+// one zlib stream (RFC 1950 -- the exact format `GIT_zlib.m31` already reads for a
+// loose object, which is why `GIT_zlib.decompress_at` exists: this is that
 // decoder, started at an offset instead of at the front of its own buffer).
 //
 // For an ordinary object (commit/tree/blob/tag) that stream is the content,
@@ -82,15 +82,15 @@
 // it. Reading a pack's own trailing checksums (the CRC32 per object, the pack
 // and idx SHA-1s) is skipped for the reason the header above gives: the
 // content this module hands back is checked against the id it was asked for
-// by `object.parse`'s own SHA-1, which is the stronger and already-existing
+// by `GIT_object.parse`'s own SHA-1, which is the stronger and already-existing
 // guarantee, and re-deriving a second one here would only be insurance on
 // insurance.
 
 import io;
 import fs;
-import repo;
-import sha1;
-import zlib;
+import GIT_repository;
+import GIT_sha1;
+import GIT_zlib;
 
 /// Why an object could not be read out of a `.idx`/`.pack` pair. Payload-free
 /// (docs/errors-decision.md §4): the id, the path, and the offset a caller
@@ -154,8 +154,8 @@ pub str Error.to_str() {
 }
 
 /// A packed object, resolved all the way down to its plain content: the same
-/// two things `object.m31`'s loose reading already has by the time it calls
-/// `object.parse` -- `object.read` reassembles `<kind> <size>\0<content>` from
+/// two things `GIT_object.m31`'s loose reading already has by the time it calls
+/// `GIT_object.parse` -- `GIT_object.read` reassembles `<kind> <size>\0<content>` from
 /// this and hands it to `parse` exactly as it would for a loose object, so the
 /// SHA-1 check, the tree/commit/tag parsing and everything above it are
 /// shared, unchanged, between the two sources.
@@ -198,7 +198,7 @@ type Raw {
 /// pack order -- the `.idx`-less way to read a pack just fetched, which
 /// `read` cannot do because it goes through an index. An `OBJ_REF_DELTA`
 /// whose base is not in the pack (a thin pack) is resolved from `gitdir`.
-/// The trailing checksum is not checked here; `httpfetch.verify_pack` has
+/// The trailing checksum is not checked here; `GIT_http_fetch.verify_pack` has
 /// already done that for anything it wrote.
 pub Result<List<Unpacked>, Error> read_pack(str gitdir, bytes pack) {
     if (pack.size() < 32 || pack.substr(0, 4) != "PACK".to_bytes() || u32be(pack, 4) != 2) {
@@ -243,7 +243,7 @@ pub Result<List<Unpacked>, Error> read_pack(str gitdir, bytes pack) {
         } else if (hdr.kind < 1 || hdr.kind > 4) {
             return Result<List<Unpacked>, Error>.Err(Error.BadPack);
         }
-        zlib.Decoded d = inflate_pack_zlib(pack, p)?;
+        GIT_zlib.Decoded d = inflate_pack_zlib(pack, p)?;
         index_at.set(cur, raws.size());
         raws.push(Raw(hdr.kind, base_off, base_id, d.data));
         cur = p + d.used;
@@ -329,7 +329,7 @@ str object_name(str kind, bytes content) {
     framed.extend(content.size().to_str().to_bytes());
     framed.push(0);
     framed.extend(content);
-    return sha1.hex(framed);
+    return GIT_sha1.hex(framed);
 }
 
 /// Every object named by a `.idx` under `objects/pack/`, sorted and
@@ -386,7 +386,7 @@ type PackFile {
 // have none -- it is simply zero packs.
 List<PackFile> discover(str gitdir) {
     List<PackFile> out = [];
-    str dir = fs.join(fs.join(repo.common(gitdir), "objects"), "pack");
+    str dir = fs.join(fs.join(GIT_repository.common(gitdir), "objects"), "pack");
     if (!fs.is_dir(dir)) {
         return out;
     }
@@ -413,20 +413,20 @@ List<PackFile> discover(str gitdir) {
 // --- the loose fallback, for a delta base a thin pack leaves outside it ------
 
 // `id`'s loose object, read down to its kind and content only -- not through
-// `object.parse`, which this module does not depend on (object.m31 depends on
+// `GIT_object.parse`, which this module does not depend on (GIT_object.m31 depends on
 // this one; the other way would be a cycle). No SHA-1 check and no structural
 // validation: a delta base found this way is about to be fed straight into
-// `apply_delta`, and the RESULT still goes through `object.parse` exactly as
+// `apply_delta`, and the RESULT still goes through `GIT_object.parse` exactly as
 // every other object does, which is where the one check that matters happens.
 Option<Found> loose_raw(str gitdir, str id) {
-    str root = fs.join(repo.common(gitdir), "objects");
+    str root = fs.join(GIT_repository.common(gitdir), "objects");
     str path = fs.join(fs.join(root, id.substr(0, 2)), id.substr(2, 40));
     if (!fs.exists(path)) {
         return Option<Found>.None;
     }
     match (io.read_bytes(path)) {
         case Ok(bytes raw): {
-            match (zlib.decompress(raw)) {
+            match (GIT_zlib.decompress(raw)) {
                 case Ok(bytes plain): {
                     int nul = find(plain, 0, 0);
                     int sp = find(plain, 32, 0);
@@ -437,7 +437,7 @@ Option<Found> loose_raw(str gitdir, str id) {
                     bytes content = plain.substr(nul + 1, plain.size());
                     return Option<Found>.Some(Found(kind, content));
                 }
-                case Err(zlib.Error e): {
+                case Err(GIT_zlib.Error e): {
                     return Option<Found>.None;
                 }
             }
@@ -448,9 +448,9 @@ Option<Found> loose_raw(str gitdir, str id) {
     }
 }
 
-// The index of octet `b` at or after `from`, or -1 -- `object.m31`'s own
+// The index of octet `b` at or after `from`, or -1 -- `GIT_object.m31`'s own
 // private helper, duplicated rather than imported (that module imports this
-// one, not the other way around; see the header on why, and `object.m31`'s
+// one, not the other way around; see the header on why, and `GIT_object.m31`'s
 // own copy of this same helper for the established house pattern of not
 // sharing a four-line scan across modules).
 int find(bytes hay, int b, int from) {
@@ -534,7 +534,7 @@ Result<Found, Error> resolve_offset(str gitdir, List<PackFile> packs, Idx ix, by
         }
         ObjHeader hdr = read_obj_header(pack, cur)?;
         if (hdr.kind == 1 || hdr.kind == 2 || hdr.kind == 3 || hdr.kind == 4) {
-            zlib.Decoded d = inflate_pack_zlib(pack, cur + hdr.header_len)?;
+            GIT_zlib.Decoded d = inflate_pack_zlib(pack, cur + hdr.header_len)?;
             base_kind = kind_name(hdr.kind);
             base_content = d.data;
             break;
@@ -571,7 +571,7 @@ Result<Found, Error> resolve_offset(str gitdir, List<PackFile> packs, Idx ix, by
             if (base_off < 0 || base_off >= cur) {
                 return Result<Found, Error>.Err(Error.BadPack);
             }
-            zlib.Decoded d = inflate_pack_zlib(pack, p)?;
+            GIT_zlib.Decoded d = inflate_pack_zlib(pack, p)?;
             chain.push(d.data);
             cur = base_off;
         } else if (hdr.kind == 7) {
@@ -585,7 +585,7 @@ Result<Found, Error> resolve_offset(str gitdir, List<PackFile> packs, Idx ix, by
                 return Result<Found, Error>.Err(Error.BadPack);
             }
             bytes base_sha = pack.substr(p, p + 20);
-            zlib.Decoded d = inflate_pack_zlib(pack, p + 20)?;
+            GIT_zlib.Decoded d = inflate_pack_zlib(pack, p + 20)?;
             chain.push(d.data);
             bool base_done = false;
             match (ix.offset_of(base_sha)) {
@@ -805,17 +805,17 @@ Result<ObjHeader, Error> read_obj_header(bytes pack, int offset) {
     return Result<ObjHeader, Error>.Ok(ObjHeader(kind, size, i - offset));
 }
 
-// `zlib.decompress_at`, with its `Error` folded into this module's own --
+// `GIT_zlib.decompress_at`, with its `Error` folded into this module's own --
 // every packed object's stream is a full RFC 1950 stream, exactly like a
 // loose object's (the module header says why `decompress_at` and not
 // `inflate_at` is what belongs here).
-Result<zlib.Decoded, Error> inflate_pack_zlib(bytes pack, int start) {
-    match (zlib.decompress_at(pack, start)) {
-        case Ok(zlib.Decoded d): {
-            return Result<zlib.Decoded, Error>.Ok(d);
+Result<GIT_zlib.Decoded, Error> inflate_pack_zlib(bytes pack, int start) {
+    match (GIT_zlib.decompress_at(pack, start)) {
+        case Ok(GIT_zlib.Decoded d): {
+            return Result<GIT_zlib.Decoded, Error>.Ok(d);
         }
-        case Err(zlib.Error e): {
-            return Result<zlib.Decoded, Error>.Err(Error.Zlib);
+        case Err(GIT_zlib.Error e): {
+            return Result<GIT_zlib.Decoded, Error>.Err(Error.Zlib);
         }
     }
 }
@@ -944,7 +944,7 @@ int u64be(bytes b, int at) {
 }
 
 // Lexicographic comparison of the 20 octets at `data[off .. off+20]` against
-// `id20`, negative/zero/positive -- `object.m31`'s `cmp_bytes` over a fixed
+// `id20`, negative/zero/positive -- `GIT_object.m31`'s `cmp_bytes` over a fixed
 // width and without the `bytes.substr` copy a general comparison would need,
 // since this runs once per binary-search step.
 int cmp20(bytes data, int off, bytes id20) {
@@ -959,8 +959,8 @@ int cmp20(bytes data, int off, bytes id20) {
     return 0;
 }
 
-// 40 lowercase hex digits to the 20 octets they spell -- `object.m31`'s and
-// `index.m31`'s own private helper, duplicated for the same reason `find`
+// 40 lowercase hex digits to the 20 octets they spell -- `GIT_object.m31`'s and
+// `GIT_index.m31`'s own private helper, duplicated for the same reason `find`
 // above is: this module does not import either.
 bytes hex_decode(str s) {
     bytes out = [];

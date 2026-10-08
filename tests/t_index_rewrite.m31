@@ -5,7 +5,7 @@
 //
 //   ./t_index_rewrite <gitdir>
 
-import index;
+import GIT_index;
 import io;
 import os;
 
@@ -15,20 +15,20 @@ if (argv.size() < 2) {
     os.exit(2);
 }
 str gd = argv[1];
-index.Index ix = index.Index([]);
-match (index.read(gd)) {
-    case Ok(index.Index v): {
+GIT_index.Index ix = GIT_index.Index([]);
+match (GIT_index.read(gd)) {
+    case Ok(GIT_index.Index v): {
         ix = v;
     }
-    case Err(index.Error e): {
+    case Err(GIT_index.Error e): {
         io.eprint("read: " + e.to_str());
         os.exit(1);
     }
 }
-match (index.write(gd, ix)) {
+match (GIT_index.write(gd, ix)) {
     case Ok: {
     }
-    case Err(index.Error e): {
+    case Err(GIT_index.Error e): {
         io.eprint("write: " + e.to_str());
         os.exit(1);
     }

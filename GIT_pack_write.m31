@@ -1,4 +1,4 @@
-// Writing a packfile -- the half of the pack format `pack.m31` deliberately
+// Writing a packfile -- the half of the pack format `GIT_pack.m31` deliberately
 // left alone ("reading only -- writing one, for `push`, is later, separate
 // work", `docs/design.md`'s "Going remote"). This is that later work, and
 // it is the simplest packfile git accepts, on purpose:
@@ -10,12 +10,12 @@
 // No deltas. `OBJ_OFS_DELTA`/`OBJ_REF_DELTA` are a sender's optimisation,
 // never a requirement: a pack of whole objects is exactly what
 // `git unpack-objects` and `index-pack --strict` are happy to receive, it is
-// what git itself sends when `pack.window=0`, and it means the only thing
+// what git itself sends when `GIT_pack.window=0`, and it means the only thing
 // this module can get wrong is framing, which `test_push.sh` checks against
-// real `index-pack --strict` and against `pack.m31`'s own reader. The zlib
-// stream is `zlib.compress`'s stored-block one -- bigger on the wire than
+// real `index-pack --strict` and against `GIT_pack.m31`'s own reader. The zlib
+// stream is `GIT_zlib.compress`'s stored-block one -- bigger on the wire than
 // git's, never different in meaning; a Huffman encoder can replace it later
-// without this file changing (zlib.m31's own note).
+// without this file changing (GIT_zlib.m31's own note).
 //
 // --- which objects to send ---------------------------------------------------
 //
@@ -28,12 +28,12 @@
 // trees get sent again; that is harmless (git deduplicates on receipt) and
 // it is the trade git itself makes rather than walking the remote's whole
 // history. A `known` id this repository does not have at all (the remote is
-// ahead) is simply not a stopping point -- `httppush.push` refuses that case
+// ahead) is simply not a stopping point -- `GIT_http_push.push` refuses that case
 // before this is ever asked.
 
-import object;
-import sha1;
-import zlib;
+import GIT_object;
+import GIT_sha1;
+import GIT_zlib;
 
 /// Why a pack could not be built or an object set computed. Payload-free
 /// (`docs/errors-decision.md` §4): the id involved is context the caller
@@ -82,7 +82,7 @@ pub int type_number(str kind) {
 /// One entry's header: the type in bits 4-6 of the first byte and the low
 /// four bits of the size below it, then the rest of the size seven bits a
 /// byte, least significant first, every byte but the last with its top bit
-/// set -- `pack.m31`'s own reader, inverted.
+/// set -- `GIT_pack.m31`'s own reader, inverted.
 pub bytes entry_header(int type_num, int size) {
     bytes out = [];
     int rest = size >> 4;
@@ -110,17 +110,17 @@ pub Result<bytes, Error> build(str gitdir, List<str> ids) {
     be32(out, 2);
     be32(out, ids.size());
     for (str id in ids) {
-        match (object.read(gitdir, id)) {
-            case Ok(object.Object o): {
+        match (GIT_object.read(gitdir, id)) {
+            case Ok(GIT_object.Object o): {
                 out.extend(entry_header(type_number(o.kind()), o.raw.size()));
-                out.extend(zlib.compress(o.raw));
+                out.extend(GIT_zlib.compress(o.raw));
             }
-            case Err(object.Error e): {
+            case Err(GIT_object.Error e): {
                 return Result<bytes, Error>.Err(Error.Object);
             }
         }
     }
-    bytes trailer = sha1.sum(out);
+    bytes trailer = GIT_sha1.sum(out);
     out.extend(trailer);
     return Result<bytes, Error>.Ok(out);
 }
@@ -167,10 +167,10 @@ pub Result<List<str>, Error> objects_to_send(str gitdir, List<str> tips, List<st
     while (at < queue.size()) {
         str id = queue[at];
         at = at + 1;
-        match (object.read(gitdir, id)) {
-            case Ok(object.Object o): {
+        match (GIT_object.read(gitdir, id)) {
+            case Ok(GIT_object.Object o): {
                 match (o.body) {
-                    case Commit(object.Commit cm): {
+                    case Commit(GIT_object.Commit cm): {
                         commits.push(id);
                         for (str p in cm.parents) {
                             if (stop.contains(p)) {
@@ -194,7 +194,7 @@ pub Result<List<str>, Error> objects_to_send(str gitdir, List<str> tips, List<st
                     }
                 }
             }
-            case Err(object.Error e): {
+            case Err(GIT_object.Error e): {
                 return Result<List<str>, Error>.Err(Error.Object);
             }
         }
@@ -204,10 +204,10 @@ pub Result<List<str>, Error> objects_to_send(str gitdir, List<str> tips, List<st
     Map<str, bool> have = {};
     List<str> ignored = [];
     for (str b in boundary.keys()) {
-        match (object.read(gitdir, b)) {
-            case Ok(object.Object o): {
+        match (GIT_object.read(gitdir, b)) {
+            case Ok(GIT_object.Object o): {
                 match (o.body) {
-                    case Commit(object.Commit cm): {
+                    case Commit(GIT_object.Commit cm): {
                         tree_objects(gitdir, cm.tree, have, ignored, ignored)?;
                     }
                     case Blob: {
@@ -218,7 +218,7 @@ pub Result<List<str>, Error> objects_to_send(str gitdir, List<str> tips, List<st
                     }
                 }
             }
-            case Err(object.Error e): {
+            case Err(GIT_object.Error e): {
                 return Result<List<str>, Error>.Err(Error.Object);
             }
         }
@@ -226,10 +226,10 @@ pub Result<List<str>, Error> objects_to_send(str gitdir, List<str> tips, List<st
     List<str> trees = [];
     List<str> blobs = [];
     for (str c in commits) {
-        match (object.read(gitdir, c)) {
-            case Ok(object.Object o): {
+        match (GIT_object.read(gitdir, c)) {
+            case Ok(GIT_object.Object o): {
                 match (o.body) {
-                    case Commit(object.Commit cm): {
+                    case Commit(GIT_object.Commit cm): {
                         tree_objects(gitdir, cm.tree, have, trees, blobs)?;
                     }
                     case Blob: {
@@ -240,7 +240,7 @@ pub Result<List<str>, Error> objects_to_send(str gitdir, List<str> tips, List<st
                     }
                 }
             }
-            case Err(object.Error e): {
+            case Err(GIT_object.Error e): {
                 return Result<List<str>, Error>.Err(Error.Object);
             }
         }
@@ -273,13 +273,13 @@ Result<str, Error> peel(str gitdir, str id) {
 Result<str, Error> peel_collecting(str gitdir, str id, List<str> tags) {
     str at = id;
     for (int depth in 0 .. 16) {
-        match (object.read(gitdir, at)) {
-            case Ok(object.Object o): {
+        match (GIT_object.read(gitdir, at)) {
+            case Ok(GIT_object.Object o): {
                 match (o.body) {
                     case Commit: {
                         return Result<str, Error>.Ok(at);
                     }
-                    case Tag(object.Tag t): {
+                    case Tag(GIT_object.Tag t): {
                         tags.push(at);
                         at = t.object;
                     }
@@ -291,7 +291,7 @@ Result<str, Error> peel_collecting(str gitdir, str id, List<str> tags) {
                     }
                 }
             }
-            case Err(object.Error e): {
+            case Err(GIT_object.Error e): {
                 return Result<str, Error>.Err(Error.Object);
             }
         }
@@ -313,10 +313,10 @@ void reachable_commits(str gitdir, str start, Map<str, bool> out) {
     while (at < queue.size()) {
         str id = queue[at];
         at = at + 1;
-        match (object.read(gitdir, id)) {
-            case Ok(object.Object o): {
+        match (GIT_object.read(gitdir, id)) {
+            case Ok(GIT_object.Object o): {
                 match (o.body) {
-                    case Commit(object.Commit cm): {
+                    case Commit(GIT_object.Commit cm): {
                         for (str p in cm.parents) {
                             if (!out.contains(p)) {
                                 out.set(p, true);
@@ -347,11 +347,11 @@ Result<bool, Error> tree_objects(str gitdir, str tree_id, Map<str, bool> have, L
     }
     have.set(tree_id, true);
     trees.push(tree_id);
-    match (object.read(gitdir, tree_id)) {
-        case Ok(object.Object o): {
+    match (GIT_object.read(gitdir, tree_id)) {
+        case Ok(GIT_object.Object o): {
             match (o.body) {
-                case Tree(List<object.Entry> es): {
-                    for (object.Entry e in es) {
+                case Tree(List<GIT_object.Entry> es): {
+                    for (GIT_object.Entry e in es) {
                         if (e.is_commit()) {
                             // A submodule: a commit in another repository,
                             // never an object of this one.
@@ -377,7 +377,7 @@ Result<bool, Error> tree_objects(str gitdir, str tree_id, Map<str, bool> have, L
                 }
             }
         }
-        case Err(object.Error e): {
+        case Err(GIT_object.Error e): {
             return Result<bool, Error>.Err(Error.Object);
         }
     }

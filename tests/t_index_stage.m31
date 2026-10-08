@@ -1,12 +1,12 @@
 // Stages one new file -- writes its blob, builds an entry with
-// `index.from_stat`, appends it to the index, and writes the index back --
+// `GIT_index.from_stat`, appends it to the index, and writes the index back --
 // so `test_write.sh` can confirm real `git status`/`ls-files --stage` sees
 // exactly what was staged.
 //
 //   ./t_index_stage <gitdir> <worktree> <relative-path>
 
-import index;
-import object;
+import GIT_index;
+import GIT_object;
 import fs;
 import io;
 import os;
@@ -31,11 +31,11 @@ match (io.read_bytes(full)) {
     }
 }
 str blob_id = "";
-match (object.write_blob(gd, content)) {
+match (GIT_object.write_blob(gd, content)) {
     case Ok(str id): {
         blob_id = id;
     }
-    case Err(object.Error e): {
+    case Err(GIT_object.Error e): {
         io.eprint("write_blob: " + e.to_str());
         os.exit(1);
     }
@@ -50,13 +50,13 @@ match (fs.stat(full)) {
         os.exit(1);
     }
 }
-index.Entry entry = index.from_stat(rel.to_bytes(), st, fs.is_link(full), blob_id);
-index.Index ix = index.Index([]);
-match (index.read(gd)) {
-    case Ok(index.Index v): {
+GIT_index.Entry entry = GIT_index.from_stat(rel.to_bytes(), st, fs.is_link(full), blob_id);
+GIT_index.Index ix = GIT_index.Index([]);
+match (GIT_index.read(gd)) {
+    case Ok(GIT_index.Index v): {
         ix = v;
     }
-    case Err(index.Error e): {
+    case Err(GIT_index.Error e): {
         match (e) {
             case NotFound: {
             }
@@ -88,11 +88,11 @@ match (index.read(gd)) {
     }
 }
 ix.entries.push(entry);
-match (index.write(gd, ix)) {
+match (GIT_index.write(gd, ix)) {
     case Ok: {
         print("staged " + blob_id);
     }
-    case Err(index.Error e): {
+    case Err(GIT_index.Error e): {
         io.eprint("write: " + e.to_str());
         os.exit(1);
     }

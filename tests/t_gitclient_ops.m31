@@ -1,4 +1,4 @@
-// Drives `gitclient.State`'s staging, unstaging, committing and diffing
+// Drives `GIT_client.State`'s staging, unstaging, committing and diffing
 // directly -- no terminal, no `TUI_app.Loop` -- against a real, disposable
 // fixture, so `test_gitui.sh` can check each action's on-disk effect against
 // real git the same way `t_index_stage.m31` and `t_write_refs.m31` already
@@ -23,7 +23,7 @@
 // `diff` moves the outline's cursor onto the named row (`select_id`, the
 // same lookup `State.reload()` itself uses to keep the cursor on a rebuild)
 // and calls `show_diff_current()`, then prints the result the same way
-// `apps/git/t_hunks.m31` prints `hunks.hunks`'s own output -- one `@@ ...`
+// `apps/git/t_hunks.m31` prints `GIT_hunks.hunks`'s own output -- one `@@ ...`
 // header line per hunk, one marker-prefixed line per body row -- so a shell
 // test can diff this against real `git diff`/`git diff --cached`'s body
 // exactly as `test_hunks.sh` already does against `diff -u`'s. `Binary files
@@ -49,7 +49,7 @@
 // editor script before running this, and checks `State.message` and the
 // repository afterward the same way `commit` above is checked.
 
-import gitclient;
+import GIT_client;
 import io;
 import os;
 import tui.TUI_diff_view;
@@ -63,7 +63,7 @@ if (argv.size() < 4) {
 str gd = argv[1];
 str wt = argv[2];
 str op = argv[3];
-gitclient.State state = gitclient.State.open(gd, wt);
+GIT_client.State state = GIT_client.State.open(gd, wt);
 state.refresh();
 if (op == "stage") {
     if (argv.size() < 5) {

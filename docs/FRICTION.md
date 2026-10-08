@@ -14,7 +14,7 @@ It is ordered by how much it cost, not by how interesting it is.
 > binds none of a variant's payload (§3 — *not* a `default`; exhaustiveness
 > is untouched), a range `for` that makes §8's non-terminating `indented`
 > impossible to write, and a formatter that keeps the parentheses the author
-> wrote, so `sha1.m31`'s rounds are back in the shape FIPS 180-4 gives them
+> wrote, so `GIT_sha1.m31`'s rounds are back in the shape FIPS 180-4 gives them
 > (§10). A character literal, which this report did not ask for and
 > `apps/markdown`'s did, is in too. Everything else below still stands.
 > `docs/reference.md` §1.5, §5.5, §5.6 and §6.1 have the rules.
@@ -54,7 +54,7 @@ and every loop that consumes symbols checks `b.over` once per symbol. It
 works, it is fast, and it is strictly worse code: the failure is now a
 condition the caller must remember to test rather than one the type system
 enforces, and a truncated stream decodes one junk symbol before anyone
-notices. Nine places in `zlib.m31` check `over`, and a tenth that forgot to
+notices. Nine places in `GIT_zlib.m31` check `over`, and a tenth that forgot to
 would silently accept a truncated stream.
 
 **What would fix it:** a `Result` (or any enum) whose payloads are all scalars
@@ -97,7 +97,7 @@ The diagnostic is excellent —
 
 ```
 `?` needs the same error type on both sides: this fails with io.Error,
-and the function returns object.Error
+and the function returns GIT_object.Error
 ```
 
 — and it is right, and §6.3 argues the case. But a git client is four layers
@@ -107,7 +107,7 @@ ten-line `match` that does nothing but rename the failure:
 ```c
 // what I wanted
 bytes stream = io.read_bytes(path)?;          // if io.Error -> Error.Io
-bytes plain  = zlib.decompress(stream)?;      // if zlib.Error -> Error.Zlib
+bytes plain  = GIT_zlib.decompress(stream)?;      // if GIT_zlib.Error -> Error.Zlib
 
 // what I wrote
 bytes stream = [];
@@ -120,9 +120,9 @@ match (io.read_bytes(path)) {
         return Result<Object, Error>.Err(Error.Io(id, e));
     }
 }
-match (zlib.decompress(stream)) {
+match (GIT_zlib.decompress(stream)) {
     case Ok(bytes plain): { return parse(id, plain); }
-    case Err(zlib.Error e): {
+    case Err(GIT_zlib.Error e): {
         return Result<Object, Error>.Err(Error.Zlib(id, e));
     }
 }
@@ -136,7 +136,7 @@ is a variable that briefly holds a lie. It is also the only way to get a
 value *out* of a `match`, since an arm is a block and not an expression.
 
 Counted over the same six files: eleven `case Err(io.Error …)` arms, one for
-`zlib.Error`, and eleven more for this program's own error types, none of
+`GIT_zlib.Error`, and eleven more for this program's own error types, none of
 which does anything but rename a failure and return. `Result<…>.Err(` is
 constructed 65 times.
 
@@ -149,19 +149,19 @@ even `int x = match (e) { ... }` would collapse most of these.
 
 ## 3. There is no `default` in `match`, and no way to ask an enum which variant it is
 
-`refs.rev_parse` wanted to say: try to resolve a short object name; if it is
+`GIT_refs.rev_parse` wanted to say: try to resolve a short object name; if it is
 *ambiguous* report that, and otherwise fall through to trying it as a ref.
 That is one question about one error value. Here is what it took before I gave
 up and redesigned:
 
 ```c
 // what I wrote first -- and deleted
-int ambiguity(object.Error e) {
+int ambiguity(GIT_object.Error e) {
     match (e) {
         case Ambiguous(str prefix, int n): { return n; }
         case NotFound(str a):              { return 0; }
         case Io(str a, io.Error b):        { return 0; }
-        case Zlib(str a, zlib.Error b):    { return 0; }
+        case Zlib(str a, GIT_zlib.Error b):    { return 0; }
         case NoHeader(str a):              { return 0; }
         case UnknownType(str a, str b):    { return 0; }
         case SizeMismatch(str a, int b, int c): { return 0; }
@@ -175,19 +175,19 @@ int ambiguity(object.Error e) {
 
 Eleven arms, ten of which are the same, every payload spelled out with its
 full type so it can be thrown away — and the whole thing breaks the day
-`object.Error` grows a variant, which is exactly the property §5.6 wants and
+`GIT_object.Error` grows a variant, which is exactly the property §5.6 wants and
 exactly not what this caller needs.
 
 The fix was to change the *other* module's API so the question is never asked:
-`object.matching(gitdir, prefix)` returns a `List<str>`, and the caller counts
+`GIT_object.matching(gitdir, prefix)` returns a `List<str>`, and the caller counts
 it. That is a better API, and I would not have found it under less pressure —
-so half a point to the language. But `refs.head` needed the same trick a
+so half a point to the language. But `GIT_refs.head` needed the same trick a
 second time (ask `exists()` before `resolve()`, rather than recognise
 `NotFound` afterwards), and by then it was a workaround and not a discovery.
 
 **A `default` arm is additive** (§5.6 says so itself). Twenty of the binding
 names in this program are literally spelled `ignored`, and every one of them
-also has to spell out a payload type — `case Tree(List<object.Entry> ignored)`
+also has to spell out a payload type — `case Tree(List<GIT_object.Entry> ignored)`
 — to discard it. A `case Tree(_):`, or a bare `case Tree:` allowed for a
 variant whose payload is unused, would delete all twenty.
 
@@ -372,13 +372,13 @@ sort of thing every program that reads a binary format needs.
 
 | wanted | what I wrote | where |
 |---|---|---|
-| `b.index_of(needle, from)` — a scan from an offset | `int find(bytes hay, int b, int from)`, a loop | `object.m31` |
-| a single-**octet** search — `index_of` takes a `bytes` needle, so looking for a NUL means allocating `[0]` | the same `find` | `object.m31` |
-| `b.rindex_of(needle)` | `int rfind(bytes hay, int b)`, a loop | `object.m31` |
-| `str.cmp` / `bytes.cmp` | `int before(str a, str b)` | `refs.m31` (§4 above) |
-| zero-padded integer formatting | `str two(int v)`, `str hex8(int v)`, `str one(int v)` | `git.m31`, `zlib.m31` |
-| parse a decimal or octal run of **octets** | `int decimal(bytes)`, `int octal(bytes)` — `str.parse_int` exists but takes a `str`, so using it means building one first, and it accepts `+5` and surrounding space, which these formats do not | `object.m31` |
-| an ordered `Map`, or a `Map` that iterates in insertion order | a parallel `List<str> order` beside the `Map` | `refs.m31` |
+| `b.index_of(needle, from)` — a scan from an offset | `int find(bytes hay, int b, int from)`, a loop | `GIT_object.m31` |
+| a single-**octet** search — `index_of` takes a `bytes` needle, so looking for a NUL means allocating `[0]` | the same `find` | `GIT_object.m31` |
+| `b.rindex_of(needle)` | `int rfind(bytes hay, int b)`, a loop | `GIT_object.m31` |
+| `str.cmp` / `bytes.cmp` | `int before(str a, str b)` | `GIT_refs.m31` (§4 above) |
+| zero-padded integer formatting | `str two(int v)`, `str hex8(int v)`, `str one(int v)` | `git.m31`, `GIT_zlib.m31` |
+| parse a decimal or octal run of **octets** | `int decimal(bytes)`, `int octal(bytes)` — `str.parse_int` exists but takes a `str`, so using it means building one first, and it accepts `+5` and surrounding space, which these formats do not | `GIT_object.m31` |
+| an ordered `Map`, or a `Map` that iterates in insertion order | a parallel `List<str> order` beside the `Map` | `GIT_refs.m31` |
 | a `bytes` literal | `bytes nl() { return "\n".to_bytes(); }` — and it still allocates on every call, because §3.10 says a literal of a mutable type must | `t_object.m31` |
 
 The `bytes`-literal one deserves its own note, because the reasoning in §3.10
@@ -438,8 +438,8 @@ Two types in this program exist only because a function returns one thing,
 and a third type carries a field for the same reason:
 
 ```c
-type Tables  { Huff lit; Huff dist; }        // zlib.m31: a dynamic block's two codes
-type Headers { List<bytes> lines; bytes message; }   // object.m31: a commit's two halves
+type Tables  { Huff lit; Huff dist; }        // GIT_zlib.m31: a dynamic block's two codes
+type Headers { List<bytes> lines; bytes message; }   // GIT_object.m31: a commit's two halves
 ```
 
 and `Huff` carries a field `int left` that is not part of a Huffman code at

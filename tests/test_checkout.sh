@@ -1,4 +1,4 @@
-# `checkout.m31` -- branch listing, working-tree checkout, branch creation --
+# `GIT_checkout.m31` -- branch listing, working-tree checkout, branch creation --
 # driven through `t_checkout` and checked against real git as the oracle.
 # Shares `test.sh`'s shell, `$WORK`, `$LANGC`, `build`, `note`/`bad` and the
 # pass/fail counters, the way `test_write.sh` does.

@@ -1,6 +1,6 @@
 // The interactive client's own state and logic, split out of `gitui.m31` so
 // it is importable and unit-testable the way `t_status.m31`/`t_index_stage.m31`
-// test `status.m31`/`index.m31` directly -- a top-level statement anywhere in
+// test `GIT_status.m31`/`GIT_index.m31` directly -- a top-level statement anywhere in
 // an imported file is refused (`docs/reference.md` §2), so anything this
 // program needs a test harness to call has to live here rather than in the
 // `.m31` that actually runs the terminal loop.
@@ -8,14 +8,14 @@
 // `gitui.m31` is the thin driver: parse a path off the command line, build a
 // `State`, and hand it to `TUI_app.Loop` exactly as `apps/tui/browse.m31`
 // hands its own `State` to the same loop. Everything a test needs --
-// building the outline from a `status.Status`, staging or unstaging one
+// building the outline from a `GIT_status.Status`, staging or unstaging one
 // path, stripping a commit message down to what git would actually commit --
 // is a method or a free function here, callable with no terminal in sight.
 //
 // See `docs/design.md`'s "Starting the client" for the scope this
 // implements: whole-file staging, a commit via an externally edited message
 // file, and the outline/jump-list/which-key/footer wiring the locked design
-// names, plus hunk-level staging in the diff view (`patch.m31`, the
+// names, plus hunk-level staging in the diff view (`GIT_patch.m31`, the
 // `git add -p`/`git reset -p` half that section named as the follow-up).
 // Push/pull, checkout and rebase are each a named, deliberate gap there,
 // not an oversight here.
@@ -70,21 +70,21 @@
 // before the launch attempt, same as before), and the operator is told to
 // edit it externally and press `f`.
 
-import checkout;
+import GIT_checkout;
 import date;
 import fs;
-import gitconfig;
-import gitlog;
-import httppush;
-import hunks;
-import patch;
-import index;
+import GIT_config;
+import GIT_log;
+import GIT_http_push;
+import GIT_hunks;
+import GIT_patch;
+import GIT_index;
 import io;
-import object;
+import GIT_object;
 import os;
-import pull;
-import refs;
-import status;
+import GIT_pull;
+import GIT_refs;
+import GIT_status;
 import term;
 import text;
 import tui.TUI_buffer;
@@ -99,7 +99,7 @@ import tui.TUI_widget;
 import tui.TUI_style;
 import tui.TUI_app;
 
-/// One row of a change list (`status.Status.staged`/`.unstaged`, or
+/// One row of a change list (`GIT_status.Status.staged`/`.unstaged`, or
 /// `.untracked`), ready to sort and to show: `path` is what a human reads,
 /// `raw` is the exact bytes staging/unstaging needs, and `mark` is the
 /// status letter (`'A'`, `'M'`, `'D'`) or `0` for an untracked path, which
@@ -118,7 +118,7 @@ int PathRow.cmp(PathRow other) {
 /// short id and first message line -- read once, in `State.refresh`, so
 /// `build_outline` stays free of I/O (its own header's promise).
 pub type BranchRow {
-    pub checkout.Branch branch;
+    pub GIT_checkout.Branch branch;
     pub str subject;
 }
 
@@ -127,15 +127,15 @@ pub type BranchRow {
 /// commit-file branch reads to build the diff, `None` on whichever side the
 /// path did not exist (an add has no `old_id`, a delete has no `new_id`).
 /// `insertions`/`deletions` are exact line counts from the same
-/// `hunks.hunks` call `show_diff_current` itself would make -- computed in
+/// `GIT_hunks.hunks` call `show_diff_current` itself would make -- computed in
 /// `commit_changes`, once per commit, the first time it is unfolded, so the
 /// stat the outline shows next to a file never disagrees with the diff
-/// `Enter` opens on it. `binary` is `hunks.hunks` reporting `Binary` for this pair;
+/// `Enter` opens on it. `binary` is `GIT_hunks.hunks` reporting `Binary` for this pair;
 /// `insertions`/`deletions` are both 0 then, the same "nothing to count"
 /// `open_diff`'s own `diff_binary` path already means elsewhere.
 pub type CommitFileDiff {
     pub bytes path;
-    pub status.Change kind;
+    pub GIT_status.Change kind;
     pub Option<str> old_id;
     pub Option<str> new_id;
     pub bool binary;
@@ -143,7 +143,7 @@ pub type CommitFileDiff {
     pub int deletions;
 }
 
-// `str` has no ordering operator (`refs.m31`'s own `before`, the same
+// `str` has no ordering operator (`GIT_refs.m31`'s own `before`, the same
 // reason, written out again here because a type with a `str` field has to
 // supply its own `cmp` and there is nothing to call).
 int str_cmp(str a, str b) {
@@ -190,11 +190,11 @@ int find_byte(bytes hay, int b, int from) {
     return -1;
 }
 
-/// `status.Change` to the same character `mark_str` already turns into a
-/// letter -- `rows_from_deltas`'s own `status.Change` -> `int` mapping,
+/// `GIT_status.Change` to the same character `mark_str` already turns into a
+/// letter -- `rows_from_deltas`'s own `GIT_status.Change` -> `int` mapping,
 /// pulled out so `commit_node`'s file rows can share it instead of
 /// repeating the match.
-int change_mark(status.Change k) {
+int change_mark(GIT_status.Change k) {
     match (k) {
         case Added: {
             return 'A';
@@ -219,10 +219,10 @@ str mark_str(int m) {
 }
 
 /// `deltas`, converted to sorted `PathRow`s -- one status letter per path,
-/// `status.Change`'s own three variants.
-pub List<PathRow> rows_from_deltas(List<status.Delta> deltas) {
+/// `GIT_status.Change`'s own three variants.
+pub List<PathRow> rows_from_deltas(List<GIT_status.Delta> deltas) {
     List<PathRow> out = [];
-    for (status.Delta d in deltas) {
+    for (GIT_status.Delta d in deltas) {
         str p = d.path.utf8().or("<non-utf8 path>");
         out.push(PathRow(p, d.path, change_mark(d.kind)));
     }
@@ -306,7 +306,7 @@ const int COMMIT_BODY_WRAP_COLS = 72;
 /// scroll per press -- a whole word or two at a time, not one column, so a
 /// long line clears in a handful of presses.
 const int SCROLL_H_STEP = 4;
-/// How many commits one `gitlog.walk` fetches, and by how many the "load
+/// How many commits one `GIT_log.walk` fetches, and by how many the "load
 /// more" row at the bottom of the Commits section grows that each time it
 /// is activated. A `log` at least this long may have more behind it, which
 /// is when `build_outline` appends that row (`LOAD_MORE_ID`).
@@ -321,8 +321,8 @@ const str LOAD_MORE_ID = "commits:more";
 bytes commit_blob(str gitdir, Option<str> id) {
     match (id) {
         case Some(str oid): {
-            match (object.read(gitdir, oid)) {
-                case Ok(object.Object o): {
+            match (GIT_object.read(gitdir, oid)) {
+                case Ok(GIT_object.Object o): {
                     return o.raw;
                 }
                 case Err: {
@@ -344,31 +344,31 @@ bytes commit_blob(str gitdir, Option<str> id) {
 /// client is for stepping through history, not auditing a merge's conflict
 /// resolution.
 ///
-/// Two trees flattened to `path -> blob id` (`object.flatten_tree`) and
-/// compared by path, the exact three-way split `status.status` already
+/// Two trees flattened to `path -> blob id` (`GIT_object.flatten_tree`) and
+/// compared by path, the exact three-way split `GIT_status.status` already
 /// makes between the index and HEAD's tree (added/modified/deleted) --
 /// unchanged paths (`old_id == new_id`) are left out entirely, the same way
-/// `status.status` only ever reports what actually differs.
-Result<List<CommitFileDiff>, object.Error> commit_changes(str gitdir, object.Commit c) {
-    Map<str, str> new_tree = object.flatten_tree(gitdir, c.tree)?;
+/// `GIT_status.status` only ever reports what actually differs.
+Result<List<CommitFileDiff>, GIT_object.Error> commit_changes(str gitdir, GIT_object.Commit c) {
+    Map<str, str> new_tree = GIT_object.flatten_tree(gitdir, c.tree)?;
     Map<str, str> old_tree = {};
     if (c.parents.size() > 0) {
-        match (object.read(gitdir, c.parents[0])) {
-            case Ok(object.Object o): {
+        match (GIT_object.read(gitdir, c.parents[0])) {
+            case Ok(GIT_object.Object o): {
                 match (o.body) {
-                    case Commit(object.Commit pc): {
-                        old_tree = object.flatten_tree(gitdir, pc.tree)?;
+                    case Commit(GIT_object.Commit pc): {
+                        old_tree = GIT_object.flatten_tree(gitdir, pc.tree)?;
                     }
                     case Blob: {
                     }
-                    case Tree(List<object.Entry> ignored): {
+                    case Tree(List<GIT_object.Entry> ignored): {
                     }
                     case Tag: {
                     }
                 }
             }
-            case Err(object.Error e): {
-                return Result<List<CommitFileDiff>, object.Error>.Err(e);
+            case Err(GIT_object.Error e): {
+                return Result<List<CommitFileDiff>, GIT_object.Error>.Err(e);
             }
         }
     }
@@ -386,7 +386,7 @@ Result<List<CommitFileDiff>, object.Error> commit_changes(str gitdir, object.Com
     for (str p in paths) {
         Option<str> oid = old_tree.get(p);
         Option<str> nid = new_tree.get(p);
-        status.Change kind = status.Change.Modified;
+        GIT_status.Change kind = GIT_status.Change.Modified;
         bool skip = false;
         match (oid) {
             case Some(str o): {
@@ -397,12 +397,12 @@ Result<List<CommitFileDiff>, object.Error> commit_changes(str gitdir, object.Com
                         }
                     }
                     case None: {
-                        kind = status.Change.Deleted;
+                        kind = GIT_status.Change.Deleted;
                     }
                 }
             }
             case None: {
-                kind = status.Change.Added;
+                kind = GIT_status.Change.Added;
             }
         }
         if (skip) {
@@ -413,7 +413,7 @@ Result<List<CommitFileDiff>, object.Error> commit_changes(str gitdir, object.Com
         bool binary = false;
         int insertions = 0;
         int deletions = 0;
-        match (hunks.hunks(old_bytes, new_bytes)) {
+        match (GIT_hunks.hunks(old_bytes, new_bytes)) {
             case Binary: {
                 binary = true;
             }
@@ -436,7 +436,7 @@ Result<List<CommitFileDiff>, object.Error> commit_changes(str gitdir, object.Com
         }
         out.push(CommitFileDiff(p.to_bytes(), kind, oid, nid, binary, insertions, deletions));
     }
-    return Result<List<CommitFileDiff>, object.Error>.Ok(out);
+    return Result<List<CommitFileDiff>, GIT_object.Error>.Ok(out);
 }
 
 /// The outline's commit section: one collapsible node per commit, its short
@@ -462,7 +462,7 @@ Result<List<CommitFileDiff>, object.Error> commit_changes(str gitdir, object.Com
 /// and then the files are what they asked for: `Enter` on a commit shows its
 /// files at once, `Enter` on a file shows its diff. A fold recorded in
 /// `collapsed` still wins, as everywhere else.
-List<TUI_outline.Node> commit_node(gitlog.Entry en, List<CommitFileDiff> changes, Map<str, bool> collapsed, Map<str, CommitFileDiff> out_file_diffs) {
+List<TUI_outline.Node> commit_node(GIT_log.Entry en, List<CommitFileDiff> changes, Map<str, bool> collapsed, Map<str, CommitFileDiff> out_file_diffs) {
     str id = "commit:" + en.id;
     str label = en.id.substr(0, 7) + "  " + first_line(en.commit.message);
     List<TUI_outline.Node> body = [];
@@ -519,7 +519,7 @@ List<TUI_outline.Node> commit_node(gitlog.Entry en, List<CommitFileDiff> changes
 /// cache and rebuilds (`State.toggle_current`). The computing happens
 /// elsewhere, this only ever renders what it is handed, which is what keeps
 /// this function itself free of I/O (this doc comment's own first line).
-pub TUI_outline.Outline build_outline(status.Status st, List<gitlog.Entry> log, Map<str, List<CommitFileDiff>> changes_by_commit, Map<str, bool> collapsed, Map<str, bytes> out_paths, Map<str, CommitFileDiff> out_file_diffs, List<BranchRow> branches) {
+pub TUI_outline.Outline build_outline(GIT_status.Status st, List<GIT_log.Entry> log, Map<str, List<CommitFileDiff>> changes_by_commit, Map<str, bool> collapsed, Map<str, bytes> out_paths, Map<str, CommitFileDiff> out_file_diffs, List<BranchRow> branches) {
     out_paths.clear();
     out_file_diffs.clear();
     List<TUI_outline.Node> roots = [];
@@ -545,7 +545,7 @@ pub TUI_outline.Outline build_outline(status.Status st, List<gitlog.Entry> log, 
     }
     roots.push(TUI_outline.Node.section("staged", "Staged changes (" + staged_children.size().to_str() + ")", staged_children, expanded: expanded_for(collapsed, "staged", true)));
     List<TUI_outline.Node> commit_children = [];
-    for (gitlog.Entry en in log) {
+    for (GIT_log.Entry en in log) {
         List<CommitFileDiff> changes = changes_by_commit.get(en.id).or([]);
         for (TUI_outline.Node n in commit_node(en, changes, collapsed, out_file_diffs)) {
             commit_children.push(n);
@@ -604,8 +604,8 @@ pub str commit_template() {
 
 // --- building a tree from the index's flat, sorted paths --------------------
 
-// One entry on its way into a tree, carrying only what `object.write_tree`
-// needs plus the bytes to group by -- not a full `index.Entry`, so the
+// One entry on its way into a tree, carrying only what `GIT_object.write_tree`
+// needs plus the bytes to group by -- not a full `GIT_index.Entry`, so the
 // recursion below never has to reconstruct one.
 type Leaf {
     int mode;
@@ -613,30 +613,30 @@ type Leaf {
     bytes path;
 }
 
-/// The tree `entries` describes, written recursively: `object.write_tree`
+/// The tree `entries` describes, written recursively: `GIT_object.write_tree`
 /// already sorts one directory level and hashes it, so this only has to
 /// group a flat list of paths into the directories git's tree format
 /// actually nests, bottom-up. Grouped by raw `bytes`, not `str`, because
-/// `index.Entry.path` need not be UTF-8 (`index.m31`'s own module header)
-/// and dropping a non-UTF-8 path here -- the way `status.m31` drops one from
+/// `GIT_index.Entry.path` need not be UTF-8 (`GIT_index.m31`'s own module header)
+/// and dropping a non-UTF-8 path here -- the way `GIT_status.m31` drops one from
 /// a *display* -- would silently leave a real, currently-staged file out of
 /// the commit, which is a correctness bug and not a display gap.
-pub Result<str, object.Error> build_tree(str gitdir, List<index.Entry> entries) {
+pub Result<str, GIT_object.Error> build_tree(str gitdir, List<GIT_index.Entry> entries) {
     List<Leaf> leaves = [];
-    for (index.Entry e in entries) {
+    for (GIT_index.Entry e in entries) {
         leaves.push(Leaf(e.mode, e.id, e.path));
     }
     return build_tree_of(gitdir, leaves);
 }
 
-Result<str, object.Error> build_tree_of(str gitdir, List<Leaf> leaves) {
-    List<object.Entry> out = [];
+Result<str, GIT_object.Error> build_tree_of(str gitdir, List<Leaf> leaves) {
+    List<GIT_object.Entry> out = [];
     List<bytes> dirnames = [];
     List<List<Leaf>> groups = [];
     for (Leaf l in leaves) {
         int slash = find_byte(l.path, '/', 0);
         if (slash < 0) {
-            out.push(object.Entry(l.mode, l.path, l.id));
+            out.push(GIT_object.Entry(l.mode, l.path, l.id));
             continue;
         }
         bytes dir = l.path.substr(0, slash);
@@ -653,10 +653,10 @@ Result<str, object.Error> build_tree_of(str gitdir, List<Leaf> leaves) {
     int i = 0;
     while (i < dirnames.size()) {
         str sub_id = build_tree_of(gitdir, groups[i])?;
-        out.push(object.Entry(0o40000, dirnames[i], sub_id));
+        out.push(GIT_object.Entry(0o40000, dirnames[i], sub_id));
         i = i + 1;
     }
-    return object.write_tree(gitdir, out);
+    return GIT_object.write_tree(gitdir, out);
 }
 
 int find_dir(List<bytes> dirnames, bytes dir) {
@@ -673,11 +673,11 @@ int find_dir(List<bytes> dirnames, bytes dir) {
 // --- finding one path in HEAD's tree, for unstaging --------------------------
 
 /// HEAD's tree, or `None` for an unborn branch or a detached HEAD this
-/// cannot read -- `status.m31`'s own `head_tree`, minus the `Status`-shaped
+/// cannot read -- `GIT_status.m31`'s own `head_tree`, minus the `Status`-shaped
 /// error, since `unstage_path` only needs to know whether there is one.
 pub Option<str> head_tree_id(str gitdir) {
-    match (refs.head(gitdir)) {
-        case Ok(refs.Head h): {
+    match (GIT_refs.head(gitdir)) {
+        case Ok(GIT_refs.Head h): {
             match (h) {
                 case Unborn(str name): {
                     return Option<str>.None;
@@ -690,17 +690,17 @@ pub Option<str> head_tree_id(str gitdir) {
                 }
             }
         }
-        case Err(refs.Error e): {
+        case Err(GIT_refs.Error e): {
             return Option<str>.None;
         }
     }
 }
 
 Option<str> commit_tree_id(str gitdir, str id) {
-    match (object.read(gitdir, id)) {
-        case Ok(object.Object o): {
+    match (GIT_object.read(gitdir, id)) {
+        case Ok(GIT_object.Object o): {
             match (o.body) {
-                case Commit(object.Commit c): {
+                case Commit(GIT_object.Commit c): {
                     return Option<str>.Some(c.tree);
                 }
                 case Blob: {
@@ -724,7 +724,7 @@ Option<str> commit_tree_id(str gitdir, str id) {
 /// `None` for a path this tree does not have, at all or at that type -- a
 /// directory where the caller asked for a blob is the same "not there" as a
 /// missing name, since either way there is no blob to restore.
-pub Option<object.Entry> find_in_tree(str gitdir, str tree_id, bytes path) {
+pub Option<GIT_object.Entry> find_in_tree(str gitdir, str tree_id, bytes path) {
     int slash = find_byte(path, '/', 0);
     bytes seg = path;
     bytes rest = [];
@@ -734,36 +734,36 @@ pub Option<object.Entry> find_in_tree(str gitdir, str tree_id, bytes path) {
         rest = path.substr(slash + 1, path.size());
         has_rest = true;
     }
-    match (object.read(gitdir, tree_id)) {
-        case Ok(object.Object o): {
+    match (GIT_object.read(gitdir, tree_id)) {
+        case Ok(GIT_object.Object o): {
             match (o.body) {
-                case Tree(List<object.Entry> es): {
-                    for (object.Entry e in es) {
+                case Tree(List<GIT_object.Entry> es): {
+                    for (GIT_object.Entry e in es) {
                         if (bytes_eq(e.name, seg)) {
                             if (has_rest) {
                                 if (e.is_tree()) {
                                     return find_in_tree(gitdir, e.id, rest);
                                 }
-                                return Option<object.Entry>.None;
+                                return Option<GIT_object.Entry>.None;
                             }
-                            return Option<object.Entry>.Some(e);
+                            return Option<GIT_object.Entry>.Some(e);
                         }
                     }
-                    return Option<object.Entry>.None;
+                    return Option<GIT_object.Entry>.None;
                 }
                 case Blob: {
-                    return Option<object.Entry>.None;
+                    return Option<GIT_object.Entry>.None;
                 }
                 case Commit: {
-                    return Option<object.Entry>.None;
+                    return Option<GIT_object.Entry>.None;
                 }
                 case Tag: {
-                    return Option<object.Entry>.None;
+                    return Option<GIT_object.Entry>.None;
                 }
             }
         }
         case Err: {
-            return Option<object.Entry>.None;
+            return Option<GIT_object.Entry>.None;
         }
     }
 }
@@ -827,7 +827,7 @@ pub type State {
     /// primary document" layout, not a second panel competing with the
     /// outline for space.
     pub bool diff_open = false;
-    /// Set instead of populating `diff_view`, when `hunks.hunks` reported
+    /// Set instead of populating `diff_view`, when `GIT_hunks.hunks` reported
     /// `Binary` for the pair being compared -- matching git's own "Binary
     /// files differ" rather than trying to render binary content as text.
     pub bool diff_binary = false;
@@ -857,12 +857,12 @@ pub type State {
     /// no tree read at all -- `reload` rebuilds the outline from this map as
     /// it stands, which is what keeps a 200-commit log cheap to refresh.
     Map<str, List<CommitFileDiff>> commit_changes_cache = {};
-    /// How many commits `refresh` asks `gitlog.walk` for -- LOG_PAGE at
+    /// How many commits `refresh` asks `GIT_log.walk` for -- LOG_PAGE at
     /// first, grown by another LOG_PAGE each time the "load more" row at
     /// the bottom of the Commits section is activated.
     int log_limit = LOG_PAGE;
-    status.Status last_status = status.Status([], [], []);
-    List<gitlog.Entry> log = [];
+    GIT_status.Status last_status = GIT_status.Status([], [], []);
+    List<GIT_log.Entry> log = [];
 }
 
 /// A fresh client over the repository whose git directory is `gitdir` and
@@ -876,23 +876,23 @@ pub static State State.open(str gitdir, str worktree) {
     return s;
 }
 
-/// Re-read the repository: `status.status` for the three change lists,
-/// `gitlog.walk` for the commit history, and HEAD for the branch label the
-/// status line shows. An unborn branch's `gitlog.walk` failure is not an
+/// Re-read the repository: `GIT_status.status` for the three change lists,
+/// `GIT_log.walk` for the commit history, and HEAD for the branch label the
+/// status line shows. An unborn branch's `GIT_log.walk` failure is not an
 /// error here -- it is exactly what "nothing committed yet" looks like --
 /// so it becomes an empty history rather than a message.
 pub void State.refresh() {
-    match (status.status(gitdir, worktree)) {
-        case Ok(status.Status st): {
+    match (GIT_status.status(gitdir, worktree)) {
+        case Ok(GIT_status.Status st): {
             last_status = st;
         }
-        case Err(status.Error e): {
-            last_status = status.Status([], [], []);
+        case Err(GIT_status.Error e): {
+            last_status = GIT_status.Status([], [], []);
             message = "status: " + e.to_str();
         }
     }
-    match (gitlog.walk(gitdir, "HEAD", log_limit)) {
-        case Ok(List<gitlog.Entry> es): {
+    match (GIT_log.walk(gitdir, "HEAD", log_limit)) {
+        case Ok(List<GIT_log.Entry> es): {
             log = es;
         }
         case Err: {
@@ -900,17 +900,17 @@ pub void State.refresh() {
         }
     }
     branch_rows = [];
-    match (checkout.branches(gitdir)) {
-        case Ok(List<checkout.Branch> bs): {
-            for (checkout.Branch b in bs) {
+    match (GIT_checkout.branches(gitdir)) {
+        case Ok(List<GIT_checkout.Branch> bs): {
+            for (GIT_checkout.Branch b in bs) {
                 branch_rows.push(BranchRow(b, tip_subject(b.id)));
             }
         }
         case Err: {
         }
     }
-    match (refs.head(gitdir)) {
-        case Ok(refs.Head h): {
+    match (GIT_refs.head(gitdir)) {
+        case Ok(GIT_refs.Head h): {
             match (h) {
                 case Born(str name, str id): {
                     branch_label = "on " + branch_name(name) + " @ " + id.substr(0, 7);
@@ -923,7 +923,7 @@ pub void State.refresh() {
                 }
             }
         }
-        case Err(refs.Error e): {
+        case Err(GIT_refs.Error e): {
             branch_label = "?";
         }
     }
@@ -942,7 +942,7 @@ bool State.ensure_commit_changes(str id) {
     if (commit_changes_cache.contains(id)) {
         return false;
     }
-    for (gitlog.Entry en in log) {
+    for (GIT_log.Entry en in log) {
         if (en.id == id) {
             match (commit_changes(gitdir, en.commit)) {
                 case Ok(List<CommitFileDiff> cs): {
@@ -1028,7 +1028,7 @@ pub void State.move_cursor(int delta) {
 /// Stage the file under the cursor, if it is an untracked or an unstaged row
 /// -- a no-op on anything else (a staged row, a section heading, a commit).
 /// This is `git add <path>` for exactly one path: read it, `write_blob`,
-/// build an entry with `index.from_stat`, and put it in the index, replacing
+/// build an entry with `GIT_index.from_stat`, and put it in the index, replacing
 /// whatever entry that path already had.
 pub void State.stage_current() {
     match (outline.current()) {
@@ -1061,11 +1061,11 @@ pub void State.stage_path(bytes rel) {
         }
     }
     str blob_id = "";
-    match (object.write_blob(gitdir, content)) {
+    match (GIT_object.write_blob(gitdir, content)) {
         case Ok(str id): {
             blob_id = id;
         }
-        case Err(object.Error e): {
+        case Err(GIT_object.Error e): {
             message = "write_blob: " + e.to_str();
             return;
         }
@@ -1080,14 +1080,14 @@ pub void State.stage_path(bytes rel) {
             return;
         }
     }
-    index.Entry entry = index.from_stat(rel, st, fs.is_link(full), blob_id);
-    index.Index ix = read_index(gitdir);
+    GIT_index.Entry entry = GIT_index.from_stat(rel, st, fs.is_link(full), blob_id);
+    GIT_index.Index ix = read_index(gitdir);
     replace_entry(ix, entry);
-    match (index.write(gitdir, ix)) {
+    match (GIT_index.write(gitdir, ix)) {
         case Ok: {
             message = "staged " + rel.utf8().or("<non-utf8>");
         }
-        case Err(index.Error e): {
+        case Err(GIT_index.Error e): {
             message = "index write: " + e.to_str();
             return;
         }
@@ -1100,7 +1100,7 @@ pub void State.stage_path(bytes rel) {
 /// has this path, the index entry goes back to exactly what HEAD says (mode
 /// and blob), with its stat fields forced to never match a real file so the
 /// next `status` re-hashes it rather than trusting stale numbers
-/// (`index.m31`'s own rule: a mismatch only ever costs a re-hash, never
+/// (`GIT_index.m31`'s own rule: a mismatch only ever costs a re-hash, never
 /// wrong). If HEAD has no such path -- the file was newly added -- there is
 /// nothing to go back to, so the entry is dropped from the index outright,
 /// which is what `git reset` does to a new file too (it becomes untracked
@@ -1124,17 +1124,17 @@ pub void State.unstage_current() {
 }
 
 pub void State.unstage_path(bytes rel) {
-    index.Index ix = read_index(gitdir);
+    GIT_index.Index ix = read_index(gitdir);
     Option<str> tree = head_tree_id(gitdir);
     match (tree) {
         case Some(str tid): {
             match (find_in_tree(gitdir, tid, rel)) {
-                case Some(object.Entry e): {
+                case Some(GIT_object.Entry e): {
                     // size: -1 can never equal a real `fs.stat` size (always
-                    // >= 0), so `status.status`'s mtime/size shortcut always
+                    // >= 0), so `GIT_status.status`'s mtime/size shortcut always
                     // re-hashes this entry instead of trusting a snapshot
                     // that was never actually taken.
-                    index.Entry restored = index.Entry(0, 0, 0, 0, 0, 0, e.mode, 0, 0, -1, e.id, 0, false, rel);
+                    GIT_index.Entry restored = GIT_index.Entry(0, 0, 0, 0, 0, 0, e.mode, 0, 0, -1, e.id, 0, false, rel);
                     replace_entry(ix, restored);
                 }
                 case None: {
@@ -1146,11 +1146,11 @@ pub void State.unstage_path(bytes rel) {
             remove_entry(ix, rel);
         }
     }
-    match (index.write(gitdir, ix)) {
+    match (GIT_index.write(gitdir, ix)) {
         case Ok: {
             message = "unstaged " + rel.utf8().or("<non-utf8>");
         }
-        case Err(index.Error e): {
+        case Err(GIT_index.Error e): {
             message = "index write: " + e.to_str();
             return;
         }
@@ -1207,7 +1207,7 @@ pub void State.discard_current() {
 ///     path is written back over whatever is on disk (recreated, if it was
 ///     deleted), a symlink entry as a symlink. The index entry itself is
 ///     left alone: it already names exactly this content, and a stale stat
-///     only ever costs `status.status` one re-hash (`index.m31`'s own rule).
+///     only ever costs `GIT_status.status` one re-hash (`GIT_index.m31`'s own rule).
 ///   - **staged** -- `git checkout HEAD -- <path>`: both the index entry and
 ///     the file go back to HEAD's blob and mode (`unstage_path`'s own
 ///     restored-entry shape, with the rewritten file's real stat). A path HEAD does not
@@ -1239,9 +1239,9 @@ pub void State.discard_path(str kind, bytes rel) {
         return;
     }
     if (kind == "unstaged") {
-        index.Index ix = read_index(gitdir);
+        GIT_index.Index ix = read_index(gitdir);
         match (find_index_entry(ix, rel)) {
-            case Some(index.Entry e): {
+            case Some(GIT_index.Entry e): {
                 if (!write_worktree(rel, e.mode, read_blob(e.id))) {
                     return;
                 }
@@ -1255,8 +1255,8 @@ pub void State.discard_path(str kind, bytes rel) {
         return;
     }
     if (kind == "staged") {
-        index.Index ix = read_index(gitdir);
-        Option<object.Entry> in_head = Option<object.Entry>.None;
+        GIT_index.Index ix = read_index(gitdir);
+        Option<GIT_object.Entry> in_head = Option<GIT_object.Entry>.None;
         match (head_tree_id(gitdir)) {
             case Some(str tid): {
                 in_head = find_in_tree(gitdir, tid, rel);
@@ -1265,7 +1265,7 @@ pub void State.discard_path(str kind, bytes rel) {
             }
         }
         match (in_head) {
-            case Some(object.Entry e): {
+            case Some(GIT_object.Entry e): {
                 if (!write_worktree(rel, e.mode, read_blob(e.id))) {
                     return;
                 }
@@ -1282,8 +1282,8 @@ pub void State.discard_path(str kind, bytes rel) {
                         return;
                     }
                 }
-                index.Entry fresh = index.from_stat(rel, st, fs.is_link(full), e.id);
-                index.Entry restored = index.Entry(fresh.ctime_s, fresh.ctime_ns, fresh.mtime_s, fresh.mtime_ns, 0, 0, e.mode, 0, 0, fresh.size, e.id, 0, false, rel);
+                GIT_index.Entry fresh = GIT_index.from_stat(rel, st, fs.is_link(full), e.id);
+                GIT_index.Entry restored = GIT_index.Entry(fresh.ctime_s, fresh.ctime_ns, fresh.mtime_s, fresh.mtime_ns, 0, 0, e.mode, 0, 0, fresh.size, e.id, 0, false, rel);
                 replace_entry(ix, restored);
             }
             case None: {
@@ -1301,11 +1301,11 @@ pub void State.discard_path(str kind, bytes rel) {
                 }
             }
         }
-        match (index.write(gitdir, ix)) {
+        match (GIT_index.write(gitdir, ix)) {
             case Ok: {
                 message = "discarded staged changes to " + shown;
             }
-            case Err(index.Error e): {
+            case Err(GIT_index.Error e): {
                 message = "index write: " + e.to_str();
                 return;
             }
@@ -1398,22 +1398,22 @@ void State.prune_empty_parents(bytes rel) {
 }
 
 /// Real, hunk-level diff for the row under the cursor -- the diff-algorithm
-/// track (`lib/diff.m31`/`apps/git/hunks.m31`) and the rendering widget
+/// track (`lib/diff.m31`/`apps/git/GIT_hunks.m31`) and the rendering widget
 /// (`apps/tui/TUI_diff_view.DiffView`) both already existed; this is the
 /// wiring `docs/design.md`'s "Starting the client" section named as the
 /// follow-up once they did. A no-op on anything that is not a path row (a
 /// section heading or a commit).
 ///
 /// The comparison made depends on which section the row is in, matching
-/// `status.m31`'s own two-stage model exactly rather than picking a
+/// `GIT_status.m31`'s own two-stage model exactly rather than picking a
 /// simplification of it:
 ///
-///   - **unstaged** -- the index's blob for this path (`status.m31`'s own
+///   - **unstaged** -- the index's blob for this path (`GIT_status.m31`'s own
 ///     "working tree vs index" comparison) against the file's content on
 ///     disk right now. A path missing from disk (staged-deleted-on-disk)
 ///     compares against an empty `new`, an all-removed hunk.
 ///   - **staged** -- HEAD's tree's blob for this path against the index's
-///     blob for it (`status.m31`'s "index vs HEAD" comparison). A path
+///     blob for it (`GIT_status.m31`'s "index vs HEAD" comparison). A path
 ///     HEAD does not have compares an empty `old` (all-added, the newly
 ///     staged file's whole content); a path the index no longer has (staged
 ///     for deletion, though this client's own `stage`/`unstage` never
@@ -1421,7 +1421,7 @@ void State.prune_empty_parents(bytes rel) {
 ///   - **untracked** -- there is no "old" side at all, so this compares an
 ///     empty `old` against the file's content on disk: one all-added hunk,
 ///     the whole file. Deliberately not a separate "new file" display
-///     state: it reuses the exact same `hunks.hunks`/`DiffView` path every
+///     state: it reuses the exact same `GIT_hunks.hunks`/`DiffView` path every
 ///     other case does, so an untracked file's diff is addressable and
 ///     scrollable exactly like any other, and it matches what `git diff`
 ///     itself shows for an intent-to-add path (`git add -N`) -- the closest
@@ -1434,7 +1434,7 @@ void State.prune_empty_parents(bytes rel) {
 ///     same "no blob there" shape `head_blob` already uses for a path HEAD
 ///     does not have.
 ///
-/// `hunks.hunks` reporting `Binary` (either side trips `diff.is_binary`'s
+/// `GIT_hunks.hunks` reporting `Binary` (either side trips `diff.is_binary`'s
 /// NUL heuristic) sets `diff_binary` instead of populating `diff_view`,
 /// which `draw` shows as "Binary files differ", git's own wording, rather
 /// than attempting to render binary content as text.
@@ -1503,9 +1503,9 @@ bytes State.read_worktree(bytes rel) {
 /// actually hit (every unstaged row's path is, by construction, in the
 /// index).
 bytes State.index_blob(bytes rel) {
-    index.Index ix = read_index(gitdir);
+    GIT_index.Index ix = read_index(gitdir);
     match (find_index_entry(ix, rel)) {
-        case Some(index.Entry e): {
+        case Some(GIT_index.Entry e): {
             return read_blob(e.id);
         }
         case None: {
@@ -1521,7 +1521,7 @@ bytes State.head_blob(bytes rel) {
     match (head_tree_id(gitdir)) {
         case Some(str tid): {
             match (find_in_tree(gitdir, tid, rel)) {
-                case Some(object.Entry e): {
+                case Some(GIT_object.Entry e): {
                     return read_blob(e.id);
                 }
                 case None: {
@@ -1536,11 +1536,11 @@ bytes State.head_blob(bytes rel) {
 }
 
 bytes State.read_blob(str id) {
-    match (object.read(gitdir, id)) {
-        case Ok(object.Object o): {
+    match (GIT_object.read(gitdir, id)) {
+        case Ok(GIT_object.Object o): {
             return o.raw;
         }
-        case Err(object.Error e): {
+        case Err(GIT_object.Error e): {
             message = "object read: " + e.to_str();
             return [];
         }
@@ -1556,7 +1556,7 @@ bytes State.read_blob(str id) {
 /// all -- `t_gitclient.m31`'s own reason for testing those two directly.
 pub void State.open_diff(str title, bytes old, bytes new) {
     diff_title = title;
-    match (hunks.hunks(old, new)) {
+    match (GIT_hunks.hunks(old, new)) {
         case Binary: {
             diff_binary = true;
             diff_view = TUI_diff_view.DiffView([]);
@@ -1643,11 +1643,11 @@ pub void State.unstage_hunk_current() {
     }
 }
 
-/// Stage hunk `k` (0-based, in `hunks.hunks(index, worktree)`'s order) of
-/// `rel`'s unstaged change: `patch.apply_hunk` over the index's blob and
+/// Stage hunk `k` (0-based, in `GIT_hunks.hunks(index, worktree)`'s order) of
+/// `rel`'s unstaged change: `GIT_patch.apply_hunk` over the index's blob and
 /// the file on disk, written as a new blob and put in the index with the
 /// entry's stat fields reset (the same `size: -1` rule `unstage_path`
-/// uses, so `status.status` re-hashes it rather than trusting a snapshot
+/// uses, so `GIT_status.status` re-hashes it rather than trusting a snapshot
 /// that was never taken). Applying the deletion hunk of a file gone from
 /// disk leaves nothing, which is `git add -p`'s "stage deletion": the entry
 /// is dropped instead. `pub`, like `stage_path`, so `t_gitclient_ops.m31`
@@ -1656,7 +1656,7 @@ pub void State.unstage_hunk_current() {
 pub bool State.stage_hunk(bytes rel, int k) {
     bytes old = index_blob(rel);
     bytes new = read_worktree(rel);
-    match (patch.apply_hunk(old, new, k)) {
+    match (GIT_patch.apply_hunk(old, new, k)) {
         case Some(bytes content): {
             str full = fs.join(worktree, rel.utf8().or(""));
             if (content.size() == 0 && !fs.exists(full)) {
@@ -1671,8 +1671,8 @@ pub bool State.stage_hunk(bytes rel, int k) {
     }
 }
 
-/// Unstage hunk `k` (0-based, in `hunks.hunks(HEAD, index)`'s order) of
-/// `rel`'s staged change: `patch.revert_hunk` over HEAD's blob and the
+/// Unstage hunk `k` (0-based, in `GIT_hunks.hunks(HEAD, index)`'s order) of
+/// `rel`'s staged change: `GIT_patch.revert_hunk` over HEAD's blob and the
 /// index's, written back the same way `stage_hunk` writes. Reverting the
 /// one all-added hunk of a path HEAD does not have leaves nothing, which is
 /// `git reset -p`'s "unstage addition": the entry is dropped, the file is
@@ -1680,7 +1680,7 @@ pub bool State.stage_hunk(bytes rel, int k) {
 pub bool State.unstage_hunk(bytes rel, int k) {
     bytes old = head_blob(rel);
     bytes new = index_blob(rel);
-    match (patch.revert_hunk(old, new, k)) {
+    match (GIT_patch.revert_hunk(old, new, k)) {
         case Some(bytes content): {
             if (content.size() == 0 && !head_has(rel)) {
                 return drop_index_entry(rel, "unstaged addition of " + rel.utf8().or("<non-utf8>"));
@@ -1714,7 +1714,7 @@ void State.reopen_diff(int keep_cursor) {
     } else {
         return;
     }
-    if (patch.hunk_count(old, new) == 0) {
+    if (GIT_patch.hunk_count(old, new) == 0) {
         close_diff();
         return;
     }
@@ -1742,31 +1742,31 @@ bool State.head_has(bytes rel) {
 /// status-line message on success.
 bool State.set_index_blob(bytes rel, bytes content, str said) {
     str blob_id = "";
-    match (object.write_blob(gitdir, content)) {
+    match (GIT_object.write_blob(gitdir, content)) {
         case Ok(str id): {
             blob_id = id;
         }
-        case Err(object.Error e): {
+        case Err(GIT_object.Error e): {
             message = "write_blob: " + e.to_str();
             return false;
         }
     }
-    index.Index ix = read_index(gitdir);
+    GIT_index.Index ix = read_index(gitdir);
     int mode = 0o100644;
     match (find_index_entry(ix, rel)) {
-        case Some(index.Entry e): {
+        case Some(GIT_index.Entry e): {
             mode = e.mode;
         }
         case None: {
         }
     }
-    replace_entry(ix, index.Entry(0, 0, 0, 0, 0, 0, mode, 0, 0, -1, blob_id, 0, false, rel));
-    match (index.write(gitdir, ix)) {
+    replace_entry(ix, GIT_index.Entry(0, 0, 0, 0, 0, 0, mode, 0, 0, -1, blob_id, 0, false, rel));
+    match (GIT_index.write(gitdir, ix)) {
         case Ok: {
             message = said;
             return true;
         }
-        case Err(index.Error e): {
+        case Err(GIT_index.Error e): {
             message = "index write: " + e.to_str();
             return false;
         }
@@ -1774,14 +1774,14 @@ bool State.set_index_blob(bytes rel, bytes content, str said) {
 }
 
 bool State.drop_index_entry(bytes rel, str said) {
-    index.Index ix = read_index(gitdir);
+    GIT_index.Index ix = read_index(gitdir);
     remove_entry(ix, rel);
-    match (index.write(gitdir, ix)) {
+    match (GIT_index.write(gitdir, ix)) {
         case Ok: {
             message = said;
             return true;
         }
-        case Err(index.Error e): {
+        case Err(GIT_index.Error e): {
             message = "index write: " + e.to_str();
             return false;
         }
@@ -1876,16 +1876,16 @@ pub void State.launch_editor() {
 /// cannot be read (a ref pointing at something this cannot parse is shown by
 /// name and id alone rather than hidden).
 str State.tip_subject(str tip) {
-    match (object.read(gitdir, tip)) {
-        case Ok(object.Object o): {
+    match (GIT_object.read(gitdir, tip)) {
+        case Ok(GIT_object.Object o): {
             match (o.body) {
-                case Commit(object.Commit c): {
+                case Commit(GIT_object.Commit c): {
                     return first_line(c.message);
                 }
                 case Blob: {
                     return "";
                 }
-                case Tree(List<object.Entry> es): {
+                case Tree(List<GIT_object.Entry> es): {
                     return "";
                 }
                 case Tag: {
@@ -1899,7 +1899,7 @@ str State.tip_subject(str tip) {
     }
 }
 
-/// Check out the branch under the cursor (`b`, then `c`): `checkout.checkout`
+/// Check out the branch under the cursor (`b`, then `c`): `GIT_checkout.checkout`
 /// with every refusal it makes shown in the message line, word for word --
 /// a dirty file, an untracked file in the way, a submodule. A no-op with a
 /// message on anything that is not a branch row, or on the current branch.
@@ -1930,12 +1930,12 @@ pub void State.checkout_branch(str name) {
                 message = "already on " + name;
                 return;
             }
-            match (checkout.checkout(gitdir, worktree, br.branch.id, br.branch.full)) {
-                case Ok(checkout.Summary sm): {
+            match (GIT_checkout.checkout(gitdir, worktree, br.branch.id, br.branch.full)) {
+                case Ok(GIT_checkout.Summary sm): {
                     message = "switched to " + name + " (" + sm.written.to_str() + " written, " + sm.removed.to_str() + " removed)";
                     reload();
                 }
-                case Err(checkout.Error e): {
+                case Err(GIT_checkout.Error e): {
                     message = "checkout refused: " + e.to_str();
                 }
             }
@@ -1964,7 +1964,7 @@ pub void State.new_branch() {
 }
 
 /// The second half of `new_branch`, after `$EDITOR` has run: the first
-/// non-comment line is the name; `checkout.create_branch` does the rest.
+/// non-comment line is the name; `GIT_checkout.create_branch` does the rest.
 pub void State.launch_branch_editor() {
     str editor = pick_editor(os.env("EDITOR"));
     bool ran = false;
@@ -2020,12 +2020,12 @@ pub void State.finish_new_branch() {
         message = "no branch created (empty name)";
         return;
     }
-    match (checkout.create_branch(gitdir, name)) {
+    match (GIT_checkout.create_branch(gitdir, name)) {
         case Ok: {
             message = "created and switched to " + name;
             reload();
         }
-        case Err(checkout.Error e): {
+        case Err(GIT_checkout.Error e): {
             message = "new branch refused: " + e.to_str();
         }
     }
@@ -2054,8 +2054,8 @@ pub void State.abort_commit() {
 /// amend: an unborn branch, or a HEAD whose commit cannot be read.
 pub void State.start_amend() {
     str head_id = "";
-    match (refs.head(gitdir)) {
-        case Ok(refs.Head h): {
+    match (GIT_refs.head(gitdir)) {
+        case Ok(GIT_refs.Head h): {
             match (h) {
                 case Born(str name, str id): {
                     head_id = id;
@@ -2069,23 +2069,23 @@ pub void State.start_amend() {
                 }
             }
         }
-        case Err(refs.Error e): {
+        case Err(GIT_refs.Error e): {
             message = "nothing to amend: refs.head: " + e.to_str();
             return;
         }
     }
     bytes head_msg = [];
-    match (object.read(gitdir, head_id)) {
-        case Ok(object.Object o): {
+    match (GIT_object.read(gitdir, head_id)) {
+        case Ok(GIT_object.Object o): {
             match (o.body) {
-                case Commit(object.Commit cm): {
+                case Commit(GIT_object.Commit cm): {
                     head_msg = cm.message;
                 }
                 case Blob: {
                     message = "nothing to amend: HEAD is not a commit";
                     return;
                 }
-                case Tree(List<object.Entry> ignored): {
+                case Tree(List<GIT_object.Entry> ignored): {
                     message = "nothing to amend: HEAD is not a commit";
                     return;
                 }
@@ -2095,7 +2095,7 @@ pub void State.start_amend() {
                 }
             }
         }
-        case Err(object.Error e): {
+        case Err(GIT_object.Error e): {
             message = "nothing to amend: cannot read HEAD's commit: " + e.to_str();
             return;
         }
@@ -2119,11 +2119,11 @@ pub void State.start_amend() {
 /// Read `commit_msg_path` back, strip it the way git's default cleanup does,
 /// and either refuse (an empty result, git's own "Aborting commit due to
 /// empty commit message") or actually commit: `build_tree` over the current
-/// index, `object.write_commit` with HEAD as the sole parent (none for an
-/// unborn branch), and `refs.update` to move the branch -- or `HEAD` itself,
+/// index, `GIT_object.write_commit` with HEAD as the sole parent (none for an
+/// unborn branch), and `GIT_refs.update` to move the branch -- or `HEAD` itself,
 /// detached -- forward by compare-and-swap against the value just read, so a
 /// second writer racing this one is refused rather than silently overwritten
-/// (`refs.m31`'s own guarantee).
+/// (`GIT_refs.m31`'s own guarantee).
 pub void State.finish_commit() {
     str raw = "";
     match (io.read(commit_msg_path)) {
@@ -2142,13 +2142,13 @@ pub void State.finish_commit() {
         amending = false;
         return;
     }
-    index.Index ix = read_index(gitdir);
+    GIT_index.Index ix = read_index(gitdir);
     str tree_id = "";
     match (build_tree(gitdir, ix.entries)) {
         case Ok(str t): {
             tree_id = t;
         }
-        case Err(object.Error e): {
+        case Err(GIT_object.Error e): {
             message = "write_tree: " + e.to_str();
             return;
         }
@@ -2157,8 +2157,8 @@ pub void State.finish_commit() {
     str ref_name = "HEAD";
     str expect_old = "";
     bool have_old = false;
-    match (refs.head(gitdir)) {
-        case Ok(refs.Head h): {
+    match (GIT_refs.head(gitdir)) {
+        case Ok(GIT_refs.Head h): {
             match (h) {
                 case Born(str name, str id): {
                     parents.push(id);
@@ -2179,12 +2179,12 @@ pub void State.finish_commit() {
                 }
             }
         }
-        case Err(refs.Error e): {
+        case Err(GIT_refs.Error e): {
             message = "refs.head: " + e.to_str();
             return;
         }
     }
-    object.Ident author = author_ident();
+    GIT_object.Ident author = author_ident();
     if (amending) {
         // `--amend`: the new commit takes HEAD's place, so it gets HEAD's own
         // parents and author (date and zone included -- real git keeps the
@@ -2194,10 +2194,10 @@ pub void State.finish_commit() {
             message = "nothing to amend: no commits yet";
             return;
         }
-        match (object.read(gitdir, parents[0])) {
-            case Ok(object.Object o): {
+        match (GIT_object.read(gitdir, parents[0])) {
+            case Ok(GIT_object.Object o): {
                 match (o.body) {
-                    case Commit(object.Commit cm): {
+                    case Commit(GIT_object.Commit cm): {
                         parents = cm.parents;
                         author = cm.author;
                     }
@@ -2205,7 +2205,7 @@ pub void State.finish_commit() {
                         message = "amend: HEAD is not a commit";
                         return;
                     }
-                    case Tree(List<object.Entry> ignored): {
+                    case Tree(List<GIT_object.Entry> ignored): {
                         message = "amend: HEAD is not a commit";
                         return;
                     }
@@ -2215,19 +2215,19 @@ pub void State.finish_commit() {
                     }
                 }
             }
-            case Err(object.Error e): {
+            case Err(GIT_object.Error e): {
                 message = "amend: cannot read HEAD's commit: " + e.to_str();
                 return;
             }
         }
     }
-    object.Commit c = object.Commit(tree_id, parents, author, committer_ident(), [], (msg + "\n").to_bytes());
+    GIT_object.Commit c = GIT_object.Commit(tree_id, parents, author, committer_ident(), [], (msg + "\n").to_bytes());
     str commit_id = "";
-    match (object.write_commit(gitdir, c)) {
+    match (GIT_object.write_commit(gitdir, c)) {
         case Ok(str id): {
             commit_id = id;
         }
-        case Err(object.Error e): {
+        case Err(GIT_object.Error e): {
             message = "write_commit: " + e.to_str();
             return;
         }
@@ -2236,10 +2236,10 @@ pub void State.finish_commit() {
     if (have_old) {
         want = Option<str>.Some(expect_old);
     }
-    match (refs.update(gitdir, ref_name, commit_id, want)) {
+    match (GIT_refs.update(gitdir, ref_name, commit_id, want)) {
         case Ok: {
         }
-        case Err(refs.Error e): {
+        case Err(GIT_refs.Error e): {
             message = "refs.update: " + e.to_str();
             return;
         }
@@ -2621,14 +2621,14 @@ void State.handle_enter() {
 /// Push the current branch to the same-named branch on `origin`, over
 /// smart HTTP, fast-forward only. The outcome -- success or the reason it
 /// did not happen -- is the status line's message; a password is never part
-/// of it (`httppush.parse_remote` strips it from the URL before anything
+/// of it (`GIT_http_push.parse_remote` strips it from the URL before anything
 /// else sees the URL).
 pub void State.push_current() {
     push_open = false;
     str refname = "";
     str id = "";
-    match (refs.head(gitdir)) {
-        case Ok(refs.Head h): {
+    match (GIT_refs.head(gitdir)) {
+        case Ok(GIT_refs.Head h): {
             match (h) {
                 case Born(str name, str oid): {
                     refname = name;
@@ -2644,35 +2644,35 @@ pub void State.push_current() {
                 }
             }
         }
-        case Err(refs.Error e): {
+        case Err(GIT_refs.Error e): {
             message = "push: " + e.to_str();
             return;
         }
     }
-    Option<str> url = gitconfig.get(gitdir, "remote", "origin", "url");
+    Option<str> url = GIT_config.get(gitdir, "remote", "origin", "url");
     if (!url.is_some()) {
         message = "push: no remote 'origin' in .git/config";
         return;
     }
-    httppush.Remote remote = httppush.Remote("", Option<httppush.Credentials>.None);
-    match (httppush.parse_remote(url.or(""))) {
-        case Ok(httppush.Remote r): {
+    GIT_http_push.Remote remote = GIT_http_push.Remote("", Option<GIT_http_push.Credentials>.None);
+    match (GIT_http_push.parse_remote(url.or(""))) {
+        case Ok(GIT_http_push.Remote r): {
             remote = r;
         }
-        case Err(httppush.Error e): {
+        case Err(GIT_http_push.Error e): {
             message = "push: " + e.to_str();
             return;
         }
     }
-    match (httppush.push(gitdir, remote, refname, id)) {
-        case Ok(httppush.Report rep): {
+    match (GIT_http_push.push(gitdir, remote, refname, id)) {
+        case Ok(GIT_http_push.Report rep): {
             if (rep.ok) {
                 message = "pushed " + refname + " to origin";
             } else {
                 message = "push refused by origin: " + rep.reason;
             }
         }
-        case Err(httppush.Error e): {
+        case Err(GIT_http_push.Error e): {
             message = "push: " + e.to_str();
         }
     }
@@ -2740,35 +2740,35 @@ TUI_app.Action State.handle_push_key(term.Code code) {
     }
 }
 
-/// Pull the current branch from `origin`, fast-forward only (`pull.pull`):
+/// Pull the current branch from `origin`, fast-forward only (`GIT_pull.pull`):
 /// refused on a dirty tree and on a diverged branch. The outcome is the
 /// status line's message.
 pub void State.pull_current() {
     pull_open = false;
-    Option<str> url = gitconfig.get(gitdir, "remote", "origin", "url");
+    Option<str> url = GIT_config.get(gitdir, "remote", "origin", "url");
     if (!url.is_some()) {
         message = "pull: no remote 'origin' in .git/config";
         return;
     }
-    httppush.Remote remote = httppush.Remote("", Option<httppush.Credentials>.None);
-    match (httppush.parse_remote(url.or(""))) {
-        case Ok(httppush.Remote r): {
+    GIT_http_push.Remote remote = GIT_http_push.Remote("", Option<GIT_http_push.Credentials>.None);
+    match (GIT_http_push.parse_remote(url.or(""))) {
+        case Ok(GIT_http_push.Remote r): {
             remote = r;
         }
-        case Err(httppush.Error e): {
+        case Err(GIT_http_push.Error e): {
             message = "pull: " + e.to_str();
             return;
         }
     }
-    match (pull.pull(gitdir, worktree, remote)) {
-        case Ok(pull.Outcome o): {
+    match (GIT_pull.pull(gitdir, worktree, remote)) {
+        case Ok(GIT_pull.Outcome o): {
             if (o.moved) {
                 message = "pulled: fast-forwarded " + o.old_id.substr(0, 7) + ".." + o.new_id.substr(0, 7);
             } else {
                 message = "pull: already up to date";
             }
         }
-        case Err(pull.Error e): {
+        case Err(GIT_pull.Error e): {
             message = "pull: " + e.to_str();
         }
     }
@@ -3153,7 +3153,7 @@ Option<str> commit_id_of_unfoldable(str id) {
 }
 
 /// The directory part of a slash-separated path, `.` for a bare name --
-/// `httpfetch.m31`'s own `dir_of`, private to it, repeated here rather than
+/// `GIT_http_fetch.m31`'s own `dir_of`, private to it, repeated here rather than
 /// exported from a module about the wire protocol.
 str dir_of(str path) {
     int i = path.size() - 1;
@@ -3167,21 +3167,21 @@ str dir_of(str path) {
 }
 
 /// `path`'s entry in `ix`, if it has one.
-Option<index.Entry> find_index_entry(index.Index ix, bytes path) {
+Option<GIT_index.Entry> find_index_entry(GIT_index.Index ix, bytes path) {
     int i = 0;
     while (i < ix.entries.size()) {
         if (bytes_eq(ix.entries[i].path, path)) {
-            return Option<index.Entry>.Some(ix.entries[i]);
+            return Option<GIT_index.Entry>.Some(ix.entries[i]);
         }
         i = i + 1;
     }
-    return Option<index.Entry>.None;
+    return Option<GIT_index.Entry>.None;
 }
 
 /// Which command real git's own editor flow would launch: `$EDITOR` if it is
 /// set, `vi` otherwise -- git's own fallback (`core.editor` and `$VISUAL`
 /// come before `vi` in real git's own chain, but both come from
-/// `.git/config`, which this client already does not read, `object.m31`'s
+/// `.git/config`, which this client already does not read, `GIT_object.m31`'s
 /// own README names that gap). Pure and total, so `t_gitclient.m31` can
 /// check it with no environment and no process at all.
 pub str pick_editor(Option<str> env_editor) {
@@ -3198,18 +3198,18 @@ str branch_name(str full) {
 
 // --- index helpers shared by whole-file (stage_path/unstage_path) and hunk-level staging --
 
-index.Index read_index(str gitdir) {
-    match (index.read(gitdir)) {
-        case Ok(index.Index ix): {
+GIT_index.Index read_index(str gitdir) {
+    match (GIT_index.read(gitdir)) {
+        case Ok(GIT_index.Index ix): {
             return ix;
         }
         case Err: {
-            return index.Index([]);
+            return GIT_index.Index([]);
         }
     }
 }
 
-void replace_entry(index.Index ix, index.Entry e) {
+void replace_entry(GIT_index.Index ix, GIT_index.Entry e) {
     int i = 0;
     while (i < ix.entries.size()) {
         if (bytes_eq(ix.entries[i].path, e.path)) {
@@ -3221,7 +3221,7 @@ void replace_entry(index.Index ix, index.Entry e) {
     ix.entries.push(e);
 }
 
-void remove_entry(index.Index ix, bytes path) {
+void remove_entry(GIT_index.Index ix, bytes path) {
     int i = 0;
     while (i < ix.entries.size()) {
         if (bytes_eq(ix.entries[i].path, path)) {
@@ -3234,22 +3234,22 @@ void remove_entry(index.Index ix, bytes path) {
 
 // --- committing ---------------------------------------------------------------
 
-// No `.git/config` is read anywhere in this program (`object.m31`'s own
+// No `.git/config` is read anywhere in this program (`GIT_object.m31`'s own
 // README names this gap); `GIT_AUTHOR_*`/`GIT_COMMITTER_*` are the one
 // identity source this client has, the same environment variables real git
 // itself honours over its config. `date.now()` is UTC-only
 // (`lib/date.m31`'s own header), so every commit this client writes is
 // timestamped `+0000`.
-object.Ident author_ident() {
+GIT_object.Ident author_ident() {
     str who = os.env("GIT_AUTHOR_NAME").or(os.env("USER").or("unknown"));
     str mail = os.env("GIT_AUTHOR_EMAIL").or(who + "@localhost");
-    return object.Ident(who.to_bytes(), mail.to_bytes(), date.now(), 0, "+0000");
+    return GIT_object.Ident(who.to_bytes(), mail.to_bytes(), date.now(), 0, "+0000");
 }
 
-object.Ident committer_ident() {
+GIT_object.Ident committer_ident() {
     str who = os.env("GIT_COMMITTER_NAME").or(os.env("USER").or("unknown"));
     str mail = os.env("GIT_COMMITTER_EMAIL").or(who + "@localhost");
-    return object.Ident(who.to_bytes(), mail.to_bytes(), date.now(), 0, "+0000");
+    return GIT_object.Ident(who.to_bytes(), mail.to_bytes(), date.now(), 0, "+0000");
 }
 
 // --- drawing and input --------------------------------------------------------

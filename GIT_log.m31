@@ -8,31 +8,31 @@
 //
 // API
 // ---
-//   gitlog.walk(gitdir, rev, limit)  -> Result<List<Entry>, Error>
+//   GIT_log.walk(gitdir, rev, limit)  -> Result<List<Entry>, Error>
 //
-// `rev` is anything `refs.rev_parse` accepts (a ref, a short or full object
+// `rev` is anything `GIT_refs.rev_parse` accepts (a ref, a short or full object
 // name); `limit` stops after that many commits, newest committer date
 // first, or walks everything reachable when negative -- `ourgit -log`'s own
 // `--max` and default.
 
-import object;
-import refs;
+import GIT_object;
+import GIT_refs;
 
 /// Why the walk could not run. Payload-free where the underlying error
 /// already says everything (docs/errors-decision.md §4); `NotACommit` names
 /// the one object the walk itself found not to be one.
 pub enum Error {
-    Refs(refs.Error);
-    Object(object.Error);
+    Refs(GIT_refs.Error);
+    Object(GIT_object.Error);
     NotACommit(str);
 }
 
 pub str Error.to_str() {
     match (this) {
-        case Refs(refs.Error e): {
+        case Refs(GIT_refs.Error e): {
             return "refs: " + e.to_str();
         }
-        case Object(object.Error e): {
+        case Object(GIT_object.Error e): {
             return "object: " + e.to_str();
         }
         case NotACommit(str id): {
@@ -44,7 +44,7 @@ pub str Error.to_str() {
 /// One commit the walk visited: its object name and its parsed body.
 pub type Entry {
     pub str id;
-    pub object.Commit commit;
+    pub GIT_object.Commit commit;
 }
 
 /// Every commit reachable from `rev`, newest committer date first.
@@ -57,19 +57,19 @@ pub type Entry {
 /// than an arbitrary one.
 pub Result<List<Entry>, Error> walk(str gitdir, str rev, int limit) {
     str tip = "";
-    match (refs.rev_parse(gitdir, rev)) {
+    match (GIT_refs.rev_parse(gitdir, rev)) {
         case Ok(str v): {
             tip = v;
         }
-        case Err(refs.Error e): {
+        case Err(GIT_refs.Error e): {
             return Result<List<Entry>, Error>.Err(Error.Refs(e));
         }
     }
-    match (refs.peel(gitdir, rev, tip)) {
+    match (GIT_refs.peel(gitdir, rev, tip)) {
         case Ok(str v): {
             tip = v;
         }
-        case Err(refs.Error e): {
+        case Err(GIT_refs.Error e): {
             return Result<List<Entry>, Error>.Err(Error.Refs(e));
         }
     }
@@ -84,10 +84,10 @@ pub Result<List<Entry>, Error> walk(str gitdir, str rev, int limit) {
         }
         str id = queue.remove_at(0);
         dates.remove_at(0);
-        match (object.read(gitdir, id)) {
-            case Ok(object.Object o): {
+        match (GIT_object.read(gitdir, id)) {
+            case Ok(GIT_object.Object o): {
                 match (o.body) {
-                    case Commit(object.Commit cm): {
+                    case Commit(GIT_object.Commit cm): {
                         out.push(Entry(id, cm));
                         for (str par in cm.parents) {
                             if (seen.contains(par)) {
@@ -108,7 +108,7 @@ pub Result<List<Entry>, Error> walk(str gitdir, str rev, int limit) {
                     }
                 }
             }
-            case Err(object.Error e): {
+            case Err(GIT_object.Error e): {
                 return Result<List<Entry>, Error>.Err(Error.Object(e));
             }
         }
@@ -133,10 +133,10 @@ void insert(List<str> queue, List<int> dates, str id, int when) {
 // commit -- a parent in a packfile, say, which sorts to the end of the queue
 // and reports itself when it is reached.
 int commit_date(str gitdir, str id) {
-    match (object.read(gitdir, id)) {
-        case Ok(object.Object o): {
+    match (GIT_object.read(gitdir, id)) {
+        case Ok(GIT_object.Object o): {
             match (o.body) {
-                case Commit(object.Commit c): {
+                case Commit(GIT_object.Commit c): {
                     return c.committer.when;
                 }
                 case Blob: {

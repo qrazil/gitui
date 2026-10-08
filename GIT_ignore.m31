@@ -1,14 +1,14 @@
-// `.gitignore` pattern matching: which paths `status.m31`'s untracked walk
+// `.gitignore` pattern matching: which paths `GIT_status.m31`'s untracked walk
 // should leave out, the way real git's own untracked-file scan does.
 //
 // API
 // ---
-//   gitignore.load(gitdir, worktree)  -> Result<Ignore, Error>
+//   GIT_ignore.load(gitdir, worktree)  -> Result<Ignore, Error>
 //   ig.is_ignored(relpath)            -> bool
 //
 // `load` finds and parses every applicable ignore file once; `is_ignored`
 // is then a pure, in-memory question asked once per candidate path, with no
-// I/O of its own -- `status.status` calls it once per untracked candidate.
+// I/O of its own -- `GIT_status.status` calls it once per untracked candidate.
 //
 // --- what is read, and in what order (lowest precedence first) --------------
 //
@@ -48,7 +48,7 @@
 //     matching git's own order (`gitignore(5)`);
 //   - a trailing, unescaped `/` means "matches a directory only" (checked
 //     against an ancestor directory in the walk above; a leaf path from
-//     `status.m31`'s own walk is always a file, so a directory-only pattern
+//     `GIT_status.m31`'s own walk is always a file, so a directory-only pattern
 //     can only ever exclude something ABOVE the leaf, never the leaf
 //     itself);
 //   - a leading `/`, or a `/` anywhere before the last character, anchors
@@ -80,7 +80,7 @@
 import io;
 import fs;
 import text;
-import repo;
+import GIT_repository;
 
 /// Why the ignore rules for a repository could not be loaded. Payload-free
 /// (docs/errors-decision.md §4): a missing or unreadable ignore file is
@@ -138,7 +138,7 @@ pub type Ignore {
 }
 
 /// Is `relpath` -- a file, repository-relative, `/`-separated, exactly as
-/// `status.m31`'s own walk spells one -- ignored?
+/// `GIT_status.m31`'s own walk spells one -- ignored?
 ///
 /// Walks every ancestor directory from the repository root down first: the
 /// moment one of them is itself excluded, the whole path is ignored and
@@ -162,7 +162,7 @@ pub bool Ignore.is_ignored(str relpath) {
 /// `is_ignored` then always answers `false` for.
 pub Result<Ignore, Error> load(str gitdir, str worktree) {
     List<IgnoreFile> files = [];
-    str excl = fs.join(repo.common(gitdir), "info/exclude");
+    str excl = fs.join(GIT_repository.common(gitdir), "info/exclude");
     match (io.read(excl)) {
         case Ok(str s): {
             files.push(IgnoreFile([], parse_patterns(s)));
@@ -210,7 +210,7 @@ pub Result<Ignore, Error> load(str gitdir, str worktree) {
 // precedence order (the list is already sorted shallowest first). `is_dir`
 // says whether that candidate is a directory (every ancestor is; the final
 // path itself, checked by `is_ignored`'s own last call, never is -- a leaf
-// from `status.m31`'s walk is always a file or a symlink).
+// from `GIT_status.m31`'s walk is always a file or a symlink).
 bool matched(List<IgnoreFile> files, List<str> segs, int k, bool is_dir) {
     bool ignored = false;
     for (IgnoreFile f in files) {
@@ -410,7 +410,7 @@ bool seg_match(List<int> name, List<int> pat) {
 }
 
 // The code points of a str (`fs.m31`'s own `chars`, written out again here
-// for the reason `index.m31`'s header gives for `hex_decode`: a small
+// for the reason `GIT_index.m31`'s header gives for `hex_decode`: a small
 // per-module helper, not a shared utility, for a language whose `str` has
 // no built-in code-point indexing).
 List<int> chars_of(str s) {

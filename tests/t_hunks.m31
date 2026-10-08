@@ -1,16 +1,16 @@
-// `hunks.hunks`, printed the way `diff -u`'s own body prints -- a leading
+// `GIT_hunks.hunks`, printed the way `diff -u`'s own body prints -- a leading
 // ` `/`+`/`-` and the line, `@@ ... @@` before each group -- so `test.sh` can
 // diff this output directly against a real `diff -u`'s (with its `---`/`+++`
 // file-header lines stripped) as an oracle for hunk boundaries and line
 // classification. Not part of `apps/git`'s command surface: a throwaway
-// harness for `hunks.m31`'s own tests, the same role `t_object.m31` and
+// harness for `GIT_hunks.m31`'s own tests, the same role `t_object.m31` and
 // friends play for the rest of this program.
 //
 //   t_hunks <old-file> <new-file>
 
 import os;
 import io;
-import hunks;
+import GIT_hunks;
 import tui.TUI_diff_view;
 
 List<str> argv = os.args();
@@ -20,7 +20,7 @@ if (argv.size() != 3) {
 }
 bytes old = read(argv[1]);
 bytes new = read(argv[2]);
-match (hunks.hunks(old, new)) {
+match (GIT_hunks.hunks(old, new)) {
     case Binary: {
         print("Binary files differ");
     }

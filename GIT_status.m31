@@ -11,7 +11,7 @@
 //
 // API
 // ---
-//   status.status(gitdir, worktree)  -> Result<Status, Error>
+//   GIT_status.status(gitdir, worktree)  -> Result<Status, Error>
 //
 // `Status` is three lists -- `staged`, `unstaged`, `untracked` -- and is
 // deliberately not shaped like any particular command's output: nothing here
@@ -49,7 +49,7 @@
 // happens to occupy its path.
 //
 // **A path that is not valid UTF-8** -- in the index or in HEAD's tree --
-// is left out of both comparisons. `object.m31`'s own module header notes
+// is left out of both comparisons. `GIT_object.m31`'s own module header notes
 // that a tree's names are octets and need not be UTF-8; this module's
 // internal comparisons are keyed by `str` (a `Map`'s key, and `bytes` cannot
 // be one, reference §3.9), and `fs.walk` itself cannot enumerate such a name
@@ -58,22 +58,22 @@
 // otherwise. Every path this program itself ever writes is UTF-8, so this
 // only bites a working tree built by something else.
 //
-// **`.gitignore` filtering is `gitignore.m31`'s job, not this module's.**
+// **`.gitignore` filtering is `GIT_ignore.m31`'s job, not this module's.**
 // A candidate path that is on disk and not in the index used to be reported
-// untracked unconditionally; now `gitignore.Ignore.is_ignored` is asked
+// untracked unconditionally; now `GIT_ignore.Ignore.is_ignored` is asked
 // about each one first, and an ignored path is left out, matching what
 // `git status`'s own untracked-file scan does. The pattern matching, the
 // nested-`.gitignore` precedence and the negated-pattern-inside-an-excluded-
-// directory exception all live in `gitignore.m31`'s own module header --
+// directory exception all live in `GIT_ignore.m31`'s own module header --
 // this module only calls it.
 
 import io;
 import fs;
 import text;
-import object;
-import refs;
-import index;
-import gitignore;
+import GIT_object;
+import GIT_refs;
+import GIT_index;
+import GIT_ignore;
 
 /// Why a status could not be produced. Payload-free variants wrap the
 /// underlying error (docs/errors-decision.md §4): the path or the object
@@ -83,10 +83,10 @@ pub enum Error {
     /// typically -- `NotFound` is not this, since a missing file mid-walk is
     /// itself a "deleted" answer, not a failure to answer).
     Io;
-    Index(index.Error);
-    Object(object.Error);
-    Refs(refs.Error);
-    Gitignore(gitignore.Error);
+    Index(GIT_index.Error);
+    Object(GIT_object.Error);
+    Refs(GIT_refs.Error);
+    Gitignore(GIT_ignore.Error);
     /// HEAD resolves to something that is not a commit -- a corrupt or a
     /// very strange repository, not one this can report on.
     HeadNotCommit;
@@ -97,16 +97,16 @@ pub str Error.to_str() {
         case Io: {
             return "the working tree could not be read";
         }
-        case Index(index.Error e): {
+        case Index(GIT_index.Error e): {
             return "index: " + e.to_str();
         }
-        case Object(object.Error e): {
+        case Object(GIT_object.Error e): {
             return "object: " + e.to_str();
         }
-        case Refs(refs.Error e): {
+        case Refs(GIT_refs.Error e): {
             return "refs: " + e.to_str();
         }
-        case Gitignore(gitignore.Error e): {
+        case Gitignore(GIT_ignore.Error e): {
             return "gitignore: " + e.to_str();
         }
         case HeadNotCommit: {
@@ -146,10 +146,10 @@ pub type Status {
 /// The status of the repository at `gitdir` whose working tree is at
 /// `worktree`.
 pub Result<Status, Error> status(str gitdir, str worktree) {
-    Map<str, index.Entry> idx = {};
-    match (index.read(gitdir)) {
-        case Ok(index.Index ix): {
-            for (index.Entry e in ix.entries) {
+    Map<str, GIT_index.Entry> idx = {};
+    match (GIT_index.read(gitdir)) {
+        case Ok(GIT_index.Index ix): {
+            for (GIT_index.Entry e in ix.entries) {
                 match (e.path.utf8()) {
                     case Some(str p): {
                         idx.set(p, e);
@@ -159,7 +159,7 @@ pub Result<Status, Error> status(str gitdir, str worktree) {
                 }
             }
         }
-        case Err(index.Error e): {
+        case Err(GIT_index.Error e): {
             match (e) {
                 case NotFound: {
                 }
@@ -225,7 +225,7 @@ pub Result<Status, Error> status(str gitdir, str worktree) {
     }
     List<Delta> unstaged = [];
     for (str p in idx.keys()) {
-        index.Entry e = get_entry(idx, p);
+        GIT_index.Entry e = get_entry(idx, p);
         if (e.is_gitlink()) {
             continue;
         }
@@ -246,7 +246,7 @@ pub Result<Status, Error> status(str gitdir, str worktree) {
                 }
                 match (io.read_bytes(full)) {
                     case Ok(bytes content): {
-                        if (object.blob_id(content) != e.id) {
+                        if (GIT_object.blob_id(content) != e.id) {
                             unstaged.push(Delta(p.to_bytes(), Change.Modified));
                         }
                     }
@@ -260,7 +260,7 @@ pub Result<Status, Error> status(str gitdir, str worktree) {
             }
         }
     }
-    gitignore.Ignore ig = load_ignore(gitdir, worktree)?;
+    GIT_ignore.Ignore ig = load_ignore(gitdir, worktree)?;
     List<bytes> untracked = [];
     for (WFile f in wt) {
         if (!idx.contains(f.path) && !ig.is_ignored(f.path)) {
@@ -270,9 +270,9 @@ pub Result<Status, Error> status(str gitdir, str worktree) {
     return Result<Status, Error>.Ok(Status(staged, unstaged, untracked));
 }
 
-index.Entry get_entry(Map<str, index.Entry> idx, str p) {
+GIT_index.Entry get_entry(Map<str, GIT_index.Entry> idx, str p) {
     match (idx.get(p)) {
-        case Some(index.Entry e): {
+        case Some(GIT_index.Entry e): {
             return e;
         }
         case None: {
@@ -285,8 +285,8 @@ index.Entry get_entry(Map<str, index.Entry> idx, str p) {
 // committed yet) -- not an error, since "nothing is committed" is a perfectly
 // good status to report on.
 Result<Option<str>, Error> head_tree(str gitdir) {
-    match (refs.head(gitdir)) {
-        case Ok(refs.Head h): {
+    match (GIT_refs.head(gitdir)) {
+        case Ok(GIT_refs.Head h): {
             match (h) {
                 case Unborn(str name): {
                     return Result<Option<str>, Error>.Ok(Option<str>.None);
@@ -301,32 +301,32 @@ Result<Option<str>, Error> head_tree(str gitdir) {
                 }
             }
         }
-        case Err(refs.Error e): {
+        case Err(GIT_refs.Error e): {
             return Result<Option<str>, Error>.Err(Error.Refs(e));
         }
     }
 }
 
-// `gitignore.load`'s own error, wrapped at this module's own Error type --
-// the same shape `commit_tree` below uses for `object.Error` -- so `status`
+// `GIT_ignore.load`'s own error, wrapped at this module's own Error type --
+// the same shape `commit_tree` below uses for `GIT_object.Error` -- so `status`
 // can propagate it with a plain `?` (§6.3: `?`'s error type must match the
 // enclosing function's exactly, with no conversion).
-Result<gitignore.Ignore, Error> load_ignore(str gitdir, str worktree) {
-    match (gitignore.load(gitdir, worktree)) {
-        case Ok(gitignore.Ignore ig): {
-            return Result<gitignore.Ignore, Error>.Ok(ig);
+Result<GIT_ignore.Ignore, Error> load_ignore(str gitdir, str worktree) {
+    match (GIT_ignore.load(gitdir, worktree)) {
+        case Ok(GIT_ignore.Ignore ig): {
+            return Result<GIT_ignore.Ignore, Error>.Ok(ig);
         }
-        case Err(gitignore.Error e): {
-            return Result<gitignore.Ignore, Error>.Err(Error.Gitignore(e));
+        case Err(GIT_ignore.Error e): {
+            return Result<GIT_ignore.Ignore, Error>.Err(Error.Gitignore(e));
         }
     }
 }
 
 Result<str, Error> commit_tree(str gitdir, str id) {
-    match (object.read(gitdir, id)) {
-        case Ok(object.Object o): {
+    match (GIT_object.read(gitdir, id)) {
+        case Ok(GIT_object.Object o): {
             match (o.body) {
-                case Commit(object.Commit c): {
+                case Commit(GIT_object.Commit c): {
                     return Result<str, Error>.Ok(c.tree);
                 }
                 case Blob: {
@@ -340,7 +340,7 @@ Result<str, Error> commit_tree(str gitdir, str id) {
                 }
             }
         }
-        case Err(object.Error e): {
+        case Err(GIT_object.Error e): {
             return Result<str, Error>.Err(Error.Object(e));
         }
     }
@@ -349,11 +349,11 @@ Result<str, Error> commit_tree(str gitdir, str id) {
 // Every blob HEAD's tree reaches, recursively, keyed by its full path from
 // the repository root. A name that is not UTF-8 is left out (module header).
 Result<bool, Error> walk_tree(str gitdir, str id, str prefix, Map<str, str> out) {
-    match (object.read(gitdir, id)) {
-        case Ok(object.Object o): {
+    match (GIT_object.read(gitdir, id)) {
+        case Ok(GIT_object.Object o): {
             match (o.body) {
-                case Tree(List<object.Entry> es): {
-                    for (object.Entry e in es) {
+                case Tree(List<GIT_object.Entry> es): {
+                    for (GIT_object.Entry e in es) {
                         match (e.name.utf8()) {
                             case Some(str name): {
                                 str full = name;
@@ -383,7 +383,7 @@ Result<bool, Error> walk_tree(str gitdir, str id, str prefix, Map<str, str> out)
                 }
             }
         }
-        case Err(object.Error e): {
+        case Err(GIT_object.Error e): {
             return Result<bool, Error>.Err(Error.Object(e));
         }
     }

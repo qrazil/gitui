@@ -28,32 +28,32 @@ bash scripts/build-gitui.sh -o ourgitui    # not build.sh -- it is the one with 
 
 | file | what it is |
 |---|---|
-| `sha1.m31` | SHA-1 (FIPS 180-4), incremental and one-shot |
-| `zlib.m31` | DEFLATE inflate (RFC 1951) and the zlib wrapper (RFC 1950), with Adler-32, from a mid-file offset as well as from the front |
-| `object.m31` | the object store: the header, the SHA-1 check, trees, commits, tags -- loose or, via `pack.m31`, packed, through the one `read` |
-| `pack.m31` | packfiles: `.idx` v2, the pack's own object encoding, `OBJ_OFS_DELTA`/`OBJ_REF_DELTA` delta-chain resolution |
-| `refs.m31` | HEAD, `refs/**`, `packed-refs`, symbolic refs, `rev-parse`'s DWIM |
-| `repo.m31` | where the files are: `.git` as a file, and a linked worktree's `commondir` |
+| `GIT_sha1.m31` | SHA-1 (FIPS 180-4), incremental and one-shot |
+| `GIT_zlib.m31` | DEFLATE inflate (RFC 1951) and the zlib wrapper (RFC 1950), with Adler-32, from a mid-file offset as well as from the front |
+| `GIT_object.m31` | the object store: the header, the SHA-1 check, trees, commits, tags -- loose or, via `GIT_pack.m31`, packed, through the one `read` |
+| `GIT_pack.m31` | packfiles: `.idx` v2, the pack's own object encoding, `OBJ_OFS_DELTA`/`OBJ_REF_DELTA` delta-chain resolution |
+| `GIT_refs.m31` | HEAD, `refs/**`, `packed-refs`, symbolic refs, `rev-parse`'s DWIM |
+| `GIT_repository.m31` | where the files are: `.git` as a file, and a linked worktree's `commondir` |
 | `git.m31` | the read-only CLI |
-| `index.m31` | `.git/index`: read, write, a fresh entry from `fs.stat` |
-| `status.m31` | working-tree status: staged, unstaged, untracked |
-| `checkout.m31` | local branches, switching branches (the working-tree-writing primitive: refuses on local changes in the way), creating a branch |
-| `hunks.m31` | `lib/diff.m31`'s edit script, grouped into qrazil/tui's `TUI_diff_view.Hunk`/`Line` with context; `spans` is the one definition of where each hunk starts and ends |
-| `patch.m31` | apply or revert exactly one hunk of a diff, byte for byte -- what the diff view's `s`/`u` stage and unstage with |
-| `gitlog.m31` | the commit-history walk, shared by `git.m31 -log` and `gitui.m31` |
-| `gitclient.m31` | the interactive client's state and logic (no top-level statements, so it is importable and testable) |
+| `GIT_index.m31` | `.git/index`: read, write, a fresh entry from `fs.stat` |
+| `GIT_status.m31` | working-tree status: staged, unstaged, untracked |
+| `GIT_checkout.m31` | local branches, switching branches (the working-tree-writing primitive: refuses on local changes in the way), creating a branch |
+| `GIT_hunks.m31` | `lib/diff.m31`'s edit script, grouped into qrazil/tui's `TUI_diff_view.Hunk`/`Line` with context; `spans` is the one definition of where each hunk starts and ends |
+| `GIT_patch.m31` | apply or revert exactly one hunk of a diff, byte for byte -- what the diff view's `s`/`u` stage and unstage with |
+| `GIT_log.m31` | the commit-history walk, shared by `git.m31 -log` and `gitui.m31` |
+| `GIT_client.m31` | the interactive client's state and logic (no top-level statements, so it is importable and testable) |
 | `gitui.m31` | the interactive client's thin driver: parses a path, runs `TUI_app.Loop` |
-| `httpfetch.m31` | git's smart-HTTP protocol, v0 fetch/clone only: pkt-line framing, the ref advertisement, want/have negotiation, side-band-64k demultiplexing, and pack checksum verification, over `lib/http.m31` |
-| `packwrite.m31` | writes packfiles (whole objects, stored-zlib) and computes the object set a push must send, like `git rev-list --objects tips ^known` |
-| `httppush.m31` | smart-HTTP v0 push (`git-receive-pack`): fast-forward-only, `report-status`, HTTP Basic auth from the URL's userinfo or `GITUI_HTTP_USER`/`GITUI_HTTP_PASSWORD` |
-| `gitconfig.m31` | a minimal `.git/config` reader (`remote.origin.url` and friends) |
+| `GIT_http_fetch.m31` | git's smart-HTTP protocol, v0 fetch/clone only: pkt-line framing, the ref advertisement, want/have negotiation, side-band-64k demultiplexing, and pack checksum verification, over `lib/http.m31` |
+| `GIT_pack_write.m31` | writes packfiles (whole objects, stored-zlib) and computes the object set a push must send, like `git rev-list --objects tips ^known` |
+| `GIT_http_push.m31` | smart-HTTP v0 push (`git-receive-pack`): fast-forward-only, `report-status`, HTTP Basic auth from the URL's userinfo or `GITUI_HTTP_USER`/`GITUI_HTTP_PASSWORD` |
+| `GIT_config.m31` | a minimal `.git/config` reader (`remote.origin.url` and friends) |
 | `deps` | the project manifest: name, version and the pinned qrazil/tui commit (`deps.lock` records what was fetched) |
 | `scripts/build-gitui.sh` | builds `gitui.m31`; its `import tui.TUI_app;` lines resolve through `deps`, so nothing is staged or copied |
 | `tests/t_*.m31` | test programs, each printing what a Python oracle prints, or asserting against its own expectations |
 | `tests/oracles/oracle_*.py` | the oracles: `hashlib`, `zlib`, and a from-scratch format reader |
 | `tests/pty_e2e.py` | drives `ourgitui` under a real pty against disposable fixtures, real `git` as the oracle |
 | `scripts/compare.sh` | every command beside the real `git`, compared octet for octet |
-| `pull.m31` | fast-forward-only pull: fetches over smart HTTP (`httpfetch.m31`), unpacks the pack with `pack.read_pack`, refuses a dirty tree and anything but a fast-forward, then `checkout.m31` moves the working tree and the ref |
+| `GIT_pull.m31` | fast-forward-only pull: fetches over smart HTTP (`GIT_http_fetch.m31`), unpacks the pack with `GIT_pack.read_pack`, refuses a dirty tree and anything but a fast-forward, then `GIT_checkout.m31` moves the working tree and the ref |
 | `tests/test.sh` | all of the above (sources the `tests/test_*.sh` files next to it) |
 | `docs/FRICTION.md` | **the other half of this**: what the language made hard, and what it made easy |
 
@@ -61,8 +61,8 @@ bash scripts/build-gitui.sh -o ourgitui    # not build.sh -- it is the one with 
 
 Read-only: `cat-file --type/--size/--pretty`, `ls-tree`, `log [--max N]
 [<rev>]`, `rev-parse` and `refs`, on a working tree, a bare repository or a
-linked worktree -- **loose or packed**, transparently: `object.read` checks
-the loose store first and `pack.m31`'s `.idx`/`.pack` reading second, so
+linked worktree -- **loose or packed**, transparently: `GIT_object.read` checks
+the loose store first and `GIT_pack.m31`'s `.idx`/`.pack` reading second, so
 every reader above it (this CLI, the interactive client's status/diff/commit
 reading, `rev-parse`'s short-hash resolution) works the same way on a
 repository a real `git clone` produced as on one this program has only ever
@@ -82,14 +82,14 @@ commit, via a message file at `COMMIT_EDITMSG` read back and refused if
 empty (`c` opens a which-key overlay: `e` launches `$EDITOR` (`vi` if unset)
 on the message file, falling back to writing the template and naming the
 path if no editor can be launched at all; `f` finishes; `a` aborts -- see
-`gitclient.m31`'s own header, "launching `$EDITOR`, and the terminal handoff
+`GIT_client.m31`'s own header, "launching `$EDITOR`, and the terminal handoff
 that takes", for how the terminal is handed to the editor and back); a
 persistent footer of the base commands; and a synced jump list toggled with
 `J`; and hunk-level staging from inside that diff view -- `s` on a hunk of
 an unstaged diff stages exactly that hunk (`git add -p`'s "y"), `u` on a
 hunk of a staged diff unstages exactly that hunk (`git reset -p`), the file
 then showing as partially staged (`MM`) the way git shows it; the index blob
-is built by `patch.m31` over the real `diff.Op` bytes, never the rendered
+is built by `GIT_patch.m31` over the real `diff.Op` bytes, never the rendered
 text, and checked against real `git apply --cached` byte for byte
 (`test_gitui.sh`). `P` opens a push which-key; `p` pushes the current branch to the
 same-named branch on `origin` over smart HTTP, fast-forward only (see
@@ -173,19 +173,19 @@ repositories this project actually has lying around, not this program's own
 ability to read them any more. `docs/design.md`'s "Going remote" names
 packfiles as the first, independent piece of that larger plan (reading only
 -- writing one, for `push`, is later, separate work), and it has landed:
-`pack.m31` reads the `.idx` (format v2; v1 is refused, not guessed at, since
+`GIT_pack.m31` reads the `.idx` (format v2; v1 is refused, not guessed at, since
 nothing still writes it), the packfile's own variable-length object headers,
 and resolves an `OBJ_OFS_DELTA`/`OBJ_REF_DELTA` chain of either kind (or a
 mix) down to a real commit/tree/blob/tag, iteratively rather than
-recursively so a real chain cannot blow the stack. `zlib.m31` grew the
+recursively so a real chain cannot blow the stack. `GIT_zlib.m31` grew the
 matching primitive, `inflate_at`/`decompress_at`: decompress one DEFLATE or
 zlib stream starting at an offset inside a much larger buffer, and report how
 many input octets it consumed, so a packfile's objects are read one at a time
 without ever copying the pack to get to the next one.
 
-`object.read` -- and so `log`, `cat-file`, `ls-tree`, `rev-parse`'s short
+`GIT_object.read` -- and so `log`, `cat-file`, `ls-tree`, `rev-parse`'s short
 names and the interactive client's own reading -- checks the loose store
-first and a repository's packs second, with nothing above `object.m31`
+first and a repository's packs second, with nothing above `GIT_object.m31`
 changed to make that true. Checked the same way everything else here is:
 `apps/git/oracle_object.py`'s from-scratch reader grew its own independent
 `.idx`/pack/delta implementation (Python's `zlib.decompressobj`, fed from an
@@ -229,7 +229,7 @@ The line is not "old objects are packed and new ones are loose": it is
 "objects this machine wrote are loose, objects that arrived in a pack are
 packed, until something repacks". That split used to mean this program was a
 usable tool on a repository you have been committing to and a useless one on
-a fresh clone, with very little in between; `pack.m31` is what closes that
+a fresh clone, with very little in between; `GIT_pack.m31` is what closes that
 gap. `tests/test.sh`'s own built-in fixture is still an all-loose one on
 purpose (a repository this program itself commits to, same as `oro` and
 `lang`), and it now builds two packed fixtures alongside it -- one repacked
@@ -237,11 +237,11 @@ with real `OBJ_OFS_DELTA` chains, one with real `OBJ_REF_DELTA` ones -- so
 every command comparison in this file's own test suite runs against a packed
 repository as well as a loose one.
 
-Packfile *writing* lives in `packwrite.m31` (see "Push" below).
+Packfile *writing* lives in `GIT_pack_write.m31` (see "Push" below).
 
-## Smart-HTTP fetch (`httpfetch.m31`): a verified pack on disk, and no further
+## Smart-HTTP fetch (`GIT_http_fetch.m31`): a verified pack on disk, and no further
 
-`httpfetch.m31` speaks enough of git's smart-HTTP protocol -- v0 only, over
+`GIT_http_fetch.m31` speaks enough of git's smart-HTTP protocol -- v0 only, over
 `lib/http.m31` -- to fetch a real packfile from a real server: the ref
 advertisement (`GET .../info/refs?service=git-upload-pack`, refusing a
 "dumb HTTP" answer rather than misparsing it), want/have negotiation (a
@@ -258,7 +258,7 @@ as hand-corrupted bytes with no server involved, and as a genuinely
 truncated response over the wire -- is refused cleanly, never written.
 
 **This is exactly as far as it goes: verified bytes on disk, not a usable
-repository.** `httpfetch.m31` does not unpack anything it fetches -- no
+repository.** `GIT_http_fetch.m31` does not unpack anything it fetches -- no
 `.idx`, no delta resolution, no loose objects written -- because doing that
 needs the same `OBJ_OFS_DELTA`/`OBJ_REF_DELTA` machinery stage 2 (above) is
 for, and duplicating an incomplete piece of that here was explicitly out of
@@ -273,14 +273,14 @@ the reason its own header gives.
 
   - **The revision grammar.** `HEAD~3`, `main^2`, `v1^{tree}`, `@{upstream}`,
     `:/message`. `rev-parse` takes a ref, a full object name or an
-    unambiguous prefix. `refs.peel` follows an annotated tag to its commit,
+    unambiguous prefix. `GIT_refs.peel` follows an annotated tag to its commit,
     because `log v1` needs it.
   - **Configuration.** No `.git/config` is read at all, so no `.mailmap`, no
     `core.abbrev` (seven digits, fixed), no `log.decorate`, no
     `core.quotePath` (on, as it is by default), no colour, no pager, no
     `i18n.logOutputEncoding`.
-  - **Hunk-level diff against the working tree.** `status.m31` reports
-    whole-file staged/unstaged/untracked; `hunks.m31` can compute a
+  - **Hunk-level diff against the working tree.** `GIT_status.m31` reports
+    whole-file staged/unstaged/untracked; `GIT_hunks.m31` can compute a
     line-level diff between any two texts, but nothing yet wires the two
     together into a `diff`-shaped view of the working tree, or `ls-files`.
   - **Writing beyond what `gitui.m31` does.** The write path (index,
@@ -293,13 +293,13 @@ the reason its own header gives.
   - **`git log`'s other orderings.** The walk is git's date-ordered queue.
     `--topo-order`, `--reverse`, path limiting and `--graph` are not there.
 
-## Push (`packwrite.m31`, `httppush.m31`, `gitconfig.m31`)
+## Push (`GIT_pack_write.m31`, `GIT_http_push.m31`, `GIT_config.m31`)
 
 `P` then `p` in `ourgitui` pushes the current branch to the same-named
-branch on `origin`: `gitconfig.m31` reads `remote.origin.url` from
-`.git/config`, `httppush.m31` fetches the receive-pack advertisement, refuses
+branch on `origin`: `GIT_config.m31` reads `remote.origin.url` from
+`.git/config`, `GIT_http_push.m31` fetches the receive-pack advertisement, refuses
 anything but a fast-forward (the remote tip must be an ancestor of what is
-pushed; no force push), `packwrite.m31` packs exactly what the server lacks,
+pushed; no force push), `GIT_pack_write.m31` packs exactly what the server lacks,
 and the server's `report-status` answer becomes the status-line message.
 The UI then reloads. The push is synchronous: the screen does not repaint
 while it runs.
@@ -312,7 +312,7 @@ standard library has no TLS), so GitHub itself is out of reach; an `http://`
 git server, such as orogit, is the target.
 
 `test_push.sh` uses real git as the oracle: every pack `packwrite` writes is
-accepted by `git index-pack --strict` and read back through `pack.m31`; the
+accepted by `git index-pack --strict` and read back through `GIT_pack.m31`; the
 object set equals `git rev-list --objects`; pushes go to a real `git
 http-backend` and are judged by the server's refs, `git fsck --full` and a
 byte-for-byte comparison of the pushed objects. A non-fast-forward is refused
@@ -320,28 +320,28 @@ with nothing sent, a server-side refusal (a `pre-receive` hook) is reported
 with its `ng` reason, and the Basic-auth paths (URL, environment, none,
 wrong) are covered against an authenticating server.
 
-## Pull (`pull.m31`, `pack.read_pack`)
+## Pull (`GIT_pull.m31`, `GIT_pack.read_pack`)
 
 `F` then `p` in `ourgitui` pulls the current branch from the same-named
-branch on `origin`, fast-forward only. `pull.m31` reads the advertisement
-(`httpfetch.discover`), and a remote tip that is the local tip or one of its
+branch on `origin`, fast-forward only. `GIT_pull.m31` reads the advertisement
+(`GIT_http_fetch.discover`), and a remote tip that is the local tip or one of its
 ancestors is "already up to date". Anything else is fetched with the local tip
-as a `have`; the pack is unpacked by `pack.read_pack` (whole objects, OFS and
+as a `have`; the pack is unpacked by `GIT_pack.read_pack` (whole objects, OFS and
 REF deltas, and thin packs, whose missing bases come from the repository) and
-each object is written loose with `object.write`. The pull is then refused when
+each object is written loose with `GIT_object.write`. The pull is then refused when
 the working tree or index is dirty, when HEAD is detached or unborn, when the
 remote has no such branch, and when the local tip is not an ancestor of the
 remote one (`not a fast-forward; merge/rebase not supported yet`). The fetched
 objects are kept in that last case.
 
-The order of the two writes matters: `checkout.checkout` diffs HEAD's tree
+The order of the two writes matters: `GIT_checkout.checkout` diffs HEAD's tree
 against the target's, so it runs first, writing the files and index; only then
 is the branch ref advanced (compare-and-swap on the old tip) and
 `refs/remotes/origin/<branch>` updated. Moving the ref first would leave
 checkout an empty diff. Authentication and `https://` behave as for push.
 
 `test_pull.sh` uses real git as the oracle: packs from `git pack-objects`
-(OFS, REF, thin) and from `packwrite.m31` unpack to an object set equal to
+(OFS, REF, thin) and from `GIT_pack_write.m31` unpack to an object set equal to
 `git rev-list --objects` with `git fsck --full` clean; pulls come from a real
 `git http-backend`, repacked so the packs delta, and are judged by `git
 status`, `git ls-files -s`, a tree diff against the pushing clone and `git

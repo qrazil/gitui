@@ -1,4 +1,4 @@
-# The interactive client (`gitui.m31`/`gitclient.m31`) -- unit-level,
+# The interactive client (`gitui.m31`/`GIT_client.m31`) -- unit-level,
 # oracle-level and pty-driven end-to-end checks, the three tiers
 # `docs/design.md`'s "how you'll know you're done and correct" names.
 #

@@ -9,19 +9,19 @@
 //
 // API
 // ---
-//   httpfetch.discover(url)                         -> Result<Advertisement, Error>
-//   httpfetch.fetch(url, ad, wants, haves, out_path) -> Result<Summary, Error>
+//   GIT_http_fetch.discover(url)                         -> Result<Advertisement, Error>
+//   GIT_http_fetch.fetch(url, ad, wants, haves, out_path) -> Result<Summary, Error>
 //
 //   ad.service, ad.capabilities, ad.refs, ad.object_format
 //   summary.pack_bytes, summary.object_count
 //
 // The seam, testable with no socket in sight (`lib/http.m31`'s own reason,
 // quoted in its header, holds here too):
-//   httpfetch.read_packet(buf, at)      -> Result<Packet, Error>   Part 1
-//   httpfetch.pkt_line(payload)         -> bytes                  Part 1
-//   httpfetch.parse_advertisement(body) -> Result<Advertisement, Error>  Part 3
-//   httpfetch.demux(body)               -> Result<DemuxResult, Error>   Part 4
-//   httpfetch.verify_pack(pack, out_path) -> Result<Summary, Error>     Part 5
+//   GIT_http_fetch.read_packet(buf, at)      -> Result<Packet, Error>   Part 1
+//   GIT_http_fetch.pkt_line(payload)         -> bytes                  Part 1
+//   GIT_http_fetch.parse_advertisement(body) -> Result<Advertisement, Error>  Part 3
+//   GIT_http_fetch.demux(body)               -> Result<DemuxResult, Error>   Part 4
+//   GIT_http_fetch.verify_pack(pack, out_path) -> Result<Summary, Error>     Part 5
 //
 // `discover` and `fetch` are the only two functions that touch a socket, and
 // they do it by building a `http.Request` and calling `http.fetch` --
@@ -29,7 +29,7 @@
 // Everything else is a pure function over `bytes`, in memory, so the whole
 // wire format is unit-testable against fixed byte strings and the two real
 // exchanges are tested only for "does a real server's answer parse", not for
-// "does the parser work" -- the same split `object.m31` draws between
+// "does the parser work" -- the same split `GIT_object.m31` draws between
 // `read` (I/O) and `parse` (none).
 //
 // --- protocol version: v0, not v2 -------------------------------------------
@@ -61,7 +61,7 @@
 // and anything else is `NotSmart`, refused rather than misparsed.
 //
 // A capabilities line advertising an object format other than SHA-1 --
-// `object-format=sha256` -- is `UnsupportedFormat`: `sha1.m31`'s own header
+// `object-format=sha256` -- is `UnsupportedFormat`: `GIT_sha1.m31`'s own header
 // gives the reason there is no second digest in this program, and it holds
 // here too.
 //
@@ -76,8 +76,8 @@
 // correctness, and "matches what a modern client negotiates by default" was
 // explicitly not the bar (`docs/design.md`'s own task note). Computing
 // the `have` list itself -- which commits this program already possesses --
-// is the caller's job, not this module's: walk `refs.all(gitdir)` and
-// `gitlog.walk(gitdir, ref.name, -1)` for each, exactly as `apps/git`'s own
+// is the caller's job, not this module's: walk `GIT_refs.all(gitdir)` and
+// `GIT_log.walk(gitdir, ref.name, -1)` for each, exactly as `apps/git`'s own
 // `-log` does, and hand the object names to `fetch`. For a first `clone`
 // that list is empty, which is the simpler case and the one to prove first;
 // a `fetch` against a repository that already has history is where `have`
@@ -136,13 +136,13 @@
 // --- verification: the one thing that must never be skipped -----------------
 //
 // Every packfile ends with a 20-byte SHA-1 of everything before it.
-// `verify_pack` computes that digest itself (`sha1.m31`) and refuses to
+// `verify_pack` computes that digest itself (`GIT_sha1.m31`) and refuses to
 // write anything to disk if it does not match, or if fewer than 32 bytes
 // arrived, or if the first four are not `PACK` -- a truncated or corrupted
 // transfer is `Truncated`, `BadPack` or `ChecksumMismatch`, never a pack on
 // disk that looks fine and is not. The write itself never touches the
 // target path directly: a temporary file beside it, written whole, then
-// renamed over -- the same discipline `refs.m31` and `object.m31` already
+// renamed over -- the same discipline `GIT_refs.m31` and `GIT_object.m31` already
 // use, for the same reason.
 //
 // --- what is NOT here ---------------------------------------------------------
@@ -164,9 +164,9 @@
 import http;
 import io;
 import fs;
-import object;
+import GIT_object;
 import random;
-import sha1;
+import GIT_sha1;
 
 /// Why a fetch or a ref listing could not be completed. Payload-free
 /// (`docs/errors-decision.md` §4, the convention every module in this
@@ -196,7 +196,7 @@ pub enum Error {
     /// A pkt-line's length prefix names more bytes than actually arrived --
     /// a message cut off in the middle.
     Truncated;
-    /// The server's object format is not SHA-1. See `sha1.m31`'s own note on
+    /// The server's object format is not SHA-1. See `GIT_sha1.m31`'s own note on
     /// why there is no second digest here.
     UnsupportedFormat;
     /// The ref advertisement does not offer `side-band-64k`, which this
@@ -280,7 +280,7 @@ pub str Error.to_str() {
 /// prefix, which counts itself. `next` is the offset just past this packet,
 /// for the caller's next call; there are no tuples in this language
 /// (`docs/FRICTION.md` §2), so a small result type carries both answers
-/// out of one call the way `gitlog.Entry` does.
+/// out of one call the way `GIT_log.Entry` does.
 pub type Packet {
     pub bool flush;
     pub bytes payload;
@@ -420,8 +420,8 @@ Result<Advertisement, Error> after_refs_response(http.Response resp) {
 }
 
 /// The ref advertisement, parsed out of the response body already read into
-/// memory -- no I/O, no socket, exactly `object.parse`'s split from
-/// `object.read`. Exposed on its own so the framing rules can be checked
+/// memory -- no I/O, no socket, exactly `GIT_object.parse`'s split from
+/// `GIT_object.read`. Exposed on its own so the framing rules can be checked
 /// against a captured or hand-built advertisement with no server involved.
 pub Result<Advertisement, Error> parse_advertisement(bytes body) {
     Packet first = read_packet(body, 0)?;
@@ -521,7 +521,7 @@ Result<RemoteRef, Error> parse_ref_line(bytes line) {
             return Result<RemoteRef, Error>.Err(Error.BadAdvertisement);
         }
     }
-    if (!object.is_name(id) || id.size() != 40) {
+    if (!GIT_object.is_name(id) || id.size() != 40) {
         return Result<RemoteRef, Error>.Err(Error.BadAdvertisement);
     }
     str name = "";
@@ -633,12 +633,12 @@ pub Result<Summary, Error> fetch(str url, Advertisement ad, List<str> wants, Lis
         return Result<Summary, Error>.Err(Error.NoWant);
     }
     for (str w in wants) {
-        if (!object.is_name(w) || w.size() != 40) {
+        if (!GIT_object.is_name(w) || w.size() != 40) {
             return Result<Summary, Error>.Err(Error.BadName);
         }
     }
     for (str h in haves) {
-        if (!object.is_name(h) || h.size() != 40) {
+        if (!GIT_object.is_name(h) || h.size() != 40) {
             return Result<Summary, Error>.Err(Error.BadName);
         }
     }
@@ -759,7 +759,7 @@ bool is_ack_or_nak(bytes payload) {
 // --- verification (Part 5) ---------------------------------------------------
 
 /// Check `pack`'s trailing 20-byte SHA-1 against the SHA-1 of everything
-/// before it (`sha1.m31`), and only then write it to `out_path`. Exposed on
+/// before it (`GIT_sha1.m31`), and only then write it to `out_path`. Exposed on
 /// its own -- given bytes, not a URL -- so a truncated or corrupted transfer
 /// can be tested by handing this function a byte string that was never near
 /// a socket: a real pack with its tail cut off, or with one byte of its
@@ -775,7 +775,7 @@ pub Result<Summary, Error> verify_pack(bytes pack, str out_path) {
     int count = be32(pack, 8);
     bytes content = pack.substr(0, pack.size() - 20);
     bytes trailer = pack.substr(pack.size() - 20, pack.size());
-    if (sha1.sum(content) != trailer) {
+    if (GIT_sha1.sum(content) != trailer) {
         return Result<Summary, Error>.Err(Error.ChecksumMismatch);
     }
     match (write_atomic(out_path, pack)) {
@@ -803,8 +803,8 @@ str base_of(str url) {
 
 // Write `content` to `path` without ever leaving a half-written file there --
 // a freshly named temporary file beside it, written whole, then renamed over
-// the target. The same discipline `refs.m31`'s own `write_atomic` uses, for
-// the same reason; duplicated here rather than imported, since `refs.m31`'s
+// the target. The same discipline `GIT_refs.m31`'s own `write_atomic` uses, for
+// the same reason; duplicated here rather than imported, since `GIT_refs.m31`'s
 // copy is private to that module (`docs/FRICTION.md`'s `before`/`str_cmp`
 // are the same trade already made twice in this program).
 Result<bool, io.Error> write_atomic(str path, bytes content) {

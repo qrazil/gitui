@@ -40,10 +40,10 @@ import os;
 import fs;
 import date;
 import text;
-import object;
-import refs;
-import repo;
-import gitlog;
+import GIT_object;
+import GIT_refs;
+import GIT_repository;
+import GIT_log;
 
 args.Parser p = args.Parser("ourgit", summary: "read-only git plumbing over loose objects");
 p.value("git-dir", help: "the repository's git directory", placeholder: "DIR");
@@ -135,17 +135,17 @@ int dispatch(args.Parser parser, args.Parsed r) {
 int cat_file(str gd, args.Parsed c) {
     str spec = c.positional("object");
     str id = "";
-    match (refs.rev_parse(gd, spec)) {
+    match (GIT_refs.rev_parse(gd, spec)) {
         case Ok(str v): {
             id = v;
         }
-        case Err(refs.Error e): {
+        case Err(GIT_refs.Error e): {
             io.eprint(e.to_str());
             return 1;
         }
     }
-    match (object.read(gd, id)) {
-        case Ok(object.Object o): {
+    match (GIT_object.read(gd, id)) {
+        case Ok(GIT_object.Object o): {
             if (c.flag("type")) {
                 say(o.kind());
                 return 0;
@@ -155,7 +155,7 @@ int cat_file(str gd, args.Parsed c) {
                 return 0;
             }
             match (o.body) {
-                case Tree(List<object.Entry> es): {
+                case Tree(List<GIT_object.Entry> es): {
                     write(tree_text(es));
                 }
                 case Blob: {
@@ -170,7 +170,7 @@ int cat_file(str gd, args.Parsed c) {
             }
             return 0;
         }
-        case Err(object.Error e): {
+        case Err(GIT_object.Error e): {
             io.eprint(e.to_str());
             return 1;
         }
@@ -179,11 +179,11 @@ int cat_file(str gd, args.Parsed c) {
 
 int ls_tree(str gd, str spec) {
     str id = "";
-    match (refs.rev_parse(gd, spec)) {
+    match (GIT_refs.rev_parse(gd, spec)) {
         case Ok(str v): {
             id = v;
         }
-        case Err(refs.Error e): {
+        case Err(GIT_refs.Error e): {
             io.eprint(e.to_str());
             return 1;
         }
@@ -191,17 +191,17 @@ int ls_tree(str gd, str spec) {
     // `git ls-tree` takes a tree-ish, so a commit means its tree. A tag is
     // peeled to a commit first, and then the same rule applies.
     for (int hops in 0 .. 12) {
-        match (object.read(gd, id)) {
-            case Ok(object.Object o): {
+        match (GIT_object.read(gd, id)) {
+            case Ok(GIT_object.Object o): {
                 match (o.body) {
-                    case Tree(List<object.Entry> es): {
+                    case Tree(List<GIT_object.Entry> es): {
                         write(tree_text(es));
                         return 0;
                     }
-                    case Commit(object.Commit c): {
+                    case Commit(GIT_object.Commit c): {
                         id = c.tree;
                     }
-                    case Tag(object.Tag t): {
+                    case Tag(GIT_object.Tag t): {
                         id = t.object;
                     }
                     case Blob: {
@@ -210,7 +210,7 @@ int ls_tree(str gd, str spec) {
                     }
                 }
             }
-            case Err(object.Error e): {
+            case Err(GIT_object.Error e): {
                 io.eprint(e.to_str());
                 return 1;
             }
@@ -221,12 +221,12 @@ int ls_tree(str gd, str spec) {
 }
 
 int rev_parse(str gd, str spec) {
-    match (refs.rev_parse(gd, spec)) {
+    match (GIT_refs.rev_parse(gd, spec)) {
         case Ok(str id): {
             say(id);
             return 0;
         }
-        case Err(refs.Error e): {
+        case Err(GIT_refs.Error e): {
             io.eprint(e.to_str());
             return 1;
         }
@@ -234,14 +234,14 @@ int rev_parse(str gd, str spec) {
 }
 
 int list_refs(str gd) {
-    match (refs.all(gd)) {
-        case Ok(List<refs.Ref> rs): {
-            for (refs.Ref one in rs) {
+    match (GIT_refs.all(gd)) {
+        case Ok(List<GIT_refs.Ref> rs): {
+            for (GIT_refs.Ref one in rs) {
                 say(one.id + " " + one.name);
             }
             return 0;
         }
-        case Err(refs.Error e): {
+        case Err(GIT_refs.Error e): {
             io.eprint(e.to_str());
             return 1;
         }
@@ -258,13 +258,13 @@ int log(str gd, args.Parsed c) {
         case None: {
         }
     }
-    // The walk itself -- git's date-ordered queue -- lives in `gitlog.m31`
+    // The walk itself -- git's date-ordered queue -- lives in `GIT_log.m31`
     // now, shared with the interactive client (`gitui.m31`) so there is one
     // implementation of it rather than two (`docs/design.md`).
-    match (gitlog.walk(gd, spec, limit)) {
-        case Ok(List<gitlog.Entry> entries): {
+    match (GIT_log.walk(gd, spec, limit)) {
+        case Ok(List<GIT_log.Entry> entries): {
             int shown = 0;
-            for (gitlog.Entry en in entries) {
+            for (GIT_log.Entry en in entries) {
                 // The blank line goes BETWEEN commits and not after each one:
                 // git separates rather than terminates, so `log` of one
                 // commit ends at the last line of its message.
@@ -276,7 +276,7 @@ int log(str gd, args.Parsed c) {
             }
             return 0;
         }
-        case Err(gitlog.Error e): {
+        case Err(GIT_log.Error e): {
             io.eprint(e.to_str());
             return 1;
         }
@@ -288,9 +288,9 @@ int log(str gd, args.Parsed c) {
 // `git ls-tree` and `git cat-file -p` on a tree print the same four fields:
 // the six-digit mode, the type word, the object name, a TAB, and the name --
 // quoted if it needs it, which is why this builds `bytes` and not a `str`.
-bytes tree_text(List<object.Entry> es) {
+bytes tree_text(List<GIT_object.Entry> es) {
     bytes b = [];
-    for (object.Entry e in es) {
+    for (GIT_object.Entry e in es) {
         b.extend((e.mode_text() + " " + e.type_word() + " " + e.id + "\t").to_bytes());
         b.extend(quoted(e.name));
         b.push('\n');
@@ -355,7 +355,7 @@ void escape(bytes b, int c) {
 }
 
 // One commit in `git log`'s default format.
-bytes commit_text(str id, object.Commit c) {
+bytes commit_text(str id, GIT_object.Commit c) {
     bytes b = [];
     b.extend(("commit " + id + "\n").to_bytes());
     if (c.parents.size() > 1) {
@@ -400,7 +400,7 @@ const Array<str> MONTH = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug"
 // the commit stored, because git does the same: it parses the field into a
 // number and prints `%+05d` of it, so a commit written `-0000` prints
 // `+0000`.
-str stamp(object.Ident who) {
+str stamp(GIT_object.Ident who) {
     date.Civil t = date.civil(who.when + who.offset * 60);
     return WEEKDAY[t.weekday] + " " + MONTH[t.month - 1] + " " + t.day.to_str() + " " + two(t.hour) + ":" + two(t.minute) + ":" + two(t.second) + " " + t.year.to_str() + " " + zone(who.offset);
 }
@@ -510,7 +510,7 @@ void write(bytes b) {
 
 // `.git` here, or in a parent, or the bare repository this already is.
 Option<str> discover(str from) {
-    str found = repo.find(from);
+    str found = GIT_repository.find(from);
     if (found == "") {
         return Option<str>.None;
     }

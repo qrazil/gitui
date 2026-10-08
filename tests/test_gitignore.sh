@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# `.gitignore` filtering (`apps/git/gitignore.m31`), checked against real
+# `.gitignore` filtering (`apps/git/GIT_ignore.m31`), checked against real
 # `git` in disposable fixtures -- the same philosophy `test_write.sh` already
 # uses for the rest of the write path (its own header).
 #
@@ -9,10 +9,10 @@
 #
 # Every comparison here uses `git status --short --untracked-files=all`, not
 # plain `--short`: the default grouping collapses an entirely-untracked
-# directory into one `?? dir/` line, which `status.m31`'s own module header
+# directory into one `?? dir/` line, which `GIT_status.m31`'s own module header
 # already says this program does not attempt to match (a pre-existing,
 # separate gap, not something this task touches) -- `-uall` lists every
-# individual untracked file instead, which is what `status.status()` itself
+# individual untracked file instead, which is what `GIT_status.status()` itself
 # reports and what these fixtures need to compare against, file for file.
 
 if [ ! -x "$WORK/t_status" ]; then
@@ -138,7 +138,7 @@ check_gitignore "gitignore: .git/info/exclude applies, and a .gitignore can over
 # real git never even reads it, because it never descends into an excluded
 # directory to look for a nested `.gitignore` in the first place. A matcher
 # that discovers ignore files by walking the whole tree (this one does, by
-# design -- see `gitignore.m31`'s own header) has to apply the same
+# design -- see `GIT_ignore.m31`'s own header) has to apply the same
 # ancestor-exclusion short-circuit to get this right regardless.
 
 gi5="$WORK/gi_mixed"

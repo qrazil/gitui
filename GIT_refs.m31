@@ -10,14 +10,14 @@
 //
 // API
 // ---
-//   refs.head(gitdir)            -> Result<Head, Error>
-//   refs.resolve(gitdir, name)   -> Result<str, Error>   a full ref name
-//   refs.all(gitdir)             -> Result<List<Ref>, Error>  sorted by name
-//   refs.rev_parse(gitdir, spec) -> Result<str, Error>   git's DWIM, and
+//   GIT_refs.head(gitdir)            -> Result<Head, Error>
+//   GIT_refs.resolve(gitdir, name)   -> Result<str, Error>   a full ref name
+//   GIT_refs.all(gitdir)             -> Result<List<Ref>, Error>  sorted by name
+//   GIT_refs.rev_parse(gitdir, spec) -> Result<str, Error>   git's DWIM, and
 //                                                        short object names
 //
-//   refs.update(gitdir, name, new_id, expect_old)  -> Result<bool, Error>
-//   refs.update_symbolic(gitdir, name, target)     -> Result<bool, Error>
+//   GIT_refs.update(gitdir, name, new_id, expect_old)  -> Result<bool, Error>
+//   GIT_refs.update_symbolic(gitdir, name, target)     -> Result<bool, Error>
 //
 // --- what is NOT here --------------------------------------------------------
 //
@@ -32,7 +32,7 @@
 // `update` writes a ref -- `refs/heads/<name>`, `HEAD` detached, or any other
 // full ref name -- to a 40-digit object name, and `update_symbolic` writes
 // `HEAD` (or any ref) as `ref: <target>`. Both write a temporary file beside
-// the real one and rename it over, exactly as `object.m31`'s writers do:
+// the real one and rename it over, exactly as `GIT_object.m31`'s writers do:
 // never a direct in-place write, so a crash mid-write leaves the old ref
 // intact and a reader never sees a half-written one.
 //
@@ -52,8 +52,8 @@
 import io;
 import fs;
 import text;
-import object;
-import repo;
+import GIT_object;
+import GIT_repository;
 import random;
 
 /// Why a name did not resolve. Payload-free (docs/errors-decision.md §4):
@@ -177,7 +177,7 @@ pub Result<Head, Error> head(str gitdir) {
         str id = resolve(gitdir, target)?;
         return Result<Head, Error>.Ok(Head.Born(target, id));
     }
-    if (object.is_name(raw) && raw.size() == 40) {
+    if (GIT_object.is_name(raw) && raw.size() == 40) {
         return Result<Head, Error>.Ok(Head.Detached(raw));
     }
     return Result<Head, Error>.Err(Error.Malformed);
@@ -221,7 +221,7 @@ pub Result<str, Error> resolve(str gitdir, str name) {
         if (raw.starts_with("ref: ")) {
             at = raw.substr(5, raw.size()).trim();
             depth = depth + 1;
-        } else if (object.is_name(raw) && raw.size() == 40) {
+        } else if (GIT_object.is_name(raw) && raw.size() == 40) {
             return Result<str, Error>.Ok(raw);
         } else {
             return Result<str, Error>.Err(Error.Malformed);
@@ -237,8 +237,8 @@ pub Result<List<Ref>, Error> all(str gitdir) {
     Map<str, str> seen = {};
     List<str> order = [];
     // The shared directory: in a linked worktree `refs` is not under the
-    // worktree's own git directory at all (`repo.m31`).
-    str shared = repo.common(gitdir);
+    // worktree's own git directory at all (`GIT_repository.m31`).
+    str shared = GIT_repository.common(gitdir);
     str root = fs.join(shared, "refs");
     match (fs.walk(root)) {
         case Ok(List<str> paths): {
@@ -295,7 +295,7 @@ pub Result<List<Ref>, Error> all(str gitdir) {
 /// are files in the git directory rather than under `refs`, and are tried as
 /// `<spec>` by that first rule.
 pub Result<str, Error> rev_parse(str gitdir, str spec) {
-    List<str> hits = object.matching(gitdir, spec);
+    List<str> hits = GIT_object.matching(gitdir, spec);
     if (hits.size() == 1) {
         return Result<str, Error>.Ok(hits[0]);
     }
@@ -324,10 +324,10 @@ pub Result<str, Error> peel(str gitdir, str spec, str id) {
     str at = id;
     int depth = 0;
     while (depth < 10) {
-        match (object.read(gitdir, at)) {
-            case Ok(object.Object o): {
+        match (GIT_object.read(gitdir, at)) {
+            case Ok(GIT_object.Object o): {
                 match (o.body) {
-                    case Tag(object.Tag t): {
+                    case Tag(GIT_object.Tag t): {
                         at = t.object;
                         depth = depth + 1;
                     }
@@ -378,10 +378,10 @@ Option<str> loose_ref(str gitdir, str name) {
     }
     // HEAD and the handful of pseudo-refs beside it belong to this worktree;
     // every branch, tag and remote lives in the shared directory, which is
-    // the same directory unless this is a linked worktree (`repo.m31`).
+    // the same directory unless this is a linked worktree (`GIT_repository.m31`).
     str where = gitdir;
-    if (!repo.per_worktree(name)) {
-        where = repo.common(gitdir);
+    if (!GIT_repository.per_worktree(name)) {
+        where = GIT_repository.common(gitdir);
     }
     str path = fs.join(where, name);
     if (!fs.is_file(path)) {
@@ -416,7 +416,7 @@ Option<str> packed(str gitdir, str name) {
 // FRICTION.md as the thing a `Repo` holding state would fix.
 List<Ref> packed_all(str gitdir) {
     List<Ref> out = [];
-    str path = fs.join(repo.common(gitdir), "packed-refs");
+    str path = fs.join(GIT_repository.common(gitdir), "packed-refs");
     if (!fs.is_file(path)) {
         return out;
     }
@@ -439,7 +439,7 @@ List<Ref> packed_all(str gitdir) {
         }
         str id = line.substr(0, 40);
         str name = line.substr(41, line.size()).trim();
-        if (!object.is_name(id) || name.size() == 0) {
+        if (!GIT_object.is_name(id) || name.size() == 0) {
             continue;
         }
         out.push(Ref(name, id));
@@ -476,7 +476,7 @@ pub Result<bool, Error> update(str gitdir, str name, str new_id, Option<str> exp
     if (!safe_name(name)) {
         return Result<bool, Error>.Err(Error.Malformed);
     }
-    if (!object.is_name(new_id) || new_id.size() != 40) {
+    if (!GIT_object.is_name(new_id) || new_id.size() != 40) {
         return Result<bool, Error>.Err(Error.BadValue);
     }
     match (expect_old) {
@@ -552,12 +552,12 @@ Result<str, Error> current_or_empty(str gitdir, str name) {
 
 // The file a ref name is written to: HEAD and the other per-worktree
 // pseudo-refs live beside `gitdir` itself, everything else in the shared
-// directory a linked worktree keeps its branches and tags in (`repo.m31`) --
+// directory a linked worktree keeps its branches and tags in (`GIT_repository.m31`) --
 // the same split `loose_ref` reads by.
 str where_for(str gitdir, str name) {
     str where = gitdir;
-    if (!repo.per_worktree(name)) {
-        where = repo.common(gitdir);
+    if (!GIT_repository.per_worktree(name)) {
+        where = GIT_repository.common(gitdir);
     }
     return fs.join(where, name);
 }

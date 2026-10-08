@@ -1,4 +1,4 @@
-// Drives `httpfetch.m31` against a real smart-HTTP git server for
+// Drives `GIT_http_fetch.m31` against a real smart-HTTP git server for
 // `test_httpfetch.sh`, and against hand-built bytes for the cases that do
 // not need a server at all (a truncated or corrupted pack).
 //
@@ -14,23 +14,23 @@
 //
 //   ./t_httpfetch fetch <url> <gitdir> <out.pack>
 //       As `clone`, but `have`s are every commit reachable from every ref in
-//       `gitdir` (`refs.all` + `gitlog.walk`, exactly as `-log` walks) --
+//       `gitdir` (`GIT_refs.all` + `GIT_log.walk`, exactly as `-log` walks) --
 //       the case where negotiation is expected to shrink the pack.
 //
 //   ./t_httpfetch verify <pack-file> <out-path>
 //       Reads `pack-file` as plain bytes (no network, no server -- this is
 //       how a truncated or corrupted transfer is tested, per the task's own
-//       "simulate this at the test level") and calls `httpfetch.verify_pack`
+//       "simulate this at the test level") and calls `GIT_http_fetch.verify_pack`
 //       on them. Prints "ok <bytes> <objects>" or "error: <message>".
 //
 // Every command prints "error: <message>" to standard error and exits 1 on
 // failure; a successful command exits 0.
 
-import httpfetch;
-import gitlog;
+import GIT_http_fetch;
+import GIT_log;
 import io;
 import os;
-import refs;
+import GIT_refs;
 
 List<str> argv = os.args();
 if (argv.size() < 2) {
@@ -63,36 +63,36 @@ void fail(str msg) {
 }
 
 void ls_remote(str url) {
-    match (httpfetch.discover(url)) {
-        case Ok(httpfetch.Advertisement ad): {
-            for (httpfetch.RemoteRef r in ad.refs) {
+    match (GIT_http_fetch.discover(url)) {
+        case Ok(GIT_http_fetch.Advertisement ad): {
+            for (GIT_http_fetch.RemoteRef r in ad.refs) {
                 print(r.id + "\t" + r.name);
             }
         }
-        case Err(httpfetch.Error e): {
+        case Err(GIT_http_fetch.Error e): {
             fail(e.to_str());
         }
     }
 }
 
 void do_clone(str url, str out_path) {
-    match (httpfetch.discover(url)) {
-        case Ok(httpfetch.Advertisement ad): {
+    match (GIT_http_fetch.discover(url)) {
+        case Ok(GIT_http_fetch.Advertisement ad): {
             List<str> wants = unique_ids(ad.refs);
             List<str> no_haves = [];
             print("caps " + ad.capabilities.join(" "));
             print("refs " + wants.size().to_str());
             run_fetch(url, ad, wants, no_haves, out_path);
         }
-        case Err(httpfetch.Error e): {
+        case Err(GIT_http_fetch.Error e): {
             fail(e.to_str());
         }
     }
 }
 
 void do_fetch(str url, str gitdir, str out_path) {
-    match (httpfetch.discover(url)) {
-        case Ok(httpfetch.Advertisement ad): {
+    match (GIT_http_fetch.discover(url)) {
+        case Ok(GIT_http_fetch.Advertisement ad): {
             List<str> wants = unique_ids(ad.refs);
             List<str> haves = local_haves(gitdir);
             print("caps " + ad.capabilities.join(" "));
@@ -100,18 +100,18 @@ void do_fetch(str url, str gitdir, str out_path) {
             print("haves " + haves.size().to_str());
             run_fetch(url, ad, wants, haves, out_path);
         }
-        case Err(httpfetch.Error e): {
+        case Err(GIT_http_fetch.Error e): {
             fail(e.to_str());
         }
     }
 }
 
-void run_fetch(str url, httpfetch.Advertisement ad, List<str> wants, List<str> haves, str out_path) {
-    match (httpfetch.fetch(url, ad, wants, haves, out_path)) {
-        case Ok(httpfetch.Summary s): {
+void run_fetch(str url, GIT_http_fetch.Advertisement ad, List<str> wants, List<str> haves, str out_path) {
+    match (GIT_http_fetch.fetch(url, ad, wants, haves, out_path)) {
+        case Ok(GIT_http_fetch.Summary s): {
             print("pack " + s.pack_bytes.to_str() + " " + s.object_count.to_str());
         }
-        case Err(httpfetch.Error e): {
+        case Err(GIT_http_fetch.Error e): {
             fail(e.to_str());
         }
     }
@@ -120,11 +120,11 @@ void run_fetch(str url, httpfetch.Advertisement ad, List<str> wants, List<str> h
 void do_verify(str pack_path, str out_path) {
     match (io.read_bytes(pack_path)) {
         case Ok(bytes data): {
-            match (httpfetch.verify_pack(data, out_path)) {
-                case Ok(httpfetch.Summary s): {
+            match (GIT_http_fetch.verify_pack(data, out_path)) {
+                case Ok(GIT_http_fetch.Summary s): {
                     print("ok " + s.pack_bytes.to_str() + " " + s.object_count.to_str());
                 }
-                case Err(httpfetch.Error e): {
+                case Err(GIT_http_fetch.Error e): {
                     fail(e.to_str());
                 }
             }
@@ -135,10 +135,10 @@ void do_verify(str pack_path, str out_path) {
     }
 }
 
-List<str> unique_ids(List<httpfetch.RemoteRef> advertised) {
+List<str> unique_ids(List<GIT_http_fetch.RemoteRef> advertised) {
     Map<str, bool> seen = {};
     List<str> out = [];
-    for (httpfetch.RemoteRef r in advertised) {
+    for (GIT_http_fetch.RemoteRef r in advertised) {
         if (!seen.contains(r.id)) {
             seen.set(r.id, true);
             out.push(r.id);
@@ -148,18 +148,18 @@ List<str> unique_ids(List<httpfetch.RemoteRef> advertised) {
 }
 
 // Every commit reachable from every local ref -- what a real `fetch` already
-// has, and so must not be asked for again. `refs.all` + `gitlog.walk` is
+// has, and so must not be asked for again. `GIT_refs.all` + `GIT_log.walk` is
 // exactly what `-log` already does for one ref; this does it for all of
 // them, matching the module note's own recipe.
 List<str> local_haves(str gitdir) {
     Map<str, bool> seen = {};
     List<str> out = [];
-    match (refs.all(gitdir)) {
-        case Ok(List<refs.Ref> all): {
-            for (refs.Ref r in all) {
-                match (gitlog.walk(gitdir, r.name, -1)) {
-                    case Ok(List<gitlog.Entry> entries): {
-                        for (gitlog.Entry e in entries) {
+    match (GIT_refs.all(gitdir)) {
+        case Ok(List<GIT_refs.Ref> all): {
+            for (GIT_refs.Ref r in all) {
+                match (GIT_log.walk(gitdir, r.name, -1)) {
+                    case Ok(List<GIT_log.Entry> entries): {
+                        for (GIT_log.Entry e in entries) {
                             if (!seen.contains(e.id)) {
                                 seen.set(e.id, true);
                                 out.push(e.id);

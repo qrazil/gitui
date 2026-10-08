@@ -1,5 +1,5 @@
 // Git's smart-HTTP protocol, the push half: `git-receive-pack` over
-// `lib/http.m31`, the sibling of `httpfetch.m31` (which has the fetch half
+// `lib/http.m31`, the sibling of `GIT_http_fetch.m31` (which has the fetch half
 // and whose pkt-line framing and advertisement parser this reuses rather
 // than repeats). See `docs/design.md`'s "Going remote" for where this
 // sits: a push is "compute what the remote lacks, pack it, send it with the
@@ -8,23 +8,23 @@
 //
 // API
 // ---
-//   httppush.parse_remote(url)                  -> Result<Remote, Error>
-//   httppush.discover(remote)                   -> Result<httpfetch.Advertisement, Error>
-//   httppush.push(gitdir, remote, refname, id)  -> Result<Report, Error>
+//   GIT_http_push.parse_remote(url)                  -> Result<Remote, Error>
+//   GIT_http_push.discover(remote)                   -> Result<GIT_http_fetch.Advertisement, Error>
+//   GIT_http_push.push(gitdir, remote, refname, id)  -> Result<Report, Error>
 //
 // The seam, testable with no socket:
-//   httppush.command_body(old, new, refname, pack) -> bytes          Part 2
-//   httppush.parse_report(body, refname)           -> Result<Report, Error>  Part 3
-//   httppush.is_ancestor(gitdir, old, new)         -> bool
+//   GIT_http_push.command_body(old, new, refname, pack) -> bytes          Part 2
+//   GIT_http_push.parse_report(body, refname)           -> Result<Report, Error>  Part 3
+//   GIT_http_push.is_ancestor(gitdir, old, new)         -> bool
 //
 // --- the exchange ----------------------------------------------------------
 //
 // `GET <url>/info/refs?service=git-receive-pack` is the same advertisement
-// `httpfetch.discover` reads for `upload-pack`, under a different content
+// `GIT_http_fetch.discover` reads for `upload-pack`, under a different content
 // type and with receive-pack's own capabilities on the first line
 // (`report-status`, `delete-refs`, `side-band-64k`, `atomic`, ...). An
 // empty repository advertises exactly one line, the all-zero id against the
-// pseudo-ref `capabilities^{}`, which `httpfetch.parse_advertisement`
+// pseudo-ref `capabilities^{}`, which `GIT_http_fetch.parse_advertisement`
 // already drops.
 //
 // `POST <url>/git-receive-pack` carries one pkt-line per ref update --
@@ -62,10 +62,10 @@
 
 import base64;
 import http;
-import httpfetch;
-import object;
+import GIT_http_fetch;
+import GIT_object;
 import os;
-import packwrite;
+import GIT_pack_write;
 
 /// Why a push did not happen, or was refused. Payload-free
 /// (`docs/errors-decision.md` §4).
@@ -276,9 +276,9 @@ void apply_auth(http.Request req, Remote r) {
 }
 
 /// `GET <url>/info/refs?service=git-receive-pack`, parsed with
-/// `httpfetch.parse_advertisement` -- the same framing, a different service
+/// `GIT_http_fetch.parse_advertisement` -- the same framing, a different service
 /// name and content type.
-pub Result<httpfetch.Advertisement, Error> discover(Remote r) {
+pub Result<GIT_http_fetch.Advertisement, Error> discover(Remote r) {
     str target = base_of(r.url) + "/info/refs?service=git-receive-pack";
     match (http.request("GET", target)) {
         case Ok(http.Request req): {
@@ -287,31 +287,31 @@ pub Result<httpfetch.Advertisement, Error> discover(Remote r) {
             match (http.fetch(req)) {
                 case Ok(http.Response resp): {
                     if (resp.status() == 401 || resp.status() == 403) {
-                        return Result<httpfetch.Advertisement, Error>.Err(Error.Auth);
+                        return Result<GIT_http_fetch.Advertisement, Error>.Err(Error.Auth);
                     }
                     if (resp.status() != 200) {
-                        return Result<httpfetch.Advertisement, Error>.Err(Error.Status);
+                        return Result<GIT_http_fetch.Advertisement, Error>.Err(Error.Status);
                     }
                     str ctype = resp.header("content-type").or("");
                     if (!ctype.starts_with("application/x-git-receive-pack-advertisement")) {
-                        return Result<httpfetch.Advertisement, Error>.Err(Error.NotSmart);
+                        return Result<GIT_http_fetch.Advertisement, Error>.Err(Error.NotSmart);
                     }
-                    match (httpfetch.parse_advertisement(resp.body())) {
-                        case Ok(httpfetch.Advertisement ad): {
-                            return Result<httpfetch.Advertisement, Error>.Ok(ad);
+                    match (GIT_http_fetch.parse_advertisement(resp.body())) {
+                        case Ok(GIT_http_fetch.Advertisement ad): {
+                            return Result<GIT_http_fetch.Advertisement, Error>.Ok(ad);
                         }
-                        case Err(httpfetch.Error e): {
-                            return Result<httpfetch.Advertisement, Error>.Err(Error.BadAdvertisement);
+                        case Err(GIT_http_fetch.Error e): {
+                            return Result<GIT_http_fetch.Advertisement, Error>.Err(Error.BadAdvertisement);
                         }
                     }
                 }
                 case Err(http.Error e): {
-                    return Result<httpfetch.Advertisement, Error>.Err(Error.Http);
+                    return Result<GIT_http_fetch.Advertisement, Error>.Err(Error.Http);
                 }
             }
         }
         case Err(http.Error e): {
-            return Result<httpfetch.Advertisement, Error>.Err(Error.BadUrl);
+            return Result<GIT_http_fetch.Advertisement, Error>.Err(Error.BadUrl);
         }
     }
 }
@@ -326,8 +326,8 @@ pub bytes command_body(str old, str new, str refname, bytes pack) {
     bytes line = (old + " " + new + " " + refname).to_bytes();
     line.push(0);
     line.extend("report-status agent=m31-httppush/1\n".to_bytes());
-    out.extend(httpfetch.pkt_line(line));
-    out.extend(httpfetch.FLUSH_PKT);
+    out.extend(GIT_http_fetch.pkt_line(line));
+    out.extend(GIT_http_fetch.FLUSH_PKT);
     out.extend(pack);
     return out;
 }
@@ -355,7 +355,7 @@ pub Result<Report, Error> parse_report(bytes body, str refname) {
     bool ok = false;
     str reason = "";
     while (at < body.size()) {
-        httpfetch.Packet p = read(body, at)?;
+        GIT_http_fetch.Packet p = read(body, at)?;
         at = p.next;
         if (p.flush) {
             break;
@@ -419,13 +419,13 @@ pub Result<Report, Error> parse_report(bytes body, str refname) {
     return Result<Report, Error>.Ok(Report(true, ok, refname, reason));
 }
 
-Result<httpfetch.Packet, Error> read(bytes body, int at) {
-    match (httpfetch.read_packet(body, at)) {
-        case Ok(httpfetch.Packet p): {
-            return Result<httpfetch.Packet, Error>.Ok(p);
+Result<GIT_http_fetch.Packet, Error> read(bytes body, int at) {
+    match (GIT_http_fetch.read_packet(body, at)) {
+        case Ok(GIT_http_fetch.Packet p): {
+            return Result<GIT_http_fetch.Packet, Error>.Ok(p);
         }
-        case Err(httpfetch.Error e): {
-            return Result<httpfetch.Packet, Error>.Err(Error.BadReport);
+        case Err(GIT_http_fetch.Error e): {
+            return Result<GIT_http_fetch.Packet, Error>.Err(Error.BadReport);
         }
     }
 }
@@ -446,10 +446,10 @@ pub bool is_ancestor(str gitdir, str anc, str desc) {
     while (at < queue.size()) {
         str id = queue[at];
         at = at + 1;
-        match (object.read(gitdir, id)) {
-            case Ok(object.Object o): {
+        match (GIT_object.read(gitdir, id)) {
+            case Ok(GIT_object.Object o): {
                 match (o.body) {
-                    case Commit(object.Commit cm): {
+                    case Commit(GIT_object.Commit cm): {
                         for (str p in cm.parents) {
                             if (p == anc) {
                                 return true;
@@ -481,17 +481,17 @@ pub bool is_ancestor(str gitdir, str anc, str desc) {
 /// server itself refused (its `reason` says why); every `Err` is a push
 /// that never reached the server, or an answer this client could not read.
 pub Result<Report, Error> push(str gitdir, Remote r, str refname, str new_id) {
-    if (!object.is_name(new_id) || new_id.size() != 40 || !refname.starts_with("refs/")) {
+    if (!GIT_object.is_name(new_id) || new_id.size() != 40 || !refname.starts_with("refs/")) {
         return Result<Report, Error>.Err(Error.BadName);
     }
-    httpfetch.Advertisement ad = discover(r)?;
+    GIT_http_fetch.Advertisement ad = discover(r)?;
     if (!has_cap(ad.capabilities, "report-status")) {
         return Result<Report, Error>.Err(Error.NoReportStatus);
     }
     str old = ZERO_ID;
     List<str> known = [];
     Map<str, bool> seen = {};
-    for (httpfetch.RemoteRef rr in ad.refs) {
+    for (GIT_http_fetch.RemoteRef rr in ad.refs) {
         if (rr.name == refname) {
             old = rr.id;
         }
@@ -504,10 +504,10 @@ pub Result<Report, Error> push(str gitdir, Remote r, str refname, str new_id) {
         return Result<Report, Error>.Err(Error.UpToDate);
     }
     if (old != ZERO_ID) {
-        match (object.read(gitdir, old)) {
-            case Ok(object.Object o): {
+        match (GIT_object.read(gitdir, old)) {
+            case Ok(GIT_object.Object o): {
             }
-            case Err(object.Error e): {
+            case Err(GIT_object.Error e): {
                 return Result<Report, Error>.Err(Error.Behind);
             }
         }
@@ -516,20 +516,20 @@ pub Result<Report, Error> push(str gitdir, Remote r, str refname, str new_id) {
         }
     }
     List<str> ids = [];
-    match (packwrite.objects_to_send(gitdir, [new_id], known)) {
+    match (GIT_pack_write.objects_to_send(gitdir, [new_id], known)) {
         case Ok(List<str> v): {
             ids = v;
         }
-        case Err(packwrite.Error e): {
+        case Err(GIT_pack_write.Error e): {
             return Result<Report, Error>.Err(Error.Pack);
         }
     }
     bytes pack = [];
-    match (packwrite.build(gitdir, ids)) {
+    match (GIT_pack_write.build(gitdir, ids)) {
         case Ok(bytes p): {
             pack = p;
         }
-        case Err(packwrite.Error e): {
+        case Err(GIT_pack_write.Error e): {
             return Result<Report, Error>.Err(Error.Pack);
         }
     }

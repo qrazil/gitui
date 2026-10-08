@@ -5,7 +5,7 @@
 //
 //   ./t_index_read <gitdir>
 
-import index;
+import GIT_index;
 import io;
 import os;
 
@@ -15,14 +15,14 @@ if (argv.size() < 2) {
     os.exit(2);
 }
 str gd = argv[1];
-match (index.read(gd)) {
-    case Ok(index.Index ix): {
-        for (index.Entry e in ix.entries) {
+match (GIT_index.read(gd)) {
+    case Ok(GIT_index.Index ix): {
+        for (GIT_index.Entry e in ix.entries) {
             str path = e.path.utf8().or("<non-utf8>");
             print(mode6(e.mode) + " " + e.id + " " + e.stage.to_str() + "\t" + path);
         }
     }
-    case Err(index.Error e): {
+    case Err(GIT_index.Error e): {
         io.eprint(e.to_str());
         os.exit(1);
     }

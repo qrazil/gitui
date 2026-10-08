@@ -1,9 +1,9 @@
 // The one thing this program reads out of `.git/config`: a remote's URL.
 //
-//   gitconfig.get(gitdir, "remote", "origin", "url")  -> Option<str>
+//   GIT_config.get(gitdir, "remote", "origin", "url")  -> Option<str>
 //
-// Nothing else in this program reads the config file at all (`object.m31`'s
-// own header, `gitclient.m31`'s identity note) -- author identity comes from
+// Nothing else in this program reads the config file at all (`GIT_object.m31`'s
+// own header, `GIT_client.m31`'s identity note) -- author identity comes from
 // the environment exactly as real git's own `GIT_AUTHOR_*` override does,
 // and the object store needs nothing from it. `push` is the first feature
 // that genuinely cannot do without it: where `origin` lives is written
@@ -27,13 +27,13 @@
 
 import fs;
 import io;
-import repo;
+import GIT_repository;
 
 /// `key`'s value under `[section "subsection"]` (`subsection` may be `""`
 /// for a bare `[section]`), or `None` if the config file, the section or the
 /// key is not there.
 pub Option<str> get(str gitdir, str section, str subsection, str key) {
-    str path = fs.join(repo.common(gitdir), "config");
+    str path = fs.join(GIT_repository.common(gitdir), "config");
     match (io.read(path)) {
         case Ok(str text): {
             return find(text, section, subsection, key);

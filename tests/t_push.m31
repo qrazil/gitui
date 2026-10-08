@@ -1,9 +1,9 @@
-// Drives `httppush.m31` (and `gitconfig.m31`) for `test_push.sh`, against a
+// Drives `GIT_http_push.m31` (and `GIT_config.m31`) for `test_push.sh`, against a
 // real `git http-backend` for the exchange itself and against hand-built
 // bytes for the parts that need no server.
 //
 //   ./t_push objects <gitdir> <tip> [<known> ...]
-//       `packwrite.objects_to_send`, one id per line, sorted -- the same set
+//       `GIT_pack_write.objects_to_send`, one id per line, sorted -- the same set
 //       `git rev-list --objects <tip> ^<known>...` names, for diffing.
 //
 //   ./t_push push <gitdir> <url> <refname>
@@ -17,25 +17,25 @@
 //       `remote.origin.url` from `.git/config`, or "none".
 //
 //   ./t_push remote <url>
-//       `httppush.parse_remote`: prints "url <credential-free url>" and
+//       `GIT_http_push.parse_remote`: prints "url <credential-free url>" and
 //       "user <name>" or "user -". The password is never printed.
 //
 //   ./t_push report <file> <refname>
-//       `httppush.parse_report` over the file's bytes: prints
+//       `GIT_http_push.parse_report` over the file's bytes: prints
 //       "unpacked <bool> ok <bool> reason <text>".
 //
 //   ./t_push config <file> <section> <subsection> <key>
-//       `gitconfig.find` over the file's text: the value, or "none".
+//       `GIT_config.find` over the file's text: the value, or "none".
 //
 //   ./t_push ancestor <gitdir> <anc> <desc>
 //       "yes" or "no".
 
-import gitconfig;
-import httppush;
+import GIT_config;
+import GIT_http_push;
 import io;
 import os;
-import packwrite;
-import refs;
+import GIT_pack_write;
+import GIT_refs;
 
 List<str> argv = os.args();
 if (argv.size() < 2) {
@@ -77,7 +77,7 @@ void fail(str msg) {
 }
 
 void do_objects(str gitdir, str tip, List<str> known) {
-    match (packwrite.objects_to_send(gitdir, [tip], known)) {
+    match (GIT_pack_write.objects_to_send(gitdir, [tip], known)) {
         case Ok(List<str> ids): {
             List<str> sorted = clone(ids);
             sorted.sort();
@@ -85,7 +85,7 @@ void do_objects(str gitdir, str tip, List<str> known) {
                 print(id);
             }
         }
-        case Err(packwrite.Error e): {
+        case Err(GIT_pack_write.Error e): {
             fail(e.to_str());
         }
     }
@@ -93,25 +93,25 @@ void do_objects(str gitdir, str tip, List<str> known) {
 
 void do_push(str gitdir, str url, str refname) {
     str id = "";
-    match (refs.resolve(gitdir, refname)) {
+    match (GIT_refs.resolve(gitdir, refname)) {
         case Ok(str v): {
             id = v;
         }
-        case Err(refs.Error e): {
+        case Err(GIT_refs.Error e): {
             fail("resolve " + refname + ": " + e.to_str());
         }
     }
-    httppush.Remote r = httppush.Remote("", Option<httppush.Credentials>.None);
-    match (httppush.parse_remote(url)) {
-        case Ok(httppush.Remote v): {
+    GIT_http_push.Remote r = GIT_http_push.Remote("", Option<GIT_http_push.Credentials>.None);
+    match (GIT_http_push.parse_remote(url)) {
+        case Ok(GIT_http_push.Remote v): {
             r = v;
         }
-        case Err(httppush.Error e): {
+        case Err(GIT_http_push.Error e): {
             fail(e.to_str());
         }
     }
-    match (httppush.push(gitdir, r, refname, id)) {
-        case Ok(httppush.Report rep): {
+    match (GIT_http_push.push(gitdir, r, refname, id)) {
+        case Ok(GIT_http_push.Report rep): {
             if (rep.ok) {
                 print("ok " + rep.refname);
             } else {
@@ -119,22 +119,22 @@ void do_push(str gitdir, str url, str refname) {
                 os.exit(1);
             }
         }
-        case Err(httppush.Error e): {
+        case Err(GIT_http_push.Error e): {
             fail(e.to_str());
         }
     }
 }
 
 void do_origin(str gitdir) {
-    print(gitconfig.get(gitdir, "remote", "origin", "url").or("none"));
+    print(GIT_config.get(gitdir, "remote", "origin", "url").or("none"));
 }
 
 void do_remote(str url) {
-    match (httppush.parse_remote(url)) {
-        case Ok(httppush.Remote r): {
+    match (GIT_http_push.parse_remote(url)) {
+        case Ok(GIT_http_push.Remote r): {
             print("url " + r.url);
             match (r.auth) {
-                case Some(httppush.Credentials c): {
+                case Some(GIT_http_push.Credentials c): {
                     print("user " + c.user);
                 }
                 case None: {
@@ -142,7 +142,7 @@ void do_remote(str url) {
                 }
             }
         }
-        case Err(httppush.Error e): {
+        case Err(GIT_http_push.Error e): {
             fail(e.to_str());
         }
     }
@@ -151,11 +151,11 @@ void do_remote(str url) {
 void do_report(str path, str refname) {
     match (io.read_bytes(path)) {
         case Ok(bytes body): {
-            match (httppush.parse_report(body, refname)) {
-                case Ok(httppush.Report rep): {
+            match (GIT_http_push.parse_report(body, refname)) {
+                case Ok(GIT_http_push.Report rep): {
                     print("unpacked " + bool_text(rep.unpacked) + " ok " + bool_text(rep.ok) + " reason " + rep.reason);
                 }
-                case Err(httppush.Error e): {
+                case Err(GIT_http_push.Error e): {
                     fail(e.to_str());
                 }
             }
@@ -169,7 +169,7 @@ void do_report(str path, str refname) {
 void do_config(str path, str section, str subsection, str key) {
     match (io.read(path)) {
         case Ok(str text): {
-            print(gitconfig.find(text, section, subsection, key).or("none"));
+            print(GIT_config.find(text, section, subsection, key).or("none"));
         }
         case Err(io.Error e): {
             fail("cannot read " + path + ": " + e.to_str());
@@ -178,7 +178,7 @@ void do_config(str path, str section, str subsection, str key) {
 }
 
 void do_ancestor(str gitdir, str anc, str desc) {
-    if (httppush.is_ancestor(gitdir, anc, desc)) {
+    if (GIT_http_push.is_ancestor(gitdir, anc, desc)) {
         print("yes");
     } else {
         print("no");

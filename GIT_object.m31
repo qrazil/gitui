@@ -1,4 +1,4 @@
-// Git's object store: loose objects, and -- `apps/git/pack.m31` -- packed
+// Git's object store: loose objects, and -- `apps/git/GIT_pack.m31` -- packed
 // ones, read through exactly the same API.
 //
 // An object lives at `.git/objects/ab/cdef...` -- the first two hex digits of
@@ -9,13 +9,13 @@
 //
 // where `<type>` is `blob`, `tree`, `commit` or `tag` and `<size>` is the
 // decimal length of `<content>`. The object's NAME is the SHA-1 of that whole
-// plaintext, header included, which is why `sha1.m31` and `zlib.m31` had to
+// plaintext, header included, which is why `GIT_sha1.m31` and `GIT_zlib.m31` had to
 // come first. Reading an object here always recomputes it: an object store is
 // content-addressed or it is just a directory of files.
 //
 // Or it lives in a `.idx`/`.pack` pair under `.git/objects/pack/` instead --
-// `pack.m31`'s problem, not this module's, except that `read` has to ask it
-// when the loose file is not there. `pack.read` hands back the same `<kind>,
+// `GIT_pack.m31`'s problem, not this module's, except that `read` has to ask it
+// when the loose file is not there. `GIT_pack.read` hands back the same `<kind>,
 // content` pair a loose read has by the time it reaches `parse`, so `read`
 // rebuilds the identical `<type> <size>\0<content>` plaintext and calls
 // `parse` on it exactly as for a loose object -- the SHA-1 check, the tree,
@@ -24,17 +24,17 @@
 //
 // API
 // ---
-//   object.read(gitdir, id)      -> Result<Object, Error>   loose, then packed
-//   object.parse(id, plaintext)  -> Result<Object, Error>   (no I/O, no zlib)
-//   object.resolve(gitdir, pfx)  -> Result<str, Error>      a unique short id
-//   object.matching(gitdir, pfx) -> List<str>               loose and packed ids
-//   object.loose(gitdir)         -> Result<List<str>, Error> loose ids only
-//   object.all(gitdir)           -> Result<List<str>, Error> loose ∪ packed ids
+//   GIT_object.read(gitdir, id)      -> Result<Object, Error>   loose, then packed
+//   GIT_object.parse(id, plaintext)  -> Result<Object, Error>   (no I/O, no zlib)
+//   GIT_object.resolve(gitdir, pfx)  -> Result<str, Error>      a unique short id
+//   GIT_object.matching(gitdir, pfx) -> List<str>               loose and packed ids
+//   GIT_object.loose(gitdir)         -> Result<List<str>, Error> loose ids only
+//   GIT_object.all(gitdir)           -> Result<List<str>, Error> loose ∪ packed ids
 //   o.kind()                     -> str, one of the four words
 //
-//   object.write_blob(gitdir, content)     -> Result<str, Error>
-//   object.write_tree(gitdir, entries)     -> Result<str, Error>
-//   object.write_commit(gitdir, commit)    -> Result<str, Error>
+//   GIT_object.write_blob(gitdir, content)     -> Result<str, Error>
+//   GIT_object.write_tree(gitdir, entries)     -> Result<str, Error>
+//   GIT_object.write_commit(gitdir, commit)    -> Result<str, Error>
 //
 // --- writing -----------------------------------------------------------------
 //
@@ -42,13 +42,13 @@
 // takes a `List<Entry>`, `write_commit` a `Commit` -- so a caller that just
 // read a tree or a commit can change one field and write the result straight
 // back. Each hashes `<type> <size>\0<content>` exactly as `parse` expects to
-// find it, deflates it (`zlib.compress`, stored blocks -- see that module's
+// find it, deflates it (`GIT_zlib.compress`, stored blocks -- see that module's
 // own header for why there is no Huffman encoder here), and writes it to
 // `objects/xx/yyyy...`. Content-addressed means idempotent: if the name is
 // already there, the write is skipped rather than redone, the same object
 // under the same name either way. The write itself is a temporary file
 // beside the target, written whole, then renamed over it, so nothing ever
-// reads a half-written zlib stream -- the same discipline `refs.m31` uses for
+// reads a half-written zlib stream -- the same discipline `GIT_refs.m31` uses for
 // a ref file, for the same reason.
 //
 // `write_tree` sorts its entries into git's own tree order first, so a
@@ -80,25 +80,25 @@
 // the reason `docs/design.md`'s "Going remote" gives -- it is what `push`
 // needs, and `push` is later, separate work.
 //
-// `object.loose(gitdir)` is deliberately unchanged by any of this: it answers
+// `GIT_object.loose(gitdir)` is deliberately unchanged by any of this: it answers
 // "every LOOSE object", exactly as its own doc comment always said, and
 // `t_object.m31`'s existing oracle test still means what it always meant on
-// the all-loose fixtures it runs against. `object.all(gitdir)` is the new,
+// the all-loose fixtures it runs against. `GIT_object.all(gitdir)` is the new,
 // separate answer to "every object regardless of where it lives" -- the one
 // callers that must see the whole store (an oracle walking every object, or a
 // future `fsck`) should use instead of assuming loose is everything.
 
 import io;
 import fs;
-import repo;
-import sha1;
-import zlib;
-import pack;
+import GIT_repository;
+import GIT_sha1;
+import GIT_zlib;
+import GIT_pack;
 import random;
 
 /// Why an object could not be read, or could not be believed. Payload-free
 /// (docs/errors-decision.md §4): the object name, the underlying `io.Error`
-/// or `zlib.Error`, and the detail behind a bad tree or a bad header are
+/// or `GIT_zlib.Error`, and the detail behind a bad tree or a bad header are
 /// context the caller already has -- it passed the name or the bytes in --
 /// when it reports.
 pub enum Error {
@@ -125,7 +125,7 @@ pub enum Error {
     BadName;
     /// A short name that several objects begin with.
     Ambiguous;
-    /// Named by a `.idx` under `objects/pack/`, but `pack.m31` could not read
+    /// Named by a `.idx` under `objects/pack/`, but `GIT_pack.m31` could not read
     /// it out: a corrupt or truncated pack, a malformed delta, a chain too
     /// deep to be real. Never `NotFound` for a genuinely missing object --
     /// that stays `Error.NotFound`, exactly as for a loose one.
@@ -328,7 +328,7 @@ pub Result<Object, Error> read(str gitdir, str id) {
     if (!is_name(id) || id.size() != 40) {
         return Result<Object, Error>.Err(Error.BadName);
     }
-    str root = fs.join(repo.common(gitdir), "objects");
+    str root = fs.join(GIT_repository.common(gitdir), "objects");
     str path = fs.join(fs.join(root, id.substr(0, 2)), id.substr(2, 40));
     if (fs.exists(path)) {
         bytes stream = [];
@@ -340,17 +340,17 @@ pub Result<Object, Error> read(str gitdir, str id) {
                 return Result<Object, Error>.Err(Error.Io);
             }
         }
-        match (zlib.decompress(stream)) {
+        match (GIT_zlib.decompress(stream)) {
             case Ok(bytes plain): {
                 return parse(id, plain);
             }
-            case Err(zlib.Error e): {
+            case Err(GIT_zlib.Error e): {
                 return Result<Object, Error>.Err(Error.Zlib);
             }
         }
     }
-    match (pack.read(gitdir, id)) {
-        case Ok(pack.Found f): {
+    match (GIT_pack.read(gitdir, id)) {
+        case Ok(GIT_pack.Found f): {
             bytes plain = [];
             plain.extend(f.kind.to_bytes());
             plain.push(' ');
@@ -359,9 +359,9 @@ pub Result<Object, Error> read(str gitdir, str id) {
             plain.extend(f.content);
             return parse(id, plain);
         }
-        case Err(pack.Error e): {
+        case Err(GIT_pack.Error e): {
             // `NotFound` alone means genuinely missing -- everything else
-            // pack.m31 can say means it found the id but could not read the
+            // GIT_pack.m31 can say means it found the id but could not read the
             // object out, which is `Error.Packed` here.
             match (e) {
                 case NotFound: {
@@ -394,11 +394,11 @@ pub Result<Object, Error> read(str gitdir, str id) {
 }
 
 /// Every blob a tree reaches, recursively, keyed by its full path from the
-/// tree's own root -- `gitclient.m31`'s own `commit_changes` diffs two of
+/// tree's own root -- `GIT_client.m31`'s own `commit_changes` diffs two of
 /// these (a commit's tree against its first parent's) by comparing paths
-/// and blob ids, the same shape `status.m31`'s own (unexported) `walk_tree`
+/// and blob ids, the same shape `GIT_status.m31`'s own (unexported) `walk_tree`
 /// already uses for "every blob HEAD's tree reaches" against the working
-/// tree. That one stays private to status.m31's own HEAD-vs-worktree
+/// tree. That one stays private to GIT_status.m31's own HEAD-vs-worktree
 /// comparison; this is the general version, for comparing any two trees. A
 /// name that is not UTF-8 is left out, the same skip `walk_tree` makes.
 pub Result<Map<str, str>, Error> flatten_tree(str gitdir, str id) {
@@ -458,7 +458,7 @@ Result<bool, Error> flatten_tree_into(str gitdir, str id, str prefix, Map<str, s
 /// object's zlib stream holds. `id` is the name it is expected to have, and
 /// the content is hashed and checked against it.
 pub Result<Object, Error> parse(str id, bytes plain) {
-    str actual = sha1.hex(plain);
+    str actual = GIT_sha1.hex(plain);
     if (actual != id) {
         return Result<Object, Error>.Err(Error.HashMismatch);
     }
@@ -503,7 +503,7 @@ pub Result<Object, Error> parse(str id, bytes plain) {
 ///
 /// A full forty-digit name is checked for on disk like any other prefix, so
 /// this answers "is it here" as well as "which is it". `rev_parse`'s DWIM
-/// (`refs.m31`) calls this for a short object name, so a packed repository's
+/// (`GIT_refs.m31`) calls this for a short object name, so a packed repository's
 /// abbreviated hashes resolve exactly as a loose repository's do -- one more
 /// reader that does not have to know which kind of store it is looking at.
 pub List<str> matching(str gitdir, str prefix) {
@@ -514,7 +514,7 @@ pub List<str> matching(str gitdir, str prefix) {
     }
     str two = p.substr(0, 2);
     str rest = p.substr(2, p.size());
-    match (fs.listdir(fs.join(fs.join(repo.common(gitdir), "objects"), two))) {
+    match (fs.listdir(fs.join(fs.join(GIT_repository.common(gitdir), "objects"), two))) {
         case Ok(List<str> names): {
             for (str n in names) {
                 if (n.size() == 38 && n.starts_with(rest)) {
@@ -525,7 +525,7 @@ pub List<str> matching(str gitdir, str prefix) {
         case Err: {
         }
     }
-    match (pack.ids(gitdir)) {
+    match (GIT_pack.ids(gitdir)) {
         case Ok(List<str> names): {
             for (str id in names) {
                 if (id.starts_with(p)) {
@@ -566,7 +566,7 @@ pub Result<str, Error> resolve(str gitdir, str prefix) {
 /// Every loose object name in the repository, sorted. What a packfile holds
 /// is not here, by construction.
 pub Result<List<str>, Error> loose(str gitdir) {
-    str root = fs.join(repo.common(gitdir), "objects");
+    str root = fs.join(GIT_repository.common(gitdir), "objects");
     List<str> out = [];
     List<str> fanout = [];
     match (fs.listdir(root)) {
@@ -606,13 +606,13 @@ pub Result<List<str>, Error> loose(str gitdir) {
 /// answers only "every LOOSE object", exactly as it always has.
 pub Result<List<str>, Error> all(str gitdir) {
     List<str> out = loose(gitdir)?;
-    match (pack.ids(gitdir)) {
+    match (GIT_pack.ids(gitdir)) {
         case Ok(List<str> packed): {
             for (str id in packed) {
                 out.push(id);
             }
         }
-        case Err(pack.Error e): {
+        case Err(GIT_pack.Error e): {
         }
     }
     out.sort();
@@ -1033,9 +1033,9 @@ bytes fold_header(bytes line) {
 // this call and rewriting it here would not fix that.
 /// The name an object of `kind` holding `content` has -- the SHA-1 of its
 /// `<kind> <size>\0<content>` plaintext -- without writing anything. This is
-/// what `status.m31` compares a working-tree file against its index entry
+/// what `GIT_status.m31` compares a working-tree file against its index entry
 /// with: an index entry's `id` is a BLOB name, so hashing the file's bytes
-/// alone (`sha1.hex(content)`) can never match it, and did not -- every file
+/// alone (`GIT_sha1.hex(content)`) can never match it, and did not -- every file
 /// whose cached stat had gone stale (a `touch`, a `git read-tree`) was
 /// reported modified until something refreshed the index. `blob_id` is that
 /// comparison done right.
@@ -1046,7 +1046,7 @@ pub str object_id(str kind, bytes content) {
     header.extend(content.size().to_str().to_bytes());
     header.push(0);
     header.extend(content);
-    return sha1.hex(header);
+    return GIT_sha1.hex(header);
 }
 
 /// `object_id("blob", content)`.
@@ -1069,7 +1069,7 @@ Result<str, Error> write_object(str gitdir, str kind, bytes content) {
     header.push(0);
     header.extend(content);
     str id = object_id(kind, content);
-    str dir = fs.join(fs.join(repo.common(gitdir), "objects"), id.substr(0, 2));
+    str dir = fs.join(fs.join(GIT_repository.common(gitdir), "objects"), id.substr(0, 2));
     str path = fs.join(dir, id.substr(2, 40));
     if (fs.exists(path)) {
         return Result<str, Error>.Ok(id);
@@ -1081,7 +1081,7 @@ Result<str, Error> write_object(str gitdir, str kind, bytes content) {
             return Result<str, Error>.Err(Error.Io);
         }
     }
-    bytes compressed = zlib.compress(header);
+    bytes compressed = GIT_zlib.compress(header);
     random.System rnd = random.system();
     str tmp = fs.join(dir, "tmp" + rnd.hex(12));
     match (io.write_bytes(tmp, compressed)) {
@@ -1124,7 +1124,7 @@ bytes mode_octal(int mode) {
 }
 
 // 40 lowercase hex digits to the 20 octets they spell. Used only on strings
-// this module already trusts -- `sha1.hex`'s own output, or an `Entry.id`
+// this module already trusts -- `GIT_sha1.hex`'s own output, or an `Entry.id`
 // that came from `tree_entries` parsing 20 raw octets in the first place --
 // so an invalid digit cannot arise and is not checked for.
 bytes hex_decode(str s) {
@@ -1150,7 +1150,7 @@ int hex_val(int c) {
     return 0;
 }
 
-// Byte comparison of two runs, negative/zero/positive -- `refs.m31`'s
+// Byte comparison of two runs, negative/zero/positive -- `GIT_refs.m31`'s
 // `before`, over `bytes` rather than `str`, needed here for `Entry.cmp`.
 int cmp_bytes(bytes a, bytes b) {
     int n = a.size();
