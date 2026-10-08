@@ -68,11 +68,11 @@ pub str Error.to_str() {
         case NoRemoteBranch: {
             return "origin has no branch of that name";
         }
-        case Fetch(GIT_http_fetch.Error e): {
-            return "fetch failed: " + e.to_str();
+        case Fetch(GIT_http_fetch.Error error): {
+            return "fetch failed: " + error.to_str();
         }
-        case Unpack(GIT_pack.Error e): {
-            return "unpacking the fetched objects failed: " + e.to_str();
+        case Unpack(GIT_pack.Error error): {
+            return "unpacking the fetched objects failed: " + error.to_str();
         }
         case Write: {
             return "a fetched object could not be written";
@@ -80,11 +80,11 @@ pub str Error.to_str() {
         case NonFastForward: {
             return "not a fast-forward; merge/rebase not supported yet";
         }
-        case Checkout(GIT_checkout.Error e): {
-            return e.to_str();
+        case Checkout(GIT_checkout.Error error): {
+            return error.to_str();
         }
-        case Refs(GIT_refs.Error e): {
-            return "refs: " + e.to_str();
+        case Refs(GIT_refs.Error error): {
+            return "refs: " + error.to_str();
         }
     }
 }
@@ -99,12 +99,12 @@ pub type Outcome {
 }
 
 /// Pull the current branch of `gitdir` from `r`, fast-forward only.
-pub Result<Outcome, Error> pull(str gitdir, str worktree, GIT_http_push.Remote r) {
+pub Result<Outcome, Error> pull(str gitdir, str worktree, GIT_http_push.Remote remote) {
     str refname = "";
     str old = "";
     match (GIT_refs.head(gitdir)) {
-        case Ok(GIT_refs.Head h): {
-            match (h) {
+        case Ok(GIT_refs.Head head): {
+            match (head) {
                 case Born(str name, str id): {
                     refname = name;
                     old = id;
@@ -117,34 +117,34 @@ pub Result<Outcome, Error> pull(str gitdir, str worktree, GIT_http_push.Remote r
                 }
             }
         }
-        case Err(GIT_refs.Error e): {
-            return Result<Outcome, Error>.Err(Error.Refs(e));
+        case Err(GIT_refs.Error error): {
+            return Result<Outcome, Error>.Err(Error.Refs(error));
         }
     }
     match (GIT_status.status(gitdir, worktree)) {
-        case Ok(GIT_status.Status st): {
-            if (st.staged.size() > 0 || st.unstaged.size() > 0) {
+        case Ok(GIT_status.Status status): {
+            if (status.staged.size() > 0 || status.unstaged.size() > 0) {
                 return Result<Outcome, Error>.Err(Error.Dirty);
             }
         }
-        case Err(GIT_status.Error e): {
+        case Err(_): {
             return Result<Outcome, Error>.Err(Error.Status);
         }
     }
-    str authz = GIT_http_push.auth_header(r);
-    GIT_http_fetch.Advertisement ad = GIT_http_fetch.Advertisement("", [], [], "");
-    match (GIT_http_fetch.discover(r.url, authorization: authz)) {
+    str authz = GIT_http_push.auth_header(remote);
+    GIT_http_fetch.Advertisement advertisement = GIT_http_fetch.Advertisement("", [], [], "");
+    match (GIT_http_fetch.discover(remote.url, authorization: authz)) {
         case Ok(GIT_http_fetch.Advertisement got): {
-            ad = got;
+            advertisement = got;
         }
-        case Err(GIT_http_fetch.Error e): {
-            return Result<Outcome, Error>.Err(Error.Fetch(e));
+        case Err(GIT_http_fetch.Error error): {
+            return Result<Outcome, Error>.Err(Error.Fetch(error));
         }
     }
     str remote_tip = "";
-    for (GIT_http_fetch.RemoteRef rr in ad.refs) {
-        if (rr.name == refname) {
-            remote_tip = rr.id;
+    for (GIT_http_fetch.RemoteRef remote_ref in advertisement.refs) {
+        if (remote_ref.name == refname) {
+            remote_tip = remote_ref.id;
         }
     }
     if (remote_tip == "") {
@@ -152,12 +152,12 @@ pub Result<Outcome, Error> pull(str gitdir, str worktree, GIT_http_push.Remote r
     }
     int objects = 0;
     if (!have(gitdir, remote_tip)) {
-        match (fetch_into(gitdir, r, ad, remote_tip, authz)) {
-            case Ok(int n): {
-                objects = n;
+        match (fetch_into(gitdir, remote, advertisement, remote_tip, authz)) {
+            case Ok(int object_count): {
+                objects = object_count;
             }
-            case Err(Error e): {
-                return Result<Outcome, Error>.Err(e);
+            case Err(Error error): {
+                return Result<Outcome, Error>.Err(error);
             }
         }
     }
@@ -168,25 +168,25 @@ pub Result<Outcome, Error> pull(str gitdir, str worktree, GIT_http_push.Remote r
         return Result<Outcome, Error>.Err(Error.NonFastForward);
     }
     match (GIT_checkout.checkout(gitdir, worktree, remote_tip, refname)) {
-        case Ok(GIT_checkout.Summary s): {
+        case Ok(_): {
         }
-        case Err(GIT_checkout.Error e): {
-            return Result<Outcome, Error>.Err(Error.Checkout(e));
+        case Err(GIT_checkout.Error error): {
+            return Result<Outcome, Error>.Err(Error.Checkout(error));
         }
     }
     match (GIT_refs.update(gitdir, refname, remote_tip, Option<str>.Some(old))) {
-        case Ok(bool b): {
+        case Ok(_): {
         }
-        case Err(GIT_refs.Error e): {
-            return Result<Outcome, Error>.Err(Error.Refs(e));
+        case Err(GIT_refs.Error error): {
+            return Result<Outcome, Error>.Err(Error.Refs(error));
         }
     }
     if (refname.starts_with("refs/heads/")) {
         // Best effort: the remote-tracking ref is bookkeeping, not the pull.
         match (GIT_refs.update(gitdir, "refs/remotes/origin/" + refname.substr(11, refname.size()), remote_tip, Option<str>.None)) {
-            case Ok(bool b): {
+            case Ok(_): {
             }
-            case Err(GIT_refs.Error e): {
+            case Err(_): {
             }
         }
     }
@@ -195,10 +195,10 @@ pub Result<Outcome, Error> pull(str gitdir, str worktree, GIT_http_push.Remote r
 
 bool have(str gitdir, str id) {
     match (GIT_object.read(gitdir, id)) {
-        case Ok(GIT_object.Object o): {
+        case Ok(_): {
             return true;
         }
-        case Err(GIT_object.Error e): {
+        case Err(_): {
             return false;
         }
     }
@@ -206,42 +206,42 @@ bool have(str gitdir, str id) {
 
 // Fetch `want` (with every local ref tip as a `have`), unpack the pack into
 // loose objects, and delete the pack file. The count of objects written.
-Result<int, Error> fetch_into(str gitdir, GIT_http_push.Remote r, GIT_http_fetch.Advertisement ad, str want, str authz) {
+Result<int, Error> fetch_into(str gitdir, GIT_http_push.Remote remote, GIT_http_fetch.Advertisement advertisement, str want, str authz) {
     List<str> haves = [];
     Map<str, bool> seen = {};
     match (GIT_refs.all(gitdir)) {
         case Ok(List<GIT_refs.Ref> all): {
-            for (GIT_refs.Ref x in all) {
-                if (!seen.contains(x.id) && haves.size() < 64) {
-                    seen.set(x.id, true);
-                    haves.push(x.id);
+            for (GIT_refs.Ref local_ref in all) {
+                if (!seen.contains(local_ref.id) && haves.size() < 64) {
+                    seen.set(local_ref.id, true);
+                    haves.push(local_ref.id);
                 }
             }
         }
-        case Err(GIT_refs.Error e): {
+        case Err(_): {
         }
     }
-    str tmp = fs.join(GIT_repository.common(gitdir), "pull-fetch.tmp");
-    match (GIT_http_fetch.fetch(r.url, ad, [want], haves, tmp, authorization: authz)) {
-        case Ok(GIT_http_fetch.Summary sm): {
+    str temp = fs.join(GIT_repository.common(gitdir), "pull-fetch.tmp");
+    match (GIT_http_fetch.fetch(remote.url, advertisement, [want], haves, temp, authorization: authz)) {
+        case Ok(_): {
         }
-        case Err(GIT_http_fetch.Error e): {
-            return Result<int, Error>.Err(Error.Fetch(e));
+        case Err(GIT_http_fetch.Error error): {
+            return Result<int, Error>.Err(Error.Fetch(error));
         }
     }
     bytes raw = [];
-    match (io.read_bytes(tmp)) {
-        case Ok(bytes b): {
-            raw = b;
+    match (io.read_bytes(temp)) {
+        case Ok(bytes contents): {
+            raw = contents;
         }
-        case Err(io.Error e): {
+        case Err(_): {
             return Result<int, Error>.Err(Error.Write);
         }
     }
-    match (fs.remove(tmp)) {
+    match (fs.remove(temp)) {
         case Ok: {
         }
-        case Err(io.Error e): {
+        case Err(_): {
         }
     }
     List<GIT_pack.Unpacked> objs = [];
@@ -249,15 +249,15 @@ Result<int, Error> fetch_into(str gitdir, GIT_http_push.Remote r, GIT_http_fetch
         case Ok(List<GIT_pack.Unpacked> got): {
             objs = got;
         }
-        case Err(GIT_pack.Error e): {
-            return Result<int, Error>.Err(Error.Unpack(e));
+        case Err(GIT_pack.Error error): {
+            return Result<int, Error>.Err(Error.Unpack(error));
         }
     }
-    for (GIT_pack.Unpacked u in objs) {
-        match (GIT_object.write(gitdir, u.kind, u.content)) {
+    for (GIT_pack.Unpacked unpacked in objs) {
+        match (GIT_object.write(gitdir, unpacked.kind, unpacked.content)) {
             case Ok(str id): {
             }
-            case Err(GIT_object.Error e): {
+            case Err(_): {
                 return Result<int, Error>.Err(Error.Write);
             }
         }

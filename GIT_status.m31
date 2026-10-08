@@ -97,17 +97,17 @@ pub str Error.to_str() {
         case Io: {
             return "the working tree could not be read";
         }
-        case Index(GIT_index.Error e): {
-            return "index: " + e.to_str();
+        case Index(GIT_index.Error error): {
+            return "index: " + error.to_str();
         }
-        case Object(GIT_object.Error e): {
-            return "object: " + e.to_str();
+        case Object(GIT_object.Error error): {
+            return "object: " + error.to_str();
         }
-        case Refs(GIT_refs.Error e): {
-            return "refs: " + e.to_str();
+        case Refs(GIT_refs.Error error): {
+            return "refs: " + error.to_str();
         }
-        case Gitignore(GIT_ignore.Error e): {
-            return "gitignore: " + e.to_str();
+        case Gitignore(GIT_ignore.Error error): {
+            return "gitignore: " + error.to_str();
         }
         case HeadNotCommit: {
             return "HEAD does not resolve to a commit";
@@ -146,48 +146,48 @@ pub type Status {
 /// The status of the repository at `gitdir` whose working tree is at
 /// `worktree`.
 pub Result<Status, Error> status(str gitdir, str worktree) {
-    Map<str, GIT_index.Entry> idx = {};
+    Map<str, GIT_index.Entry> staged_entries = {};
     match (GIT_index.read(gitdir)) {
-        case Ok(GIT_index.Index ix): {
-            for (GIT_index.Entry e in ix.entries) {
-                match (e.path.utf8()) {
-                    case Some(str p): {
-                        idx.set(p, e);
+        case Ok(GIT_index.Index index): {
+            for (GIT_index.Entry entry in index.entries) {
+                match (entry.path.utf8()) {
+                    case Some(str path): {
+                        staged_entries.set(path, entry);
                     }
                     case None: {
                     }
                 }
             }
         }
-        case Err(GIT_index.Error e): {
-            match (e) {
+        case Err(GIT_index.Error error): {
+            match (error) {
                 case NotFound: {
                 }
                 case Io: {
-                    return Result<Status, Error>.Err(Error.Index(e));
+                    return Result<Status, Error>.Err(Error.Index(error));
                 }
                 case BadSignature: {
-                    return Result<Status, Error>.Err(Error.Index(e));
+                    return Result<Status, Error>.Err(Error.Index(error));
                 }
                 case BadVersion: {
-                    return Result<Status, Error>.Err(Error.Index(e));
+                    return Result<Status, Error>.Err(Error.Index(error));
                 }
                 case Truncated: {
-                    return Result<Status, Error>.Err(Error.Index(e));
+                    return Result<Status, Error>.Err(Error.Index(error));
                 }
                 case BadExtension: {
-                    return Result<Status, Error>.Err(Error.Index(e));
+                    return Result<Status, Error>.Err(Error.Index(error));
                 }
                 case Checksum: {
-                    return Result<Status, Error>.Err(Error.Index(e));
+                    return Result<Status, Error>.Err(Error.Index(error));
                 }
             }
         }
     }
     Map<str, str> head = {};
     match (head_tree(gitdir)) {
-        case Ok(Option<str> t): {
-            match (t) {
+        case Ok(Option<str> link_target): {
+            match (link_target) {
                 case Some(str tree): {
                     walk_tree(gitdir, tree, "", head)?;
                 }
@@ -195,85 +195,85 @@ pub Result<Status, Error> status(str gitdir, str worktree) {
                 }
             }
         }
-        case Err(Error e): {
-            return Result<Status, Error>.Err(e);
+        case Err(Error error): {
+            return Result<Status, Error>.Err(error);
         }
     }
-    List<WFile> wt = list_worktree(worktree)?;
+    List<WFile> worktree_files = list_worktree(worktree)?;
     Map<str, bool> wt_link = {};
-    for (WFile f in wt) {
-        wt_link.set(f.path, f.is_link);
+    for (WFile file in worktree_files) {
+        wt_link.set(file.path, file.is_link);
     }
     List<Delta> staged = [];
-    for (str p in idx.keys()) {
-        str iid = get_entry(idx, p).id;
-        match (head.get(p)) {
+    for (str path in staged_entries.keys()) {
+        str iid = get_entry(staged_entries, path).id;
+        match (head.get(path)) {
             case Some(str hid): {
                 if (hid != iid) {
-                    staged.push(Delta(p.to_bytes(), Change.Modified));
+                    staged.push(Delta(path.to_bytes(), Change.Modified));
                 }
             }
             case None: {
-                staged.push(Delta(p.to_bytes(), Change.Added));
+                staged.push(Delta(path.to_bytes(), Change.Added));
             }
         }
     }
-    for (str p in head.keys()) {
-        if (!idx.contains(p)) {
-            staged.push(Delta(p.to_bytes(), Change.Deleted));
+    for (str path in head.keys()) {
+        if (!staged_entries.contains(path)) {
+            staged.push(Delta(path.to_bytes(), Change.Deleted));
         }
     }
     List<Delta> unstaged = [];
-    for (str p in idx.keys()) {
-        GIT_index.Entry e = get_entry(idx, p);
-        if (e.is_gitlink()) {
+    for (str path in staged_entries.keys()) {
+        GIT_index.Entry entry = get_entry(staged_entries, path);
+        if (entry.is_gitlink()) {
             continue;
         }
-        bool present = wt_link.contains(p);
+        bool present = wt_link.contains(path);
         if (!present) {
-            unstaged.push(Delta(p.to_bytes(), Change.Deleted));
+            unstaged.push(Delta(path.to_bytes(), Change.Deleted));
             continue;
         }
-        if (wt_link.get(p).or(false)) {
+        if (wt_link.get(path).or(false)) {
             continue;
         }
-        str full = fs.join(worktree, p);
+        str full = fs.join(worktree, path);
         match (fs.stat(full)) {
-            case Ok(fs.Stat st): {
-                int mtime = e.mtime_s * 1_000_000_000 + e.mtime_ns;
-                if (st.size == e.size && st.mtime_ns == mtime) {
+            case Ok(fs.Stat stat): {
+                int mtime = entry.mtime_s * 1_000_000_000 + entry.mtime_ns;
+                if (stat.size == entry.size && stat.mtime_ns == mtime) {
                     continue;
                 }
                 match (io.read_bytes(full)) {
                     case Ok(bytes content): {
-                        if (GIT_object.blob_id(content) != e.id) {
-                            unstaged.push(Delta(p.to_bytes(), Change.Modified));
+                        if (GIT_object.blob_id(content) != entry.id) {
+                            unstaged.push(Delta(path.to_bytes(), Change.Modified));
                         }
                     }
-                    case Err(io.Error err): {
-                        unstaged.push(Delta(p.to_bytes(), Change.Modified));
+                    case Err(_): {
+                        unstaged.push(Delta(path.to_bytes(), Change.Modified));
                     }
                 }
             }
-            case Err(io.Error err): {
-                unstaged.push(Delta(p.to_bytes(), Change.Deleted));
+            case Err(_): {
+                unstaged.push(Delta(path.to_bytes(), Change.Deleted));
             }
         }
     }
-    GIT_ignore.Ignore ig = load_ignore(gitdir, worktree)?;
+    GIT_ignore.Ignore ignore = load_ignore(gitdir, worktree)?;
     List<bytes> untracked = [];
-    for (WFile f in wt) {
-        if (!idx.contains(f.path) && !ig.is_ignored(f.path)) {
-            untracked.push(f.path.to_bytes());
+    for (WFile file in worktree_files) {
+        if (!staged_entries.contains(file.path) && !ignore.is_ignored(file.path)) {
+            untracked.push(file.path.to_bytes());
         }
     }
     return Result<Status, Error>.Ok(Status(staged, unstaged, untracked));
 }
 
-GIT_index.Entry get_entry(Map<str, GIT_index.Entry> idx, str p) {
-    match (idx.get(p)) {
-        case Some(GIT_index.Entry e): {
-            return e;
+GIT_index.Entry get_entry(Map<str, GIT_index.Entry> staged_entries, str path) {
+    match (staged_entries.get(path)) {
+        case Some(GIT_index.Entry entry): {
+            return entry;
         }
         case None: {
             trap("status: an index entry looked up by its own key was not found");
@@ -286,8 +286,8 @@ GIT_index.Entry get_entry(Map<str, GIT_index.Entry> idx, str p) {
 // good status to report on.
 Result<Option<str>, Error> head_tree(str gitdir) {
     match (GIT_refs.head(gitdir)) {
-        case Ok(GIT_refs.Head h): {
-            match (h) {
+        case Ok(GIT_refs.Head head): {
+            match (head) {
                 case Unborn(str name): {
                     return Result<Option<str>, Error>.Ok(Option<str>.None);
                 }
@@ -301,8 +301,8 @@ Result<Option<str>, Error> head_tree(str gitdir) {
                 }
             }
         }
-        case Err(GIT_refs.Error e): {
-            return Result<Option<str>, Error>.Err(Error.Refs(e));
+        case Err(GIT_refs.Error error): {
+            return Result<Option<str>, Error>.Err(Error.Refs(error));
         }
     }
 }
@@ -313,21 +313,21 @@ Result<Option<str>, Error> head_tree(str gitdir) {
 // enclosing function's exactly, with no conversion).
 Result<GIT_ignore.Ignore, Error> load_ignore(str gitdir, str worktree) {
     match (GIT_ignore.load(gitdir, worktree)) {
-        case Ok(GIT_ignore.Ignore ig): {
-            return Result<GIT_ignore.Ignore, Error>.Ok(ig);
+        case Ok(GIT_ignore.Ignore ignore): {
+            return Result<GIT_ignore.Ignore, Error>.Ok(ignore);
         }
-        case Err(GIT_ignore.Error e): {
-            return Result<GIT_ignore.Ignore, Error>.Err(Error.Gitignore(e));
+        case Err(GIT_ignore.Error error): {
+            return Result<GIT_ignore.Ignore, Error>.Err(Error.Gitignore(error));
         }
     }
 }
 
 Result<str, Error> commit_tree(str gitdir, str id) {
     match (GIT_object.read(gitdir, id)) {
-        case Ok(GIT_object.Object o): {
-            match (o.body) {
-                case Commit(GIT_object.Commit c): {
-                    return Result<str, Error>.Ok(c.tree);
+        case Ok(GIT_object.Object object): {
+            match (object.body) {
+                case Commit(GIT_object.Commit commit): {
+                    return Result<str, Error>.Ok(commit.tree);
                 }
                 case Blob: {
                     return Result<str, Error>.Err(Error.HeadNotCommit);
@@ -340,8 +340,8 @@ Result<str, Error> commit_tree(str gitdir, str id) {
                 }
             }
         }
-        case Err(GIT_object.Error e): {
-            return Result<str, Error>.Err(Error.Object(e));
+        case Err(GIT_object.Error error): {
+            return Result<str, Error>.Err(Error.Object(error));
         }
     }
 }
@@ -350,20 +350,20 @@ Result<str, Error> commit_tree(str gitdir, str id) {
 // the repository root. A name that is not UTF-8 is left out (module header).
 Result<bool, Error> walk_tree(str gitdir, str id, str prefix, Map<str, str> out) {
     match (GIT_object.read(gitdir, id)) {
-        case Ok(GIT_object.Object o): {
-            match (o.body) {
-                case Tree(List<GIT_object.Entry> es): {
-                    for (GIT_object.Entry e in es) {
-                        match (e.name.utf8()) {
+        case Ok(GIT_object.Object object): {
+            match (object.body) {
+                case Tree(List<GIT_object.Entry> entries): {
+                    for (GIT_object.Entry entry in entries) {
+                        match (entry.name.utf8()) {
                             case Some(str name): {
                                 str full = name;
                                 if (prefix != "") {
                                     full = prefix + "/" + name;
                                 }
-                                if (e.is_tree()) {
-                                    walk_tree(gitdir, e.id, full, out)?;
+                                if (entry.is_tree()) {
+                                    walk_tree(gitdir, entry.id, full, out)?;
                                 } else {
-                                    out.set(full, e.id);
+                                    out.set(full, entry.id);
                                 }
                             }
                             case None: {
@@ -383,8 +383,8 @@ Result<bool, Error> walk_tree(str gitdir, str id, str prefix, Map<str, str> out)
                 }
             }
         }
-        case Err(GIT_object.Error e): {
-            return Result<bool, Error>.Err(Error.Object(e));
+        case Err(GIT_object.Error error): {
+            return Result<bool, Error>.Err(Error.Object(error));
         }
     }
 }
@@ -403,21 +403,21 @@ Result<List<WFile>, Error> list_worktree(str worktree) {
     str base = fs.join(worktree, "");
     match (fs.walk(worktree)) {
         case Ok(List<str> paths): {
-            for (str p in paths) {
-                str rel = text.strip_prefix(p, base);
+            for (str path in paths) {
+                str rel = text.strip_prefix(path, base);
                 if (rel == ".git" || rel.starts_with(".git/")) {
                     continue;
                 }
-                if (fs.is_link(p)) {
+                if (fs.is_link(path)) {
                     out.push(WFile(rel, true));
-                } else if (fs.is_dir(p)) {
+                } else if (fs.is_dir(path)) {
                     continue;
-                } else if (fs.is_file(p)) {
+                } else if (fs.is_file(path)) {
                     out.push(WFile(rel, false));
                 }
             }
         }
-        case Err(io.Error e): {
+        case Err(_): {
             return Result<List<WFile>, Error>.Err(Error.Io);
         }
     }

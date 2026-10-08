@@ -64,10 +64,10 @@ pub Option<str> find(str text, str section, str subsection, str key) {
             continue;
         }
         match (line.index_of("=")) {
-            case Some(int eq): {
-                str k = line.substr(0, eq).trim().to_lower();
-                if (k == want_key) {
-                    found = Option<str>.Some(unquote(strip_comment(line.substr(eq + 1, line.size()).trim())));
+            case Some(int equals_index): {
+                str line_key = line.substr(0, equals_index).trim().to_lower();
+                if (line_key == want_key) {
+                    found = Option<str>.Some(unquote(strip_comment(line.substr(equals_index + 1, line.size()).trim())));
                 }
             }
             case None: {
@@ -82,34 +82,34 @@ pub Option<str> find(str text, str section, str subsection, str key) {
 // A header line up to and including its last `]`, dropping a trailing
 // comment (`[remote "x"] ; note`).
 str close_header(str line) {
-    int i = line.size();
-    while (i > 0) {
-        i = i - 1;
-        if (line.substr(i, i + 1) == "]") {
-            return line.substr(0, i + 1);
+    int position = line.size();
+    while (position > 0) {
+        position = position - 1;
+        if (line.substr(position, position + 1) == "]") {
+            return line.substr(0, position + 1);
         }
     }
     return line;
 }
 
 // A value without a trailing `#`/`;` comment that sits outside double quotes.
-str strip_comment(str v) {
+str strip_comment(str value) {
     bool quoted = false;
-    int i = 0;
-    while (i < v.size()) {
-        str ch = v.substr(i, i + 1);
-        if (ch == "\\") {
-            i = i + 2;
+    int position = 0;
+    while (position < value.size()) {
+        str character = value.substr(position, position + 1);
+        if (character == "\\") {
+            position = position + 2;
             continue;
         }
-        if (ch == "\"") {
+        if (character == "\"") {
             quoted = !quoted;
-        } else if (!quoted && (ch == "#" || ch == ";")) {
-            return v.substr(0, i).trim();
+        } else if (!quoted && (character == "#" || character == ";")) {
+            return value.substr(0, position).trim();
         }
-        i = i + 1;
+        position = position + 1;
     }
-    return v;
+    return value;
 }
 
 // Does a `[...]` header line name `section`/`subsection`?
@@ -121,9 +121,9 @@ bool header_matches(str line, str want_section, str want_sub) {
     str name = inner;
     str sub = "";
     match (inner.index_of("\"")) {
-        case Some(int q): {
-            name = inner.substr(0, q).trim();
-            str quoted = inner.substr(q, inner.size());
+        case Some(int quote_index): {
+            name = inner.substr(0, quote_index).trim();
+            str quoted = inner.substr(quote_index, inner.size());
             if (quoted.size() >= 2 && quoted.ends_with("\"")) {
                 sub = unescape(quoted.substr(1, quoted.size() - 1));
             } else {
@@ -146,30 +146,30 @@ bool header_matches(str line, str want_section, str want_sub) {
 
 // A value with its surrounding double quotes removed and unescaped, or
 // itself if it is not quoted.
-str unquote(str v) {
-    if (v.size() >= 2 && v.starts_with("\"") && v.ends_with("\"")) {
-        return unescape(v.substr(1, v.size() - 1));
+str unquote(str value) {
+    if (value.size() >= 2 && value.starts_with("\"") && value.ends_with("\"")) {
+        return unescape(value.substr(1, value.size() - 1));
     }
-    return v;
+    return value;
 }
 
 // `\"` -> `"`, `\\` -> `\`; any other escape is left as written.
-str unescape(str s) {
-    if (!s.contains("\\")) {
-        return s;
+str unescape(str text) {
+    if (!text.contains("\\")) {
+        return text;
     }
     List<int> out = [];
-    List<int> cs = s.chars();
-    int i = 0;
-    while (i < cs.size()) {
-        int c = cs[i];
-        if (c == '\\' && i + 1 < cs.size() && (cs[i + 1] == '"' || cs[i + 1] == '\\')) {
-            out.push(cs[i + 1]);
-            i = i + 2;
+    List<int> characters = text.chars();
+    int position = 0;
+    while (position < characters.size()) {
+        int character = characters[position];
+        if (character == '\\' && position + 1 < characters.size() && (characters[position + 1] == '"' || characters[position + 1] == '\\')) {
+            out.push(characters[position + 1]);
+            position = position + 2;
             continue;
         }
-        out.push(c);
-        i = i + 1;
+        out.push(character);
+        position = position + 1;
     }
     return str.from_chars(out);
 }

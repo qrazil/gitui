@@ -40,33 +40,33 @@ import diff;
 import GIT_hunks;
 
 /// `old` with exactly one hunk of diff(old, new) applied.
-pub Option<bytes> apply_hunk(bytes old, bytes new, int k, int context = GIT_hunks.DEFAULT_CONTEXT) {
+pub Option<bytes> apply_hunk(bytes old, bytes new, int hunk_index, int context = GIT_hunks.DEFAULT_CONTEXT) {
     match (diff.diff(old, new)) {
         case Binary: {
             return Option<bytes>.None;
         }
         case Lines(List<diff.Op> ops): {
             List<GIT_hunks.Span> sps = GIT_hunks.spans(ops, context: context);
-            if (k < 0 || k >= sps.size()) {
+            if (hunk_index < 0 || hunk_index >= sps.size()) {
                 return Option<bytes>.None;
             }
-            return Option<bytes>.Some(rebuild(ops, sps[k], true));
+            return Option<bytes>.Some(rebuild(ops, sps[hunk_index], true));
         }
     }
 }
 
 /// `new` with exactly one hunk of diff(old, new) undone.
-pub Option<bytes> revert_hunk(bytes old, bytes new, int k, int context = GIT_hunks.DEFAULT_CONTEXT) {
+pub Option<bytes> revert_hunk(bytes old, bytes new, int hunk_index, int context = GIT_hunks.DEFAULT_CONTEXT) {
     match (diff.diff(old, new)) {
         case Binary: {
             return Option<bytes>.None;
         }
         case Lines(List<diff.Op> ops): {
             List<GIT_hunks.Span> sps = GIT_hunks.spans(ops, context: context);
-            if (k < 0 || k >= sps.size()) {
+            if (hunk_index < 0 || hunk_index >= sps.size()) {
                 return Option<bytes>.None;
             }
-            return Option<bytes>.Some(rebuild(ops, sps[k], false));
+            return Option<bytes>.Some(rebuild(ops, sps[hunk_index], false));
         }
     }
 }
@@ -88,29 +88,29 @@ pub int hunk_count(bytes old, bytes new, int context = GIT_hunks.DEFAULT_CONTEXT
 // (the file after staging this one hunk). Otherwise the mirror: outside the
 // span take the new side, inside take the old side (the file after
 // unstaging this one hunk).
-bytes rebuild(List<diff.Op> ops, GIT_hunks.Span sp, bool applying) {
+bytes rebuild(List<diff.Op> ops, GIT_hunks.Span span, bool applying) {
     bytes out = [];
-    int i = 0;
-    int n = ops.size();
-    while (i < n) {
-        bool inside = i >= sp.start && i < sp.end;
+    int position = 0;
+    int op_count = ops.size();
+    while (position < op_count) {
+        bool inside = position >= span.start && position < span.end;
         bool take_new = inside == applying;
-        match (ops[i].kind) {
+        match (ops[position].kind) {
             case Keep: {
-                out.extend(ops[i].line);
+                out.extend(ops[position].line);
             }
             case Add: {
                 if (take_new) {
-                    out.extend(ops[i].line);
+                    out.extend(ops[position].line);
                 }
             }
             case Remove: {
                 if (!take_new) {
-                    out.extend(ops[i].line);
+                    out.extend(ops[position].line);
                 }
             }
         }
-        i = i + 1;
+        position = position + 1;
     }
     return out;
 }

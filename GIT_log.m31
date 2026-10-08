@@ -29,11 +29,11 @@ pub enum Error {
 
 pub str Error.to_str() {
     match (this) {
-        case Refs(GIT_refs.Error e): {
-            return "refs: " + e.to_str();
+        case Refs(GIT_refs.Error error): {
+            return "refs: " + error.to_str();
         }
-        case Object(GIT_object.Error e): {
-            return "object: " + e.to_str();
+        case Object(GIT_object.Error error): {
+            return "object: " + error.to_str();
         }
         case NotACommit(str id): {
             return "not a commit: " + id;
@@ -58,19 +58,19 @@ pub type Entry {
 pub Result<List<Entry>, Error> walk(str gitdir, str rev, int limit) {
     str tip = "";
     match (GIT_refs.rev_parse(gitdir, rev)) {
-        case Ok(str v): {
-            tip = v;
+        case Ok(str resolved): {
+            tip = resolved;
         }
-        case Err(GIT_refs.Error e): {
-            return Result<List<Entry>, Error>.Err(Error.Refs(e));
+        case Err(GIT_refs.Error error): {
+            return Result<List<Entry>, Error>.Err(Error.Refs(error));
         }
     }
     match (GIT_refs.peel(gitdir, rev, tip)) {
-        case Ok(str v): {
-            tip = v;
+        case Ok(str peeled): {
+            tip = peeled;
         }
-        case Err(GIT_refs.Error e): {
-            return Result<List<Entry>, Error>.Err(Error.Refs(e));
+        case Err(GIT_refs.Error error): {
+            return Result<List<Entry>, Error>.Err(Error.Refs(error));
         }
     }
     List<str> queue = [tip];
@@ -85,11 +85,11 @@ pub Result<List<Entry>, Error> walk(str gitdir, str rev, int limit) {
         str id = queue.remove_at(0);
         dates.remove_at(0);
         match (GIT_object.read(gitdir, id)) {
-            case Ok(GIT_object.Object o): {
-                match (o.body) {
-                    case Commit(GIT_object.Commit cm): {
-                        out.push(Entry(id, cm));
-                        for (str par in cm.parents) {
+            case Ok(GIT_object.Object object): {
+                match (object.body) {
+                    case Commit(GIT_object.Commit commit): {
+                        out.push(Entry(id, commit));
+                        for (str par in commit.parents) {
                             if (seen.contains(par)) {
                                 continue;
                             }
@@ -108,8 +108,8 @@ pub Result<List<Entry>, Error> walk(str gitdir, str rev, int limit) {
                     }
                 }
             }
-            case Err(GIT_object.Error e): {
-                return Result<List<Entry>, Error>.Err(Error.Object(e));
+            case Err(GIT_object.Error error): {
+                return Result<List<Entry>, Error>.Err(Error.Object(error));
             }
         }
     }
@@ -121,12 +121,12 @@ pub Result<List<Entry>, Error> walk(str gitdir, str rev, int limit) {
 // two lists rather than a list of pairs because a struct here would be a
 // third type for four lines of code, and `remove_at` on both is the pop.
 void insert(List<str> queue, List<int> dates, str id, int when) {
-    int i = 0;
-    while (i < dates.size() && dates[i] >= when) {
-        i = i + 1;
+    int index = 0;
+    while (index < dates.size() && dates[index] >= when) {
+        index = index + 1;
     }
-    queue.insert(i, id);
-    dates.insert(i, when);
+    queue.insert(index, id);
+    dates.insert(index, when);
 }
 
 // A commit's committer timestamp, or 0 for anything that is not a readable
@@ -134,10 +134,10 @@ void insert(List<str> queue, List<int> dates, str id, int when) {
 // and reports itself when it is reached.
 int commit_date(str gitdir, str id) {
     match (GIT_object.read(gitdir, id)) {
-        case Ok(GIT_object.Object o): {
-            match (o.body) {
-                case Commit(GIT_object.Commit c): {
-                    return c.committer.when;
+        case Ok(GIT_object.Object object): {
+            match (object.body) {
+                case Commit(GIT_object.Commit commit): {
+                    return commit.committer.when;
                 }
                 case Blob: {
                     return 0;

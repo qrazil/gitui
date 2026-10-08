@@ -50,8 +50,8 @@ str path = ".";
 if (argv.size() > 1) {
     path = argv[1];
 }
-str gd = GIT_repository.find(path);
-if (gd == "") {
+str git_directory = GIT_repository.find(path);
+if (git_directory == "") {
     io.eprint("gitui: not a git repository (or any parent up to /): no .git directory");
     return;
 }
@@ -59,13 +59,13 @@ if (!term.is_terminal(0)) {
     io.eprint("gitui: standard input is not a terminal");
     return;
 }
-GIT_client.State state = GIT_client.State.open(gd, path);
+GIT_client.State state = GIT_client.State.open(git_directory, path);
 state.reload();
 TUI_app.Loop loop = TUI_app.Loop();
 bool running = true;
 while (running) {
-    match (loop.run((TUI_buffer.Buffer buf, TUI_geometry.Rect area) => state.draw(buf, area), (term.Event ev) => state.handle(ev))) {
-        case Ok(int n): {
+    match (loop.run((TUI_buffer.Buffer buffer, TUI_geometry.Rect area) => state.draw(buffer, area), (term.Event event) => state.handle(event))) {
+        case Ok(_): {
             if (state.want_editor) {
                 state.want_editor = false;
                 state.launch_editor();
@@ -73,8 +73,8 @@ while (running) {
                 running = false;
             }
         }
-        case Err(term.Error e): {
-            io.eprint("gitui: " + e.to_str());
+        case Err(term.Error error): {
+            io.eprint("gitui: " + error.to_str());
             running = false;
         }
     }

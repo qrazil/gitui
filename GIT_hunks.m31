@@ -80,22 +80,22 @@ type Run {
 
 List<Run> runs_of(List<diff.Op> ops) {
     List<Run> runs = [];
-    int n = ops.size();
-    int i = 0;
-    while (i < n) {
-        bool change = is_change(ops[i]);
-        int j = i + 1;
-        while (j < n && is_change(ops[j]) == change) {
-            j = j + 1;
+    int op_count = ops.size();
+    int index = 0;
+    while (index < op_count) {
+        bool change = is_change(ops[index]);
+        int run_end = index + 1;
+        while (run_end < op_count && is_change(ops[run_end]) == change) {
+            run_end = run_end + 1;
         }
-        runs.push(Run(change, i, j));
-        i = j;
+        runs.push(Run(change, index, run_end));
+        index = run_end;
     }
     return runs;
 }
 
-bool is_change(diff.Op op) {
-    match (op.kind) {
+bool is_change(diff.Op operation) {
+    match (operation.kind) {
         case Keep: {
             return false;
         }
@@ -125,17 +125,17 @@ pub type Span {
 pub List<Span> spans(List<diff.Op> ops, int context = DEFAULT_CONTEXT) {
     List<Run> runs = runs_of(ops);
     List<Span> out = [];
-    int rn = runs.size();
-    int idx = 0;
-    while (idx < rn) {
-        if (!runs[idx].change) {
-            idx = idx + 1;
+    int run_count = runs.size();
+    int index = 0;
+    while (index < run_count) {
+        if (!runs[index].change) {
+            index = index + 1;
             continue;
         }
-        int first_run = idx;
-        int last_run = idx;
-        int next = idx + 1;
-        while (next + 1 < rn && runs[next].end - runs[next].start <= 2 * context) {
+        int first_run = index;
+        int last_run = index;
+        int next = index + 1;
+        while (next + 1 < run_count && runs[next].end - runs[next].start <= 2 * context) {
             last_run = next + 1;
             next = next + 2;
         }
@@ -150,7 +150,7 @@ pub List<Span> spans(List<diff.Op> ops, int context = DEFAULT_CONTEXT) {
             content_start = lead.end - take;
         }
         int content_end = runs[last_run].end;
-        if (last_run + 1 < rn) {
+        if (last_run + 1 < run_count) {
             Run trail = runs[last_run + 1];
             int take = context;
             int have = trail.end - trail.start;
@@ -160,7 +160,7 @@ pub List<Span> spans(List<diff.Op> ops, int context = DEFAULT_CONTEXT) {
             content_end = trail.start + take;
         }
         out.push(Span(content_start, content_end));
-        idx = last_run + 1;
+        index = last_run + 1;
     }
     return out;
 }
@@ -173,8 +173,8 @@ List<TUI_diff_view.Hunk> group(List<diff.Op> ops, int context) {
     List<int> old_no = prefix_counts(ops, true);
     List<int> new_no = prefix_counts(ops, false);
     List<TUI_diff_view.Hunk> out = [];
-    for (Span sp in spans(ops, context: context)) {
-        out.push(build_hunk(ops, old_no, new_no, sp.start, sp.end));
+    for (Span span in spans(ops, context: context)) {
+        out.push(build_hunk(ops, old_no, new_no, span.start, span.end));
     }
     return out;
 }
@@ -187,11 +187,11 @@ List<TUI_diff_view.Hunk> group(List<diff.Op> ops, int context) {
 // still ask for the count at its (one past the last) boundary.
 List<int> prefix_counts(List<diff.Op> ops, bool old) {
     List<int> counts = [0; ops.size() + 1];
-    int i = 0;
-    int n = ops.size();
-    while (i < n) {
+    int index = 0;
+    int op_count = ops.size();
+    while (index < op_count) {
         bool counts_here = false;
-        match (ops[i].kind) {
+        match (ops[index].kind) {
             case Keep: {
                 counts_here = true;
             }
@@ -203,22 +203,22 @@ List<int> prefix_counts(List<diff.Op> ops, bool old) {
             }
         }
         if (counts_here) {
-            counts[i + 1] = counts[i] + 1;
+            counts[index + 1] = counts[index] + 1;
         } else {
-            counts[i + 1] = counts[i];
+            counts[index + 1] = counts[index];
         }
-        i = i + 1;
+        index = index + 1;
     }
     return counts;
 }
 
 TUI_diff_view.Hunk build_hunk(List<diff.Op> ops, List<int> old_no, List<int> new_no, int start, int end) {
     List<TUI_diff_view.Line> lines = [];
-    int i = start;
-    while (i < end) {
-        diff.Op op = ops[i];
-        str text = line_text(op.line);
-        match (op.kind) {
+    int index = start;
+    while (index < end) {
+        diff.Op operation = ops[index];
+        str text = line_text(operation.line);
+        match (operation.kind) {
             case Keep: {
                 lines.push(TUI_diff_view.Line.context(text));
             }
@@ -229,7 +229,7 @@ TUI_diff_view.Hunk build_hunk(List<diff.Op> ops, List<int> old_no, List<int> new
                 lines.push(TUI_diff_view.Line.removed(text));
             }
         }
-        i = i + 1;
+        index = index + 1;
     }
     int old_count = old_no[end] - old_no[start];
     int new_count = new_no[end] - new_no[start];
@@ -268,17 +268,17 @@ str hunk_range(int before, int count) {
 // silently drop bytes, it renders as its own hex -- visibly not the line's
 // text, so a reader is never shown something the file does not contain.
 str line_text(bytes line) {
-    int n = line.size();
-    if (n > 0 && line[n - 1] == 10) {
-        n = n - 1;
+    int length = line.size();
+    if (length > 0 && line[length - 1] == 10) {
+        length = length - 1;
     }
-    if (n > 0 && line[n - 1] == 13) {
-        n = n - 1;
+    if (length > 0 && line[length - 1] == 13) {
+        length = length - 1;
     }
-    bytes trimmed = line.substr(0, n);
+    bytes trimmed = line.substr(0, length);
     match (trimmed.utf8()) {
-        case Some(str s): {
-            return s;
+        case Some(str text): {
+            return text;
         }
         case None: {
             return "<invalid utf-8: " + trimmed.hex() + ">";

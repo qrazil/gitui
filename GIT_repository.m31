@@ -37,22 +37,22 @@ import text;
 /// bare repository, or the same questions asked of the parent. `""` if there
 /// is no repository up to the root.
 pub str find(str path) {
-    str at = path;
-    for (int up in 0 .. 64) {
-        str inner = fs.join(at, ".git");
+    str current = path;
+    for (int i in 0 .. 64) {
+        str inner = fs.join(current, ".git");
         if (fs.is_dir(inner)) {
             return inner;
         }
         if (fs.is_file(inner)) {
-            str pointed = gitfile(at, inner);
+            str pointed = gitfile(current, inner);
             if (pointed != "") {
                 return pointed;
             }
         }
-        if (fs.is_dir(fs.join(at, "objects")) && fs.exists(fs.join(at, "HEAD"))) {
-            return at;
+        if (fs.is_dir(fs.join(current, "objects")) && fs.exists(fs.join(current, "HEAD"))) {
+            return current;
         }
-        at = fs.join(at, "..");
+        current = fs.join(current, "..");
     }
     return "";
 }
@@ -68,15 +68,15 @@ pub str common(str gitdir) {
         return gitdir;
     }
     match (io.read(marker)) {
-        case Ok(str s): {
-            str p = s.trim();
-            if (p == "") {
+        case Ok(str contents): {
+            str target = contents.trim();
+            if (target == "") {
                 return gitdir;
             }
-            if (p.starts_with("/")) {
-                return p;
+            if (target.starts_with("/")) {
+                return target;
             }
-            return fs.join(gitdir, p);
+            return fs.join(gitdir, target);
         }
         case Err: {
             return gitdir;
@@ -104,8 +104,8 @@ pub bool per_worktree(str name) {
 // the path may be relative to the working tree the file is in.
 str gitfile(str tree, str path) {
     match (io.read(path)) {
-        case Ok(str s): {
-            str line = text.strip_prefix(s.trim(), "gitdir:").trim();
+        case Ok(str contents): {
+            str line = text.strip_prefix(contents.trim(), "gitdir:").trim();
             if (line == "") {
                 return "";
             }
