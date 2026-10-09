@@ -5,6 +5,7 @@
 // handoff that takes", for why `edit_message` cannot launch the editor itself.
 
 import fs;
+import GIT_config;
 import GIT_index;
 import GIT_merge;
 import GIT_object;
@@ -164,6 +165,10 @@ pub void CommitLayer.finish_commit() {
         message = "cannot amend while a merge is under way";
         return;
     }
+    if (GIT_config.commit_gpgsign(gitdir)) {
+        message = GIT_config.GPGSIGN_REFUSAL + "; the message is kept at " + commit_message_path;
+        return;
+    }
     str raw = "";
     if (is_merge && !GIT_merge.message_file_is_current(gitdir, commit_message_path)) {
         raw = GIT_merge.merge_message_text(gitdir);
@@ -235,7 +240,7 @@ pub void CommitLayer.finish_commit() {
             return;
         }
     }
-    GIT_object.Ident author = GIT_ui_model.author_ident();
+    GIT_object.Ident author = GIT_ui_model.author_ident(gitdir);
     if (is_merge) {
         for (str merge_parent in GIT_merge.merge_heads(gitdir)) {
             parents.push(merge_parent);
@@ -277,7 +282,7 @@ pub void CommitLayer.finish_commit() {
             }
         }
     }
-    GIT_object.Commit commit = GIT_object.Commit(tree_id, parents, author, GIT_ui_model.committer_ident(), [], (commit_message + "\n").to_bytes());
+    GIT_object.Commit commit = GIT_object.Commit(tree_id, parents, author, GIT_ui_model.committer_ident(gitdir), [], (commit_message + "\n").to_bytes());
     str commit_id = "";
     match (GIT_object.write_commit(gitdir, commit)) {
         case Ok(str id): {

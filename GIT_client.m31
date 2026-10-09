@@ -161,7 +161,7 @@ pub void State.launch_editor() {
         settle();
         return;
     }
-    str editor = GIT_ui_model.pick_editor(os.env("EDITOR"));
+    str editor = GIT_ui_model.editor_for(gitdir);
     match (os.run([editor, commit_message_path])) {
         case Ok(os.ExitStatus exit_status): {
             match (exit_status) {
