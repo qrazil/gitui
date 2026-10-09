@@ -879,10 +879,9 @@ pub Result<Summary, Error> apply_tree_diff(str gitdir, str worktree, str from_tr
     return Result<Summary, Error>.Ok(Summary(written, removed));
 }
 
-/// `git reset --hard <commit>`: the working tree and index become the
-/// commit's tree, and the branch HEAD is on moves to it. See the module
-/// header. Untracked files are left alone.
-pub Result<Summary, Error> reset_hard(str gitdir, str worktree, str commit) {
+/// The files and index half of `reset --hard <commit>`: both become the
+/// commit's tree, no ref moves. Untracked files are left alone.
+pub Result<Summary, Error> reset_files(str gitdir, str worktree, str commit) {
     Map<str, TreeEntry> target = tree_of_commit(gitdir, commit)?;
     GIT_index.Index index = load_index(gitdir)?;
     Map<str, GIT_index.Entry> staged = {};
@@ -965,7 +964,13 @@ pub Result<Summary, Error> reset_hard(str gitdir, str worktree, str commit) {
             return Result<Summary, Error>.Err(Error.Index(error));
         }
     }
-    // --- HEAD: the branch it is on, or HEAD itself when detached ----------
+    return Result<Summary, Error>.Ok(Summary(written, removed));
+}
+
+/// `git reset --hard <commit>`: `reset_files`, then the branch HEAD is on moves
+/// to the commit with git's reflog line. See the module header.
+pub Result<Summary, Error> reset_hard(str gitdir, str worktree, str commit) {
+    Summary done = reset_files(gitdir, worktree, commit)?;
     str ref_name = "HEAD";
     match (GIT_refs.head(gitdir)) {
         case Ok(GIT_refs.Head head): {
@@ -991,7 +996,7 @@ pub Result<Summary, Error> reset_hard(str gitdir, str worktree, str commit) {
             return Result<Summary, Error>.Err(Error.Refs(error));
         }
     }
-    return Result<Summary, Error>.Ok(Summary(written, removed));
+    return Result<Summary, Error>.Ok(done);
 }
 
 // The index of `gitdir`, empty when there is no file yet.

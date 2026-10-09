@@ -730,11 +730,21 @@ pub Result<Saved, Error> push(str gitdir, str worktree, bool include_untracked =
         put_on_stack(gitdir, commit, text)?;
     }
     // the work tree and index back to HEAD
-    match (GIT_checkout.reset_hard(gitdir, worktree, head.id)) {
-        case Ok: {
+    if (store) {
+        match (GIT_checkout.reset_hard(gitdir, worktree, head.id)) {
+            case Ok: {
+            }
+            case Err(GIT_checkout.Error error): {
+                return Result<Saved, Error>.Err(from_checkout(error));
+            }
         }
-        case Err(GIT_checkout.Error error): {
-            return Result<Saved, Error>.Err(from_checkout(error));
+    } else {
+        match (GIT_checkout.reset_files(gitdir, worktree, head.id)) {
+            case Ok: {
+            }
+            case Err(GIT_checkout.Error error): {
+                return Result<Saved, Error>.Err(from_checkout(error));
+            }
         }
     }
     for (bytes path in untracked) {
@@ -1166,6 +1176,18 @@ Result<bool, Error> write_untracked(str gitdir, str worktree, str path, GIT_udif
     }
 }
 
+Result<GIT_merge.TreeMerge, Error> merge_stash_tree(str gitdir, Parts parts, str current_tree) {
+    GIT_diff3.Labels names = GIT_diff3.Labels("Updated upstream", "Stash base", "Stashed changes");
+    match (GIT_merge.merge_trees(gitdir, parts.base_tree, current_tree, parts.tree, names)) {
+        case Ok(GIT_merge.TreeMerge found): {
+            return Result<GIT_merge.TreeMerge, Error>.Ok(found);
+        }
+        case Err(GIT_merge.Error error): {
+            return Result<GIT_merge.TreeMerge, Error>.Err(from_merge(error));
+        }
+    }
+}
+
 Result<GIT_merge.TreeMerge, Error> merge_index_changes(str gitdir, Parts parts, str current_tree) {
     GIT_diff3.Labels names = GIT_diff3.Labels("Updated upstream", "Stash base", "Stashed changes");
     match (GIT_merge.merge_trees(gitdir, parts.base_tree, current_tree, parts.index_tree, names)) {
@@ -1288,6 +1310,7 @@ pub Result<Applied, Error> apply(str gitdir, str worktree, str id, bool restore_
         }
     } else {
         // the tree changes themselves: files written, removed, nothing if refused
+        GIT_merge.TreeMerge plain = merge_stash_tree(gitdir, parts, current_tree)?;
         match (GIT_checkout.apply_tree_diff(gitdir, worktree, parts.base_tree, parts.tree, index)) {
             case Ok(GIT_checkout.Summary summary): {
                 written = summary.written;
@@ -1295,6 +1318,13 @@ pub Result<Applied, Error> apply(str gitdir, str worktree, str id, bool restore_
             }
             case Err(GIT_checkout.Error error): {
                 return Result<Applied, Error>.Err(from_checkout(error));
+            }
+        }
+        match (io.write(fs.join(gitdir, "AUTO_MERGE"), plain.tree + "\n")) {
+            case Ok: {
+            }
+            case Err(_): {
+                return Result<Applied, Error>.Err(Error.Io("cannot write AUTO_MERGE"));
             }
         }
     }
