@@ -248,6 +248,23 @@ def main():
     check("apply: refused over local changes, as git does", r.returncode != 0 and "refused" in t, t)
     same("apply refused leaves the repository as it was", ours, theirs)
 
+    # a pop that has to merge and conflicts: git's conflicted state, the stash kept
+    def moved_on(fx):
+        run(fx, "stash", "push", "-q")
+        write(fx + "/a.txt", b"one\ndeux\nthree\nfour\nfive\nsix\nseven\neight\nnine\nten\n")
+        run(fx, "commit", "-q", "-am", "head moved")
+
+    ours, theirs = pair(root, "mergepop", moved_on)
+    s = Session(binpath, ours, env=ENV)
+    s.send("zp")
+    t = s.text()
+    check("pop: conflicts are reported and the stash is kept", "stopped on conflicts in a.txt" in t and "stash@{0} is kept" in t, t)
+    check("pop: the outline lists the unmerged path", "a.txt" in t and "Stashes (1)" in t, t)
+    s.quit()
+    r = run(theirs, "stash", "pop", "-q")
+    check("pop: git conflicts too", r.returncode != 0)
+    same("pop that conflicts leaves git's state", ours, theirs)
+
     # nothing to stash
     ours, _ = pair(root, "nothing", lambda fx: (run(fx, "stash", "push", "-q", "-u")))
     s = Session(binpath, ours, env=ENV)

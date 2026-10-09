@@ -188,10 +188,15 @@ reads the other's stack and `refs/stash` reflog. The outline has a
 the list overlay previews the highlighted stash's diff. Every write goes to
 the command log (`stash push -u`, `stash pop stash@{0}`, ...) and writes
 git-style reflog lines. `apply` and `pop` refuse, writing nothing, when a
-local change or an untracked file is in the way. Limits: when the stash and
-the working tree changed the same file differently (including `-k` followed
-by `pop`), a real three-way merge is needed; `GIT_stash.stash_apply_merge` is
-the hook for it and returns `NeedsMerge(path)` until `GIT_merge` is wired in.
+local change or an untracked file is in the way. A stash that has to be
+merged (HEAD or the index moved on a file the stash also changed, `-k` followed by `pop`) goes through `GIT_merge.merge_with_base`
+(`GIT_stash.stash_apply_merge`: base = the stash's base, ours = the index, theirs =
+the stash, labelled `Updated upstream` / `Stashed changes`) and ends as git's
+does: a clean merge leaves the index alone apart from files the stash added, a
+conflicted one leaves markers, stages 1/2/3 and the other merged paths staged, and
+`pop` keeps the stash. `apply --index` over a merge applies the staged changes by a
+tree merge where git applies a patch, and refuses (nothing written, where git fails
+half way) when the index has staged changes of its own. Other limits:
 Untracked symlinks are skipped by `push -u` (the stdlib has no `readlink`),
 `show` does no rename detection and submodules are stashed as the index has
 them. Checked against real git in `test_stash.sh` (byte-for-byte `show`,

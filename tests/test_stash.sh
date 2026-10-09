@@ -199,13 +199,68 @@ if build t_stash; then
         st_fsck "$stx/moved-ours" && note "stash apply, HEAD moved: fsck clean" || bad "stash apply, HEAD moved: fsck"
     else bad "stash apply after HEAD moved" "git rc=$r1 ours rc=$r2 $out"; fi
 
-    # HEAD moved on a file the stash also changed: the merge hook says so
-    st_pair merge
-    st_git "$stx/merge-ours" stash push -q >/dev/null 2>&1
-    printf 'head moved\n' >>"$stx/merge-ours/a.txt"; st_git "$stx/merge-ours" commit -q -am 'same file' >/dev/null
-    before=$(st_state "$stx/merge-ours")
-    out=$(st_ours "$stx/merge-ours" apply 0 2>&1); r2=$?
-    if [ $r2 -ne 0 ] && grep -qi "merge" <<<"$out" && [ "$before" = "$(st_state "$stx/merge-ours")" ]; then note "stash apply: a file both sides changed reports 'needs merge' and changes nothing"; else bad "stash apply needing a merge" "rc=$r2 $out"; fi
+    # HEAD moved on a file the stash also changed: a real three-way merge, as git does it.
+    # Each case: both copies get the same stash (made by git) and the same new HEAD commit;
+    # git applies/pops on one, we do on the other; state, AUTO_MERGE, exit status and the
+    # kept (or dropped) stash must be the same.
+    st_head_clean() { sed -i 's/^eight$/EIGHT/' a.txt; git add a.txt; git commit -q -m 'head: clean hunk'; }
+    st_head_conflict() { sed -i 's/^two$/deux/' a.txt; git add a.txt; git commit -q -m 'head: conflicting hunk'; }
+    st_head_many() {
+        sed -i 's/^two$/deux/' a.txt; printf 'head-b\n' >>b.txt; printf 'head edit\n' >del.txt
+        git rm -q dir/c.txt; printf 'head new\n' >new.txt; chmod 755 nonl.txt; git add -A; git commit -q -m 'head: many'
+    }
+    st_head_mode() { chmod 755 b.txt; printf 'head-b\n' >>b.txt; git add b.txt; git commit -q -m 'head: mode and append'; }
+    st_head_deleted() { git rm -q b.txt; git commit -q -m 'head: deletes the file the stash edited'; }
+    st_head_staged() { sed -i 's/^eight$/EIGHT/' a.txt; git add a.txt; }
+    for variant in "clean:plain:" "conflict:plain:" "many:plain:" "mode:plain:" "deleted:plain:" "conflict:untracked:-u" "many:untracked:-u" "clean:keep:-k" "staged:plain:"; do
+        scen=${variant%%:*}; rest=${variant#*:}; name=${rest%%:*}; flags=${rest#*:}
+        for cmd in apply pop; do
+            for idx in "" "--index"; do
+                tag="mg-$scen-$name-$cmd${idx:+-index}"
+                st_pair "$tag"
+                for r in git ours; do
+                    st_git "$stx/$tag-$r" stash push -q $flags >/dev/null 2>&1
+                    (cd "$stx/$tag-$r" && st_env bash -c "$(declare -f st_head_$scen); st_head_$scen") >/dev/null 2>&1
+                done
+                st_git "$stx/$tag-git" stash $cmd -q $idx >"$WORK/mg.git.out" 2>&1; r1=$?
+                pre=$(st_state "$stx/$tag-ours")
+                out=$(st_ours "$stx/$tag-ours" $cmd $idx 0 2>&1); r2=$?
+                if { [ $r1 -eq 0 ] && [ $r2 -ne 0 ]; } || { [ $r1 -ne 0 ] && [ $r2 -eq 0 ]; }; then
+                    bad "stash $cmd $idx after $scen head move ($name)" "git rc=$r1 ours rc=$r2 $out"
+                    continue
+                fi
+                if [ -n "$idx" ] && [ $r1 -ne 0 ] && [ $r2 -ne 0 ] && grep -q 'would be overwritten by merge' "$WORK/mg.git.out"; then
+                    # git fails half way here (index reset, files not); we refuse before writing anything
+                    [ "$pre" = "$(st_state "$stx/$tag-ours")" ] && note "stash $cmd $idx after $scen head move ($name): refused, nothing written (git fails half way)" || bad "stash $cmd $idx after $scen head move ($name): wrote something while refusing"
+                    continue
+                fi
+                st_check "stash $cmd $idx after $scen head move ($name): state equals git's (rc $r1)" "$stx/$tag-git" "$stx/$tag-ours"
+                if [ -e "$stx/$tag-git/.git/AUTO_MERGE" ]; then
+                    [ "$(cat "$stx/$tag-git/.git/AUTO_MERGE" 2>/dev/null)" = "$(cat "$stx/$tag-ours/.git/AUTO_MERGE" 2>/dev/null)" ] || bad "stash $cmd $idx after $scen head move ($name): AUTO_MERGE differs"
+                fi
+                if [ $r1 -ne 0 ]; then
+                    [ "$(git -C "$stx/$tag-ours" stash list | wc -l)" = "$(git -C "$stx/$tag-git" stash list | wc -l)" ] || bad "stash $cmd ($scen/$name): stash list differs after the failed $cmd"
+                    diff <(cd "$stx/$tag-git" && grep -rn '^[<=>]\{7\}' --include='*.txt' . | cut -d: -f1,3-) <(cd "$stx/$tag-ours" && grep -rn '^[<=>]\{7\}' --include='*.txt' . | cut -d: -f1,3-) >/dev/null || bad "stash $cmd ($scen/$name): conflict markers differ"
+                fi
+                st_fsck "$stx/$tag-ours" || bad "fsck after our $cmd $idx ($scen/$name)"
+            done
+        done
+    done
+
+    # a conflicted pop keeps the stash, and git can finish what we started
+    st_pair mgfin
+    for r in git ours; do
+        st_git "$stx/mgfin-$r" stash push -q >/dev/null 2>&1
+        (cd "$stx/mgfin-$r" && st_env bash -c "$(declare -f st_head_conflict); st_head_conflict") >/dev/null 2>&1
+    done
+    st_ours "$stx/mgfin-ours" pop 0 >/dev/null 2>&1
+    [ "$(git -C "$stx/mgfin-ours" stash list | wc -l)" = 1 ] && note "stash pop: a conflicted pop keeps the stash" || bad "stash pop conflicted: stash dropped"
+    for r in git ours; do
+        printf 'resolved\n' >"$stx/mgfin-$r/a.txt"; st_git "$stx/mgfin-$r" add a.txt
+    done
+    st_git "$stx/mgfin-ours" stash drop -q >/dev/null 2>&1
+    git -C "$stx/mgfin-ours" ls-files -u | grep -q . && bad "stash pop conflict: add did not clear the unmerged entries" || note "stash pop conflict: git add resolves what we left; git stash drop drops the kept stash"
+    st_fsck "$stx/mgfin-ours" && note "stash pop conflict: fsck clean after resolving" || bad "stash pop conflict: fsck"
 
     # --- drop: the reflog stack as git rewrites it ------------------------------------
     st_pair drop

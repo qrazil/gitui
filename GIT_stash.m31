@@ -12,8 +12,9 @@
 //   GIT_stash.apply(gitdir, worktree, id, restore_index) -> Result<Applied, Error>
 //   GIT_stash.pop(gitdir, worktree, n, restore_index)    -> Result<Applied, Error>
 //   GIT_stash.branch(gitdir, worktree, name, n)          -> Result<Applied, Error>
-//   GIT_stash.stash_apply_merge(...)   the one hook for "HEAD moved on a file the
-//                                      stash also changed"; today: Error.NeedsMerge
+//   GIT_stash.stash_apply_merge(gitdir, worktree, parts) -> Result<GIT_merge.Applied, Error>
+//                                      the three-way merge `apply` falls back to when
+//                                      HEAD moved on a file the stash also changed
 //   GIT_stash.labels(gitdir)           -> List<str>, `stash@{0}: On main: msg`
 //
 // --- what a stash is -----------------------------------------------------------
@@ -41,9 +42,14 @@
 //     (what git does); with `restore_index` the index changes (base -> I) are
 //     staged as well;
 //   * a file the stash changed that the current index also changed since the
-//     stash's base is the general case: `stash_apply_merge`. It needs a
-//     three-way merge, so it returns `Error.NeedsMerge(path)` and nothing is
-//     written -- the hook for `GIT_merge` once that lands;
+//     stash's base is the general case: `stash_apply_merge`, which is what git does
+//     for every apply -- `GIT_merge.merge_with_base` with the stash's base tree as
+//     the base, the current index as ours and the stash's work tree as theirs,
+//     labelled `Updated upstream` / `Stashed changes`. A clean merge leaves the
+//     index as it was except for files the stash added; a conflicted one leaves
+//     git's state (markers in the files, stages 1/2/3, every other merged path
+//     staged) and `apply` returns `Error.Conflicts(paths)`, so `pop` keeps the
+//     stash. `AUTO_MERGE` holds the merged tree either way;
 //   * a work-tree file the stash would overwrite that has local changes, or an
 //     untracked file where the stash would put one, refuses with nothing written
 //     (`Error.Dirty`, `Error.UntrackedExists`) -- through `GIT_checkout.
@@ -61,7 +67,9 @@
 
 import fs;
 import GIT_checkout;
+import GIT_diff3;
 import GIT_index;
+import GIT_merge;
 import GIT_object;
 import GIT_reflog;
 import GIT_refs;
@@ -86,8 +94,9 @@ pub enum Error {
     NoSuchStash;
     /// The commit is not shaped like a stash.
     NotAStash;
-    /// The path was changed on both sides since the stash's base and needs a real merge.
-    NeedsMerge(str);
+    /// The stash was applied by a merge that left these paths in conflict; the
+    /// stash is kept.
+    Conflicts(List<str>);
     /// Local changes to a file the stash would overwrite.
     Dirty;
     /// An untracked file is where the stash would write one.
@@ -102,6 +111,51 @@ pub enum Error {
     Io(str);
     /// Anything the layers below said.
     Failed(str);
+}
+
+/// The conflicted paths when the apply stopped on conflicts, else empty.
+pub List<str> Error.conflicted_paths() {
+    match (this) {
+        case Conflicts(List<str> paths): {
+            return paths;
+        }
+        case NoInitialCommit: {
+            return [];
+        }
+        case NoChanges: {
+            return [];
+        }
+        case Unmerged: {
+            return [];
+        }
+        case NoSuchStash: {
+            return [];
+        }
+        case NotAStash: {
+            return [];
+        }
+        case Dirty: {
+            return [];
+        }
+        case BranchExists: {
+            return [];
+        }
+        case BadName: {
+            return [];
+        }
+        case Failed(_): {
+            return [];
+        }
+        case Io(_): {
+            return [];
+        }
+        case IndexConflict(_): {
+            return [];
+        }
+        case UntrackedExists(_): {
+            return [];
+        }
+    }
 }
 
 pub str Error.to_str() {
@@ -121,8 +175,8 @@ pub str Error.to_str() {
         case NotAStash: {
             return "that is not a stash commit";
         }
-        case NeedsMerge(str path): {
-            return path + " changed since the stash was made: needs a merge, which is not available yet";
+        case Conflicts(List<str> paths): {
+            return "conflicts in " + paths.join(", ") + " -- the stash entry is kept in case you need it again";
         }
         case Dirty: {
             return "local changes would be overwritten -- commit or discard them first";
@@ -964,12 +1018,92 @@ pub Result<str, Error> drop(str gitdir, int n) {
 
 // --- apply -----------------------------------------------------------------------
 
+Error from_merge(GIT_merge.Error error) {
+    match (error) {
+        case IndexDirty(_): {
+            return Error.Dirty;
+        }
+        case LocalChanges(_): {
+            return Error.Dirty;
+        }
+        case Checkout(GIT_checkout.Error inner): {
+            return from_checkout(inner);
+        }
+        case Io: {
+            return Error.Io(error.to_str());
+        }
+        case NotACommit: {
+            return Error.Failed(error.to_str());
+        }
+        case Unrelated: {
+            return Error.Failed(error.to_str());
+        }
+        case NotFastForward: {
+            return Error.Failed(error.to_str());
+        }
+        case InProgress: {
+            return Error.Failed(error.to_str());
+        }
+        case NoMerge: {
+            return Error.Failed(error.to_str());
+        }
+        case UnmergedPaths: {
+            return Error.Unmerged;
+        }
+        case Unborn: {
+            return Error.NoInitialCommit;
+        }
+        case EmptyMessage: {
+            return Error.Failed(error.to_str());
+        }
+        case Unsupported(_): {
+            return Error.Failed(error.to_str());
+        }
+        case Object(_): {
+            return Error.Failed(error.to_str());
+        }
+        case Index(_): {
+            return Error.Failed(error.to_str());
+        }
+        case Refs(_): {
+            return Error.Failed(error.to_str());
+        }
+        case Graph(_): {
+            return Error.Failed(error.to_str());
+        }
+        case Status(_): {
+            return Error.Failed(error.to_str());
+        }
+    }
+}
+
 /// The general case of `apply`: `path` was changed by the stash and also by what
-/// is staged (or committed) since the stash's base, so the two have to be
-/// merged. A three-way merge is `GIT_merge`'s job, which is not here yet; this
-/// is the one place that will call it.
-pub Result<Applied, Error> stash_apply_merge(str gitdir, str worktree, Parts parts, bool restore_index, str path) {
-    return Result<Applied, Error>.Err(Error.NeedsMerge(path));
+/// is staged (or committed) since the stash's base, so the stash's changes are
+/// merged into the current index and work tree, as git does: base = the stash's
+/// base tree, ours = the tree of the current index, theirs = the stash's work
+/// tree. Writes `AUTO_MERGE`. Conflicted paths are left as stages 1/2/3 with
+/// markers; refuses (nothing written) when a touched path has local edits.
+pub Result<GIT_merge.Applied, Error> stash_apply_merge(str gitdir, str worktree, Parts parts) {
+    GIT_index.Index index = read_index(gitdir)?;
+    str current_tree = tree_of_entries(gitdir, index.entries)?;
+    GIT_merge.Opts opts = GIT_merge.Opts(ours_label: "Updated upstream", theirs_label: "Stashed changes", base_label: "Stash base", style: GIT_merge.configured_style(gitdir));
+    GIT_merge.Applied merged = GIT_merge.Applied("", [], []);
+    match (GIT_merge.merge_with_base(gitdir, worktree, parts.base_tree, current_tree, parts.tree, opts)) {
+        case Ok(GIT_merge.Applied found): {
+            merged = found;
+        }
+        case Err(GIT_merge.Error error): {
+            return Result<GIT_merge.Applied, Error>.Err(from_merge(error));
+        }
+    }
+    match (io.write(fs.join(gitdir, "AUTO_MERGE"), merged.tree + "\n")) {
+        case Ok: {
+        }
+        case Err(_): {
+            return Result<GIT_merge.Applied, Error>.Err(Error.Io("cannot write AUTO_MERGE"));
+        }
+    }
+    return Result<GIT_merge.Applied, Error>.Ok(merged);
 }
 
 GIT_index.Entry unknown_stat(int mode, str id, bytes path) {
@@ -1026,6 +1160,18 @@ Result<bool, Error> write_untracked(str gitdir, str worktree, str path, GIT_udif
     }
 }
 
+Result<GIT_merge.TreeMerge, Error> merge_index_changes(str gitdir, Parts parts, str current_tree) {
+    GIT_diff3.Labels names = GIT_diff3.Labels("Updated upstream", "Stash base", "Stashed changes");
+    match (GIT_merge.merge_trees(gitdir, parts.base_tree, current_tree, parts.index_tree, names)) {
+        case Ok(GIT_merge.TreeMerge found): {
+            return Result<GIT_merge.TreeMerge, Error>.Ok(found);
+        }
+        case Err(GIT_merge.Error error): {
+            return Result<GIT_merge.TreeMerge, Error>.Err(from_merge(error));
+        }
+    }
+}
+
 /// `git stash apply` for the stash commit `id`. See the module header.
 pub Result<Applied, Error> apply(str gitdir, str worktree, str id, bool restore_index = false) {
     Parts parts = parts_of(gitdir, id)?;
@@ -1056,17 +1202,44 @@ pub Result<Applied, Error> apply(str gitdir, str worktree, str id, bool restore_
         }
     }
     List<str> touched = GIT_udiff.changed_paths(base, work);
+    bool needs_merge = false;
     for (str path in touched) {
         GIT_udiff.Leaf was = leaf_at(base, path);
         GIT_udiff.Leaf now = leaf_at(work, path);
         GIT_udiff.Leaf have = leaf_at(current, path);
-        if (same_leaf(have, now) || same_leaf(have, was)) {
-            continue;
+        if (!(same_leaf(have, now) || same_leaf(have, was))) {
+            needs_merge = true;
+            break;
         }
-        return stash_apply_merge(gitdir, worktree, parts, restore_index, path);
     }
     List<str> staged_paths = [];
-    if (restore_index) {
+    if (restore_index && needs_merge) {
+        // git restores the index only when it differs both from the base and from
+        // what the index holds now
+        if (parts.index_tree != current_tree && parts.index_tree != parts.base_tree) {
+            // and it cannot do that over staged changes of its own when it has to merge as
+            // well (it fails half way); refuse before writing anything
+            HeadInfo head = head_info(gitdir)?;
+            if (head.tree != current_tree) {
+                List<str> staged_now = GIT_udiff.changed_paths(flat(gitdir, head.tree)?, current);
+                return Result<Applied, Error>.Err(Error.IndexConflict(staged_now[0]));
+            }
+            // git applies the stash's staged changes (base -> index) to the current index
+            GIT_merge.TreeMerge onto = merge_index_changes(gitdir, parts, current_tree)?;
+            if (onto.conflicts.size() > 0) {
+                return Result<Applied, Error>.Err(Error.IndexConflict(onto.conflicts[0].path));
+            }
+            Map<str, GIT_udiff.Leaf> landed = flat(gitdir, onto.tree)?;
+            for (str path in GIT_udiff.changed_paths(base, staged)) {
+                // a patch whose change is already there (or whose file is not) does not apply
+                if (same_leaf(leaf_at(landed, path), leaf_at(current, path))) {
+                    return Result<Applied, Error>.Err(Error.IndexConflict(path));
+                }
+            }
+            staged = landed;
+            staged_paths = GIT_udiff.changed_paths(current, staged);
+        }
+    } else if (restore_index) {
         staged_paths = GIT_udiff.changed_paths(base, staged);
         for (str path in staged_paths) {
             GIT_udiff.Leaf was = leaf_at(base, path);
@@ -1082,16 +1255,41 @@ pub Result<Applied, Error> apply(str gitdir, str worktree, str id, bool restore_
     for (GIT_index.Entry entry in index.entries) {
         original.set(entry.path.utf8().or(""), entry);
     }
-    // the tree changes themselves: files written, removed, nothing if refused
     int written = 0;
     int removed = 0;
-    match (GIT_checkout.apply_tree_diff(gitdir, worktree, parts.base_tree, parts.tree, index)) {
-        case Ok(GIT_checkout.Summary summary): {
-            written = summary.written;
-            removed = summary.removed;
+    if (needs_merge) {
+        GIT_merge.Applied merged = stash_apply_merge(gitdir, worktree, parts)?;
+        if (merged.conflicts.size() > 0) {
+            for (str path in untracked_paths) {
+                write_untracked(gitdir, worktree, path, leaf_at(untracked, path))?;
+            }
+            List<str> conflicted = [];
+            for (GIT_merge.Conflicted each in merged.conflicts) {
+                if (conflicted.size() == 0 || conflicted[conflicted.size() - 1] != each.path) {
+                    conflicted.push(each.path);
+                }
+            }
+            return Result<Applied, Error>.Err(Error.Conflicts(conflicted));
         }
-        case Err(GIT_checkout.Error error): {
-            return Result<Applied, Error>.Err(from_checkout(error));
+        work = flat(gitdir, merged.tree)?;
+        touched = GIT_udiff.changed_paths(current, work);
+        for (str path in touched) {
+            if (leaf_at(work, path).id == "") {
+                removed = removed + 1;
+            } else {
+                written = written + 1;
+            }
+        }
+    } else {
+        // the tree changes themselves: files written, removed, nothing if refused
+        match (GIT_checkout.apply_tree_diff(gitdir, worktree, parts.base_tree, parts.tree, index)) {
+            case Ok(GIT_checkout.Summary summary): {
+                written = summary.written;
+                removed = summary.removed;
+            }
+            case Err(GIT_checkout.Error error): {
+                return Result<Applied, Error>.Err(from_checkout(error));
+            }
         }
     }
     // the index: back to what it was, except what the stash added (and, with

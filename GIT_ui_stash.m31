@@ -60,6 +60,18 @@ pub void push_stash(GIT_ui_core.Core core, bool include_untracked, bool keep_ind
     }
 }
 
+// A merge that stopped on conflicts has changed the tree: say so and reload.
+bool conflicted(GIT_ui_core.Core core, str verb, int n, GIT_stash.Error error) {
+    List<str> paths = error.conflicted_paths();
+    if (paths.size() == 0) {
+        return false;
+    }
+    core.log_command("stash " + verb + " " + ref_name(n) + " (conflicts in " + paths.join(", ") + ")");
+    core.say(verb + " stopped on conflicts in " + paths.join(", ") + "; " + ref_name(n) + " is kept");
+    core.reload();
+    return true;
+}
+
 /// `git stash apply` (and with `drop_after`, `pop`) of `stash@{n}`.
 pub void apply_stash(GIT_ui_core.Core core, int n, bool restore_index, bool drop_after) {
     GIT_stash.Applied done = GIT_stash.Applied(0, 0, 0);
@@ -69,6 +81,9 @@ pub void apply_stash(GIT_ui_core.Core core, int n, bool restore_index, bool drop
                 done = found;
             }
             case Err(GIT_stash.Error error): {
+                if (conflicted(core, "pop", n, error)) {
+                    return;
+                }
                 core.say("pop refused: " + error.to_str());
                 return;
             }
@@ -90,6 +105,9 @@ pub void apply_stash(GIT_ui_core.Core core, int n, bool restore_index, bool drop
                 done = found;
             }
             case Err(GIT_stash.Error error): {
+                if (conflicted(core, "apply", n, error)) {
+                    return;
+                }
                 core.say("apply refused: " + error.to_str());
                 return;
             }
