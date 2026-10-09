@@ -13,12 +13,30 @@
 // ---
 //   GIT_status.status(gitdir, worktree)  -> Result<Status, Error>
 //
-// `Status` is three lists -- `staged`, `unstaged`, `untracked` -- and is
+// `Status` is four lists -- `staged`, `unstaged`, `untracked`, `unmerged` -- and is
 // deliberately not shaped like any particular command's output: nothing here
 // prints a `git status --short` line, or groups by directory, or colours
 // anything. That is a future caller's job, and there is no such caller yet
 // (`docs/design.md`'s "dependency chain" section). This hands back
 // structure and nothing else.
+//
+// --- unmerged paths ----------------------------------------------------------
+//
+// A path that has index entries at stage 1, 2 or 3 (base, ours, theirs: a
+// merge that stopped on it) is neither staged nor unstaged: it is its own
+// category, `Status.unmerged`, and appears in no other list -- not as
+// untracked either, and not as "deleted" when HEAD has it. `Unmerged.kind` is
+// the pair of letters `git status --porcelain` prints (`Conflict.code()`),
+// worked out from which of the three stages exist, as git does:
+//
+//     stages 1 2 3   UU  both modified      stages 2 3   AA  both added
+//     stages 1 2     UD  deleted by them    stages 1 3   DU  deleted by us
+//     stage  2       AU  added by us        stage  3     UA  added by them
+//     stage  1       DD  both deleted
+//
+// Anything that decides whether a path is safe to overwrite (checkout, a
+// reset) has to count `unmerged` as modified: nothing in `staged`/`unstaged`
+// says so.
 //
 // --- the mtime/size shortcut is not optional ---------------------------------
 //
@@ -132,6 +150,65 @@ pub type Delta {
     pub Change kind;
 }
 
+/// What is wrong with an unmerged path, named for who did what -- "us" is
+/// the side being merged into (stage 2), "them" the side merged in (stage 3).
+pub enum Conflict {
+    /// Stages 1, 2 and 3: changed on both sides (`UU`).
+    BothModified;
+    /// Stages 2 and 3, no base: added on both sides (`AA`).
+    BothAdded;
+    /// Stage 1 alone: removed on both sides (`DD`).
+    BothDeleted;
+    /// Stage 2 alone: added by us (`AU`).
+    AddedByUs;
+    /// Stage 3 alone: added by them (`UA`).
+    AddedByThem;
+    /// Stages 1 and 3: deleted by us, changed by them (`DU`).
+    DeletedByUs;
+    /// Stages 1 and 2: changed by us, deleted by them (`UD`).
+    DeletedByThem;
+}
+
+/// The two letters `git status --porcelain` prints for this conflict.
+pub str Conflict.code() {
+    match (this) {
+        case BothModified: {
+            return "UU";
+        }
+        case BothAdded: {
+            return "AA";
+        }
+        case BothDeleted: {
+            return "DD";
+        }
+        case AddedByUs: {
+            return "AU";
+        }
+        case AddedByThem: {
+            return "UA";
+        }
+        case DeletedByUs: {
+            return "DU";
+        }
+        case DeletedByThem: {
+            return "UD";
+        }
+    }
+}
+
+/// One path the index holds in conflict. The `*_id` of a side that does not
+/// exist is `""` and its mode 0.
+pub type Unmerged {
+    pub bytes path;
+    pub Conflict kind;
+    pub str base_id;
+    pub str ours_id;
+    pub str theirs_id;
+    pub int base_mode;
+    pub int ours_mode;
+    pub int theirs_mode;
+}
+
 /// A full status: the index against HEAD's tree, the working tree against
 /// the index, and what is on disk but in neither.
 pub type Status {
@@ -141,18 +218,28 @@ pub type Status {
     pub List<Delta> unstaged;
     /// In the working tree, not in the index.
     pub List<bytes> untracked;
+    /// Index entries at stages 1/2/3, one per path, in path order. See the
+    /// module header; these paths are in none of the other lists.
+    pub List<Unmerged> unmerged = [];
 }
 
 /// The status of the repository at `gitdir` whose working tree is at
 /// `worktree`.
 pub Result<Status, Error> status(str gitdir, str worktree) {
     Map<str, GIT_index.Entry> staged_entries = {};
+    List<Unmerged> unmerged = [];
+    List<str> conflict_order = [];
+    Map<str, Unmerged> conflicts = {};
     match (GIT_index.read(gitdir)) {
         case Ok(GIT_index.Index index): {
             for (GIT_index.Entry entry in index.entries) {
                 match (entry.path.utf8()) {
                     case Some(str path): {
-                        staged_entries.set(path, entry);
+                        if (entry.stage == 0) {
+                            staged_entries.set(path, entry);
+                        } else {
+                            note_conflict(conflict_order, conflicts, path, entry);
+                        }
                     }
                     case None: {
                     }
@@ -219,7 +306,7 @@ pub Result<Status, Error> status(str gitdir, str worktree) {
         }
     }
     for (str path in head.keys()) {
-        if (!staged_entries.contains(path)) {
+        if (!staged_entries.contains(path) && !conflicts.contains(path)) {
             staged.push(Delta(path.to_bytes(), Change.Deleted));
         }
     }
@@ -263,11 +350,70 @@ pub Result<Status, Error> status(str gitdir, str worktree) {
     GIT_ignore.Ignore ignore = load_ignore(gitdir, worktree)?;
     List<bytes> untracked = [];
     for (WFile file in worktree_files) {
-        if (!staged_entries.contains(file.path) && !ignore.is_ignored(file.path)) {
+        if (!staged_entries.contains(file.path) && !conflicts.contains(file.path) && !ignore.is_ignored(file.path)) {
             untracked.push(file.path.to_bytes());
         }
     }
-    return Result<Status, Error>.Ok(Status(staged, unstaged, untracked));
+    for (str path in conflict_order) {
+        match (conflicts.get(path)) {
+            case Some(Unmerged each): {
+                unmerged.push(Unmerged(each.path, conflict_kind(each), each.base_id, each.ours_id, each.theirs_id, each.base_mode, each.ours_mode, each.theirs_mode));
+            }
+            case None: {
+            }
+        }
+    }
+    Status result = Status(staged, unstaged, untracked);
+    result.unmerged = unmerged;
+    return Result<Status, Error>.Ok(result);
+}
+
+// Fold one stage-1/2/3 entry into its path's `Unmerged` (made on first sight;
+// `order` remembers first sight, and the index is in path order).
+void note_conflict(List<str> order, Map<str, Unmerged> by_path, str path, GIT_index.Entry entry) {
+    Unmerged slot = Unmerged(path.to_bytes(), Conflict.BothModified, "", "", "", 0, 0, 0);
+    match (by_path.get(path)) {
+        case Some(Unmerged known): {
+            slot = known;
+        }
+        case None: {
+            order.push(path);
+        }
+    }
+    if (entry.stage == 1) {
+        slot = Unmerged(slot.path, slot.kind, entry.id, slot.ours_id, slot.theirs_id, entry.mode, slot.ours_mode, slot.theirs_mode);
+    } else if (entry.stage == 2) {
+        slot = Unmerged(slot.path, slot.kind, slot.base_id, entry.id, slot.theirs_id, slot.base_mode, entry.mode, slot.theirs_mode);
+    } else {
+        slot = Unmerged(slot.path, slot.kind, slot.base_id, slot.ours_id, entry.id, slot.base_mode, slot.ours_mode, entry.mode);
+    }
+    by_path.set(path, slot);
+}
+
+// Which of the seven conflicts the present stages make (module header).
+Conflict conflict_kind(Unmerged each) {
+    bool has_base = each.base_id != "";
+    bool has_ours = each.ours_id != "";
+    bool has_theirs = each.theirs_id != "";
+    if (has_ours && has_theirs) {
+        if (has_base) {
+            return Conflict.BothModified;
+        }
+        return Conflict.BothAdded;
+    }
+    if (has_ours) {
+        if (has_base) {
+            return Conflict.DeletedByThem;
+        }
+        return Conflict.AddedByUs;
+    }
+    if (has_theirs) {
+        if (has_base) {
+            return Conflict.DeletedByUs;
+        }
+        return Conflict.AddedByThem;
+    }
+    return Conflict.BothDeleted;
 }
 
 GIT_index.Entry get_entry(Map<str, GIT_index.Entry> staged_entries, str path) {

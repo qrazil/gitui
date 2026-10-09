@@ -302,6 +302,8 @@ source tests/test_checkout.sh
 source tests/test_config.sh
 source tests/test_reflog.sh
 source tests/test_graph.sh
+source tests/test_unmerged.sh
+source tests/test_treediff.sh
 
 # --- smart-HTTP fetch/clone, against a real 'git http-backend' -------------
 #

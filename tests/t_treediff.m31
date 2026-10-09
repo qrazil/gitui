@@ -1,0 +1,42 @@
+// Drives `GIT_checkout.apply_tree_diff` and `GIT_checkout.reset_hard` for
+// `test_treediff.sh`.
+//
+//   ./t_treediff <gitdir> <worktree> apply <from-tree> <to-tree>
+//   ./t_treediff <gitdir> <worktree> reset <commit>
+//
+// Prints `ok <written> <removed>`, or `refused <error text>`.
+
+import GIT_checkout;
+import GIT_index;
+import io;
+import os;
+
+List<str> argv = os.args();
+if (argv.size() < 5) {
+    io.eprint("usage: t_treediff <gitdir> <worktree> apply <from> <to> | reset <commit>");
+    os.exit(2);
+}
+str gitdir = argv[1];
+str worktree = argv[2];
+Result<GIT_checkout.Summary, GIT_checkout.Error> result = Result<GIT_checkout.Summary, GIT_checkout.Error>.Err(GIT_checkout.Error.Io);
+if (argv[3] == "apply") {
+    GIT_index.Index index = GIT_index.Index([]);
+    match (GIT_index.read(gitdir)) {
+        case Ok(GIT_index.Index got): {
+            index = got;
+        }
+        case Err(_): {
+        }
+    }
+    result = GIT_checkout.apply_tree_diff(gitdir, worktree, argv[4], argv[5], index);
+} else {
+    result = GIT_checkout.reset_hard(gitdir, worktree, argv[4]);
+}
+match (result) {
+    case Ok(GIT_checkout.Summary summary): {
+        print("ok " + summary.written.to_str() + " " + summary.removed.to_str());
+    }
+    case Err(GIT_checkout.Error error): {
+        print("refused " + error.to_str());
+    }
+}

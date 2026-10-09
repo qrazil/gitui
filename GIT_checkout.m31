@@ -31,6 +31,38 @@
 // same skip `GIT_status.m31` and `GIT_object.flatten_tree` already make -- a path
 // this program cannot spell is one it should not be deleting or writing.
 //
+// Two lower-level entry points share the file-writing half of that:
+//
+//   `apply_tree_diff(gitdir, worktree, from_tree, to_tree, index)` -- the tree
+//   change on its own, with no HEAD and no branch: take the working tree and
+//   `index` from `from_tree` to `to_tree` (tree ids; `""` is the empty tree)
+//   and write `index` to disk. It is `git read-tree -m -u from to`, in git's
+//   rules for a path whose two trees differ (a path equal in both is never
+//   looked at):
+//     - the index entry equals the `to` side already: leave the path alone,
+//       worktree included (a local edit there survives);
+//     - else the entry must equal the `from` side and the file on disk must
+//       match it (a file that is simply missing is fine); then it is written
+//       or removed. Anything else is `Dirty`, an unmerged path is `Dirty`,
+//       and a `from`-absent path with a file (or a directory with something
+//       in it) already on disk is `UntrackedCollision`.
+//   All of that is decided before the first write, so a refusal leaves the
+//   working tree, the index in memory and `.git/index` as they were. Files
+//   changed on disk and in the index that are not in the diff are never read
+//   as part of it. A write error half way (disk full) is the one case that
+//   can leave a partial result. A symlink in the working tree is "matching"
+//   when it is a symlink at all: the stdlib has no `readlink` yet, so a
+//   changed target is not seen (`GIT_status` has the same blind spot).
+//
+//   `reset_hard(gitdir, worktree, commit)` -- `git reset --hard <commit>`:
+//   working tree and index forced to the commit's tree (every local change
+//   to a tracked path discarded, unmerged entries resolved to the commit's
+//   side, tracked files the commit lacks removed, untracked files kept) and
+//   the branch HEAD is on (HEAD itself when detached) moved to the commit,
+//   reflog message `reset: moving to <id>`. It still will not delete what it
+//   cannot account for: an untracked file or directory standing where a
+//   directory or a file must go is `UntrackedCollision`, nothing written.
+//
 // `branches` lists `refs/heads/*`, the current one marked, for the client's
 // "Branches" section; `create_branch` is `git branch <name>` + `git
 // switch`: a new ref at HEAD's commit and HEAD moved onto it, nothing in the
@@ -343,6 +375,9 @@ pub Result<Summary, Error> checkout(str gitdir, str worktree, str target_commit_
             }
             for (bytes untracked_path in status.untracked) {
                 untracked.set(untracked_path.utf8().or(""), true);
+            }
+            for (GIT_status.Unmerged conflict in status.unmerged) {
+                dirty.set(conflict.path.utf8().or(""), true);
             }
         }
         case Err(GIT_status.Error error): {
@@ -738,4 +773,429 @@ bool is_same_bytes(bytes left, bytes right) {
         }
     }
     return true;
+}
+
+// --- the tree change, without HEAD ------------------------------------------
+
+/// Take `worktree` and `index` from the tree `from_tree` to the tree `to_tree`
+/// and write the index to `.git/index`. See the module header for the rules;
+/// in short, local changes to untouched paths are kept, and a touched path
+/// with local changes refuses the whole thing with nothing written.
+pub Result<Summary, Error> apply_tree_diff(str gitdir, str worktree, str from_tree, str to_tree, GIT_index.Index index) {
+    Map<str, TreeEntry> from = {};
+    if (from_tree != "") {
+        walk(gitdir, from_tree, "", from)?;
+    }
+    Map<str, TreeEntry> to = {};
+    if (to_tree != "") {
+        walk(gitdir, to_tree, "", to)?;
+    }
+    Map<str, GIT_index.Entry> staged = {};
+    Map<str, bool> conflicted = {};
+    for (GIT_index.Entry entry in index.entries) {
+        match (entry.path.utf8()) {
+            case Some(str path): {
+                if (entry.stage == 0) {
+                    staged.set(path, entry);
+                } else {
+                    conflicted.set(path, true);
+                }
+            }
+            case None: {
+            }
+        }
+    }
+    List<str> paths = [];
+    for (str path in to.keys()) {
+        paths.push(path);
+    }
+    for (str path in from.keys()) {
+        if (!to.contains(path)) {
+            paths.push(path);
+        }
+    }
+    paths.sort();
+    // --- decide: which differing paths are really applied, which refuse ---
+    List<Step> plan = [];
+    Map<str, bool> deleted = {};
+    for (str path in paths) {
+        TreeEntry old = from.get(path).or(TreeEntry(0, ""));
+        TreeEntry new = to.get(path).or(TreeEntry(0, ""));
+        if (old.mode == new.mode && old.id == new.id) {
+            continue;
+        }
+        if (old.mode >> 12 == 0o16 || new.mode >> 12 == 0o16) {
+            return Result<Summary, Error>.Err(Error.Submodule);
+        }
+        if (conflicted.contains(path)) {
+            return Result<Summary, Error>.Err(Error.Dirty);
+        }
+        if (index_has(staged, path, new)) {
+            continue;
+        }
+        if (!index_has(staged, path, old)) {
+            return Result<Summary, Error>.Err(Error.Dirty);
+        }
+        if (old.id != "" && worktree_state(fs.join(worktree, path), get_entry(staged, path)) == 2) {
+            return Result<Summary, Error>.Err(Error.Dirty);
+        }
+        plan.push(Step(path, old, new));
+        if (new.id == "") {
+            deleted.set(path, true);
+        }
+    }
+    for (Step step in plan) {
+        if (step.old.id == "" && is_blocked(worktree, step.path, deleted)) {
+            return Result<Summary, Error>.Err(Error.UntrackedCollision);
+        }
+    }
+    // --- do it: removals first, so a file can become a directory ---------
+    Map<str, bool> replaced = {};
+    List<GIT_index.Entry> added = [];
+    int written = 0;
+    int removed = 0;
+    for (Step step in plan) {
+        if (step.new.id == "") {
+            remove_path(worktree, fs.join(worktree, step.path))?;
+            replaced.set(step.path, true);
+            removed = removed + 1;
+        }
+    }
+    for (Step step in plan) {
+        if (step.new.id != "") {
+            added.push(install(gitdir, worktree, step.path, step.new)?);
+            replaced.set(step.path, true);
+            written = written + 1;
+        }
+    }
+    swap_entries(index, replaced, added);
+    match (GIT_index.write(gitdir, index)) {
+        case Ok: {
+        }
+        case Err(GIT_index.Error error): {
+            return Result<Summary, Error>.Err(Error.Index(error));
+        }
+    }
+    return Result<Summary, Error>.Ok(Summary(written, removed));
+}
+
+/// `git reset --hard <commit>`: the working tree and index become the
+/// commit's tree, and the branch HEAD is on moves to it. See the module
+/// header. Untracked files are left alone.
+pub Result<Summary, Error> reset_hard(str gitdir, str worktree, str commit) {
+    Map<str, TreeEntry> target = tree_of_commit(gitdir, commit)?;
+    GIT_index.Index index = load_index(gitdir)?;
+    Map<str, GIT_index.Entry> staged = {};
+    Map<str, bool> tracked = {};
+    for (GIT_index.Entry entry in index.entries) {
+        match (entry.path.utf8()) {
+            case Some(str path): {
+                tracked.set(path, true);
+                if (entry.stage == 0) {
+                    staged.set(path, entry);
+                }
+                if (entry.is_gitlink()) {
+                    TreeEntry want = target.get(path).or(TreeEntry(0, ""));
+                    if (entry.stage != 0 || !index_has(staged, path, want)) {
+                        return Result<Summary, Error>.Err(Error.Submodule);
+                    }
+                }
+            }
+            case None: {
+            }
+        }
+    }
+    List<str> paths = [];
+    for (str path in target.keys()) {
+        paths.push(path);
+    }
+    paths.sort();
+    List<Step> writes = [];
+    Map<str, bool> gone = {};
+    List<str> gone_paths = [];
+    for (str path in tracked.keys()) {
+        if (!target.contains(path)) {
+            gone.set(path, true);
+            gone_paths.push(path);
+        }
+    }
+    gone_paths.sort();
+    for (str path in paths) {
+        TreeEntry want = target.get(path).or(TreeEntry(0, ""));
+        if (want.mode >> 12 == 0o16) {
+            if (!index_has(staged, path, want)) {
+                return Result<Summary, Error>.Err(Error.Submodule);
+            }
+            continue;
+        }
+        if (index_has(staged, path, want) && worktree_state(fs.join(worktree, path), get_entry(staged, path)) == 0) {
+            continue;
+        }
+        writes.push(Step(path, TreeEntry(0, ""), want));
+    }
+    for (Step step in writes) {
+        if (is_blocked_for_reset(worktree, step.path, gone)) {
+            return Result<Summary, Error>.Err(Error.UntrackedCollision);
+        }
+    }
+    Map<str, bool> replaced = {};
+    List<GIT_index.Entry> added = [];
+    int written = 0;
+    int removed = 0;
+    for (str path in gone_paths) {
+        str full = fs.join(worktree, path);
+        if (fs.is_link(full) || (fs.exists(full) && !fs.is_dir(full))) {
+            remove_path(worktree, full)?;
+        }
+        removed = removed + 1;
+    }
+    for (str path in gone_paths) {
+        replaced.set(path, true);
+    }
+    for (Step step in writes) {
+        added.push(install(gitdir, worktree, step.path, step.new)?);
+        replaced.set(step.path, true);
+        written = written + 1;
+    }
+    swap_entries(index, replaced, added);
+    match (GIT_index.write(gitdir, index)) {
+        case Ok: {
+        }
+        case Err(GIT_index.Error error): {
+            return Result<Summary, Error>.Err(Error.Index(error));
+        }
+    }
+    // --- HEAD: the branch it is on, or HEAD itself when detached ----------
+    str ref_name = "HEAD";
+    match (GIT_refs.head(gitdir)) {
+        case Ok(GIT_refs.Head head): {
+            match (head) {
+                case Born(str name, _): {
+                    ref_name = name;
+                }
+                case Unborn(str name): {
+                    ref_name = name;
+                }
+                case Detached(_): {
+                }
+            }
+        }
+        case Err(GIT_refs.Error error): {
+            return Result<Summary, Error>.Err(Error.Refs(error));
+        }
+    }
+    match (GIT_refs.update(gitdir, ref_name, commit, Option<str>.None, msg: "reset: moving to " + commit)) {
+        case Ok: {
+        }
+        case Err(GIT_refs.Error error): {
+            return Result<Summary, Error>.Err(Error.Refs(error));
+        }
+    }
+    return Result<Summary, Error>.Ok(Summary(written, removed));
+}
+
+// The index of `gitdir`, empty when there is no file yet.
+Result<GIT_index.Index, Error> load_index(str gitdir) {
+    match (GIT_index.read(gitdir)) {
+        case Ok(GIT_index.Index got): {
+            return Result<GIT_index.Index, Error>.Ok(got);
+        }
+        case Err(GIT_index.Error error): {
+            match (error) {
+                case NotFound: {
+                    return Result<GIT_index.Index, Error>.Ok(GIT_index.Index([]));
+                }
+                case Io: {
+                    return Result<GIT_index.Index, Error>.Err(Error.Index(error));
+                }
+                case Truncated: {
+                    return Result<GIT_index.Index, Error>.Err(Error.Index(error));
+                }
+                case BadSignature: {
+                    return Result<GIT_index.Index, Error>.Err(Error.Index(error));
+                }
+                case BadVersion: {
+                    return Result<GIT_index.Index, Error>.Err(Error.Index(error));
+                }
+                case BadExtension: {
+                    return Result<GIT_index.Index, Error>.Err(Error.Index(error));
+                }
+                case Checksum: {
+                    return Result<GIT_index.Index, Error>.Err(Error.Index(error));
+                }
+            }
+        }
+    }
+}
+
+GIT_index.Entry get_entry(Map<str, GIT_index.Entry> entries, str path) {
+    return entries.get(path).or(GIT_index.Entry(0, 0, 0, 0, 0, 0, 0, 0, 0, 0, "", 0, false, path.to_bytes()));
+}
+
+// Does the stage-0 index hold `want` at `path` -- or nothing, for an absent
+// `want`?
+bool index_has(Map<str, GIT_index.Entry> staged, str path, TreeEntry want) {
+    match (staged.get(path)) {
+        case Some(GIT_index.Entry entry): {
+            return want.id != "" && entry.id == want.id && entry.mode == want.mode;
+        }
+        case None: {
+            return want.id == "";
+        }
+    }
+}
+
+// How the file on disk at `full` compares with the index entry: 0 the same,
+// 1 not there, 2 different (other content, executable bit, or not a file).
+int worktree_state(str full, GIT_index.Entry entry) {
+    if (entry.mode >> 12 == 0o12) {
+        if (fs.is_link(full)) {
+            return 0;
+        }
+        if (fs.exists(full)) {
+            return 2;
+        }
+        return 1;
+    }
+    if (fs.is_link(full)) {
+        return 2;
+    }
+    match (fs.stat(full)) {
+        case Ok(fs.Stat stat): {
+            if (!stat.is_file()) {
+                return 2;
+            }
+            if ((stat.perm() & 0o111 != 0) != (entry.mode & 0o111 != 0)) {
+                return 2;
+            }
+            if (stat.size == entry.size && stat.mtime_ns == entry.mtime_s * 1_000_000_000 + entry.mtime_ns) {
+                return 0;
+            }
+            match (io.read_bytes(full)) {
+                case Ok(bytes content): {
+                    if (GIT_object.blob_id(content) == entry.id) {
+                        return 0;
+                    }
+                    return 2;
+                }
+                case Err(_): {
+                    return 2;
+                }
+            }
+        }
+        case Err(_): {
+            return 1;
+        }
+    }
+}
+
+// Is something on disk where a new file `path` must go, other than what this
+// same change deletes? That is the file itself, a directory with anything
+// else in it, or a file standing where one of its parent directories must be.
+bool is_blocked(str worktree, str path, Map<str, bool> deleted) {
+    str full = fs.join(worktree, path);
+    if (fs.is_link(full)) {
+        return true;
+    }
+    if (fs.exists(full)) {
+        if (!fs.is_dir(full) || !holds_only(worktree, full, deleted)) {
+            return true;
+        }
+    }
+    return parent_in_the_way(worktree, path, deleted);
+}
+
+// The reset flavour of `is_blocked`: a plain untracked file at the path is
+// not in the way (it is overwritten, as git's `reset --hard` does).
+bool is_blocked_for_reset(str worktree, str path, Map<str, bool> gone) {
+    str full = fs.join(worktree, path);
+    if (!fs.is_link(full) && fs.is_dir(full) && !holds_only(worktree, full, gone)) {
+        return true;
+    }
+    return parent_in_the_way(worktree, path, gone);
+}
+
+// A non-directory standing at one of `path`'s parent directories that this
+// change does not remove.
+bool parent_in_the_way(str worktree, str path, Map<str, bool> deleted) {
+    str relative_parent = parent_directory(path);
+    while (relative_parent != "") {
+        str full = fs.join(worktree, relative_parent);
+        if ((fs.is_link(full) || fs.is_file(full)) && !deleted.contains(relative_parent)) {
+            return true;
+        }
+        relative_parent = parent_directory(relative_parent);
+    }
+    return false;
+}
+
+// Is everything under the directory `full` a file this change deletes?
+bool holds_only(str worktree, str full, Map<str, bool> deleted) {
+    str base = fs.join(worktree, "");
+    match (fs.walk(full)) {
+        case Ok(List<str> found): {
+            for (str each in found) {
+                if (fs.is_link(each) || !fs.is_dir(each)) {
+                    if (!each.starts_with(base) || !deleted.contains(each.substr(base.size(), each.size()))) {
+                        return false;
+                    }
+                }
+            }
+            return true;
+        }
+        case Err(_): {
+            return false;
+        }
+    }
+}
+
+// Write the blob `want` at `path` under the working tree and give back the
+// index entry for it, as `checkout` builds one.
+Result<GIT_index.Entry, Error> install(str gitdir, str worktree, str path, TreeEntry want) {
+    str full = fs.join(worktree, path);
+    bytes content = [];
+    match (GIT_object.read(gitdir, want.id)) {
+        case Ok(GIT_object.Object object): {
+            content = object.raw;
+        }
+        case Err(GIT_object.Error error): {
+            return Result<GIT_index.Entry, Error>.Err(Error.Object(error));
+        }
+    }
+    write_path(full, content, want.mode)?;
+    GIT_index.Entry entry = GIT_index.Entry(0, 0, 0, 0, 0, 0, want.mode, 0, 0, content.size(), want.id, 0, false, path.to_bytes());
+    if (want.mode >> 12 != 0o12) {
+        match (fs.stat(full)) {
+            case Ok(fs.Stat stat): {
+                entry = GIT_index.from_stat(path.to_bytes(), stat, false, want.id);
+            }
+            case Err(_): {
+                return Result<GIT_index.Entry, Error>.Err(Error.Io);
+            }
+        }
+    }
+    return Result<GIT_index.Entry, Error>.Ok(entry);
+}
+
+// Replace every entry (at any stage) of the paths in `replaced` by `added`,
+// and leave every other entry exactly as it was, in index order.
+void swap_entries(GIT_index.Index index, Map<str, bool> replaced, List<GIT_index.Entry> added) {
+    List<GIT_index.Entry> kept = [];
+    for (GIT_index.Entry entry in index.entries) {
+        match (entry.path.utf8()) {
+            case Some(str path): {
+                if (!replaced.contains(path)) {
+                    kept.push(entry);
+                }
+            }
+            case None: {
+                kept.push(entry);
+            }
+        }
+    }
+    for (GIT_index.Entry entry in added) {
+        kept.push(entry);
+    }
+    kept.sort();
+    index.entries = kept;
 }

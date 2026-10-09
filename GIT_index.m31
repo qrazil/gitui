@@ -137,8 +137,8 @@ pub type Entry {
     /// The blob's 40-digit name.
     pub str id;
     /// 0 for an ordinary entry; 1, 2 or 3 name the three sides of a conflict
-    /// git has not asked to resolve yet ("ours", "theirs", the merge base).
-    /// `write` never produces anything but 0.
+    /// not yet resolved: 1 the merge base, 2 "ours" (the side being merged
+    /// into), 3 "theirs". `write` keeps whatever stage it is handed.
     pub int stage;
     pub bool is_assume_valid;
     pub bytes path;

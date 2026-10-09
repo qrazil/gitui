@@ -36,8 +36,8 @@ bash scripts/build-gitui.sh -o ourgitui    # not build.sh -- it is the one with 
 | `GIT_repository.m31` | where the files are: `.git` as a file, and a linked worktree's `commondir` |
 | `git.m31` | the read-only CLI |
 | `GIT_index.m31` | `.git/index`: read, write, a fresh entry from `fs.stat` |
-| `GIT_status.m31` | working-tree status: staged, unstaged, untracked |
-| `GIT_checkout.m31` | local branches, switching branches (the working-tree-writing primitive: refuses on local changes in the way), creating a branch |
+| `GIT_status.m31` | working-tree status: staged, unstaged, untracked, and unmerged paths (index stages 1/2/3, with `git status`'s two-letter codes) |
+| `GIT_checkout.m31` | local branches, switching branches (the working-tree-writing primitive: refuses on local changes in the way), creating a branch; `apply_tree_diff` (`read-tree -m -u` between two trees) and `reset_hard` (`reset --hard`) |
 | `GIT_hunks.m31` | `lib/diff.m31`'s edit script, grouped into qrazil/tui's `TUI_diff_view.Hunk`/`Line` with context; `spans` is the one definition of where each hunk starts and ends |
 | `GIT_patch.m31` | apply or revert exactly one hunk of a diff, byte for byte -- what the diff view's `s`/`u` stage and unstage with |
 | `GIT_log.m31` | the commit-history walk, shared by `git.m31 -log` and `gitui.m31` |
@@ -46,7 +46,9 @@ bash scripts/build-gitui.sh -o ourgitui    # not build.sh -- it is the one with 
 | `GIT_http_fetch.m31` | git's smart-HTTP protocol, v0 fetch/clone only: pkt-line framing, the ref advertisement, want/have negotiation, side-band-64k demultiplexing, and pack checksum verification, over `lib/https.m31` (`http://` and `https://`) |
 | `GIT_pack_write.m31` | writes packfiles (whole objects, stored-zlib) and computes the object set a push must send, like `git rev-list --objects tips ^known` |
 | `GIT_http_push.m31` | smart-HTTP v0 push (`git-receive-pack`): fast-forward-only, `report-status`, HTTP Basic auth from the URL's userinfo or `GITUI_HTTP_USER`/`GITUI_HTTP_PASSWORD` |
-| `GIT_config.m31` | a minimal `.git/config` reader (`remote.origin.url` and friends) |
+| `GIT_config.m31` | `.git/config` in full: every section/subsection/key, multi-valued keys, system/global/local layering, and safe in-place `set`/`add`/`unset` that keep the rest of the file byte for byte |
+| `GIT_reflog.m31` | `.git/logs/<ref>` in git's own format: read, append, delete with `--rewrite`; `GIT_refs.update` writes it for every ref move |
+| `GIT_graph.m31` | the commit graph: ancestors, `is_ancestor`, `merge_bases` (criss-cross gives several), `ahead_behind`, `rev_list(include, exclude)` |
 | `deps` | the project manifest: name, version and the pinned qrazil/tui commit (`deps.lock` records what was fetched) |
 | `scripts/build-gitui.sh` | builds `gitui.m31`; its `import tui.TUI_app;` lines resolve through `deps`, so nothing is staged or copied |
 | `tests/t_*.m31` | test programs, each printing what a Python oracle prints, or asserting against its own expectations |

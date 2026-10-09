@@ -1,0 +1,92 @@
+// Runs `GIT_status.status` and prints what it says about unmerged paths, for
+// `test_unmerged.sh` to diff against `git status --porcelain` and
+// `git ls-files -u`.
+//
+//   ./t_unmerged <gitdir> <worktree> porcelain   `XY path` lines, git's order
+//   ./t_unmerged <gitdir> <worktree> stages      `path id1 id2 id3 mode1 mode2 mode3`
+//                                                (`-` for an absent id, modes in decimal)
+
+import GIT_status;
+import io;
+import os;
+
+List<str> argv = os.args();
+if (argv.size() < 4) {
+    io.eprint("usage: t_unmerged <gitdir> <worktree> porcelain|stages");
+    os.exit(2);
+}
+match (GIT_status.status(argv[1], argv[2])) {
+    case Ok(GIT_status.Status status): {
+        if (argv[3] == "porcelain") {
+            show(status);
+        } else {
+            show_stages(status);
+        }
+    }
+    case Err(GIT_status.Error error): {
+        io.eprint(error.to_str());
+        os.exit(1);
+    }
+}
+
+void show_stages(GIT_status.Status status) {
+    for (GIT_status.Unmerged each in status.unmerged) {
+        print(each.path.utf8().or("?") + " " + dash(each.base_id) + " " + dash(each.ours_id) + " " + dash(each.theirs_id) + " " + each.base_mode.to_str() + " " + each.ours_mode.to_str() + " " + each.theirs_mode.to_str());
+    }
+}
+
+str dash(str id) {
+    if (id == "") {
+        return "-";
+    }
+    return id;
+}
+
+void show(GIT_status.Status status) {
+    Map<str, str> codes = {};
+    for (GIT_status.Delta delta in status.staged) {
+        codes.set(delta.path.utf8().or("?"), letter(delta.kind) + " ");
+    }
+    for (GIT_status.Delta delta in status.unstaged) {
+        str path = delta.path.utf8().or("?");
+        str left = codes.get(path).or(" ").substr(0, 1);
+        codes.set(path, left + letter(delta.kind));
+    }
+    for (GIT_status.Unmerged each in status.unmerged) {
+        str path = each.path.utf8().or("?");
+        if (codes.contains(path)) {
+            print("BUG: " + path + " is both unmerged and in staged/unstaged");
+        }
+        codes.set(path, each.kind.code());
+    }
+    List<str> paths = [];
+    for (str path in codes.keys()) {
+        paths.push(path);
+    }
+    paths.sort();
+    for (str path in paths) {
+        print(codes.get(path).or("??") + " " + path);
+    }
+    List<str> untracked = [];
+    for (bytes path in status.untracked) {
+        untracked.push(path.utf8().or("?"));
+    }
+    untracked.sort();
+    for (str path in untracked) {
+        print("?? " + path);
+    }
+}
+
+str letter(GIT_status.Change change) {
+    match (change) {
+        case Added: {
+            return "A";
+        }
+        case Modified: {
+            return "M";
+        }
+        case Deleted: {
+            return "D";
+        }
+    }
+}
