@@ -244,3 +244,21 @@ if build t_sequencer; then
         sq_flow "two reverts, the first conflicts" revert "" "m1 m3" abort
     }
 fi
+
+# The cherry-pick and revert screens under a real pty (`pty_sequencer.py`): the menus from a
+# commit or branch row, the banner, blocked operations, resolution, continue/skip/abort/quit and
+# git interop, each checked against real git. It builds its own fixtures under `$WORK/pty_sequencer`.
+if [ -f "$WORK/gitui" ] || bash scripts/build-gitui.sh -o "$WORK/gitui_sequencer" >"$WORK/gitui_sequencer_build.log" 2>&1; then
+    [ -f "$WORK/gitui" ] && sq_bin="$WORK/gitui" || sq_bin="$WORK/gitui_sequencer"
+    if command -v python3 >/dev/null; then
+        if out=$(python3 tests/pty_sequencer.py "$sq_bin" "$WORK/pty_sequencer" 2>&1); then
+            note "sequencer pty: $(echo "$out" | grep -c '^ok') cherry-pick and revert screen checks passed under a real pty"
+        else
+            bad "sequencer pty" "$out"
+        fi
+    else
+        echo "sequencer pty: skipped, no python3" >&2
+    fi
+else
+    bad "sequencer pty: scripts/build-gitui.sh" "$(cat "$WORK/gitui_sequencer_build.log")"
+fi
