@@ -1,0 +1,338 @@
+// A unified diff between two trees, in the bytes `git diff <tree> <tree>` (and so
+// `git stash show -p`) prints -- no rename detection, no colour, no `--stat`.
+//
+// API
+// ---
+//   GIT_udiff.Leaf                        a blob of a tree: its mode and id
+//   GIT_udiff.flat(gitdir, tree)          -> Result<Map<str, Leaf>, GIT_object.Error>
+//   GIT_udiff.trees(gitdir, from, to)     -> Result<bytes, GIT_object.Error>
+//   GIT_udiff.flats(gitdir, old, new)     -> the same, for two `flat` maps
+//   GIT_udiff.leaf_diff(gitdir, path, before, after) -> Result<bytes, GIT_object.Error>
+//   GIT_udiff.changed_paths(old, new)     -> List<str>, sorted
+//
+// An empty tree id (`""`) is the empty tree, so "everything added" is `trees(g, "", t)`.
+//
+// What it reproduces of git's output, because a stash is shown with it and a
+// test compares the bytes:
+//   * `diff --git a/<p> b/<p>`, then `old mode`/`new mode` for a mode-only or
+//     mode-and-content change, `new file mode`/`deleted file mode`, and the
+//     `index <7>..<7>` line (with the mode when it did not change);
+//   * `--- a/<p>`/`+++ b/<p>` (`/dev/null` for an added or deleted file),
+//     left out for an empty added or deleted file and a mode-only change;
+//   * `Binary files a/<p> and b/<p> differ` for content with a NUL;
+//   * hunks with three lines of context, the header's `,1` left out and a
+//     zero-length side counted from the line before, and git's default
+//     "function name" after the second `@@`: the nearest line above the hunk
+//     in the old file that starts with a letter, `_` or `$`, cut to 80 bytes
+//     with its trailing blanks dropped;
+//   * `\ No newline at end of file` after a line that lacks its terminator.
+// Paths are in byte order, which is what a tree walk gives. Submodule entries
+// (mode 0o160000) print as git does, a one-line `Subproject commit` change.
+
+import diff;
+import GIT_hunks;
+import GIT_object;
+import GIT_xdiff;
+
+/// A blob (or symlink, or submodule) of a tree.
+pub type Leaf {
+    pub int mode;
+    pub str id;
+}
+
+/// Every non-directory entry a tree reaches, keyed by its path. A name that is
+/// not UTF-8 is left out, as everywhere else in the client.
+pub Result<Map<str, Leaf>, GIT_object.Error> flat(str gitdir, str tree) {
+    Map<str, Leaf> out = {};
+    if (tree == "") {
+        return Result<Map<str, Leaf>, GIT_object.Error>.Ok(out);
+    }
+    flat_into(gitdir, tree, "", out)?;
+    return Result<Map<str, Leaf>, GIT_object.Error>.Ok(out);
+}
+
+Result<bool, GIT_object.Error> flat_into(str gitdir, str id, str prefix, Map<str, Leaf> out) {
+    GIT_object.Object object = GIT_object.read(gitdir, id)?;
+    match (object.body) {
+        case Tree(List<GIT_object.Entry> entries): {
+            for (GIT_object.Entry entry in entries) {
+                match (entry.name.utf8()) {
+                    case Some(str name): {
+                        str full = name;
+                        if (prefix != "") {
+                            full = prefix + "/" + name;
+                        }
+                        if (entry.is_tree()) {
+                            flat_into(gitdir, entry.id, full, out)?;
+                        } else {
+                            out.set(full, Leaf(entry.mode, entry.id));
+                        }
+                    }
+                    case None: {
+                    }
+                }
+            }
+            return Result<bool, GIT_object.Error>.Ok(true);
+        }
+        case Blob: {
+            return Result<bool, GIT_object.Error>.Err(GIT_object.Error.BadTree);
+        }
+        case Commit: {
+            return Result<bool, GIT_object.Error>.Err(GIT_object.Error.BadTree);
+        }
+        case Tag: {
+            return Result<bool, GIT_object.Error>.Err(GIT_object.Error.BadTree);
+        }
+    }
+}
+
+/// The paths whose mode or id differ between two flattened trees, sorted.
+pub List<str> changed_paths(Map<str, Leaf> old, Map<str, Leaf> new) {
+    List<str> paths = [];
+    for (str path in new.keys()) {
+        Leaf now = new.get(path).or(Leaf(0, ""));
+        match (old.get(path)) {
+            case Some(Leaf before): {
+                if (before.mode != now.mode || before.id != now.id) {
+                    paths.push(path);
+                }
+            }
+            case None: {
+                paths.push(path);
+            }
+        }
+    }
+    for (str path in old.keys()) {
+        if (!new.contains(path)) {
+            paths.push(path);
+        }
+    }
+    paths.sort();
+    return paths;
+}
+
+/// The diff of `from_tree` to `to_tree`, every changed path in order.
+pub Result<bytes, GIT_object.Error> trees(str gitdir, str from_tree, str to_tree) {
+    Map<str, Leaf> old = flat(gitdir, from_tree)?;
+    Map<str, Leaf> new = flat(gitdir, to_tree)?;
+    return flats(gitdir, old, new);
+}
+
+/// The diff of two flattened trees (see `flat`), every changed path in order --
+/// so a caller can lay extra paths over one side first (`stash show -u` does).
+pub Result<bytes, GIT_object.Error> flats(str gitdir, Map<str, Leaf> old, Map<str, Leaf> new) {
+    bytes out = [];
+    for (str path in changed_paths(old, new)) {
+        Leaf before = old.get(path).or(Leaf(0, ""));
+        Leaf after = new.get(path).or(Leaf(0, ""));
+        out.extend(leaf_diff(gitdir, path, before, after)?);
+    }
+    return Result<bytes, GIT_object.Error>.Ok(out);
+}
+
+/// One path's diff, `before`/`after` being absent as `Leaf(0, "")`.
+pub Result<bytes, GIT_object.Error> leaf_diff(str gitdir, str path, Leaf before, Leaf after) {
+    bytes out = [];
+    out.extend(("diff --git a/" + path + " b/" + path + "\n").to_bytes());
+    bool is_added = before.id == "";
+    bool is_removed = after.id == "";
+    if (is_added) {
+        out.extend(("new file mode " + octal(after.mode) + "\n").to_bytes());
+    } else if (is_removed) {
+        out.extend(("deleted file mode " + octal(before.mode) + "\n").to_bytes());
+    } else if (before.mode != after.mode) {
+        out.extend(("old mode " + octal(before.mode) + "\n").to_bytes());
+        out.extend(("new mode " + octal(after.mode) + "\n").to_bytes());
+    }
+    if (before.id == after.id) {
+        return Result<bytes, GIT_object.Error>.Ok(out);
+    }
+    str old_short = "0000000";
+    if (!is_added) {
+        old_short = before.id.substr(0, 7);
+    }
+    str new_short = "0000000";
+    if (!is_removed) {
+        new_short = after.id.substr(0, 7);
+    }
+    str index_line = "index " + old_short + ".." + new_short;
+    if (!is_added && !is_removed && before.mode == after.mode) {
+        index_line = index_line + " " + octal(after.mode);
+    }
+    out.extend((index_line + "\n").to_bytes());
+    bytes old = [];
+    bytes new = [];
+    if (before.mode >> 12 == 0o16 || after.mode >> 12 == 0o16) {
+        old = ("Subproject commit " + before.id + "\n").to_bytes();
+        new = ("Subproject commit " + after.id + "\n").to_bytes();
+        if (is_added) {
+            old = [];
+        }
+        if (is_removed) {
+            new = [];
+        }
+    } else {
+        if (!is_added) {
+            old = blob(gitdir, before.id)?;
+        }
+        if (!is_removed) {
+            new = blob(gitdir, after.id)?;
+        }
+    }
+    out.extend(body_diff(path, old, new, is_added, is_removed));
+    return Result<bytes, GIT_object.Error>.Ok(out);
+}
+
+/// The `---`/`+++` header and hunks (or the binary notice) for two contents.
+pub bytes body_diff(str path, bytes old, bytes new, bool is_added, bool is_removed) {
+    bytes out = [];
+    if ((is_added && new.size() == 0) || (is_removed && old.size() == 0)) {
+        return out;
+    }
+    str from_name = "a/" + path;
+    str to_name = "b/" + path;
+    if (is_added) {
+        from_name = "/dev/null";
+    }
+    if (is_removed) {
+        to_name = "/dev/null";
+    }
+    match (GIT_xdiff.diff_text(old, new)) {
+        case Binary: {
+            out.extend(("Binary files " + from_name + " and " + to_name + " differ\n").to_bytes());
+            return out;
+        }
+        case Lines(List<diff.Op> ops): {
+            out.extend(("--- " + from_name + "\n+++ " + to_name + "\n").to_bytes());
+            out.extend(hunks_text(ops));
+            return out;
+        }
+    }
+}
+
+/// The `@@` blocks for an edit script.
+pub bytes hunks_text(List<diff.Op> ops) {
+    bytes out = [];
+    List<int> old_before = [0; ops.size() + 1];
+    List<int> new_before = [0; ops.size() + 1];
+    List<bytes> old_lines = [];
+    for (int i in 0 .. ops.size()) {
+        old_before[i + 1] = old_before[i];
+        new_before[i + 1] = new_before[i];
+        match (ops[i].kind) {
+            case Keep: {
+                old_before[i + 1] = old_before[i] + 1;
+                new_before[i + 1] = new_before[i] + 1;
+                old_lines.push(ops[i].line);
+            }
+            case Remove: {
+                old_before[i + 1] = old_before[i] + 1;
+                old_lines.push(ops[i].line);
+            }
+            case Add: {
+                new_before[i + 1] = new_before[i] + 1;
+            }
+        }
+    }
+    for (GIT_hunks.Span span in GIT_hunks.spans(ops)) {
+        int old_count = old_before[span.end] - old_before[span.start];
+        int new_count = new_before[span.end] - new_before[span.start];
+        str header = "@@ -" + range(old_before[span.start], old_count) + " +" + range(new_before[span.start], new_count) + " @@";
+        str function_line = function_name(old_lines, old_before[span.start]);
+        if (function_line != "") {
+            header = header + " " + function_line;
+        }
+        out.extend((header + "\n").to_bytes());
+        for (int i in span.start .. span.end) {
+            diff.Op operation = ops[i];
+            int prefix = ' ';
+            match (operation.kind) {
+                case Remove: {
+                    prefix = '-';
+                }
+                case Add: {
+                    prefix = '+';
+                }
+                case Keep: {
+                }
+            }
+            out.push(prefix);
+            out.extend(operation.line);
+            bool is_terminated = operation.line.size() > 0 && operation.line[operation.line.size() - 1] == '\n';
+            if (!is_terminated) {
+                out.extend("\n\\ No newline at end of file\n".to_bytes());
+            }
+        }
+    }
+    return out;
+}
+
+// `before` lines precede the hunk; a side with no lines in the hunk is
+// counted from the line before it, and a count of one is left out.
+str range(int before, int count) {
+    int start = before;
+    if (count > 0) {
+        start = before + 1;
+    }
+    if (count == 1) {
+        return start.to_str();
+    }
+    return start.to_str() + "," + count.to_str();
+}
+
+// git's default funcname: the nearest of the first `before` old lines (searching
+// upward from the last) that starts with a letter, `_` or `$`.
+str function_name(List<bytes> old_lines, int before) {
+    int i = before - 1;
+    while (i >= 0) {
+        bytes line = old_lines[i];
+        if (line.size() > 0) {
+            int first = line[0];
+            bool is_alpha = (first >= 'a' && first <= 'z') || (first >= 'A' && first <= 'Z');
+            if (is_alpha || first == '_' || first == '$') {
+                int length = line.size();
+                if (length > 80) {
+                    length = 80;
+                }
+                while (length > 0 && is_space(line[length - 1])) {
+                    length = length - 1;
+                }
+                return line.substr(0, length).utf8().or("");
+            }
+        }
+        i = i - 1;
+    }
+    return "";
+}
+
+bool is_space(int c) {
+    return c == ' ' || c == '\t' || c == '\n' || c == '\r' || c == 11 || c == 12;
+}
+
+str octal(int mode) {
+    str text = "";
+    int digit_index = 5;
+    while (digit_index >= 0) {
+        text = text + (mode >> digit_index * 3 & 7).to_str();
+        digit_index = digit_index - 1;
+    }
+    return text;
+}
+
+Result<bytes, GIT_object.Error> blob(str gitdir, str id) {
+    GIT_object.Object object = GIT_object.read(gitdir, id)?;
+    match (object.body) {
+        case Blob: {
+            return Result<bytes, GIT_object.Error>.Ok(object.raw);
+        }
+        case Tree: {
+            return Result<bytes, GIT_object.Error>.Err(GIT_object.Error.BadTree);
+        }
+        case Commit: {
+            return Result<bytes, GIT_object.Error>.Err(GIT_object.Error.BadTree);
+        }
+        case Tag: {
+            return Result<bytes, GIT_object.Error>.Err(GIT_object.Error.BadTree);
+        }
+    }
+}
