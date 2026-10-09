@@ -1,10 +1,14 @@
 // The remote layer: the push (`P`) and pull (`F`) overlays and the two
-// operations behind them, fast-forward only, over smart HTTP.
+// operations behind them, fast-forward only, over smart HTTP -- and over ssh
+// when `origin` is an ssh URL (`GIT_ssh_transport.m31`), where an unknown host
+// key stops at a confirm overlay (`HostTrustOverlay`) before anything is sent.
 
 import GIT_config;
 import GIT_http_push;
 import GIT_pull;
 import GIT_refs;
+import GIT_remote;
+import GIT_ssh_transport;
 import GIT_ui_branch;
 import GIT_ui_core;
 import term;
@@ -62,6 +66,16 @@ pub void RemoteLayer.push_current() {
         message = "push: no remote 'origin' in .git/config";
         return;
     }
+    match (GIT_remote.parse(GIT_remote.rewrite_gitdir(gitdir, url.or(""), true))) {
+        case Ok(GIT_remote.Remote ssh_remote): {
+            if (ssh_remote.transport.eq(GIT_remote.Transport.Ssh)) {
+                push_over_ssh(ssh_remote, refname, id);
+                return;
+            }
+        }
+        case Err(_): {
+        }
+    }
     GIT_http_push.Remote remote = GIT_http_push.Remote("", Option<GIT_http_push.Credentials>.None);
     match (GIT_http_push.parse_remote(url.or(""))) {
         case Ok(GIT_http_push.Remote parsed): {
@@ -97,6 +111,16 @@ pub void RemoteLayer.pull_current() {
         message = "pull: no remote 'origin' in .git/config";
         return;
     }
+    match (GIT_remote.parse(GIT_remote.rewrite_gitdir(gitdir, url.or(""), false))) {
+        case Ok(GIT_remote.Remote ssh_remote): {
+            if (ssh_remote.transport.eq(GIT_remote.Transport.Ssh)) {
+                pull_over_ssh(ssh_remote);
+                return;
+            }
+        }
+        case Err(_): {
+        }
+    }
     GIT_http_push.Remote remote = GIT_http_push.Remote("", Option<GIT_http_push.Credentials>.None);
     match (GIT_http_push.parse_remote(url.or(""))) {
         case Ok(GIT_http_push.Remote parsed): {
@@ -118,6 +142,88 @@ pub void RemoteLayer.pull_current() {
         }
         case Err(GIT_pull.Error error): {
             message = "pull: " + error.to_str();
+        }
+    }
+    reload();
+}
+
+// --- over ssh ------------------------------------------------------------------------
+
+// A refusal from the ssh transport as the status line's message -- or, for a
+// host whose key is not known yet, the confirm overlay.
+pub void RemoteLayer.ssh_stopped(str verb, GIT_ssh_transport.Error error, bool is_push) {
+    match (error.pending_host()) {
+        case Some(GIT_ssh_transport.PendingHost pending): {
+            message = verb + ": " + pending.prompt();
+            push_overlay(HostTrustOverlay(this, pending, is_push));
+        }
+        case None: {
+            message = verb + ": " + error.to_str();
+        }
+    }
+}
+
+pub void RemoteLayer.push_over_ssh(GIT_remote.Remote remote, str refname, str id) {
+    match (GIT_ssh_transport.target_for(remote)) {
+        case Ok(GIT_ssh_transport.Target target): {
+            match (GIT_ssh_transport.connect_receive(target)) {
+                case Ok(GIT_ssh_transport.Receive receive): {
+                    match (receive.push(gitdir, refname, id)) {
+                        case Ok(GIT_ssh_transport.PushResult result): {
+                            if (result.is_ok) {
+                                message = "pushed " + refname + " to origin";
+                                log_command("push origin " + refname + " " + GIT_ui_core.short_id(id));
+                            } else {
+                                message = "push refused by origin: " + result.reason + " " + result.remote;
+                            }
+                        }
+                        case Err(GIT_ssh_transport.Error error): {
+                            message = "push: " + error.to_str();
+                        }
+                    }
+                }
+                case Err(GIT_ssh_transport.Error error): {
+                    ssh_stopped("push", error, true);
+                    return;
+                }
+            }
+        }
+        case Err(GIT_ssh_transport.Error error): {
+            message = "push: " + error.to_str();
+            return;
+        }
+    }
+    reload();
+}
+
+pub void RemoteLayer.pull_over_ssh(GIT_remote.Remote remote) {
+    match (GIT_ssh_transport.target_for(remote)) {
+        case Ok(GIT_ssh_transport.Target target): {
+            match (GIT_pull.pull_ssh(gitdir, worktree, target)) {
+                case Ok(GIT_pull.Outcome outcome): {
+                    if (outcome.has_moved) {
+                        message = "pulled: fast-forwarded " + outcome.old_id.substr(0, 7) + ".." + outcome.new_id.substr(0, 7);
+                        log_command("pull origin " + GIT_ui_core.short_id(outcome.old_id) + ".." + GIT_ui_core.short_id(outcome.new_id));
+                    } else {
+                        message = "pull: already up to date";
+                    }
+                }
+                case Err(GIT_pull.Error error): {
+                    match (error.ssh_error()) {
+                        case Some(GIT_ssh_transport.Error ssh_error): {
+                            ssh_stopped("pull", ssh_error, false);
+                            return;
+                        }
+                        case None: {
+                            message = "pull: " + error.to_str();
+                        }
+                    }
+                }
+            }
+        }
+        case Err(GIT_ssh_transport.Error error): {
+            message = "pull: " + error.to_str();
+            return;
         }
     }
     reload();
@@ -166,4 +272,49 @@ pub List<GIT_ui_core.Hint> RemoteOverlay.hints() {
         return GIT_ui_core.hints_for(GIT_ui_core.SCOPE_PUSH);
     }
     return GIT_ui_core.hints_for(GIT_ui_core.SCOPE_PULL);
+}
+
+/// An ssh host whose key is not in known_hosts: `y` records it and runs the
+/// push or pull again (now checked against the file like any known host);
+/// every other key cancels with nothing recorded and nothing sent.
+type HostTrustOverlay {
+    RemoteLayer host;
+    GIT_ssh_transport.PendingHost pending;
+    bool is_push;
+}
+
+pub TUI_app.Action HostTrustOverlay.handle_key(term.Code code) {
+    host.pop_overlay();
+    match (GIT_ui_core.lookup(GIT_ui_core.SCOPE_CONFIRM, code)) {
+        case Some(str cmd): {
+            if (cmd == GIT_ui_core.CMD_YES) {
+                match (GIT_ssh_transport.trust_host(pending)) {
+                    case Ok(_): {
+                        if (is_push) {
+                            host.push_current();
+                        } else {
+                            host.pull_current();
+                        }
+                    }
+                    case Err(GIT_ssh_transport.Error error): {
+                        host.say(error.to_str());
+                    }
+                }
+                return TUI_app.Action.Redraw;
+            }
+        }
+        case None: {
+        }
+    }
+    host.say("host key not trusted; nothing was sent");
+    return TUI_app.Action.Redraw;
+}
+
+pub void HostTrustOverlay.render(TUI_buffer.Buffer buffer, TUI_geometry.Rect area) {
+    TUI_menu.WhichKey which_key = TUI_menu.WhichKey("host key " + pending.fingerprint + " not known", [TUI_menu.Item("host", pending.spec()), TUI_menu.Item("y", "trust and add to known_hosts (" + pending.known_hosts + ")"), TUI_menu.Item("N", "any other key: do not trust")]);
+    which_key.render(buffer, area);
+}
+
+pub List<GIT_ui_core.Hint> HostTrustOverlay.hints() {
+    return [GIT_ui_core.Hint("y", "trust host key"), GIT_ui_core.Hint("any", "cancel")];
 }

@@ -1,0 +1,1015 @@
+// ssh remotes for fetch (pull) and push: an ssh `exec` channel running
+// `git-upload-pack '<path>'` or `git-receive-pack '<path>'` on the far side,
+// wrapped as a `GIT_wire.Stream` so the same v0 conversation `GIT_wire.m31`
+// holds over HTTP runs here unchanged -- minus the `# service=` preamble: over
+// ssh the ref advertisement is the first thing on the channel's stdout.
+//
+//   GIT_remote.parse(url)          -> host, port, user, path (ssh:// and scp-like)
+//   target_for(remote)             -> Target: + ~/.ssh/config + key + known_hosts
+//   connect_upload(target)         -> Upload   (advertisement read)
+//   Upload.fetch(wants, haves, f)  -> the verified pack written to `f`
+//   connect_receive(target)        -> Receive  (advertisement read)
+//   Receive.push(gitdir, ref, id)  -> PushResult
+//   trust_host(pending)            -> appends the unknown host's key to known_hosts
+//
+// --- trust -----------------------------------------------------------------------
+//
+// The ssh library never trusts on first use, and neither does this module: an
+// unknown host is `Error.UnknownHost(PendingHost)`, carrying the fingerprint
+// the server presented, and the connection is NOT made. The UI shows it
+// (`PendingHost.prompt`) and, only on `y`, calls `trust_host`, which appends
+// the line and lets the operation run again -- now through the library's own
+// check against `known_hosts`. A host whose key differs from the recorded one
+// is `Error.HostKeyChanged`, a refusal with no way to override from here.
+//
+// The library's errors do not say which key a server presented, so for the
+// prompt (and the "changed" message) `probe_host_key` runs the first half of
+// the handshake itself, over the library's public packet functions: version
+// exchange, KEXINIT, ECDH init, and read the reply's host-key blob. It
+// authenticates nothing and trusts nothing; what the user approves is then
+// verified in full -- signature included -- by the real connection.
+//
+// --- what is not here --------------------------------------------------------------
+//
+// Only unencrypted `ssh-ed25519` keys and `ssh-ed25519` host keys (the ssh
+// library's one suite); no ssh-agent, no password or passphrase prompt (there
+// is no terminal to ask on -- the error says to use https instead); no
+// `Match`/`Include` in ssh_config; only the user's own known_hosts file (or
+// `GITUI_SSH_KNOWN_HOSTS`).
+//
+// Environment: `GITUI_SSH_KNOWN_HOSTS` and `GITUI_SSH_IDENTITY` replace the
+// known_hosts file and the identity list (the tests point them at throwaway
+// files); `HOME` locates `~/.ssh`.
+
+import GIT_http_push;
+import GIT_object;
+import GIT_pack_write;
+import GIT_remote;
+import GIT_wire;
+import base64;
+import fs;
+import io;
+import net;
+import os;
+import random;
+import sha256;
+import ssh;
+import sshauth;
+import sshclient;
+import sshexec;
+import sshhosts;
+import sshkey;
+import x25519;
+
+/// A host whose key is not in known_hosts yet, as the server presented it.
+pub type PendingHost {
+    pub str host;
+    pub int port;
+    /// `SHA256:<unpadded base64>`, as `ssh-keygen -lf` prints it.
+    pub str fingerprint;
+    pub str key_type;
+    pub str key_base64;
+    pub str known_hosts;
+    pub bool is_hashed;
+}
+
+/// The question the UI puts to the user.
+pub str PendingHost.prompt() {
+    return "host key " + fingerprint + " not known; trust and add to known_hosts? (y/N)";
+}
+
+/// `host` or `[host]:port`, the name known_hosts files spell a host by.
+pub str PendingHost.spec() {
+    return host_spec(host, port);
+}
+
+pub enum Error {
+    /// Not an ssh remote.
+    BadUrl;
+    /// No usable key: missing, passphrase-protected or the wrong kind.
+    NoKey(str);
+    /// The server's key is not in known_hosts: ask before connecting.
+    UnknownHost(PendingHost);
+    /// The server's key differs from the one known_hosts records: refused.
+    /// Carries the fingerprint it presented (`""` when that could not be read).
+    HostKeyChanged(str);
+    /// known_hosts marks the server's key `@revoked`.
+    HostKeyRevoked;
+    /// known_hosts could not be read or is malformed.
+    KnownHosts(str);
+    /// The connection or the handshake failed.
+    Connect(str);
+    /// The server refused authentication.
+    Auth(str);
+    /// The command could not be started.
+    Exec(str);
+    /// The conversation failed or the remote said so (its stderr included as
+    /// `remote: ...`).
+    Protocol(str);
+    /// Nothing to push: the remote already has this commit.
+    UpToDate;
+    /// The remote has a commit this repository lacks.
+    Behind;
+    /// The remote tip is not an ancestor of what would be pushed.
+    NonFastForward;
+    /// The objects to send could not be collected or packed.
+    Pack;
+    /// The remote does not offer report-status.
+    NoReportStatus;
+    /// A malformed ref name or object id.
+    BadName;
+}
+
+pub str Error.to_str() {
+    match (this) {
+        case BadUrl: {
+            return "the remote URL is not an ssh URL";
+        }
+        case NoKey(str why): {
+            return why;
+        }
+        case UnknownHost(PendingHost pending): {
+            return pending.prompt();
+        }
+        case HostKeyChanged(str fingerprint): {
+            str shown = "";
+            if (fingerprint != "") {
+                shown = " (it presented " + fingerprint + ")";
+            }
+            return "REFUSED: the host key does not match known_hosts" + shown + "; someone may be intercepting the connection, or the host was reinstalled (then remove the old line from known_hosts yourself)";
+        }
+        case HostKeyRevoked: {
+            return "REFUSED: the host key is marked @revoked in known_hosts";
+        }
+        case KnownHosts(str why): {
+            return why;
+        }
+        case Connect(str why): {
+            return "ssh connection failed: " + why;
+        }
+        case Auth(str why): {
+            return why;
+        }
+        case Exec(str why): {
+            return "could not run the remote command: " + why;
+        }
+        case Protocol(str why): {
+            return why;
+        }
+        case UpToDate: {
+            return "everything up to date";
+        }
+        case Behind: {
+            return "the remote has commits this repository does not; fetch first";
+        }
+        case NonFastForward: {
+            return "not a fast-forward: the remote tip is not an ancestor of what would be pushed";
+        }
+        case Pack: {
+            return "the objects to send could not be collected or packed";
+        }
+        case NoReportStatus: {
+            return "the server does not offer report-status";
+        }
+        case BadName: {
+            return "not a well-formed ref name or object id";
+        }
+    }
+}
+
+/// The unknown host this error asks the user about, if it is that error.
+pub Option<PendingHost> Error.pending_host() {
+    match (this) {
+        case UnknownHost(PendingHost pending): {
+            return Option<PendingHost>.Some(pending);
+        }
+        case BadUrl: {
+        }
+        case HostKeyRevoked: {
+        }
+        case UpToDate: {
+        }
+        case Behind: {
+        }
+        case NonFastForward: {
+        }
+        case Pack: {
+        }
+        case NoReportStatus: {
+        }
+        case BadName: {
+        }
+        case NoKey(_): {
+        }
+        case HostKeyChanged(_): {
+        }
+        case KnownHosts(_): {
+        }
+        case Connect(_): {
+        }
+        case Auth(_): {
+        }
+        case Exec(_): {
+        }
+        case Protocol(_): {
+        }
+    }
+    return Option<PendingHost>.None;
+}
+
+// --- the target --------------------------------------------------------------------
+
+/// Everything needed to open the connection.
+pub type Target {
+    pub str host;
+    pub int port;
+    pub str user;
+    pub str path;
+    pub List<str> identities;
+    pub str known_hosts;
+    pub bool is_hashed;
+}
+
+const str AGENT = "gitui-ssh/1";
+const str DEFAULT_KEY = "id_ed25519";
+
+str home_dir() {
+    return os.env("HOME").or("");
+}
+
+str expand_home(str path) {
+    if (path == "~") {
+        return home_dir();
+    }
+    if (path.starts_with("~/")) {
+        return fs.join(home_dir(), path.substr(2, path.size()));
+    }
+    return path;
+}
+
+str read_text(str path) {
+    match (io.read(path)) {
+        case Ok(str contents): {
+            return contents;
+        }
+        case Err(_): {
+            return "";
+        }
+    }
+}
+
+List<str> fields_of(str line) {
+    List<str> out = [];
+    for (str piece in line.split(" ")) {
+        for (str word in piece.split("\t")) {
+            if (word != "") {
+                out.push(word);
+            }
+        }
+    }
+    return out;
+}
+
+/// Does the ssh_config `text` say `HashKnownHosts yes` for `host`? The first
+/// value wins, as in ssh; `Host` blocks are matched with their globs and
+/// `!` negations; a `Match` block is not understood and so applies to nothing.
+pub bool hashes_known_hosts(str config_text, str host) {
+    bool applies = true;
+    for (str raw in config_text.split("\n")) {
+        List<str> words = fields_of(raw.trim());
+        if (words.size() == 0 || words[0].starts_with("#")) {
+            continue;
+        }
+        str keyword = words[0].to_lower();
+        if (keyword == "host") {
+            bool hit = false;
+            bool negated = false;
+            for (int i in 1 .. words.size()) {
+                str pattern = words[i];
+                if (pattern.starts_with("!")) {
+                    if (GIT_remote.glob_matches(pattern.substr(1, pattern.size()), host)) {
+                        negated = true;
+                    }
+                } else if (GIT_remote.glob_matches(pattern, host)) {
+                    hit = true;
+                }
+            }
+            applies = hit && !negated;
+        } else if (keyword == "match") {
+            applies = false;
+        } else if (applies && (keyword == "hashknownhosts" || keyword.starts_with("hashknownhosts="))) {
+            if (words.size() >= 2) {
+                return words[1].to_lower() == "yes";
+            }
+            if (keyword.ends_with("=yes")) {
+                return true;
+            }
+            return false;
+        }
+    }
+    return false;
+}
+
+/// Resolve an ssh remote against `~/.ssh/config`, the environment overrides
+/// and the defaults.
+pub Result<Target, Error> target_for(GIT_remote.Remote remote) {
+    if (!remote.transport.eq(GIT_remote.Transport.Ssh)) {
+        return Result<Target, Error>.Err(Error.BadUrl);
+    }
+    str config_text = "";
+    str config_path = fs.join(fs.join(home_dir(), ".ssh"), "config");
+    if (home_dir() != "") {
+        config_text = read_text(config_path);
+    }
+    GIT_remote.SshTarget resolved = GIT_remote.ssh_config_resolve(config_text, remote.host, remote.user, remote.port);
+    str user = resolved.user;
+    if (user == "") {
+        user = os.env("USER").or(os.env("LOGNAME").or(""));
+    }
+    if (user == "") {
+        user = "git";
+    }
+    int port = resolved.port;
+    if (port == 0) {
+        port = 22;
+    }
+    List<str> identities = [];
+    match (os.env("GITUI_SSH_IDENTITY")) {
+        case Some(str only): {
+            identities.push(only);
+        }
+        case None: {
+            for (str file in resolved.identity_files) {
+                identities.push(expand_home(file));
+            }
+            str fallback = fs.join(fs.join(home_dir(), ".ssh"), DEFAULT_KEY);
+            if (!identities.contains(fallback)) {
+                identities.push(fallback);
+            }
+        }
+    }
+    str known = fs.join(fs.join(home_dir(), ".ssh"), "known_hosts");
+    match (os.env("GITUI_SSH_KNOWN_HOSTS")) {
+        case Some(str overridden): {
+            known = overridden;
+        }
+        case None: {
+        }
+    }
+    return Result<Target, Error>.Ok(Target(resolved.hostname, port, user, remote.path, identities, known, hashes_known_hosts(config_text, remote.host)));
+}
+
+// --- keys --------------------------------------------------------------------------
+
+Result<List<sshkey.PrivateKey>, Error> load_keys(Target target) {
+    List<sshkey.PrivateKey> keys = [];
+    str encrypted = "";
+    str broken = "";
+    for (str path in target.identities) {
+        if (!fs.exists(path)) {
+            continue;
+        }
+        match (sshkey.load(path)) {
+            case Ok(sshkey.PrivateKey key): {
+                keys.push(key);
+            }
+            case Err(sshkey.Error why): {
+                if (why.to_str() == sshkey.Error.Encrypted.to_str()) {
+                    encrypted = path;
+                } else {
+                    broken = path + ": " + why.to_str();
+                }
+            }
+        }
+    }
+    if (keys.size() > 0) {
+        return Result<List<sshkey.PrivateKey>, Error>.Ok(keys);
+    }
+    if (encrypted != "") {
+        return Result<List<sshkey.PrivateKey>, Error>.Err(Error.NoKey("ssh key " + encrypted + " is passphrase-protected, and there is no terminal to ask for the passphrase (nor an ssh-agent); use an unencrypted ed25519 key, or an https:// remote instead"));
+    }
+    if (broken != "") {
+        return Result<List<sshkey.PrivateKey>, Error>.Err(Error.NoKey("ssh key unusable (" + broken + "); only unencrypted ed25519 OpenSSH keys are supported -- or use an https:// remote instead"));
+    }
+    return Result<List<sshkey.PrivateKey>, Error>.Err(Error.NoKey("no ssh key found (looked for " + target.identities.join(", ") + "); create an ed25519 key with ssh-keygen -t ed25519, set IdentityFile in ~/.ssh/config, or use an https:// remote instead"));
+}
+
+// --- known_hosts -------------------------------------------------------------------
+
+/// How known_hosts spells the host: bare for port 22, `[host]:port` otherwise,
+/// lower-cased.
+pub str host_spec(str host, int port) {
+    str name = host.to_lower();
+    if (port == 22 || port == 0) {
+        return name;
+    }
+    return "[" + name + "]:" + port.to_str();
+}
+
+/// The line `trust_host` appends for `pending`: plain, or hashed
+/// (`|1|salt|hmac`) with the given 20-byte `salt`.
+pub str known_hosts_line(PendingHost pending, bytes salt) {
+    str names = pending.spec();
+    if (pending.is_hashed) {
+        bytes mac = GIT_remote.hmac_sha1(salt, names.to_bytes());
+        names = "|1|" + base64.encode(salt) + "|" + base64.encode(mac);
+    }
+    return names + " " + pending.key_type + " " + pending.key_base64;
+}
+
+/// Record `pending`'s key in known_hosts (creating the file and its directory
+/// if need be). Plain by default, hashed under `HashKnownHosts yes`.
+pub Result<bool, Error> trust_host(PendingHost pending) {
+    str path = pending.known_hosts;
+    str directory = "";
+    int cut = path.size() - 1;
+    while (cut > 0 && path.byte_at(cut) != '/') {
+        cut = cut - 1;
+    }
+    if (cut > 0) {
+        directory = path.substr(0, cut);
+    }
+    if (directory != "" && !fs.exists(directory)) {
+        match (fs.makedirs(directory)) {
+            case Ok(_): {
+            }
+            case Err(_): {
+                return Result<bool, Error>.Err(Error.KnownHosts("could not create " + directory));
+            }
+        }
+    }
+    str prefix = "";
+    if (fs.exists(path)) {
+        str current = read_text(path);
+        if (current != "" && !current.ends_with("\n")) {
+            prefix = "\n";
+        }
+    }
+    bytes salt = random.system().octets(20);
+    match (io.append(path, prefix + known_hosts_line(pending, salt) + "\n")) {
+        case Ok(_): {
+            return Result<bool, Error>.Ok(true);
+        }
+        case Err(_): {
+            return Result<bool, Error>.Err(Error.KnownHosts("could not append to " + path));
+        }
+    }
+}
+
+// --- the host-key probe --------------------------------------------------------------
+
+/// `SHA256:` and the unpadded base64 of the SHA-256 of the key blob.
+pub str fingerprint_of(bytes blob) {
+    str encoded = base64.encode(sha256.sum(blob));
+    while (encoded.ends_with("=")) {
+        encoded = encoded.substr(0, encoded.size() - 1);
+    }
+    return "SHA256:" + encoded;
+}
+
+Result<bytes, str> read_exact(net.Conn conn, int n) {
+    bytes out = [];
+    while (out.size() < n) {
+        match (conn.read(n - out.size())) {
+            case Ok(bytes chunk): {
+                if (chunk.size() == 0) {
+                    return Result<bytes, str>.Err("the server closed the connection");
+                }
+                out.extend(chunk);
+            }
+            case Err(io.Error why): {
+                return Result<bytes, str>.Err("the connection failed");
+            }
+        }
+    }
+    return Result<bytes, str>.Ok(out);
+}
+
+Result<bytes, str> recv_plain(net.Conn conn) {
+    bytes head = read_exact(conn, 4)?;
+    int size = (head[0] << 24) | (head[1] << 16) | (head[2] << 8) | head[3];
+    if (size < 1 || size > 35000) {
+        return Result<bytes, str>.Err("a malformed packet arrived");
+    }
+    bytes rest = read_exact(conn, size)?;
+    bytes whole = clone(head);
+    whole.extend(rest);
+    match (ssh.parse_plain_packet(whole, 0)) {
+        case Ok(ssh.RawPacket packet): {
+            return Result<bytes, str>.Ok(packet.payload);
+        }
+        case Err(ssh.Error why): {
+            return Result<bytes, str>.Err(why.to_str());
+        }
+    }
+}
+
+Result<bool, str> send_plain(net.Conn conn, bytes payload, random.System rng) {
+    match (conn.write(ssh.encode_plain_packet(payload, rng))) {
+        case Ok(_): {
+            return Result<bool, str>.Ok(true);
+        }
+        case Err(_): {
+            return Result<bool, str>.Err("the connection failed");
+        }
+    }
+}
+
+/// The host-key blob (`string "ssh-ed25519", string key`) the server at
+/// `host:port` presents during key exchange. Nothing is authenticated here:
+/// the real connection verifies whatever the user then approves.
+pub Result<bytes, str> probe_host_key(str host, int port) {
+    net.Conn conn = connect_plain(host, port)?;
+    Result<bytes, str> outcome = probe_on(conn);
+    match (conn.close()) {
+        case Ok(_): {
+        }
+        case Err(_): {
+        }
+    }
+    return outcome;
+}
+
+Result<net.Conn, str> connect_plain(str host, int port) {
+    match (net.connect(host, port)) {
+        case Ok(net.Conn conn): {
+            match (conn.set_read_timeout(15000)) {
+                case Ok(_): {
+                }
+                case Err(_): {
+                }
+            }
+            return Result<net.Conn, str>.Ok(conn);
+        }
+        case Err(net.Error why): {
+            return Result<net.Conn, str>.Err("could not connect to " + host + ":" + port.to_str() + ": " + why.to_str());
+        }
+    }
+}
+
+Result<bytes, str> probe_on(net.Conn conn) {
+    random.System rng = random.system();
+    bytes crlf = [13, 10];
+    match (conn.write("SSH-2.0-m31_0.1\r\n".to_bytes())) {
+        case Ok(_): {
+        }
+        case Err(_): {
+            return Result<bytes, str>.Err("the connection failed");
+        }
+    }
+    int tries = 0;
+    bool greeted = false;
+    while (!greeted) {
+        tries = tries + 1;
+        if (tries > 20) {
+            return Result<bytes, str>.Err("the server sent no ssh version line");
+        }
+        match (conn.read_until(crlf, 255)) {
+            case Ok(bytes line): {
+                if (line.starts_with("SSH-2.".to_bytes())) {
+                    greeted = true;
+                } else if (line.starts_with("SSH-".to_bytes()) || !line.ends_with(crlf)) {
+                    return Result<bytes, str>.Err("the server does not speak ssh protocol 2");
+                }
+            }
+            case Err(_): {
+                return Result<bytes, str>.Err("the connection failed");
+            }
+        }
+    }
+    send_plain(conn, ssh.build_client_kexinit(rng), rng)?;
+    bytes theirs = recv_plain(conn)?;
+    match (ssh.parse_kexinit(theirs)) {
+        case Ok(ssh.KexInit server): {
+            match (ssh.check_server_kexinit(server)) {
+                case Ok: {
+                }
+                case Err(ssh.Error why): {
+                    return Result<bytes, str>.Err("no common ssh algorithms (this client offers curve25519-sha256 and ssh-ed25519 only): " + why.to_str());
+                }
+            }
+        }
+        case Err(ssh.Error why): {
+            return Result<bytes, str>.Err(why.to_str());
+        }
+    }
+    bytes secret = rng.octets(32);
+    send_plain(conn, ssh.build_kex_ecdh_init(x25519.base_point(secret)), rng)?;
+    bytes reply = recv_plain(conn)?;
+    if (reply.size() < 1 || reply[0] != 31) {
+        return Result<bytes, str>.Err("the key exchange reply was not understood");
+    }
+    match (ssh.parse_string(reply, 1)) {
+        case Ok(ssh.Field blob): {
+            match (ssh.parse_host_key_blob(blob.value)) {
+                case Ok(_): {
+                    return Result<bytes, str>.Ok(blob.value);
+                }
+                case Err(ssh.Error why): {
+                    return Result<bytes, str>.Err("the server's host key is not ssh-ed25519: " + why.to_str());
+                }
+            }
+        }
+        case Err(ssh.Error why): {
+            return Result<bytes, str>.Err(why.to_str());
+        }
+    }
+}
+
+// What the unknown-host error carries: probe the server and describe its key.
+Result<sshclient.Session, Error> unknown_host(Target target) {
+    match (probe_host_key(target.host, target.port)) {
+        case Ok(bytes blob): {
+            // sshhosts only drops a revoked key that is also listed as good;
+            // a bare `@revoked` line for the very key presented is still a refusal.
+            for (GIT_remote.HostKey listed in GIT_remote.known_hosts_find(read_text(target.known_hosts), target.host, target.port)) {
+                if (listed.marker == "revoked" && listed.key == base64.encode(blob)) {
+                    return Result<sshclient.Session, Error>.Err(Error.HostKeyRevoked);
+                }
+            }
+            return Result<sshclient.Session, Error>.Err(Error.UnknownHost(PendingHost(target.host, target.port, fingerprint_of(blob), "ssh-ed25519", base64.encode(blob), target.known_hosts, target.is_hashed)));
+        }
+        case Err(str why): {
+            return Result<sshclient.Session, Error>.Err(Error.Connect(why));
+        }
+    }
+}
+
+// --- opening a session ------------------------------------------------------------------
+
+Result<sshclient.Session, Error> open_session(Target target) {
+    List<sshkey.PrivateKey> keys = load_keys(target)?;
+    if (!fs.exists(target.known_hosts)) {
+        return unknown_host(target);
+    }
+    str auth_failure = "";
+    for (sshkey.PrivateKey key in keys) {
+        match (sshclient.connect_with(target.host, target.port, target.user, key, target.known_hosts)) {
+            case Ok(sshclient.Session session): {
+                return Result<sshclient.Session, Error>.Ok(session);
+            }
+            case Err(sshclient.Error failure): {
+                match (failure) {
+                    case Key(sshkey.Error why): {
+                        return Result<sshclient.Session, Error>.Err(Error.NoKey("ssh key: " + why.to_str() + "; or use an https:// remote instead"));
+                    }
+                    case KnownHosts(sshhosts.Error why): {
+                        if (why.to_str() == sshhosts.Error.UnknownHost.to_str()) {
+                            return unknown_host(target);
+                        }
+                        if (why.to_str() == sshhosts.Error.Revoked.to_str()) {
+                            return Result<sshclient.Session, Error>.Err(Error.HostKeyRevoked);
+                        }
+                        return Result<sshclient.Session, Error>.Err(Error.KnownHosts(target.known_hosts + ": " + why.to_str()));
+                    }
+                    case Connect(ssh.Error why): {
+                        if (why.to_str() == ssh.Error.HostKeyMismatch.to_str()) {
+                            str presented = "";
+                            match (probe_host_key(target.host, target.port)) {
+                                case Ok(bytes blob): {
+                                    presented = fingerprint_of(blob);
+                                }
+                                case Err(_): {
+                                }
+                            }
+                            return Result<sshclient.Session, Error>.Err(Error.HostKeyChanged(presented));
+                        }
+                        return Result<sshclient.Session, Error>.Err(Error.Connect(why.to_str()));
+                    }
+                    case Auth(sshauth.Error sshauth_error): {
+                        auth_failure = "ssh authentication as " + target.user + " failed (" + sshauth_error.to_str() + "); check that the key is in the server's authorized_keys, or use an https:// remote instead";
+                    }
+                    case Exec(sshexec.Error why): {
+                        return Result<sshclient.Session, Error>.Err(Error.Exec(why.to_str()));
+                    }
+                }
+            }
+        }
+    }
+    return Result<sshclient.Session, Error>.Err(Error.Auth(auth_failure));
+}
+
+// --- the stream ---------------------------------------------------------------------------
+
+/// An ssh exec channel as a `GIT_wire.Stream`: `read` is the command's stdout
+/// (empty at its end), `write` its stdin. The command's stderr is collected
+/// when stdout ends, or when the connection is finished, and is available as
+/// `remote_messages`.
+pub type Conn {
+    sshclient.Session session;
+    sshexec.Channel channel;
+    str stderr_text;
+    bool is_ended;
+    bool is_finished;
+}
+
+pub Result<bytes, io.Error> Conn.read(int n) {
+    match (channel.read(n)) {
+        case Ok(bytes data): {
+            if (data.size() == 0 && !is_ended) {
+                is_ended = true;
+                collect_stderr();
+            }
+            return Result<bytes, io.Error>.Ok(data);
+        }
+        case Err(_): {
+            return Result<bytes, io.Error>.Err(io.Error.Other(5));
+        }
+    }
+}
+
+pub Result<int, io.Error> Conn.write(bytes data) {
+    match (channel.write(data)) {
+        case Ok(int sent): {
+            return Result<int, io.Error>.Ok(sent);
+        }
+        case Err(_): {
+            return Result<int, io.Error>.Err(io.Error.Other(32));
+        }
+    }
+}
+
+/// Stop now: for a conversation that went wrong, or is over.
+pub Result<bool, io.Error> Conn.close() {
+    finish(is_ended);
+    return Result<bool, io.Error>.Ok(true);
+}
+
+// The channel is at EOF, so everything it will say on stderr is buffered.
+void Conn.collect_stderr() {
+    match (channel.read_all_err()) {
+        case Ok(bytes data): {
+            stderr_text = stderr_text + data.utf8().or("");
+        }
+        case Err(_): {
+        }
+    }
+}
+
+/// Close the channel and the connection. `is_graceful`: the command is about
+/// to exit on its own (the conversation is complete, or a flush was sent), so
+/// wait for it and keep its stderr; otherwise hang up without waiting.
+pub void Conn.finish(bool is_graceful) {
+    if (is_finished) {
+        return;
+    }
+    is_finished = true;
+    match (channel.close_write()) {
+        case Ok: {
+        }
+        case Err(_): {
+        }
+    }
+    if (is_graceful || is_ended) {
+        match (channel.wait()) {
+            case Ok(_): {
+            }
+            case Err(_): {
+            }
+        }
+        collect_stderr();
+    } else {
+        match (channel.close()) {
+            case Ok: {
+            }
+            case Err(_): {
+            }
+        }
+    }
+    match (session.close()) {
+        case Ok(_): {
+        }
+        case Err(_): {
+        }
+    }
+}
+
+/// What the remote command wrote to stderr, one `remote: ` line each,
+/// joined by `; ` -- or `""`.
+pub str Conn.remote_messages() {
+    List<str> lines = [];
+    for (str raw in stderr_text.split("\n")) {
+        str line = raw.trim();
+        if (line != "") {
+            lines.push("remote: " + line);
+        }
+    }
+    return lines.join("; ");
+}
+
+// A wire error in words, with what the remote said appended.
+str Conn.describe(str what) {
+    str said = remote_messages();
+    if (said == "") {
+        return what;
+    }
+    return what + " (" + said + ")";
+}
+
+Result<Conn, Error> start(Target target, str command) {
+    sshclient.Session session = open_session(target)?;
+    match (session.exec(command)) {
+        case Ok(sshexec.Channel channel): {
+            return Result<Conn, Error>.Ok(Conn(session, channel, "", false, false));
+        }
+        case Err(sshclient.Error why): {
+            match (session.close()) {
+                case Ok(_): {
+                }
+                case Err(_): {
+                }
+            }
+            return Result<Conn, Error>.Err(Error.Exec(why.to_str()));
+        }
+    }
+}
+
+// The advertisement, or the connection finished and the reason in words.
+Result<GIT_wire.Advertisement, Error> advertise(Conn conn) {
+    match (GIT_wire.read_advertisement(conn)) {
+        case Ok(GIT_wire.Advertisement advertisement): {
+            return Result<GIT_wire.Advertisement, Error>.Ok(advertisement);
+        }
+        case Err(GIT_wire.Error why): {
+            str message = conn.describe("the server did not send a ref advertisement: " + why.to_str());
+            conn.finish(false);
+            return Result<GIT_wire.Advertisement, Error>.Err(Error.Protocol(message));
+        }
+    }
+}
+
+// --- fetch -----------------------------------------------------------------------------------
+
+/// A connection to `git-upload-pack` with its ref advertisement read.
+pub type Upload {
+    pub Conn conn;
+    pub GIT_wire.Advertisement advertisement;
+}
+
+/// The id the remote advertises for `refname`, or `""`.
+pub str Upload.tip(str refname) {
+    for (GIT_wire.RemoteRef advertised in advertisement.refs) {
+        if (advertised.name == refname) {
+            return advertised.id;
+        }
+    }
+    return "";
+}
+
+/// Negotiate, receive the pack for `wants` given what we `haves`, verify it
+/// and write it to `out_path`; the connection is finished either way.
+pub Result<GIT_wire.Summary, Error> Upload.fetch(List<str> wants, List<str> haves, str out_path) {
+    match (GIT_wire.fetch_pack(conn, advertisement, wants, haves, agent: AGENT)) {
+        case Ok(GIT_wire.DemuxResult got): {
+            if (got.has_remote_error) {
+                conn.finish(false);
+                return Result<GIT_wire.Summary, Error>.Err(Error.Protocol("remote: " + got.remote_error.trim()));
+            }
+            match (GIT_wire.verify_pack(got.pack, out_path)) {
+                case Ok(GIT_wire.Summary summary): {
+                    conn.finish(true);
+                    return Result<GIT_wire.Summary, Error>.Ok(summary);
+                }
+                case Err(GIT_wire.Error why): {
+                    conn.finish(true);
+                    return Result<GIT_wire.Summary, Error>.Err(Error.Protocol("the received pack is unusable: " + why.to_str()));
+                }
+            }
+        }
+        case Err(GIT_wire.Error why): {
+            str message = conn.describe("fetch failed: " + why.to_str());
+            conn.finish(false);
+            return Result<GIT_wire.Summary, Error>.Err(Error.Protocol(message));
+        }
+    }
+}
+
+/// Say goodbye (a flush) and finish: nothing is wanted after all.
+pub void Upload.finish() {
+    match (GIT_wire.say_goodbye(conn)) {
+        case Ok(_): {
+        }
+        case Err(_): {
+        }
+    }
+    conn.finish(true);
+}
+
+pub Result<Upload, Error> connect_upload(Target target) {
+    Conn conn = start(target, GIT_remote.service_command("git-upload-pack", target.path))?;
+    GIT_wire.Advertisement advertisement = advertise(conn)?;
+    return Result<Upload, Error>.Ok(Upload(conn, advertisement));
+}
+
+// --- push -----------------------------------------------------------------------------------------
+
+/// What the server made of a push, and what its stderr said.
+pub type PushResult {
+    pub bool is_ok;
+    pub str reason;
+    pub str remote;
+}
+
+/// A connection to `git-receive-pack` with its ref advertisement read.
+pub type Receive {
+    pub Conn conn;
+    pub GIT_wire.Advertisement advertisement;
+}
+
+/// Push `new_id` to `refname`, fast-forward only, as `GIT_http_push.push`
+/// does over HTTP. The connection is finished either way.
+pub Result<PushResult, Error> Receive.push(str gitdir, str refname, str new_id) {
+    Result<GIT_wire.ReportStatus, Error> attempt = transmit(gitdir, refname, new_id);
+    match (attempt) {
+        case Ok(GIT_wire.ReportStatus status): {
+            conn.finish(true);
+            str reason = status.reason;
+            if (!status.is_unpacked && reason == "") {
+                reason = "the server could not unpack the objects";
+            }
+            return Result<PushResult, Error>.Ok(PushResult(status.is_unpacked && status.is_ok, reason, conn.remote_messages()));
+        }
+        case Err(Error why): {
+            if (why.to_str() == Error.UpToDate.to_str() || why.to_str() == Error.Behind.to_str() || why.to_str() == Error.NonFastForward.to_str() || why.to_str() == Error.Pack.to_str() || why.to_str() == Error.BadName.to_str() || why.to_str() == Error.NoReportStatus.to_str()) {
+                match (GIT_wire.say_goodbye(conn)) {
+                    case Ok(_): {
+                    }
+                    case Err(_): {
+                    }
+                }
+                conn.finish(true);
+            } else {
+                conn.finish(false);
+            }
+            return Result<PushResult, Error>.Err(why);
+        }
+    }
+}
+
+Result<GIT_wire.ReportStatus, Error> Receive.transmit(str gitdir, str refname, str new_id) {
+    if (!GIT_object.is_name(new_id) || new_id.size() != 40 || !refname.starts_with("refs/")) {
+        return Result<GIT_wire.ReportStatus, Error>.Err(Error.BadName);
+    }
+    if (!GIT_wire.has_cap(advertisement.capabilities, "report-status")) {
+        return Result<GIT_wire.ReportStatus, Error>.Err(Error.NoReportStatus);
+    }
+    str old = GIT_wire.ZERO_ID;
+    List<str> known = [];
+    Map<str, bool> seen = {};
+    for (GIT_wire.RemoteRef advertised in advertisement.refs) {
+        if (advertised.name == refname) {
+            old = advertised.id;
+        }
+        if (!seen.contains(advertised.id)) {
+            seen.set(advertised.id, true);
+            known.push(advertised.id);
+        }
+    }
+    if (old == new_id) {
+        return Result<GIT_wire.ReportStatus, Error>.Err(Error.UpToDate);
+    }
+    if (old != GIT_wire.ZERO_ID) {
+        match (GIT_object.read(gitdir, old)) {
+            case Ok(_): {
+            }
+            case Err(_): {
+                return Result<GIT_wire.ReportStatus, Error>.Err(Error.Behind);
+            }
+        }
+        if (!GIT_http_push.is_ancestor(gitdir, old, new_id)) {
+            return Result<GIT_wire.ReportStatus, Error>.Err(Error.NonFastForward);
+        }
+    }
+    List<str> ids = [];
+    match (GIT_pack_write.objects_to_send(gitdir, [new_id], known)) {
+        case Ok(List<str> listed): {
+            ids = listed;
+        }
+        case Err(_): {
+            return Result<GIT_wire.ReportStatus, Error>.Err(Error.Pack);
+        }
+    }
+    bytes pack = [];
+    match (GIT_pack_write.build(gitdir, ids)) {
+        case Ok(bytes packed): {
+            pack = packed;
+        }
+        case Err(_): {
+            return Result<GIT_wire.ReportStatus, Error>.Err(Error.Pack);
+        }
+    }
+    match (GIT_wire.send_push(conn, advertisement, old, new_id, refname, pack, agent: AGENT)) {
+        case Ok(GIT_wire.ReportStatus status): {
+            return Result<GIT_wire.ReportStatus, Error>.Ok(status);
+        }
+        case Err(GIT_wire.Error why): {
+            return Result<GIT_wire.ReportStatus, Error>.Err(Error.Protocol(conn.describe("push failed: " + why.to_str())));
+        }
+    }
+}
+
+pub Result<Receive, Error> connect_receive(Target target) {
+    Conn conn = start(target, GIT_remote.service_command("git-receive-pack", target.path))?;
+    GIT_wire.Advertisement advertisement = advertise(conn)?;
+    return Result<Receive, Error>.Ok(Receive(conn, advertisement));
+}
