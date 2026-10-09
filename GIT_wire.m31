@@ -367,7 +367,10 @@ pub type Advertisement {
 /// the service name; over ssh the advertisement is the first thing on the
 /// stream. An empty repository advertises one line, the all-zero id against
 /// `capabilities^{}`, which is dropped here. A leading `version 1` line is
-/// accepted and ignored; `ERR <message>` is `RemoteError`.
+/// accepted and ignored; `ERR <message>` is `RemoteError`. Peeled tags
+/// (`refs/tags/v1^{}`) are kept in `refs`, as `git ls-remote` shows them; a
+/// caller choosing `want`s must skip them, since a duplex server refuses a
+/// want for an id it advertised only as a peel ("not our ref").
 pub Result<Advertisement, Error> read_advertisement(Stream stream, str service = "") {
     List<str> caps = [];
     List<RemoteRef> refs = [];

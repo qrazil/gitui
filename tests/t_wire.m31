@@ -1,0 +1,936 @@
+// Drives `GIT_wire.m31` for `test_wire.sh`.
+//
+//   ./t_wire unit
+//       Checks over hand-built bytes, no server: pkt-line framing, the ref
+//       advertisement, side-band demultiplexing, report-status, the exact
+//       bytes of the two request bodies and pack verification. Prints
+//       "ok <name>" or "FAIL <name>: <detail>" per check.
+//
+//   ./t_wire duplex
+//       The negotiation over an in-memory duplex stream whose server has a
+//       bounded output buffer and cannot read while it is full: proves
+//       `fetch_pack` never has unread replies waiting while it writes more
+//       (the write/write deadlock a long-lived ssh channel would have), that
+//       it stops early on `ready`, and that the stateless body does trip the
+//       same detector. Same output shape as `unit`.
+//
+//   ./t_wire ls <port> <service>
+//       Connects to 127.0.0.1:<port> (a bridge to a real git service),
+//       reads the advertisement and prints "caps <c1> <c2> ..." then
+//       "<id>\t<name>" per ref.
+//
+//   ./t_wire fetch <port> <gitdir> <out.pack>
+//       As `ls`, then fetches every advertised id with `have`s from every
+//       commit reachable from every ref in <gitdir>, over the one duplex
+//       connection. Prints "haves <n>", "pack <bytes> <objects>".
+//
+//   ./t_wire push <port> <gitdir> <refname> <old-id>
+//       Pushes <refname>'s local value over the connection (a receive-pack
+//       bridge) with the objects the remote lacks. Prints "ok <ref>" or
+//       "ng <ref> <reason>" (exit 1); "error: <message>" on stderr, exit 1,
+//       when it could not happen.
+
+import GIT_log;
+import GIT_object;
+import GIT_pack_write;
+import GIT_refs;
+import GIT_sha1;
+import GIT_wire;
+import io;
+import net;
+import os;
+
+List<str> argv = os.args();
+if (argv.size() < 2) {
+    usage();
+}
+str cmd = argv[1];
+if (cmd == "unit" && argv.size() == 2) {
+    run_unit();
+} else if (cmd == "duplex" && argv.size() == 2) {
+    run_duplex();
+} else if (cmd == "ls" && argv.size() == 4) {
+    do_ls(argv[2], argv[3]);
+} else if (cmd == "fetch" && argv.size() == 5) {
+    do_fetch(argv[2], argv[3], argv[4]);
+} else if (cmd == "push" && argv.size() == 6) {
+    do_push(argv[2], argv[3], argv[4], argv[5]);
+} else {
+    usage();
+}
+
+void usage() {
+    io.eprint("usage: t_wire unit");
+    io.eprint("       t_wire duplex");
+    io.eprint("       t_wire ls <port> <service>");
+    io.eprint("       t_wire fetch <port> <gitdir> <out.pack>");
+    io.eprint("       t_wire push <port> <gitdir> <refname> <old-id>");
+    os.exit(2);
+}
+
+void fail(str message) {
+    io.eprint("error: " + message);
+    os.exit(1);
+}
+
+// --- reporting ---------------------------------------------------------------
+
+void check(str name, bool is_good, str detail) {
+    if (is_good) {
+        print("ok " + name);
+    } else {
+        print("FAIL " + name + ": " + detail);
+    }
+}
+
+str text(bytes data) {
+    match (data.utf8()) {
+        case Some(str value): {
+            return value;
+        }
+        case None: {
+            return "(not utf-8)";
+        }
+    }
+}
+
+// What a result was, as one word, for a failure detail.
+str describe_packet(Result<GIT_wire.Packet, GIT_wire.Error> result) {
+    match (result) {
+        case Ok(GIT_wire.Packet packet): {
+            if (packet.is_flush) {
+                return "flush";
+            }
+            return "packet " + text(packet.payload);
+        }
+        case Err(GIT_wire.Error error): {
+            return error.to_str();
+        }
+    }
+}
+
+bool is_packet_error(Result<GIT_wire.Packet, GIT_wire.Error> result, GIT_wire.Error wanted) {
+    match (result) {
+        case Ok: {
+            return false;
+        }
+        case Err(GIT_wire.Error error): {
+            return error == wanted;
+        }
+    }
+}
+
+bool is_ad_error(Result<GIT_wire.Advertisement, GIT_wire.Error> result, GIT_wire.Error wanted) {
+    match (result) {
+        case Ok: {
+            return false;
+        }
+        case Err(GIT_wire.Error error): {
+            return error == wanted;
+        }
+    }
+}
+
+bool is_demux_error(Result<GIT_wire.DemuxResult, GIT_wire.Error> result, GIT_wire.Error wanted) {
+    match (result) {
+        case Ok: {
+            return false;
+        }
+        case Err(GIT_wire.Error error): {
+            return error == wanted;
+        }
+    }
+}
+
+bool is_report_error(Result<GIT_wire.ReportStatus, GIT_wire.Error> result, GIT_wire.Error wanted) {
+    match (result) {
+        case Ok: {
+            return false;
+        }
+        case Err(GIT_wire.Error error): {
+            return error == wanted;
+        }
+    }
+}
+
+// --- fixtures ----------------------------------------------------------------
+
+const str ID_A = "1111111111111111111111111111111111111111";
+const str ID_B = "2222222222222222222222222222222222222222";
+const str ID_C = "3333333333333333333333333333333333333333";
+
+// A byte string of pkt-lines (a line is not newline-terminated unless it says so) and a flush.
+bytes pkts(List<str> lines) {
+    bytes out = [];
+    for (str line in lines) {
+        out.extend(GIT_wire.pkt_line(line.to_bytes()));
+    }
+    out.extend(GIT_wire.FLUSH_PKT);
+    return out;
+}
+
+// One pkt-line whose payload is the first caps after a NUL, as a server sends it.
+bytes first_ref_line(str id, str name, str caps) {
+    bytes payload = (id + " " + name).to_bytes();
+    payload.push(0);
+    payload.extend((caps + "\n").to_bytes());
+    return GIT_wire.pkt_line(payload);
+}
+
+bytes band(int channel, bytes data) {
+    bytes payload = [channel];
+    payload.extend(data);
+    return GIT_wire.pkt_line(payload);
+}
+
+// A stream that gives back one byte per read -- the shortest reads a socket may.
+type Dribble {
+    bytes data;
+    int at;
+}
+
+Result<bytes, io.Error> Dribble.read(int n) {
+    if (at >= data.size() || n <= 0) {
+        bytes none = [];
+        return Result<bytes, io.Error>.Ok(none);
+    }
+    bytes one = [data[at]];
+    at = at + 1;
+    return Result<bytes, io.Error>.Ok(one);
+}
+
+Result<int, io.Error> Dribble.write(bytes b) {
+    return Result<int, io.Error>.Ok(b.size());
+}
+
+Result<bool, io.Error> Dribble.close() {
+    return Result<bool, io.Error>.Ok(true);
+}
+
+GIT_wire.Advertisement advert(List<str> caps) {
+    List<GIT_wire.RemoteRef> none = [];
+    return GIT_wire.Advertisement("", caps, none, "sha1");
+}
+
+// --- unit --------------------------------------------------------------------
+
+void run_unit() {
+    unit_framing();
+    unit_advertisement();
+    unit_demux();
+    unit_bodies();
+    unit_report();
+    unit_pack();
+}
+
+void unit_framing() {
+    check("wire: pkt_line of hello\\n is 000ahello\\n", text(GIT_wire.pkt_line("hello\n".to_bytes())) == "000ahello\n", text(GIT_wire.pkt_line("hello\n".to_bytes())));
+    bytes empty = [];
+    check("wire: pkt_line of nothing is 0004", text(GIT_wire.pkt_line(empty)) == "0004", text(GIT_wire.pkt_line(empty)));
+    check("wire: FLUSH_PKT is 0000", text(GIT_wire.FLUSH_PKT) == "0000", text(GIT_wire.FLUSH_PKT));
+    bytes two = GIT_wire.pkt_line("one".to_bytes());
+    two.extend(GIT_wire.FLUSH_PKT);
+    two.extend(GIT_wire.pkt_line("two".to_bytes()));
+    match (GIT_wire.read_packet(two, 0)) {
+        case Ok(GIT_wire.Packet first): {
+            check("wire: read_packet reads a data packet", !first.is_flush && text(first.payload) == "one" && first.next == 7, text(first.payload) + " next " + first.next.to_str());
+            match (GIT_wire.read_packet(two, first.next)) {
+                case Ok(GIT_wire.Packet flush): {
+                    check("wire: read_packet reads a flush", flush.is_flush && flush.next == 11, "next " + flush.next.to_str());
+                }
+                case Err(GIT_wire.Error error): {
+                    check("wire: read_packet reads a flush", false, error.to_str());
+                }
+            }
+        }
+        case Err(GIT_wire.Error error): {
+            check("wire: read_packet reads a data packet", false, error.to_str());
+        }
+    }
+    List<str> bad_lengths = ["0001", "0002", "0003", "zzzz", "00g0"];
+    for (str bad in bad_lengths) {
+        bytes with_tail = (bad + "xxxxxxxx").to_bytes();
+        check("wire: read_packet refuses length " + bad, is_packet_error(GIT_wire.read_packet(with_tail, 0), GIT_wire.Error.Syntax), describe_packet(GIT_wire.read_packet(with_tail, 0)));
+    }
+    bytes cut = "0010abc".to_bytes();
+    check("wire: read_packet on a packet cut short is Truncated", is_packet_error(GIT_wire.read_packet(cut, 0), GIT_wire.Error.Truncated), describe_packet(GIT_wire.read_packet(cut, 0)));
+    bytes stub = "00".to_bytes();
+    check("wire: read_packet with no whole length is Truncated", is_packet_error(GIT_wire.read_packet(stub, 0), GIT_wire.Error.Truncated), describe_packet(GIT_wire.read_packet(stub, 0)));
+    // Over a stream: boundary versus middle.
+    GIT_wire.Stream stream = io.buffer_of(two);
+    int seen = 0;
+    while (true) {
+        match (GIT_wire.read_pkt(stream)) {
+            case Ok: {
+                seen = seen + 1;
+            }
+            case Err(GIT_wire.Error error): {
+                check("wire: read_pkt reads three packets then reports Closed", seen == 3 && error == GIT_wire.Error.Closed, "saw " + seen.to_str() + " then " + error.to_str());
+                break;
+            }
+        }
+    }
+    GIT_wire.Stream middle = io.buffer_of("0010abc".to_bytes());
+    check("wire: read_pkt ending inside a packet is Truncated", is_packet_error(GIT_wire.read_pkt(middle), GIT_wire.Error.Truncated), describe_packet(GIT_wire.read_pkt(middle)));
+    GIT_wire.Stream head = io.buffer_of("00".to_bytes());
+    check("wire: read_pkt ending inside the length is Truncated", is_packet_error(GIT_wire.read_pkt(head), GIT_wire.Error.Truncated), describe_packet(GIT_wire.read_pkt(head)));
+    GIT_wire.Stream header_only = io.buffer_of("0008".to_bytes());
+    check("wire: read_pkt with a length and no payload is Truncated", is_packet_error(GIT_wire.read_pkt(header_only), GIT_wire.Error.Truncated), describe_packet(GIT_wire.read_pkt(header_only)));
+    GIT_wire.Stream dribble = Dribble(two, 0);
+    match (GIT_wire.read_pkt(dribble)) {
+        case Ok(GIT_wire.Packet packet): {
+            check("wire: read_pkt reassembles a packet read one byte at a time", text(packet.payload) == "one", text(packet.payload));
+        }
+        case Err(GIT_wire.Error error): {
+            check("wire: read_pkt reassembles a packet read one byte at a time", false, error.to_str());
+        }
+    }
+}
+
+void unit_advertisement() {
+    List<str> caps = ["multi_ack_detailed", "side-band-64k", "ofs-delta", "symref=HEAD:refs/heads/main", "object-format=sha1", "agent=git/2.45"];
+    bytes normal = first_ref_line(ID_A, "HEAD", caps.join(" "));
+    normal.extend(GIT_wire.pkt_line((ID_A + " refs/heads/main\n").to_bytes()));
+    normal.extend(GIT_wire.pkt_line((ID_B + " refs/tags/v1\n").to_bytes()));
+    normal.extend(GIT_wire.FLUSH_PKT);
+    match (GIT_wire.read_advertisement(io.buffer_of(normal))) {
+        case Ok(GIT_wire.Advertisement ad): {
+            check("wire: advertisement has three refs in order", ad.refs.size() == 3 && ad.refs[0].name == "HEAD" && ad.refs[2].id == ID_B, ad.refs.size().to_str() + " refs");
+            check("wire: advertisement capabilities come from the first line only", ad.capabilities.size() == 6 && ad.capabilities[1] == "side-band-64k", ad.capabilities.join(","));
+            check("wire: has_cap sees a bare and a valued capability", GIT_wire.has_cap(ad.capabilities, "ofs-delta") && GIT_wire.has_cap(ad.capabilities, "agent") && !GIT_wire.has_cap(ad.capabilities, "shallow"), ad.capabilities.join(","));
+            check("wire: cap_value gives symref's value", GIT_wire.cap_value(ad.capabilities, "symref").or("none") == "HEAD:refs/heads/main" && GIT_wire.cap_value(ad.capabilities, "ofs-delta").or("none") == "none", GIT_wire.cap_value(ad.capabilities, "symref").or("none"));
+            check("wire: object format defaults to sha1", ad.object_format == "sha1", ad.object_format);
+        }
+        case Err(GIT_wire.Error error): {
+            check("wire: advertisement parses", false, error.to_str());
+        }
+    }
+    // An empty repository: one line, all-zero id, capabilities^{}.
+    bytes empty = first_ref_line(GIT_wire.ZERO_ID, "capabilities^{}", "report-status delete-refs agent=git/2.45");
+    empty.extend(GIT_wire.FLUSH_PKT);
+    match (GIT_wire.read_advertisement(io.buffer_of(empty))) {
+        case Ok(GIT_wire.Advertisement ad): {
+            check("wire: an empty repository advertises no refs but its capabilities", ad.refs.size() == 0 && GIT_wire.has_cap(ad.capabilities, "report-status"), ad.refs.size().to_str() + " refs");
+        }
+        case Err(GIT_wire.Error error): {
+            check("wire: an empty repository advertisement parses", false, error.to_str());
+        }
+    }
+    // `version 1` first: accepted and ignored.
+    bytes versioned = GIT_wire.pkt_line("version 1\n".to_bytes());
+    versioned.extend(first_ref_line(ID_A, "refs/heads/main", "side-band-64k"));
+    versioned.extend(GIT_wire.FLUSH_PKT);
+    match (GIT_wire.read_advertisement(io.buffer_of(versioned))) {
+        case Ok(GIT_wire.Advertisement ad): {
+            check("wire: a leading 'version 1' line is skipped", ad.refs.size() == 1 && ad.refs[0].name == "refs/heads/main" && GIT_wire.has_cap(ad.capabilities, "side-band-64k"), ad.refs.size().to_str() + " refs");
+        }
+        case Err(GIT_wire.Error error): {
+            check("wire: a leading 'version 1' line is skipped", false, error.to_str());
+        }
+    }
+    bytes err_line = GIT_wire.pkt_line("ERR access denied\n".to_bytes());
+    check("wire: an ERR line is RemoteError", is_ad_error(GIT_wire.read_advertisement(io.buffer_of(err_line)), GIT_wire.Error.RemoteError), "other");
+    bytes sha256 = first_ref_line(ID_A, "refs/heads/main", "object-format=sha256");
+    sha256.extend(GIT_wire.FLUSH_PKT);
+    check("wire: object-format=sha256 is UnsupportedFormat", is_ad_error(GIT_wire.read_advertisement(io.buffer_of(sha256)), GIT_wire.Error.UnsupportedFormat), "other");
+    bytes short_id = GIT_wire.pkt_line("abc refs/heads/main\n".to_bytes());
+    short_id.extend(GIT_wire.FLUSH_PKT);
+    check("wire: a ref line with a short id is BadAdvertisement", is_ad_error(GIT_wire.read_advertisement(io.buffer_of(short_id)), GIT_wire.Error.BadAdvertisement), "other");
+    bytes no_flush = first_ref_line(ID_A, "refs/heads/main", "side-band-64k");
+    check("wire: an advertisement with no flush is Closed", is_ad_error(GIT_wire.read_advertisement(io.buffer_of(no_flush)), GIT_wire.Error.Closed), "other");
+    GIT_wire.Stream dribble = Dribble(normal, 0);
+    match (GIT_wire.read_advertisement(dribble)) {
+        case Ok(GIT_wire.Advertisement ad): {
+            check("wire: an advertisement read one byte at a time is the same", ad.refs.size() == 3 && ad.capabilities.size() == 6, ad.refs.size().to_str() + " refs");
+        }
+        case Err(GIT_wire.Error error): {
+            check("wire: an advertisement read one byte at a time is the same", false, error.to_str());
+        }
+    }
+    // The service name rides along.
+    match (GIT_wire.read_advertisement(io.buffer_of(empty), service: "git-receive-pack")) {
+        case Ok(GIT_wire.Advertisement ad): {
+            check("wire: read_advertisement records the service", ad.service == "git-receive-pack", ad.service);
+        }
+        case Err(GIT_wire.Error error): {
+            check("wire: read_advertisement records the service", false, error.to_str());
+        }
+    }
+}
+
+void unit_demux() {
+    bytes body = band(2, "Counting objects\r".to_bytes());
+    body.extend(band(1, [80, 65, 67, 75]));
+    body.extend(band(2, "done\n".to_bytes()));
+    body.extend(band(1, [1, 2, 3]));
+    body.extend(GIT_wire.FLUSH_PKT);
+    match (GIT_wire.demux(body)) {
+        case Ok(GIT_wire.DemuxResult out): {
+            check("wire: demux joins channel 1 across packets", out.pack.hex() == "5041434b010203", out.pack.hex());
+            check("wire: demux collects channel 2 as progress", out.progress == "Counting objects\rdone\n" && !out.has_remote_error, out.progress);
+        }
+        case Err(GIT_wire.Error error): {
+            check("wire: demux of a good stream", false, error.to_str());
+        }
+    }
+    bytes with_error = band(1, [1]);
+    with_error.extend(band(3, "fatal: pack too big".to_bytes()));
+    match (GIT_wire.demux(with_error)) {
+        case Ok(GIT_wire.DemuxResult out): {
+            check("wire: demux reports channel 3 as a remote error", out.has_remote_error && out.remote_error == "fatal: pack too big", out.remote_error);
+        }
+        case Err(GIT_wire.Error error): {
+            check("wire: demux reports channel 3 as a remote error", false, error.to_str());
+        }
+    }
+    check("wire: demux of channel 7 is BadBand", is_demux_error(GIT_wire.demux(band(7, [1])), GIT_wire.Error.BadBand), "other");
+    bytes no_band = GIT_wire.pkt_line([]);
+    check("wire: demux of a packet with no channel byte is BadBand", is_demux_error(GIT_wire.demux(no_band), GIT_wire.Error.BadBand), "other");
+    check("wire: demux of an ERR line is RemoteError", is_demux_error(GIT_wire.demux(GIT_wire.pkt_line("ERR no such repo".to_bytes())), GIT_wire.Error.RemoteError), "other");
+    bytes cut = band(1, [1, 2, 3, 4]);
+    check("wire: demux of a cut packet is Truncated", is_demux_error(GIT_wire.demux(cut.substr(0, cut.size() - 2)), GIT_wire.Error.Truncated), "other");
+    // The stream form: ACK/NAK lines first, then the bands, ends at the flush.
+    bytes response = GIT_wire.pkt_line("ACK 1111111111111111111111111111111111111111\n".to_bytes());
+    response.extend(GIT_wire.pkt_line("NAK\n".to_bytes()));
+    response.extend(band(2, "hello".to_bytes()));
+    response.extend(band(1, [9, 9]));
+    response.extend(GIT_wire.FLUSH_PKT);
+    response.extend("trailing garbage that must stay unread".to_bytes());
+    GIT_wire.Stream stream = io.buffer_of(response);
+    match (GIT_wire.read_fetch_response(stream)) {
+        case Ok(GIT_wire.DemuxResult out): {
+            check("wire: read_fetch_response skips ACK/NAK and joins the pack", out.pack.hex() == "0909" && out.progress == "hello", out.pack.hex());
+            match (stream.read(100)) {
+                case Ok(bytes rest): {
+                    check("wire: read_fetch_response stops reading at the flush", text(rest) == "trailing garbage that must stay unread", text(rest));
+                }
+                case Err: {
+                    check("wire: read_fetch_response stops reading at the flush", false, "read failed");
+                }
+            }
+        }
+        case Err(GIT_wire.Error error): {
+            check("wire: read_fetch_response of a good stream", false, error.to_str());
+        }
+    }
+    bytes unflushed = band(1, [5]);
+    match (GIT_wire.read_fetch_response(io.buffer_of(unflushed))) {
+        case Ok(GIT_wire.DemuxResult out): {
+            check("wire: read_fetch_response accepts a clean end of stream for a flush", out.pack.hex() == "05", out.pack.hex());
+        }
+        case Err(GIT_wire.Error error): {
+            check("wire: read_fetch_response accepts a clean end of stream for a flush", false, error.to_str());
+        }
+    }
+    bytes torn = band(1, [5, 6, 7, 8]);
+    match (GIT_wire.read_fetch_response(io.buffer_of(torn.substr(0, torn.size() - 1)))) {
+        case Ok: {
+            check("wire: read_fetch_response of a torn packet is an error", false, "was Ok");
+        }
+        case Err(GIT_wire.Error error): {
+            check("wire: read_fetch_response of a torn packet is Truncated", error == GIT_wire.Error.Truncated, error.to_str());
+        }
+    }
+}
+
+void unit_bodies() {
+    GIT_wire.Advertisement ad = advert(["side-band-64k", "ofs-delta", "multi_ack_detailed"]);
+    str body = text(GIT_wire.negotiation_body(ad, [ID_A, ID_B], [ID_C], "t/1"));
+    str want_a = "want " + ID_A + " side-band-64k ofs-delta agent=t/1\n";
+    str expected = hex4(want_a) + want_a + "0032want " + ID_B + "\n" + "0000" + "0032have " + ID_C + "\n" + "0009done\n";
+    check("wire: negotiation_body is wants, flush, haves, done, with caps on the first want", body == expected, body);
+    bytes pack = [80, 65, 67, 75, 0, 0, 0, 2];
+    bytes command = GIT_wire.command_body(GIT_wire.ZERO_ID, ID_A, "refs/heads/main", pack, "t/1");
+    str line = GIT_wire.ZERO_ID + " " + ID_A + " refs/heads/main";
+    str caps = "report-status agent=t/1\n";
+    int length = 4 + line.size() + 1 + caps.size();
+    bytes expected_command = hex4_of(length).to_bytes();
+    expected_command.extend(line.to_bytes());
+    expected_command.push(0);
+    expected_command.extend(caps.to_bytes());
+    expected_command.extend("0000".to_bytes());
+    expected_command.extend(pack);
+    check("wire: command_body is one NUL-capped command, a flush, then the raw pack", command == expected_command, text(command));
+    // fetch_pack refuses before writing a byte.
+    GIT_wire.Stream sink = io.buffer();
+    List<str> no_wants = [];
+    List<str> no_haves = [];
+    check("wire: fetch_pack with no want is NoWant", is_fetch_error(GIT_wire.fetch_pack(sink, ad, no_wants, no_haves), GIT_wire.Error.NoWant), "other");
+    check("wire: fetch_pack with a short want is BadName", is_fetch_error(GIT_wire.fetch_pack(sink, ad, ["abc"], no_haves), GIT_wire.Error.BadName), "other");
+    check("wire: fetch_pack with an uppercase have is BadName", is_fetch_error(GIT_wire.fetch_pack(sink, ad, [ID_A], ["ABCDEFABCDEFABCDEFABCDEFABCDEFABCDEFABCD"]), GIT_wire.Error.BadName), "other");
+    GIT_wire.Advertisement plain = advert(["multi_ack"]);
+    check("wire: fetch_pack without side-band-64k is NoSideBand", is_fetch_error(GIT_wire.fetch_pack(sink, plain, [ID_A], no_haves), GIT_wire.Error.NoSideBand), "other");
+    match (sink.read(10)) {
+        case Ok(bytes written): {
+            check("wire: fetch_pack's refusals wrote nothing", written.size() == 0, text(written));
+        }
+        case Err: {
+            check("wire: fetch_pack's refusals wrote nothing", false, "read failed");
+        }
+    }
+    check("wire: send_push without report-status is NoReportStatus", is_report_error(GIT_wire.send_push(sink, plain, GIT_wire.ZERO_ID, ID_A, "refs/heads/main", pack), GIT_wire.Error.NoReportStatus), "other");
+    GIT_wire.Advertisement reporting = advert(["report-status"]);
+    check("wire: send_push of a ref outside refs/ is BadName", is_report_error(GIT_wire.send_push(sink, reporting, GIT_wire.ZERO_ID, ID_A, "main", pack), GIT_wire.Error.BadName), "other");
+    // A canned ERR reply to a round of haves.
+    bytes reply = GIT_wire.pkt_line("ERR upload-pack: not our ref\n".to_bytes());
+    GIT_wire.Advertisement multi = advert(["side-band-64k", "multi_ack_detailed"]);
+    check("wire: an ERR in reply to a round of haves is RemoteError", is_fetch_error(GIT_wire.fetch_pack(io.buffer_of(reply), multi, [ID_A], [ID_B]), GIT_wire.Error.RemoteError), "other");
+    bytes odd = GIT_wire.pkt_line("what\n".to_bytes());
+    check("wire: a garbage reply to a round of haves is BadAck", is_fetch_error(GIT_wire.fetch_pack(io.buffer_of(odd), multi, [ID_A], [ID_B]), GIT_wire.Error.BadAck), "other");
+    bytes hung_up = [];
+    check("wire: a server hanging up during negotiation is Closed", is_fetch_error(GIT_wire.fetch_pack(Dribble(hung_up, 0), multi, [ID_A], [ID_B]), GIT_wire.Error.Closed), "other");
+}
+
+bool is_fetch_error(Result<GIT_wire.DemuxResult, GIT_wire.Error> result, GIT_wire.Error wanted) {
+    return is_demux_error(result, wanted);
+}
+
+str hex4_of(int value) {
+    bytes two = [value >> 8 & 0xFF, value & 0xFF];
+    return two.hex();
+}
+
+// The four-digit prefix of a pkt-line whose payload is `payload`.
+str hex4(str payload) {
+    return hex4_of(payload.size() + 4);
+}
+
+void unit_report() {
+    check_report("wire: report 'unpack ok' and 'ok ref' is accepted", ["unpack ok\n", "ok refs/heads/main\n"], true, true, "");
+    check_report("wire: report 'ng ref reason' is refused with the reason", ["unpack ok\n", "ng refs/heads/main non-fast-forward\n"], true, false, "non-fast-forward");
+    check_report("wire: report 'ng ref' with several words keeps them all", ["unpack ok\n", "ng refs/heads/main hook declined: no pushing on fridays\n"], true, false, "hook declined: no pushing on fridays");
+    check_report("wire: report 'unpack <why>' is not unpacked", ["unpack index-pack abnormal exit\n", "ng refs/heads/main unpacker error\n"], false, false, "index-pack abnormal exit");
+    check_report("wire: report picks out its own ref among several", ["unpack ok\n", "ok refs/heads/other\n", "ng refs/heads/main stale info\n"], true, false, "stale info");
+    check_bad_report("wire: report with no unpack line is BadReport", ["ok refs/heads/main\n"]);
+    check_bad_report("wire: report that never mentions the ref is BadReport", ["unpack ok\n", "ok refs/heads/other\n"]);
+    check_bad_report("wire: report with an unknown line is BadReport", ["unpack ok\n", "maybe refs/heads/main\n"]);
+    bytes nothing = [];
+    check("wire: report of an empty body is BadReport", is_report_error(GIT_wire.parse_report(nothing, "refs/heads/main"), GIT_wire.Error.BadReport), "other");
+}
+
+void check_report(str name, List<str> lines, bool is_unpacked, bool is_ok, str reason) {
+    match (GIT_wire.parse_report(pkts(lines), "refs/heads/main")) {
+        case Ok(GIT_wire.ReportStatus status): {
+            check(name, status.is_unpacked == is_unpacked && status.is_ok == is_ok && status.reason == reason, "unpacked " + status.is_unpacked.to_str() + " ok " + status.is_ok.to_str() + " reason " + status.reason);
+        }
+        case Err(GIT_wire.Error error): {
+            check(name, false, error.to_str());
+        }
+    }
+}
+
+void check_bad_report(str name, List<str> lines) {
+    check(name, is_report_error(GIT_wire.parse_report(pkts(lines), "refs/heads/main"), GIT_wire.Error.BadReport), "other");
+}
+
+bytes empty_pack() {
+    bytes content = [80, 65, 67, 75, 0, 0, 0, 2, 0, 0, 0, 0];
+    bytes out = clone(content);
+    out.extend(GIT_sha1.sum(content));
+    return out;
+}
+
+void unit_pack() {
+    bytes good = empty_pack();
+    match (GIT_wire.check_pack(good)) {
+        case Ok(int count): {
+            check("wire: check_pack accepts a well-formed empty pack", count == 0, count.to_str());
+        }
+        case Err(GIT_wire.Error error): {
+            check("wire: check_pack accepts a well-formed empty pack", false, error.to_str());
+        }
+    }
+    bytes flipped = clone(good);
+    flipped[good.size() - 1] = flipped[good.size() - 1] ^ 1;
+    check("wire: check_pack with a flipped checksum bit is ChecksumMismatch", is_int_error(GIT_wire.check_pack(flipped), GIT_wire.Error.ChecksumMismatch), "other");
+    bytes corrupt_body = clone(good);
+    corrupt_body[11] = 1;
+    check("wire: check_pack with a changed object count is ChecksumMismatch", is_int_error(GIT_wire.check_pack(corrupt_body), GIT_wire.Error.ChecksumMismatch), "other");
+    bytes not_pack = clone(good);
+    not_pack[0] = 'X';
+    check("wire: check_pack without PACK is BadPack", is_int_error(GIT_wire.check_pack(not_pack), GIT_wire.Error.BadPack), "other");
+    check("wire: check_pack of too few bytes is Truncated", is_int_error(GIT_wire.check_pack(good.substr(0, 31)), GIT_wire.Error.Truncated), "other");
+}
+
+bool is_int_error(Result<int, GIT_wire.Error> result, GIT_wire.Error wanted) {
+    match (result) {
+        case Ok: {
+            return false;
+        }
+        case Err(GIT_wire.Error error): {
+            return error == wanted;
+        }
+    }
+}
+
+// --- duplex ------------------------------------------------------------------
+
+// An upload-pack that speaks multi_ack_detailed in memory, and is as
+// impatient as a real one: it replies the moment it has a flush or a `have`,
+// and every reply byte waits in `outbox` until the client reads it. If the
+// client writes while `outbox` holds more than `cap` bytes, a real server
+// would be blocked on its own write, unable to read, and the client's write
+// would block in turn: `is_stalled` records that moment.
+type FakeServer {
+    int cap;
+    bool has_multi_ack;
+    int ready_after;
+    Map<str, bool> known;
+    bytes inbox;
+    int inbox_at;
+    bytes outbox;
+    bool is_stalled;
+    bool has_seen_wants;
+    int have_count;
+    int flush_count;
+    int common_count;
+    bool is_done;
+    bool has_sent_ready;
+    int peak_outbox;
+}
+
+Result<int, io.Error> FakeServer.write(bytes data) {
+    inbox.extend(data);
+    process();
+    return Result<int, io.Error>.Ok(data.size());
+}
+
+Result<bytes, io.Error> FakeServer.read(int n) {
+    bytes out = [];
+    if (outbox.size() == 0) {
+        if (!is_done) {
+            // The client is waiting for a reply the server will never send
+            // until it is written more: both sides blocked on a read.
+            is_stalled = true;
+        }
+        return Result<bytes, io.Error>.Ok(out);
+    }
+    int take = n;
+    if (take > outbox.size()) {
+        take = outbox.size();
+    }
+    out = outbox.substr(0, take);
+    outbox = outbox.substr(take, outbox.size());
+    return Result<bytes, io.Error>.Ok(out);
+}
+
+Result<bool, io.Error> FakeServer.close() {
+    return Result<bool, io.Error>.Ok(true);
+}
+
+void FakeServer.emit(bytes data) {
+    outbox.extend(data);
+    if (outbox.size() > peak_outbox) {
+        peak_outbox = outbox.size();
+    }
+    if (outbox.size() > cap) {
+        is_stalled = true;
+    }
+}
+
+void FakeServer.process() {
+    while (true) {
+        match (GIT_wire.read_packet(inbox, inbox_at)) {
+            case Err(GIT_wire.Error error): {
+                return;
+            }
+            case Ok(GIT_wire.Packet packet): {
+                inbox_at = packet.next;
+                handle(packet);
+            }
+        }
+    }
+}
+
+void FakeServer.handle(GIT_wire.Packet packet) {
+    if (packet.is_flush) {
+        if (!has_seen_wants) {
+            has_seen_wants = true;
+        } else {
+            flush_count = flush_count + 1;
+            if (has_multi_ack) {
+                emit(GIT_wire.pkt_line("NAK\n".to_bytes()));
+            }
+        }
+        return;
+    }
+    str line = text(packet.payload).trim();
+    if (line.starts_with("have ")) {
+        have_count = have_count + 1;
+        str id = line.substr(5, line.size());
+        if (has_multi_ack && known.contains(id)) {
+            common_count = common_count + 1;
+            emit(GIT_wire.pkt_line(("ACK " + id + " common\n").to_bytes()));
+            if (ready_after > 0 && common_count >= ready_after && !has_sent_ready) {
+                has_sent_ready = true;
+                emit(GIT_wire.pkt_line(("ACK " + id + " ready\n").to_bytes()));
+            }
+        }
+    } else if (line == "done") {
+        if (common_count > 0) {
+            emit(GIT_wire.pkt_line(("ACK " + ID_A + "\n").to_bytes()));
+        } else {
+            emit(GIT_wire.pkt_line("NAK\n".to_bytes()));
+        }
+        emit(band(2, "Enumerating objects: 3, done.\n".to_bytes()));
+        emit(band(1, [80, 65, 67, 75]));
+        emit(band(1, [1, 2, 3]));
+        emit(GIT_wire.FLUSH_PKT);
+        is_done = true;
+    }
+}
+
+FakeServer fake_server(int cap, bool has_multi_ack, int ready_after, List<str> known_ids) {
+    Map<str, bool> known = {};
+    for (str id in known_ids) {
+        known.set(id, true);
+    }
+    return FakeServer(cap, has_multi_ack, ready_after, known, [], 0, [], false, false, 0, 0, 0, false, false, 0);
+}
+
+List<str> make_ids(int count) {
+    List<str> ids = [];
+    for (int i in 0 .. count) {
+        str hex = (100000 + i).to_str();
+        // 40 lowercase hex digits: the decimal digits are valid hex.
+        str id = "";
+        while (id.size() < 40) {
+            id = id + hex;
+        }
+        ids.push(id.substr(0, 40));
+    }
+    return ids;
+}
+
+void run_duplex() {
+    List<str> ids = make_ids(1000);
+    GIT_wire.Advertisement ad = advert(["multi_ack_detailed", "side-band-64k", "ofs-delta"]);
+    // 1000 haves, every one known: 1000 ACK lines is ~57 KB of replies, over
+    // the 32 KB the fake is allowed to hold, so only reading between rounds
+    // gets through.
+    FakeServer server = fake_server(32768, true, 0, ids);
+    match (GIT_wire.fetch_pack(server, ad, [ID_A], ids)) {
+        case Ok(GIT_wire.DemuxResult out): {
+            check("duplex: 1000 known haves get a pack back", out.pack.hex() == "5041434b010203" && out.progress.starts_with("Enumerating"), out.pack.hex());
+        }
+        case Err(GIT_wire.Error error): {
+            check("duplex: 1000 known haves get a pack back", false, error.to_str());
+        }
+    }
+    check("duplex: every have was sent", server.have_count == 1000, server.have_count.to_str());
+    check("duplex: haves went in four rounds of at most 256", server.flush_count == 4, server.flush_count.to_str() + " flushes");
+    check("duplex: the client never wrote with replies unread (no write/write deadlock)", !server.is_stalled, "stalled; peak " + server.peak_outbox.to_str());
+    check("duplex: the largest backlog was one round's ACKs", server.peak_outbox < 20000 && server.peak_outbox > 10000, server.peak_outbox.to_str());
+    // The same server, fed the stateless body in a single write.
+    FakeServer stateless = fake_server(32768, true, 0, ids);
+    Result<bool, GIT_wire.Error> wrote = GIT_wire.write_all(stateless, GIT_wire.negotiation_body(ad, [ID_A], ids, "t/1"));
+    check("duplex: the detector trips on the stateless body written down a duplex stream", stateless.is_stalled, "peak " + stateless.peak_outbox.to_str());
+    // Ready after 300 common haves: the second round's replies say so, and
+    // the client stops there.
+    FakeServer eager = fake_server(32768, true, 300, ids);
+    match (GIT_wire.fetch_pack(eager, ad, [ID_A], ids)) {
+        case Ok(GIT_wire.DemuxResult out): {
+            check("duplex: a ready server still delivers the pack", out.pack.size() == 7, out.pack.hex());
+        }
+        case Err(GIT_wire.Error error): {
+            check("duplex: a ready server still delivers the pack", false, error.to_str());
+        }
+    }
+    check("duplex: the client stops offering haves after 'ready'", eager.have_count == 512 && eager.flush_count == 2, eager.have_count.to_str() + " haves, " + eager.flush_count.to_str() + " flushes");
+    check("duplex: no stall when stopping early", !eager.is_stalled, "stalled");
+    // Unknown haves: NAK each round, no ACK lines.
+    FakeServer strangers = fake_server(32768, true, 0, []);
+    match (GIT_wire.fetch_pack(strangers, ad, [ID_A], ids)) {
+        case Ok(GIT_wire.DemuxResult out): {
+            check("duplex: haves the server does not know still end in a pack", out.pack.size() == 7, out.pack.hex());
+        }
+        case Err(GIT_wire.Error error): {
+            check("duplex: haves the server does not know still end in a pack", false, error.to_str());
+        }
+    }
+    check("duplex: unknown haves were all offered, in four rounds", strangers.have_count == 1000 && strangers.flush_count == 4 && !strangers.is_stalled, strangers.have_count.to_str() + " haves, " + strangers.flush_count.to_str() + " flushes");
+    // No haves at all: the wants, one flush, done.
+    List<str> none = [];
+    FakeServer fresh = fake_server(32768, true, 0, none);
+    match (GIT_wire.fetch_pack(fresh, ad, [ID_A, ID_B], none)) {
+        case Ok(GIT_wire.DemuxResult out): {
+            check("duplex: a clone (no haves) is wants, done, pack", out.pack.size() == 7 && fresh.have_count == 0 && fresh.flush_count == 0 && !fresh.is_stalled, out.pack.hex());
+        }
+        case Err(GIT_wire.Error error): {
+            check("duplex: a clone (no haves) is wants, done, pack", false, error.to_str());
+        }
+    }
+    // A server without multi_ack_detailed: one round, capped, no flush.
+    GIT_wire.Advertisement old = advert(["side-band-64k"]);
+    FakeServer plain = fake_server(32768, false, 0, ids);
+    match (GIT_wire.fetch_pack(plain, old, [ID_A], ids)) {
+        case Ok(GIT_wire.DemuxResult out): {
+            check("duplex: without multi_ack_detailed, one round of 256 haves and done", out.pack.size() == 7 && plain.have_count == 256 && plain.flush_count == 0 && !plain.is_stalled, plain.have_count.to_str() + " haves, " + plain.flush_count.to_str() + " flushes");
+        }
+        case Err(GIT_wire.Error error): {
+            check("duplex: without multi_ack_detailed, one round of 256 haves and done", false, error.to_str());
+        }
+    }
+    check("duplex: HAVES_PER_ROUND is 256", GIT_wire.HAVES_PER_ROUND == 256, GIT_wire.HAVES_PER_ROUND.to_str);
+}
+
+// --- against a real git service ----------------------------------------------
+
+GIT_wire.Stream connect_or_fail(str port_text) {
+    int port = port_text.parse_int().or(0);
+    if (port <= 0) {
+        fail("bad port " + port_text);
+    }
+    match (net.connect("127.0.0.1", port)) {
+        case Ok(net.Conn conn): {
+            return conn;
+        }
+        case Err(net.Error error): {
+            fail("connect: " + error.to_str());
+        }
+    }
+    return io.buffer();
+}
+
+GIT_wire.Advertisement read_ad(GIT_wire.Stream stream, str service) {
+    match (GIT_wire.read_advertisement(stream, service: service)) {
+        case Ok(GIT_wire.Advertisement ad): {
+            return ad;
+        }
+        case Err(GIT_wire.Error error): {
+            fail("advertisement: " + error.to_str());
+        }
+    }
+    return advert([]);
+}
+
+void do_ls(str port_text, str service) {
+    GIT_wire.Stream stream = connect_or_fail(port_text);
+    GIT_wire.Advertisement ad = read_ad(stream, service);
+    print("caps " + ad.capabilities.join(" "));
+    for (GIT_wire.RemoteRef remote_ref in ad.refs) {
+        print(remote_ref.id + "\t" + remote_ref.name);
+    }
+    Result<bool, GIT_wire.Error> said = GIT_wire.say_goodbye(stream);
+    Result<bool, io.Error> closed = stream.close();
+}
+
+void do_fetch(str port_text, str gitdir, str out_path) {
+    GIT_wire.Stream stream = connect_or_fail(port_text);
+    GIT_wire.Advertisement ad = read_ad(stream, "git-upload-pack");
+    List<str> wants = unique_ids(ad.refs);
+    List<str> haves = local_haves(gitdir);
+    print("refs " + wants.size().to_str());
+    print("haves " + haves.size().to_str());
+    match (GIT_wire.fetch_pack(stream, ad, wants, haves)) {
+        case Ok(GIT_wire.DemuxResult out): {
+            if (out.has_remote_error) {
+                fail("remote: " + out.remote_error);
+            }
+            match (GIT_wire.verify_pack(out.pack, out_path)) {
+                case Ok(GIT_wire.Summary summary): {
+                    print("pack " + summary.pack_bytes.to_str() + " " + summary.object_count.to_str());
+                }
+                case Err(GIT_wire.Error error): {
+                    fail(error.to_str());
+                }
+            }
+        }
+        case Err(GIT_wire.Error error): {
+            fail(error.to_str());
+        }
+    }
+    Result<bool, io.Error> closed = stream.close();
+}
+
+void do_push(str port_text, str gitdir, str refname, str old_id) {
+    str new_id = "";
+    match (GIT_refs.resolve(gitdir, refname)) {
+        case Ok(str resolved): {
+            new_id = resolved;
+        }
+        case Err(GIT_refs.Error error): {
+            fail("resolve " + refname + ": " + error.to_str());
+        }
+    }
+    GIT_wire.Stream stream = connect_or_fail(port_text);
+    GIT_wire.Advertisement ad = read_ad(stream, "git-receive-pack");
+    List<str> known = [];
+    for (GIT_wire.RemoteRef remote_ref in ad.refs) {
+        known.push(remote_ref.id);
+    }
+    bytes pack = [];
+    match (GIT_pack_write.objects_to_send(gitdir, [new_id], known)) {
+        case Ok(List<str> ids): {
+            match (GIT_pack_write.build(gitdir, ids)) {
+                case Ok(bytes built): {
+                    pack = built;
+                }
+                case Err(GIT_pack_write.Error error): {
+                    fail(error.to_str());
+                }
+            }
+        }
+        case Err(GIT_pack_write.Error error): {
+            fail(error.to_str());
+        }
+    }
+    match (GIT_wire.send_push(stream, ad, old_id, new_id, refname, pack)) {
+        case Ok(GIT_wire.ReportStatus status): {
+            Result<bool, io.Error> closed = stream.close();
+            if (status.is_ok) {
+                print("ok " + status.refname);
+            } else {
+                print("ng " + status.refname + " " + status.reason);
+                os.exit(1);
+            }
+        }
+        case Err(GIT_wire.Error error): {
+            fail(error.to_str());
+        }
+    }
+}
+
+List<str> unique_ids(List<GIT_wire.RemoteRef> advertised) {
+    Map<str, bool> seen = {};
+    List<str> out = [];
+    for (GIT_wire.RemoteRef remote_ref in advertised) {
+        // A peeled tag (`v1^{}`) is listed for ls-remote's sake; a stateful
+        // server answers a want for it with "not our ref".
+        if (remote_ref.name.ends_with("^{}")) {
+            continue;
+        }
+        if (!seen.contains(remote_ref.id)) {
+            seen.set(remote_ref.id, true);
+            out.push(remote_ref.id);
+        }
+    }
+    return out;
+}
+
+// Every commit reachable from every local ref, newest first per ref.
+List<str> local_haves(str gitdir) {
+    Map<str, bool> seen = {};
+    List<str> out = [];
+    match (GIT_refs.all(gitdir)) {
+        case Ok(List<GIT_refs.Ref> all): {
+            for (GIT_refs.Ref git_ref in all) {
+                match (GIT_log.walk(gitdir, git_ref.name, -1)) {
+                    case Ok(List<GIT_log.Entry> entries): {
+                        for (GIT_log.Entry entry in entries) {
+                            if (!seen.contains(entry.id)) {
+                                seen.set(entry.id, true);
+                                out.push(entry.id);
+                            }
+                        }
+                    }
+                    case Err: {
+                    }
+                }
+            }
+        }
+        case Err: {
+        }
+    }
+    return out;
+}
