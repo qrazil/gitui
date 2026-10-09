@@ -1,0 +1,1936 @@
+// Merging: the three-way tree merge, merge bases, and `git merge`'s own state
+// (`MERGE_HEAD`, `MERGE_MSG`, `MERGE_MODE`, `ORIG_HEAD`, `AUTO_MERGE`) so that
+// real git can finish what this starts and this can finish what git started.
+//
+// API
+// ---
+//   GIT_merge.merge_trees(gitdir, base_tree, ours_tree, theirs_tree, labels, style:)
+//                                           -> Result<TreeMerge, Error>
+//       The pure part. Three tree ids (a commit id is accepted for each, `""`
+//       is the empty tree), nothing touched but the object store: the merged
+//       tree is written, conflicts are listed with their index stages 1/2/3.
+//   GIT_merge.merge_with_base(gitdir, worktree, base, ours, theirs, opts)
+//                                           -> Result<Applied, Error>
+//       The reusable entry point (cherry-pick, revert, rebase and stash-apply
+//       call it with the base they need): merge_trees, then the working tree
+//       and the index take the result, conflicted paths left as stages 1/2/3
+//       with markers in the files. No ref moves, no MERGE_HEAD, no commit.
+//   GIT_merge.start(gitdir, worktree, theirs_spec, opts)       -> Result<Report, Error>
+//   GIT_merge.start_commit(gitdir, worktree, theirs_id, spec, opts)
+//   GIT_merge.continue_merge(gitdir, worktree, message)        -> Result<Report, Error>
+//   GIT_merge.abort_merge(gitdir, worktree)                    -> Result<bool, Error>
+//   GIT_merge.in_progress(gitdir)                              -> bool
+//   GIT_merge.merge_head(gitdir)                               -> Option<str>
+//   GIT_merge.bases(gitdir, ours, theirs)                      -> Result<List<str>, Error>
+//   GIT_merge.stage_lines(conflicts)                           -> List<str>
+//
+// --- what is the same as git -------------------------------------------------
+//
+// The per-path decision is `git merge -s ort` without rename detection (and
+// the same as `-s recursive -X no-renames`):
+//   - a path both sides left the same, or one side left as the base had it, is
+//     taken from the other side (including a deletion);
+//   - both sides changed it: file contents go through `GIT_diff3.merge3` at
+//     the level git merges at, modes are merged on their own (one side's
+//     chmod is kept, two different chmods conflict), a binary file conflicts
+//     keeping ours, symlinks and submodules conflict keeping ours;
+//   - add/add merges the two files with an empty base; modify/delete and
+//     delete/modify keep the modified file in the tree and the working tree
+//     and record stages 1 and 2 (or 1 and 3);
+//   - a file against a directory of the same name: the directory stays, the
+//     file is renamed `path~label` (label: the side's name, `/` as `_`) and
+//     recorded there at its side's stage;
+//   - a file against a symlink (or a submodule): the regular file is renamed
+//     `path~label`, the other stays, each with its stage (and stage 1 for the
+//     one whose type the base had).
+// Conflicted paths appear in the tree git's `merge-tree --write-tree` writes:
+// a content conflict as the file with markers, a modify/delete as the modified
+// file. `AUTO_MERGE` is that tree. Tests compare the tree id and the stage
+// list with `git merge-tree --write-tree` on every case.
+//
+// --- merge bases -------------------------------------------------------------
+//
+// One merge base: used. None: `Error.Unrelated` unless `allow_unrelated` (an
+// empty base then). Several (a criss-cross history): the recursive strategy's
+// virtual base. The bases, oldest first, are folded pairwise: each pair is
+// merged (recursively, with its own base) with `Temporary merge branch 1/2`
+// as labels and the result is a commit - written to the object store, never
+// referenced - with the two as parents, which stands for them in the next
+// step. Conflict markers inside a virtual base are kept as the content, as
+// git does; with `merge.conflictstyle=diff3` the base section is labelled
+// `merged common ancestors`.
+//
+// --- where this differs from git, on purpose ---------------------------------
+//
+//   - No rename detection (the task says so): a rename on one side and an edit
+//     on the other is a modify/delete plus an add, as `-X no-renames` has it.
+//   - `merge.conflictstyle=zdiff3` is written as `diff3` (no zealous narrowing
+//     of the diff3 output).
+//   - A file/directory conflict whose file side is also modify/delete, or a
+//     distinct-types conflict inside a virtual base, are handled by the same
+//     rules rather than git's special cases; the plain cases are tested.
+//   - A path that is not UTF-8 is refused (`Error.Unsupported`) rather than
+//     skipped: dropping it would silently lose it from the merged tree.
+//   - The abort (`reset --merge`) restores every path the merge touched from
+//     HEAD, including edits made to them afterwards; paths the merge did not
+//     touch keep their local changes.
+//   - Merge commits are written with `GIT_AUTHOR_*` / `GIT_COMMITTER_*` (name,
+//     email, date) first, then `user.name` / `user.email`.
+
+import GIT_checkout;
+import GIT_config;
+import GIT_diff3;
+import GIT_graph;
+import GIT_index;
+import GIT_object;
+import GIT_refs;
+import GIT_reflog;
+import GIT_status;
+import date;
+import fs;
+import io;
+import os;
+
+/// Why a merge did not happen (nothing written unless said), or did not finish.
+pub enum Error {
+    /// A name that is not a commit.
+    NotACommit;
+    /// The two histories share no commit and `allow_unrelated` is off.
+    Unrelated;
+    /// `ff_only`, and the merge is not a fast-forward.
+    NotFastForward;
+    /// `MERGE_HEAD` exists: a merge is already under way.
+    InProgress;
+    /// `continue` or `abort` with no merge under way.
+    NoMerge;
+    /// `continue` with paths still in conflict.
+    UnmergedPaths;
+    /// HEAD is on a branch with no commits.
+    Unborn;
+    /// The commit message came out empty.
+    EmptyMessage;
+    /// The index differs from HEAD (staged changes, or an unfinished merge):
+    /// git refuses to merge on top of it. The paths.
+    IndexDirty(List<str>);
+    /// The merge would change files that have local modifications. The paths.
+    LocalChanges(List<str>);
+    /// Something this merge does not do. Why.
+    Unsupported(str);
+    /// A file under `.git` or in the working tree could not be read or written.
+    Io;
+    Object(GIT_object.Error);
+    Index(GIT_index.Error);
+    Refs(GIT_refs.Error);
+    Graph(GIT_graph.Error);
+    Checkout(GIT_checkout.Error);
+    Status(GIT_status.Error);
+}
+
+pub str Error.to_str() {
+    match (this) {
+        case NotACommit: {
+            return "that is not a commit";
+        }
+        case Unrelated: {
+            return "refusing to merge unrelated histories";
+        }
+        case NotFastForward: {
+            return "not possible to fast-forward, aborting";
+        }
+        case InProgress: {
+            return "you have not concluded your merge (MERGE_HEAD exists)";
+        }
+        case NoMerge: {
+            return "there is no merge to continue or abort (MERGE_HEAD is missing)";
+        }
+        case UnmergedPaths: {
+            return "committing is not possible because you have unmerged files";
+        }
+        case Unborn: {
+            return "HEAD is on a branch with no commits yet";
+        }
+        case EmptyMessage: {
+            return "aborting commit due to empty commit message";
+        }
+        case IndexDirty(List<str> paths): {
+            return "your local changes to the following files would be overwritten by merge: " + paths.join(", ");
+        }
+        case LocalChanges(List<str> paths): {
+            return "your local changes to the following files would be overwritten by merge: " + paths.join(", ");
+        }
+        case Unsupported(str why): {
+            return "not supported: " + why;
+        }
+        case Io: {
+            return "a file could not be read or written";
+        }
+        case Object(GIT_object.Error error): {
+            return "object: " + error.to_str();
+        }
+        case Index(GIT_index.Error error): {
+            return "index: " + error.to_str();
+        }
+        case Refs(GIT_refs.Error error): {
+            return "refs: " + error.to_str();
+        }
+        case Graph(GIT_graph.Error error): {
+            return "graph: " + error.to_str();
+        }
+        case Checkout(GIT_checkout.Error error): {
+            return "checkout: " + error.to_str();
+        }
+        case Status(GIT_status.Error error): {
+            return "status: " + error.to_str();
+        }
+    }
+}
+
+// --- types -----------------------------------------------------------------------
+
+/// One side of a path: its mode (0o100644, 0o100755, 0o120000, 0o160000) and
+/// blob id. Mode 0 and id `""`: the path is not there on that side.
+pub type Side {
+    pub int mode;
+    pub str id;
+}
+
+/// What kind of conflict a path is in.
+pub enum Kind {
+    /// Both sides changed the file and the changes overlap, or a binary
+    /// file, a symlink or a submodule changed on both sides.
+    Content;
+    /// Both sides added the path, differently.
+    AddAdd;
+    /// Ours changed it, theirs deleted it.
+    ModifyDelete;
+    /// Ours deleted it, theirs changed it.
+    DeleteModify;
+    /// A regular file on one side, a symlink or submodule on the other.
+    DistinctTypes;
+    /// A file on one side, a directory on the other; the file was renamed.
+    FileDirectory;
+    /// Both sides changed the mode, differently.
+    Mode;
+}
+
+pub str Kind.word() {
+    match (this) {
+        case Content: {
+            return "content";
+        }
+        case AddAdd: {
+            return "add/add";
+        }
+        case ModifyDelete: {
+            return "modify/delete";
+        }
+        case DeleteModify: {
+            return "delete/modify";
+        }
+        case DistinctTypes: {
+            return "distinct types";
+        }
+        case FileDirectory: {
+            return "file/directory";
+        }
+        case Mode: {
+            return "mode";
+        }
+    }
+}
+
+int Kind.code() {
+    match (this) {
+        case Content: {
+            return 0;
+        }
+        case AddAdd: {
+            return 1;
+        }
+        case ModifyDelete: {
+            return 2;
+        }
+        case DeleteModify: {
+            return 3;
+        }
+        case DistinctTypes: {
+            return 4;
+        }
+        case FileDirectory: {
+            return 5;
+        }
+        case Mode: {
+            return 6;
+        }
+    }
+}
+
+pub bool Kind.eq(Kind other) {
+    return code() == other.code();
+}
+
+/// A path left in conflict. `base`, `ours` and `theirs` are the index stages
+/// 1, 2 and 3: a side whose mode is 0 has no stage.
+pub type Conflicted {
+    pub str path;
+    pub Kind kind;
+    pub Side base;
+    pub Side ours;
+    pub Side theirs;
+}
+
+/// Sorted by path, as the index is.
+pub int Conflicted.cmp(Conflicted other) {
+    return cmp_bytes(path.to_bytes(), other.path.to_bytes());
+}
+
+/// The result of `merge_trees`.
+pub type TreeMerge {
+    /// The merged tree, written to the object store: conflicted paths hold
+    /// the file with markers (or the modified side, or ours).
+    pub str tree;
+    pub List<Conflicted> conflicts;
+    /// git's `CONFLICT (...)` / `Auto-merging` lines, in the order found.
+    pub List<str> messages;
+}
+
+/// Options for `merge_with_base` / `merge_trees`' callers.
+pub type Opts {
+    pub str ours_label = "HEAD";
+    pub str theirs_label = "theirs";
+    /// Printed after `|||||||` in diff3 style; git uses the base commit's
+    /// short id, or `merged common ancestors`.
+    pub str base_label = "";
+    pub GIT_diff3.Style style = GIT_diff3.Style.Merge;
+}
+
+/// What `merge_with_base` leaves behind.
+pub type Applied {
+    pub str tree;
+    pub List<Conflicted> conflicts;
+    pub List<str> messages;
+}
+
+/// How `start` treats a merge that could be a fast-forward.
+pub enum FastForward {
+    /// Fast-forward when possible (git's default).
+    Allow;
+    /// `--no-ff`: always make a merge commit.
+    Never;
+    /// `--ff-only`: fast-forward or refuse.
+    Only;
+}
+
+int FastForward.code() {
+    match (this) {
+        case Allow: {
+            return 0;
+        }
+        case Never: {
+            return 1;
+        }
+        case Only: {
+            return 2;
+        }
+    }
+}
+
+pub bool FastForward.eq(FastForward other) {
+    return code() == other.code();
+}
+
+pub type StartOpts {
+    pub FastForward ff = FastForward.Allow;
+    pub bool allow_unrelated = false;
+    pub GIT_diff3.Style style = GIT_diff3.Style.Merge;
+    /// Replaces the generated merge message when not empty.
+    pub str message = "";
+}
+
+/// How `start` and `continue_merge` ended.
+pub enum Ending {
+    /// Theirs is already part of HEAD.
+    UpToDate;
+    /// HEAD moved to theirs, no merge commit.
+    FastForwarded;
+    /// A merge commit was made (`Report.commit`).
+    Merged;
+    /// Conflicts: the merge is under way (`MERGE_HEAD` written).
+    Conflicts;
+}
+
+int Ending.code() {
+    match (this) {
+        case UpToDate: {
+            return 0;
+        }
+        case FastForwarded: {
+            return 1;
+        }
+        case Merged: {
+            return 2;
+        }
+        case Conflicts: {
+            return 3;
+        }
+    }
+}
+
+pub bool Ending.eq(Ending other) {
+    return code() == other.code();
+}
+
+pub type Report {
+    pub Ending ending;
+    /// The new HEAD commit, or `""`.
+    pub str commit;
+    pub str tree;
+    pub List<Conflicted> conflicts;
+    pub List<str> messages;
+}
+
+/// The `git ls-files -u` lines of a conflict list: `<mode> <id> <stage>\t<path>`.
+pub List<str> stage_lines(List<Conflicted> conflicts) {
+    List<str> out = [];
+    for (Conflicted c in conflicts) {
+        if (c.base.mode != 0) {
+            out.push(stage_line(c.base, 1, c.path));
+        }
+        if (c.ours.mode != 0) {
+            out.push(stage_line(c.ours, 2, c.path));
+        }
+        if (c.theirs.mode != 0) {
+            out.push(stage_line(c.theirs, 3, c.path));
+        }
+    }
+    return out;
+}
+
+str stage_line(Side side, int stage, str path) {
+    return mode_text(side.mode) + " " + side.id + " " + stage.to_str() + "\t" + path;
+}
+
+str mode_text(int mode) {
+    str text = "";
+    int digit_index = 5;
+    while (digit_index >= 0) {
+        text = text + (mode >> digit_index * 3 & 7).to_str();
+        digit_index = digit_index - 1;
+    }
+    return text;
+}
+
+// --- small helpers -----------------------------------------------------------------
+
+Side absent() {
+    return Side(0, "");
+}
+
+bool is_absent(Side side) {
+    return side.mode == 0;
+}
+
+bool is_dir(Side side) {
+    return side.mode >> 12 == 0o04;
+}
+
+bool is_reg(Side side) {
+    return side.mode >> 12 == 0o10;
+}
+
+bool same_side(Side a, Side b) {
+    return a.mode == b.mode && a.id == b.id;
+}
+
+str short_id(str id) {
+    if (id.size() > 7) {
+        return id.substr(0, 7);
+    }
+    return id;
+}
+
+Result<GIT_object.Object, Error> read_object(str gitdir, str id) {
+    match (GIT_object.read(gitdir, id)) {
+        case Ok(GIT_object.Object object): {
+            return Result<GIT_object.Object, Error>.Ok(object);
+        }
+        case Err(GIT_object.Error error): {
+            return Result<GIT_object.Object, Error>.Err(Error.Object(error));
+        }
+    }
+}
+
+Result<str, Error> write_blob(str gitdir, bytes content) {
+    match (GIT_object.write_blob(gitdir, content)) {
+        case Ok(str id): {
+            return Result<str, Error>.Ok(id);
+        }
+        case Err(GIT_object.Error error): {
+            return Result<str, Error>.Err(Error.Object(error));
+        }
+    }
+}
+
+Result<str, Error> write_tree(str gitdir, List<GIT_object.Entry> entries) {
+    match (GIT_object.write_tree(gitdir, entries)) {
+        case Ok(str id): {
+            return Result<str, Error>.Ok(id);
+        }
+        case Err(GIT_object.Error error): {
+            return Result<str, Error>.Err(Error.Object(error));
+        }
+    }
+}
+
+Result<str, Error> write_commit(str gitdir, GIT_object.Commit commit) {
+    match (GIT_object.write_commit(gitdir, commit)) {
+        case Ok(str id): {
+            return Result<str, Error>.Ok(id);
+        }
+        case Err(GIT_object.Error error): {
+            return Result<str, Error>.Err(Error.Object(error));
+        }
+    }
+}
+
+/// The entries of the tree `id` (`""`: none).
+Result<List<GIT_object.Entry>, Error> read_tree(str gitdir, str id) {
+    List<GIT_object.Entry> none = [];
+    if (id == "") {
+        return Result<List<GIT_object.Entry>, Error>.Ok(none);
+    }
+    GIT_object.Object object = read_object(gitdir, id)?;
+    match (object.body) {
+        case Tree(List<GIT_object.Entry> entries): {
+            return Result<List<GIT_object.Entry>, Error>.Ok(entries);
+        }
+        case Blob: {
+            return Result<List<GIT_object.Entry>, Error>.Err(Error.Object(GIT_object.Error.BadTree));
+        }
+        case Commit: {
+            return Result<List<GIT_object.Entry>, Error>.Err(Error.Object(GIT_object.Error.BadTree));
+        }
+        case Tag: {
+            return Result<List<GIT_object.Entry>, Error>.Err(Error.Object(GIT_object.Error.BadTree));
+        }
+    }
+}
+
+/// The commit `id` as a Commit, or Error.NotACommit.
+Result<GIT_object.Commit, Error> read_commit(str gitdir, str id) {
+    GIT_object.Object object = read_object(gitdir, id)?;
+    match (object.body) {
+        case Commit(GIT_object.Commit commit): {
+            return Result<GIT_object.Commit, Error>.Ok(commit);
+        }
+        case Blob: {
+            return Result<GIT_object.Commit, Error>.Err(Error.NotACommit);
+        }
+        case Tree(_): {
+            return Result<GIT_object.Commit, Error>.Err(Error.NotACommit);
+        }
+        case Tag(_): {
+            return Result<GIT_object.Commit, Error>.Err(Error.NotACommit);
+        }
+    }
+}
+
+/// A tree id from a commit id or a tree id; `""` stays `""` (the empty tree).
+Result<str, Error> tree_of(str gitdir, str id) {
+    if (id == "") {
+        return Result<str, Error>.Ok("");
+    }
+    GIT_object.Object object = read_object(gitdir, id)?;
+    match (object.body) {
+        case Commit(GIT_object.Commit commit): {
+            return Result<str, Error>.Ok(commit.tree);
+        }
+        case Tree(_): {
+            return Result<str, Error>.Ok(id);
+        }
+        case Blob: {
+            return Result<str, Error>.Err(Error.NotACommit);
+        }
+        case Tag(_): {
+            return Result<str, Error>.Err(Error.NotACommit);
+        }
+    }
+}
+
+// A tree's entries by name. A name that is not UTF-8 is refused.
+Result<Map<str, Side>, Error> side_map(List<GIT_object.Entry> entries) {
+    Map<str, Side> out = {};
+    for (GIT_object.Entry entry in entries) {
+        match (entry.name.utf8()) {
+            case Some(str name): {
+                out.set(name, Side(entry.mode, entry.id));
+            }
+            case None: {
+                return Result<Map<str, Side>, Error>.Err(Error.Unsupported("a file name that is not UTF-8"));
+            }
+        }
+    }
+    return Result<Map<str, Side>, Error>.Ok(out);
+}
+
+/// Every non-directory a tree reaches, by full path.
+Result<Map<str, Side>, Error> flatten(str gitdir, str tree) {
+    Map<str, Side> out = {};
+    flatten_into(gitdir, tree, "", out)?;
+    return Result<Map<str, Side>, Error>.Ok(out);
+}
+
+Result<bool, Error> flatten_into(str gitdir, str tree, str prefix, Map<str, Side> out) {
+    List<GIT_object.Entry> entries = read_tree(gitdir, tree)?;
+    for (GIT_object.Entry entry in entries) {
+        str name = "";
+        match (entry.name.utf8()) {
+            case Some(str found): {
+                name = found;
+            }
+            case None: {
+                return Result<bool, Error>.Err(Error.Unsupported("a file name that is not UTF-8"));
+            }
+        }
+        str full = name;
+        if (prefix != "") {
+            full = prefix + "/" + name;
+        }
+        if (entry.is_tree()) {
+            flatten_into(gitdir, entry.id, full, out)?;
+        } else {
+            out.set(full, Side(entry.mode, entry.id));
+        }
+    }
+    return Result<bool, Error>.Ok(true);
+}
+
+// --- the tree merge --------------------------------------------------------------
+
+type Ctx {
+    str gitdir;
+    GIT_diff3.Labels labels;
+    GIT_diff3.Style style;
+    List<Conflicted> conflicts;
+    List<str> messages;
+}
+
+/// Merge three trees (or commits; `""` is the empty tree). See the module header.
+pub Result<TreeMerge, Error> merge_trees(str gitdir, str base_tree, str ours_tree, str theirs_tree, GIT_diff3.Labels labels, GIT_diff3.Style style = GIT_diff3.Style.Merge) {
+    str b = tree_of(gitdir, base_tree)?;
+    str o = tree_of(gitdir, ours_tree)?;
+    str t = tree_of(gitdir, theirs_tree)?;
+    Ctx ctx = Ctx(gitdir, labels, style, [], []);
+    str merged = merge_dir(ctx, "", b, o, t)?;
+    if (merged == "") {
+        List<GIT_object.Entry> none = [];
+        merged = write_tree(gitdir, none)?;
+    }
+    ctx.conflicts.sort();
+    return Result<TreeMerge, Error>.Ok(TreeMerge(merged, ctx.conflicts, ctx.messages));
+}
+
+// The merged tree of one directory, written; `""` when it came out empty.
+Result<str, Error> merge_dir(Ctx ctx, str prefix, str base_tree, str ours_tree, str theirs_tree) {
+    Map<str, Side> base = side_map(read_tree(ctx.gitdir, base_tree)?)?;
+    Map<str, Side> ours = side_map(read_tree(ctx.gitdir, ours_tree)?)?;
+    Map<str, Side> theirs = side_map(read_tree(ctx.gitdir, theirs_tree)?)?;
+    Map<str, bool> taken = {};
+    List<str> names = [];
+    for (str name in base.keys()) {
+        taken.set(name, true);
+        names.push(name);
+    }
+    for (str name in ours.keys()) {
+        if (!taken.contains(name)) {
+            names.push(name);
+        }
+        taken.set(name, true);
+    }
+    for (str name in theirs.keys()) {
+        if (!taken.contains(name)) {
+            names.push(name);
+        }
+        taken.set(name, true);
+    }
+    names.sort();
+    List<GIT_object.Entry> out = [];
+    for (str name in names) {
+        Side b = base.get(name).or(absent());
+        Side o = ours.get(name).or(absent());
+        Side t = theirs.get(name).or(absent());
+        merge_name(ctx, prefix, name, b, o, t, out, taken)?;
+    }
+    if (out.size() == 0) {
+        return Result<str, Error>.Ok("");
+    }
+    return write_tree(ctx.gitdir, out);
+}
+
+void push_side(List<GIT_object.Entry> out, str name, Side side) {
+    if (side.mode != 0) {
+        out.push(GIT_object.Entry(side.mode, name.to_bytes(), side.id));
+    }
+}
+
+// One name of a directory, given what the three trees have there.
+Result<bool, Error> merge_name(Ctx ctx, str prefix, str name, Side b, Side o, Side t, List<GIT_object.Entry> out, Map<str, bool> taken) {
+    str full = name;
+    if (prefix != "") {
+        full = prefix + "/" + name;
+    }
+    // Nothing to decide: the same on both sides, or only one side changed.
+    if (same_side(o, t)) {
+        push_side(out, name, o);
+        return Result<bool, Error>.Ok(true);
+    }
+    if (same_side(b, o)) {
+        push_side(out, name, t);
+        return Result<bool, Error>.Ok(true);
+    }
+    if (same_side(b, t)) {
+        push_side(out, name, o);
+        return Result<bool, Error>.Ok(true);
+    }
+    bool o_dirish = is_absent(o) || is_dir(o);
+    bool t_dirish = is_absent(t) || is_dir(t);
+    if (o_dirish && t_dirish) {
+        str bt = "";
+        if (is_dir(b)) {
+            bt = b.id;
+        }
+        str ot = "";
+        if (is_dir(o)) {
+            ot = o.id;
+        }
+        str tt = "";
+        if (is_dir(t)) {
+            tt = t.id;
+        }
+        str sub = merge_dir(ctx, full, bt, ot, tt)?;
+        if (sub != "") {
+            out.push(GIT_object.Entry(0o40000, name.to_bytes(), sub));
+        }
+        return Result<bool, Error>.Ok(true);
+    }
+    // The base's file, if it had a file there.
+    Side bf = b;
+    if (is_dir(b)) {
+        bf = absent();
+    }
+    if (!o_dirish && !t_dirish) {
+        return merge_leaves(ctx, full, name, bf, o, t, out, taken);
+    }
+    // One side has a file, the other a directory or nothing.
+    bool file_is_ours = !o_dirish;
+    Side file = t;
+    Side other = o;
+    str file_label = ctx.labels.theirs;
+    if (file_is_ours) {
+        file = o;
+        other = t;
+        file_label = ctx.labels.ours;
+    }
+    if (is_dir(other)) {
+        str dir_ours = "";
+        str dir_theirs = "";
+        if (file_is_ours) {
+            dir_theirs = other.id;
+        } else {
+            dir_ours = other.id;
+        }
+        str bt = "";
+        if (is_dir(b)) {
+            bt = b.id;
+        }
+        str sub = merge_dir(ctx, full, bt, dir_ours, dir_theirs)?;
+        if (sub != "") {
+            out.push(GIT_object.Entry(0o40000, name.to_bytes(), sub));
+            str moved = unique_name(name, file_label, taken);
+            str moved_full = moved;
+            if (prefix != "") {
+                moved_full = prefix + "/" + moved;
+            }
+            push_side(out, moved, file);
+            Side stage1 = bf;
+            Side stage2 = absent();
+            Side stage3 = absent();
+            if (file_is_ours) {
+                stage2 = file;
+            } else {
+                stage3 = file;
+            }
+            ctx.conflicts.push(Conflicted(moved_full, Kind.FileDirectory, stage1, stage2, stage3));
+            ctx.messages.push("CONFLICT (file/directory): directory in the way of " + full + " from " + ctx.labels.ours + "; moving it to " + moved_full + " instead.");
+            return Result<bool, Error>.Ok(true);
+        }
+    }
+    // The other side has no such entry as far as this file is concerned.
+    if (is_absent(bf)) {
+        push_side(out, name, file);
+        return Result<bool, Error>.Ok(true);
+    }
+    push_side(out, name, file);
+    Side s2 = absent();
+    Side s3 = absent();
+    str deleted_in = ctx.labels.theirs;
+    str modified_in = ctx.labels.ours;
+    Kind kind = Kind.ModifyDelete;
+    if (file_is_ours) {
+        s2 = file;
+    } else {
+        s3 = file;
+        deleted_in = ctx.labels.ours;
+        modified_in = ctx.labels.theirs;
+        kind = Kind.DeleteModify;
+    }
+    ctx.conflicts.push(Conflicted(full, kind, bf, s2, s3));
+    ctx.messages.push("CONFLICT (modify/delete): " + full + " deleted in " + deleted_in + " and modified in " + modified_in + ".  Version " + modified_in + " of " + full + " left in tree.");
+    return Result<bool, Error>.Ok(true);
+}
+
+// `name~label`, `/` in the label as `_`, made unique among the names in use.
+str unique_name(str name, str label, Map<str, bool> taken) {
+    List<int> clean = [];
+    for (int c in label.chars()) {
+        if (c == '/') {
+            clean.push('_');
+        } else {
+            clean.push(c);
+        }
+    }
+    str stem = name + "~" + str.from_chars(clean);
+    str candidate = stem;
+    int n = 0;
+    while (taken.contains(candidate)) {
+        candidate = stem + "_" + n.to_str();
+        n = n + 1;
+    }
+    taken.set(candidate, true);
+    return candidate;
+}
+
+// Both sides have a file (or symlink, or submodule) there, and they differ
+// from each other and from the base (`b`; absent for an add/add).
+Result<bool, Error> merge_leaves(Ctx ctx, str full, str name, Side b, Side o, Side t, List<GIT_object.Entry> out, Map<str, bool> taken) {
+    if (o.mode >> 12 != t.mode >> 12) {
+        return merge_distinct_types(ctx, full, name, b, o, t, out, taken);
+    }
+    if (!is_reg(o)) {
+        // Symlinks and submodules: no merging, ours stays.
+        push_side(out, name, o);
+        ctx.conflicts.push(Conflicted(full, Kind.Content, b, o, t));
+        ctx.messages.push("CONFLICT (content): Merge conflict in " + full);
+        return Result<bool, Error>.Ok(true);
+    }
+    // Modes first, as git does: one side's change wins, two different ones conflict.
+    int mode = t.mode;
+    bool mode_conflict = false;
+    if (!(o.mode == t.mode || o.mode == b.mode)) {
+        mode = o.mode;
+        if (t.mode != b.mode) {
+            mode_conflict = true;
+        }
+    }
+    str id = "";
+    bool content_conflict = false;
+    if (o.id == t.id) {
+        id = o.id;
+    } else if (b.mode != 0 && b.id == o.id) {
+        id = t.id;
+    } else if (b.mode != 0 && b.id == t.id) {
+        id = o.id;
+    } else {
+        bytes base_content = [];
+        if (b.mode != 0) {
+            base_content = read_object(ctx.gitdir, b.id)?.raw;
+        }
+        bytes ours_content = read_object(ctx.gitdir, o.id)?.raw;
+        bytes theirs_content = read_object(ctx.gitdir, t.id)?.raw;
+        if (is_binary(base_content) || is_binary(ours_content) || is_binary(theirs_content)) {
+            id = o.id;
+            content_conflict = true;
+            ctx.messages.push("warning: Cannot merge binary files: " + full + " (" + ctx.labels.ours + " vs. " + ctx.labels.theirs + ")");
+        } else {
+            ctx.messages.push("Auto-merging " + full);
+            GIT_diff3.Merged merged = GIT_diff3.merge3(base_content, ours_content, theirs_content, ctx.labels, style: ctx.style, level: GIT_diff3.Level.Zealous);
+            id = write_blob(ctx.gitdir, merged.text)?;
+            content_conflict = merged.conflicts > 0;
+        }
+    }
+    out.push(GIT_object.Entry(mode, name.to_bytes(), id));
+    if (content_conflict || mode_conflict) {
+        Kind kind = Kind.Content;
+        str word = "content";
+        if (b.mode == 0) {
+            kind = Kind.AddAdd;
+            word = "add/add";
+        } else if (!content_conflict) {
+            kind = Kind.Mode;
+        }
+        ctx.conflicts.push(Conflicted(full, kind, b, o, t));
+        ctx.messages.push("CONFLICT (" + word + "): Merge conflict in " + full);
+    }
+    return Result<bool, Error>.Ok(true);
+}
+
+// git's `buffer_is_binary`: a NUL in the first 8000 bytes.
+bool is_binary(bytes content) {
+    int limit = content.size();
+    if (limit > 8000) {
+        limit = 8000;
+    }
+    for (int i in 0 .. limit) {
+        if (content[i] == 0) {
+            return true;
+        }
+    }
+    return false;
+}
+
+// Ours and theirs are different kinds of thing (file, symlink, submodule).
+// The regular file is renamed `name~label` (both, if neither is regular), each
+// side keeping its own stage, and the base's stage with the side whose kind
+// the base had.
+Result<bool, Error> merge_distinct_types(Ctx ctx, str full, str name, Side b, Side o, Side t, List<GIT_object.Entry> out, Map<str, bool> taken) {
+    bool rename_ours = false;
+    bool rename_theirs = false;
+    if (is_reg(o)) {
+        rename_ours = true;
+    } else if (is_reg(t)) {
+        rename_theirs = true;
+    } else {
+        rename_ours = true;
+        rename_theirs = true;
+    }
+    str parent = "";
+    if (full.size() > name.size()) {
+        parent = full.substr(0, full.size() - name.size());
+    }
+    str ours_name = name;
+    if (rename_ours) {
+        ours_name = unique_name(name, ctx.labels.ours, taken);
+    }
+    str theirs_name = name;
+    if (rename_theirs) {
+        theirs_name = unique_name(name, ctx.labels.theirs, taken);
+    }
+    Side ours_base = absent();
+    Side theirs_base = absent();
+    if (b.mode >> 12 == o.mode >> 12) {
+        ours_base = b;
+    }
+    if (b.mode >> 12 == t.mode >> 12) {
+        theirs_base = b;
+    }
+    push_side(out, ours_name, o);
+    push_side(out, theirs_name, t);
+    ctx.conflicts.push(Conflicted(parent + ours_name, Kind.DistinctTypes, ours_base, o, absent()));
+    ctx.conflicts.push(Conflicted(parent + theirs_name, Kind.DistinctTypes, theirs_base, absent(), t));
+    str how = "renamed one of them so each can be recorded somewhere.";
+    if (rename_ours && rename_theirs) {
+        how = "renamed both of them so each can be recorded somewhere.";
+    }
+    ctx.messages.push("CONFLICT (distinct types): " + full + " had different types on each side; " + how);
+    return Result<bool, Error>.Ok(true);
+}
+
+// Byte comparison of two runs, negative/zero/positive (each module keeps its
+// own private copy; this is the one `Conflicted.cmp` sorts with).
+int cmp_bytes(bytes left, bytes right) {
+    int length = left.size();
+    if (right.size() < length) {
+        length = right.size();
+    }
+    for (int i in 0 .. length) {
+        if (left[i] != right[i]) {
+            return left[i] - right[i];
+        }
+    }
+    return left.size() - right.size();
+}
+
+// --- wrapping the other modules' errors -------------------------------------------
+
+Result<GIT_index.Index, Error> read_index(str gitdir) {
+    match (GIT_index.read(gitdir)) {
+        case Ok(GIT_index.Index index): {
+            return Result<GIT_index.Index, Error>.Ok(index);
+        }
+        case Err(GIT_index.Error error): {
+            match (error) {
+                case NotFound: {
+                    return Result<GIT_index.Index, Error>.Ok(GIT_index.Index([]));
+                }
+                case Io: {
+                    return Result<GIT_index.Index, Error>.Err(Error.Index(error));
+                }
+                case BadSignature: {
+                    return Result<GIT_index.Index, Error>.Err(Error.Index(error));
+                }
+                case BadVersion: {
+                    return Result<GIT_index.Index, Error>.Err(Error.Index(error));
+                }
+                case Checksum: {
+                    return Result<GIT_index.Index, Error>.Err(Error.Index(error));
+                }
+                case Truncated: {
+                    return Result<GIT_index.Index, Error>.Err(Error.Index(error));
+                }
+                case BadExtension: {
+                    return Result<GIT_index.Index, Error>.Err(Error.Index(error));
+                }
+            }
+        }
+    }
+}
+
+Result<bool, Error> write_index(str gitdir, GIT_index.Index index) {
+    match (GIT_index.write(gitdir, index)) {
+        case Ok: {
+            return Result<bool, Error>.Ok(true);
+        }
+        case Err(GIT_index.Error error): {
+            return Result<bool, Error>.Err(Error.Index(error));
+        }
+    }
+}
+
+Result<bool, Error> graph_is_ancestor(str gitdir, str ancestor, str descendant) {
+    match (GIT_graph.is_ancestor(gitdir, ancestor, descendant)) {
+        case Ok(bool answer): {
+            return Result<bool, Error>.Ok(answer);
+        }
+        case Err(GIT_graph.Error error): {
+            return Result<bool, Error>.Err(Error.Graph(error));
+        }
+    }
+}
+
+Result<bool, Error> ref_update(str gitdir, str name, str new_id, Option<str> expect_old, str msg) {
+    match (GIT_refs.update(gitdir, name, new_id, expect_old, msg: msg)) {
+        case Ok: {
+            return Result<bool, Error>.Ok(true);
+        }
+        case Err(GIT_refs.Error error): {
+            return Result<bool, Error>.Err(Error.Refs(error));
+        }
+    }
+}
+
+// --- the state files -----------------------------------------------------------------
+
+/// Is a merge under way (`.git/MERGE_HEAD` exists)?
+pub bool in_progress(str gitdir) {
+    return fs.exists(fs.join(gitdir, "MERGE_HEAD"));
+}
+
+/// The commits being merged in, from `MERGE_HEAD` (one line each; several only
+/// for an octopus merge git started), empty when no merge is under way.
+pub List<str> merge_heads(str gitdir) {
+    List<str> out = [];
+    match (io.read(fs.join(gitdir, "MERGE_HEAD"))) {
+        case Ok(str text): {
+            for (str line in text.split("\n")) {
+                str id = line.trim();
+                if (id.size() == 40 && GIT_object.is_name(id)) {
+                    out.push(id);
+                }
+            }
+        }
+        case Err(_): {
+        }
+    }
+    return out;
+}
+
+/// The first commit being merged in, or None.
+pub Option<str> merge_head(str gitdir) {
+    List<str> heads = merge_heads(gitdir);
+    if (heads.size() == 0) {
+        return Option<str>.None;
+    }
+    return Option<str>.Some(heads[0]);
+}
+
+/// The text of `.git/MERGE_MSG`, or `""`.
+pub str merge_message_text(str gitdir) {
+    match (io.read(fs.join(gitdir, "MERGE_MSG"))) {
+        case Ok(str text): {
+            return text;
+        }
+        case Err(_): {
+            return "";
+        }
+    }
+}
+
+Result<bool, Error> write_state(str gitdir, str name, str text) {
+    match (io.write(fs.join(gitdir, name), text)) {
+        case Ok: {
+            return Result<bool, Error>.Ok(true);
+        }
+        case Err(_): {
+            return Result<bool, Error>.Err(Error.Io);
+        }
+    }
+}
+
+/// Remove the files a merge under way leaves: `MERGE_HEAD`, `MERGE_MODE`,
+/// `MERGE_MSG` and `AUTO_MERGE`. `ORIG_HEAD` stays, as it does in git.
+pub void clear_state(str gitdir) {
+    List<str> names = ["MERGE_HEAD", "MERGE_MODE", "MERGE_MSG", "AUTO_MERGE"];
+    for (str name in names) {
+        str path = fs.join(gitdir, name);
+        if (fs.exists(path) || fs.is_link(path)) {
+            match (fs.remove(path)) {
+                case Ok: {
+                }
+                case Err(_): {
+                }
+            }
+        }
+    }
+}
+
+// --- identities and messages -----------------------------------------------------------
+
+// `GIT_<prefix>_NAME/EMAIL/DATE`, then `user.name` / `user.email`, then the
+// login name; a date that is not git's raw `<seconds> <+zone>` is ignored.
+GIT_object.Ident ident(str gitdir, str prefix) {
+    str who = os.env("GIT_" + prefix + "_NAME").or("");
+    if (who == "") {
+        who = GIT_config.get(gitdir, "user", "", "name").or("");
+    }
+    if (who == "") {
+        who = os.env("USER").or("unknown");
+    }
+    str mail = os.env("GIT_" + prefix + "_EMAIL").or("");
+    if (mail == "") {
+        mail = GIT_config.get(gitdir, "user", "", "email").or("");
+    }
+    if (mail == "") {
+        mail = who + "@localhost";
+    }
+    int when = date.now();
+    str zone = "+0000";
+    List<str> parts = os.env("GIT_" + prefix + "_DATE").or("").trim().split(" ");
+    if (parts.size() == 2 && parts[1].size() == 5 && (parts[1].byte_at(0) == '+' || parts[1].byte_at(0) == '-')) {
+        match (parts[0].parse_int()) {
+            case Some(int seconds): {
+                when = seconds;
+                zone = parts[1];
+            }
+            case None: {
+            }
+        }
+    }
+    int minutes = parts_minutes(zone);
+    return GIT_object.Ident(strip_ident(who).to_bytes(), strip_ident(mail).to_bytes(), when, minutes, zone);
+}
+
+int parts_minutes(str zone) {
+    int hours = zone.substr(1, 3).parse_int().or(0);
+    int minutes = zone.substr(3, 5).parse_int().or(0);
+    int total = hours * 60 + minutes;
+    if (zone.byte_at(0) == '-') {
+        return 0 - total;
+    }
+    return total;
+}
+
+str strip_ident(str raw) {
+    List<int> out = [];
+    for (int c in raw.chars()) {
+        if (c != '<' && c != '>' && c != '\n') {
+            out.push(c);
+        }
+    }
+    return str.from_chars(out).trim();
+}
+
+/// The branch name HEAD is on (`main`), or `""` when detached.
+str current_branch(str gitdir) {
+    match (GIT_refs.head(gitdir)) {
+        case Ok(GIT_refs.Head head): {
+            match (head) {
+                case Born(str name, str id): {
+                    return short_ref(name);
+                }
+                case Unborn(str name): {
+                    return short_ref(name);
+                }
+                case Detached(str id): {
+                    return "";
+                }
+            }
+        }
+        case Err(_): {
+            return "";
+        }
+    }
+}
+
+str short_ref(str full) {
+    if (full.starts_with("refs/heads/")) {
+        return full.substr(11, full.size());
+    }
+    return full;
+}
+
+/// git's default merge message for merging `spec` into HEAD:
+/// `Merge branch 'x'`, `Merge remote-tracking branch 'origin/x'`,
+/// `Merge tag 'v1'` or `Merge commit 'x'`, followed by ` into <branch>` unless
+/// the branch is `main` or `master` (`merge.suppressDest` is not read), or
+/// ` into HEAD` when detached. No trailing newline.
+pub str default_message(str gitdir, str spec) {
+    str kind = "commit";
+    if (GIT_refs.has_ref(gitdir, "refs/heads/" + spec)) {
+        kind = "branch";
+    } else if (GIT_refs.has_ref(gitdir, "refs/remotes/" + spec)) {
+        kind = "remote-tracking branch";
+    } else if (GIT_refs.has_ref(gitdir, "refs/tags/" + spec)) {
+        kind = "tag";
+    }
+    str text = "Merge " + kind + " '" + spec + "'";
+    str branch = current_branch(gitdir);
+    if (branch == "") {
+        return text + " into HEAD";
+    }
+    if (branch != "main" && branch != "master") {
+        return text + " into " + branch;
+    }
+    return text;
+}
+
+/// A commit message as `git commit`'s default cleanup leaves it: `#` lines gone,
+/// trailing blanks cut from every line, runs of blank lines made one, leading
+/// and trailing blank lines gone, and one final newline (empty stays empty).
+pub str clean_message(str raw) {
+    List<str> kept = [];
+    bool blank_pending = false;
+    for (str line in raw.split("\n")) {
+        if (line.starts_with("#")) {
+            continue;
+        }
+        str text = trim_end(line);
+        if (text == "") {
+            if (kept.size() > 0) {
+                blank_pending = true;
+            }
+            continue;
+        }
+        if (blank_pending) {
+            kept.push("");
+            blank_pending = false;
+        }
+        kept.push(text);
+    }
+    if (kept.size() == 0) {
+        return "";
+    }
+    return kept.join("\n") + "\n";
+}
+
+// `# Conflicts:` block git appends to MERGE_MSG: one `#\t<path>` per unmerged path.
+str conflicts_block(List<Conflicted> conflicts) {
+    str out = "\n# Conflicts:\n";
+    str last = "";
+    for (Conflicted c in conflicts) {
+        if (c.path != last) {
+            out = out + "#\t" + c.path + "\n";
+        }
+        last = c.path;
+    }
+    return out;
+}
+
+// --- merge bases -----------------------------------------------------------------------
+
+/// The merge bases of two commits, newest first (several for a criss-cross
+/// history), empty for unrelated histories.
+pub Result<List<str>, Error> bases(str gitdir, str ours, str theirs) {
+    match (GIT_graph.merge_bases(gitdir, ours, theirs)) {
+        case Ok(List<str> found): {
+            return Result<List<str>, Error>.Ok(found);
+        }
+        case Err(GIT_graph.Error error): {
+            return Result<List<str>, Error>.Err(Error.Graph(error));
+        }
+    }
+}
+
+// What a merge is based on: the tree, the commit it stands for (a real base
+// commit, or an unreferenced virtual one) and the label diff3 prints.
+type BaseTree {
+    str tree;
+    str commit;
+    str label;
+}
+
+// The base for merging `ours` and `theirs`: the one merge base; none (the
+// empty tree); or several folded into a virtual commit the way git's recursive
+// strategy does -- oldest first, each next one merged into the running result
+// with that pair's own base, `Temporary merge branch 1/2` as labels.
+Result<BaseTree, Error> base_for(str gitdir, str ours, str theirs, GIT_diff3.Style style) {
+    List<str> found = bases(gitdir, ours, theirs)?;
+    if (found.size() == 0) {
+        return Result<BaseTree, Error>.Ok(BaseTree("", "", ""));
+    }
+    if (found.size() == 1) {
+        return Result<BaseTree, Error>.Ok(BaseTree(tree_of(gitdir, found[0])?, found[0], short_id(found[0])));
+    }
+    int index = found.size() - 1;
+    str running_commit = found[index];
+    str running_tree = tree_of(gitdir, running_commit)?;
+    index = index - 1;
+    while (index >= 0) {
+        str next = found[index];
+        BaseTree inner = base_for(gitdir, running_commit, next, style)?;
+        GIT_diff3.Labels labels = GIT_diff3.Labels("Temporary merge branch 1", inner.label, "Temporary merge branch 2");
+        TreeMerge merged = merge_trees(gitdir, inner.tree, running_tree, next, labels, style: style)?;
+        GIT_object.Ident who = GIT_object.Ident("virtual".to_bytes(), "virtual@localhost".to_bytes(), 0, 0, "+0000");
+        GIT_object.Commit commit = GIT_object.Commit(merged.tree, [running_commit, next], who, who, [], "merged common ancestors\n".to_bytes());
+        running_commit = write_commit(gitdir, commit)?;
+        running_tree = merged.tree;
+        index = index - 1;
+    }
+    return Result<BaseTree, Error>.Ok(BaseTree(running_tree, running_commit, "merged common ancestors"));
+}
+
+// --- merging onto the working tree and index -----------------------------------------
+
+// The index must be exactly `tree` at stage 0: the paths where it is not.
+Result<List<str>, Error> index_differences(str gitdir, GIT_index.Index index, str tree) {
+    Map<str, Side> want = flatten(gitdir, tree)?;
+    Map<str, bool> seen = {};
+    List<str> out = [];
+    for (GIT_index.Entry entry in index.entries) {
+        str path = "";
+        match (entry.path.utf8()) {
+            case Some(str found): {
+                path = found;
+            }
+            case None: {
+                return Result<List<str>, Error>.Err(Error.Unsupported("a file name that is not UTF-8"));
+            }
+        }
+        Side expected = want.get(path).or(absent());
+        if (entry.stage != 0 || expected.mode != entry.mode || expected.id != entry.id) {
+            out.push(path);
+        }
+        seen.set(path, true);
+    }
+    for (str path in want.keys()) {
+        if (!seen.contains(path)) {
+            out.push(path);
+        }
+    }
+    out.sort();
+    return Result<List<str>, Error>.Ok(dedupe(out));
+}
+
+List<str> dedupe(List<str> sorted) {
+    List<str> out = [];
+    for (str item in sorted) {
+        if (out.size() == 0 || out[out.size() - 1] != item) {
+            out.push(item);
+        }
+    }
+    return out;
+}
+
+// Paths where two flattened trees differ (either side may lack the path).
+List<str> tree_differences(Map<str, Side> a, Map<str, Side> b) {
+    List<str> out = [];
+    for (str path in a.keys()) {
+        if (!same_side(a.get(path).or(absent()), b.get(path).or(absent()))) {
+            out.push(path);
+        }
+    }
+    for (str path in b.keys()) {
+        if (!a.contains(path)) {
+            out.push(path);
+        }
+    }
+    out.sort();
+    return out;
+}
+
+/// Merge the trees of `ours` and `theirs` over `base` and make the working
+/// tree and index the result: clean paths as `read-tree -m -u` would leave
+/// them, conflicted paths with the marked file in the working tree and index
+/// stages 1/2/3. `base` is a commit id, a tree id, or `""` for the empty tree;
+/// `ours` must be what the index holds (HEAD's commit or tree) and `theirs`
+/// anything. Nothing else is touched: no ref, no `MERGE_HEAD`, no commit.
+///
+/// Refuses, writing nothing, with `IndexDirty` when the index is not exactly
+/// `ours` (git's rule for every merge), with `LocalChanges` when a path the
+/// merge changes or conflicts on has working-tree edits, and with
+/// `Checkout(UntrackedCollision)` when an untracked file is in the way.
+pub Result<Applied, Error> merge_with_base(str gitdir, str worktree, str base, str ours, str theirs, Opts opts) {
+    str ours_tree = tree_of(gitdir, ours)?;
+    GIT_index.Index index = read_index(gitdir)?;
+    List<str> dirty = index_differences(gitdir, index, ours_tree)?;
+    if (dirty.size() > 0) {
+        return Result<Applied, Error>.Err(Error.IndexDirty(dirty));
+    }
+    GIT_diff3.Labels labels = GIT_diff3.Labels(opts.ours_label, opts.base_label, opts.theirs_label);
+    TreeMerge merged = merge_trees(gitdir, base, ours, theirs, labels, style: opts.style)?;
+    Map<str, Side> before = flatten(gitdir, ours_tree)?;
+    Map<str, Side> after = flatten(gitdir, merged.tree)?;
+    List<str> touched = tree_differences(before, after);
+    for (Conflicted c in merged.conflicts) {
+        touched.push(c.path);
+    }
+    Map<str, bool> touched_set = {};
+    for (str path in touched) {
+        touched_set.set(path, true);
+    }
+    GIT_status.Status status = status_of(gitdir, worktree)?;
+    List<str> edited = [];
+    for (GIT_status.Delta delta in status.unstaged) {
+        match (delta.path.utf8()) {
+            case Some(str path): {
+                if (touched_set.contains(path)) {
+                    edited.push(path);
+                }
+            }
+            case None: {
+            }
+        }
+    }
+    if (edited.size() > 0) {
+        edited.sort();
+        return Result<Applied, Error>.Err(Error.LocalChanges(edited));
+    }
+    match (GIT_checkout.apply_tree_diff(gitdir, worktree, ours_tree, merged.tree, index)) {
+        case Ok(_): {
+        }
+        case Err(GIT_checkout.Error error): {
+            return Result<Applied, Error>.Err(Error.Checkout(error));
+        }
+    }
+    if (merged.conflicts.size() > 0) {
+        stage_conflicts(gitdir, merged.conflicts)?;
+    }
+    return Result<Applied, Error>.Ok(Applied(merged.tree, merged.conflicts, merged.messages));
+}
+
+Result<GIT_status.Status, Error> status_of(str gitdir, str worktree) {
+    match (GIT_status.status(gitdir, worktree)) {
+        case Ok(GIT_status.Status status): {
+            return Result<GIT_status.Status, Error>.Ok(status);
+        }
+        case Err(GIT_status.Error error): {
+            return Result<GIT_status.Status, Error>.Err(Error.Status(error));
+        }
+    }
+}
+
+// The index entries of each conflicted path become its stage 1/2/3 entries
+// (stat data zero, size 0, as git writes them), in index order.
+Result<bool, Error> stage_conflicts(str gitdir, List<Conflicted> conflicts) {
+    GIT_index.Index index = read_index(gitdir)?;
+    Map<str, bool> replaced = {};
+    for (Conflicted c in conflicts) {
+        replaced.set(c.path, true);
+    }
+    List<GIT_index.Entry> kept = [];
+    for (GIT_index.Entry entry in index.entries) {
+        if (!replaced.contains(entry.path.utf8().or(""))) {
+            kept.push(entry);
+        }
+    }
+    for (Conflicted c in conflicts) {
+        stage_entry(kept, c.path, c.base, 1);
+        stage_entry(kept, c.path, c.ours, 2);
+        stage_entry(kept, c.path, c.theirs, 3);
+    }
+    kept.sort();
+    index.entries = kept;
+    return write_index(gitdir, index);
+}
+
+void stage_entry(List<GIT_index.Entry> out, str path, Side side, int stage) {
+    if (side.mode != 0) {
+        out.push(GIT_index.Entry(0, 0, 0, 0, 0, 0, side.mode, 0, 0, 0, side.id, stage, false, path.to_bytes()));
+    }
+}
+
+// The line without its trailing blanks (space, tab, carriage return).
+str trim_end(str line) {
+    int end = line.size();
+    while (end > 0 && (line.byte_at(end - 1) == ' ' || line.byte_at(end - 1) == '\t' || line.byte_at(end - 1) == '\r')) {
+        end = end - 1;
+    }
+    return line.substr(0, end);
+}
+
+// --- starting a merge -----------------------------------------------------------------
+
+str head_ref_name(GIT_refs.Head head) {
+    match (head) {
+        case Born(str name, str id): {
+            return name;
+        }
+        case Unborn(str name): {
+            return name;
+        }
+        case Detached(str id): {
+            return "HEAD";
+        }
+    }
+}
+
+/// `git merge <spec>`: `spec` is anything `GIT_refs.rev_parse` takes (a branch,
+/// `origin/main`, a tag, a commit id). See `start_commit`.
+pub Result<Report, Error> start(str gitdir, str worktree, str spec, StartOpts opts) {
+    str theirs = "";
+    match (GIT_refs.rev_parse(gitdir, spec)) {
+        case Ok(str found): {
+            match (GIT_refs.peel(gitdir, spec, found)) {
+                case Ok(str commit): {
+                    theirs = commit;
+                }
+                case Err(_): {
+                    return Result<Report, Error>.Err(Error.NotACommit);
+                }
+            }
+        }
+        case Err(_): {
+            return Result<Report, Error>.Err(Error.NotACommit);
+        }
+    }
+    return start_commit(gitdir, worktree, theirs, spec, opts);
+}
+
+/// Merge the commit `theirs` into HEAD. `spec` is only the name the messages
+/// use (`Merge branch '<spec>'`, the reflog line `merge <spec>: ...`).
+///
+///   - `theirs` already in HEAD's history: `Ending.UpToDate`, only `ORIG_HEAD` written.
+///   - HEAD in `theirs`' history and not `--no-ff`: the working tree and index
+///     move to `theirs` (touched paths only, like `read-tree -m -u`) and the
+///     branch (or detached HEAD) to it: `Ending.FastForwarded`. With
+///     `--ff-only` anything else is `Error.NotFastForward`.
+///   - otherwise a three-way merge over the merge base (see the header). Clean:
+///     a two-parent commit made at once, `Ending.Merged`. With conflicts the
+///     merge is left under way, as git leaves it: `MERGE_HEAD`, `MERGE_MSG`
+///     (with a `# Conflicts:` block), `MERGE_MODE` and `AUTO_MERGE` written,
+///     the index holding stages 1/2/3, `Ending.Conflicts`.
+/// `ORIG_HEAD` is HEAD as it was, for every merge that gets past the checks.
+pub Result<Report, Error> start_commit(str gitdir, str worktree, str theirs, str spec, StartOpts opts) {
+    if (in_progress(gitdir)) {
+        return Result<Report, Error>.Err(Error.InProgress);
+    }
+    GIT_refs.Head head = GIT_refs.Head.Unborn("");
+    match (GIT_refs.head(gitdir)) {
+        case Ok(GIT_refs.Head found): {
+            head = found;
+        }
+        case Err(GIT_refs.Error error): {
+            return Result<Report, Error>.Err(Error.Refs(error));
+        }
+    }
+    str ours = "";
+    match (head) {
+        case Born(str name, str id): {
+            ours = id;
+        }
+        case Detached(str id): {
+            ours = id;
+        }
+        case Unborn(str name): {
+            return Result<Report, Error>.Err(Error.Unborn);
+        }
+    }
+    str ref_name = head_ref_name(head);
+    read_commit(gitdir, theirs)?;
+    str ours_tree = tree_of(gitdir, ours)?;
+    str theirs_tree = tree_of(gitdir, theirs)?;
+    List<Conflicted> none = [];
+    if (ours == theirs || graph_is_ancestor(gitdir, theirs, ours)?) {
+        ref_update(gitdir, "ORIG_HEAD", ours, Option<str>.None, "")?;
+        return Result<Report, Error>.Ok(Report(Ending.UpToDate, ours, ours_tree, none, ["Already up to date."]));
+    }
+    bool can_fast_forward = graph_is_ancestor(gitdir, ours, theirs)?;
+    if (can_fast_forward && opts.ff != FastForward.Never) {
+        GIT_index.Index index = read_index(gitdir)?;
+        match (GIT_checkout.apply_tree_diff(gitdir, worktree, ours_tree, theirs_tree, index)) {
+            case Ok(_): {
+            }
+            case Err(GIT_checkout.Error error): {
+                return Result<Report, Error>.Err(Error.Checkout(error));
+            }
+        }
+        ref_update(gitdir, "ORIG_HEAD", ours, Option<str>.None, "")?;
+        ref_update(gitdir, ref_name, theirs, Option<str>.Some(ours), "merge " + spec + ": Fast-forward")?;
+        return Result<Report, Error>.Ok(Report(Ending.FastForwarded, theirs, theirs_tree, none, ["Fast-forward"]));
+    }
+    if (opts.ff == FastForward.Only) {
+        return Result<Report, Error>.Err(Error.NotFastForward);
+    }
+    List<str> found = bases(gitdir, ours, theirs)?;
+    if (found.size() == 0 && !opts.allow_unrelated) {
+        return Result<Report, Error>.Err(Error.Unrelated);
+    }
+    BaseTree base = base_for(gitdir, ours, theirs, opts.style)?;
+    Opts merge_opts = Opts(theirs_label: spec, base_label: base.label, style: opts.style);
+    str base_id = base.tree;
+    Applied applied = merge_with_base(gitdir, worktree, base_id, ours, theirs, merge_opts)?;
+    ref_update(gitdir, "ORIG_HEAD", ours, Option<str>.None, "")?;
+    str text = opts.message;
+    if (text == "") {
+        text = default_message(gitdir, spec);
+    }
+    if (!text.ends_with("\n")) {
+        text = text + "\n";
+    }
+    if (applied.conflicts.size() == 0) {
+        GIT_object.Commit commit = GIT_object.Commit(applied.tree, [ours, theirs], ident(gitdir, "AUTHOR"), ident(gitdir, "COMMITTER"), [], text.to_bytes());
+        str id = write_commit(gitdir, commit)?;
+        ref_update(gitdir, ref_name, id, Option<str>.Some(ours), "merge " + spec + ": Merge made by the 'ort' strategy.")?;
+        return Result<Report, Error>.Ok(Report(Ending.Merged, id, applied.tree, none, applied.messages));
+    }
+    write_state(gitdir, "MERGE_HEAD", theirs + "\n")?;
+    str mode = "";
+    if (opts.ff == FastForward.Never) {
+        mode = "no-ff";
+    }
+    write_state(gitdir, "MERGE_MODE", mode)?;
+    write_state(gitdir, "MERGE_MSG", text + conflicts_block(applied.conflicts))?;
+    write_state(gitdir, "AUTO_MERGE", applied.tree + "\n")?;
+    return Result<Report, Error>.Ok(Report(Ending.Conflicts, "", applied.tree, applied.conflicts, applied.messages));
+}
+
+// --- finishing a merge -------------------------------------------------------------------
+
+/// Commit a merge under way, as `git commit` / `git merge --continue` do: the
+/// tree is the index (which must hold no stage 1/2/3 entry), the parents are
+/// HEAD and the `MERGE_HEAD` commits, the message is `message` or, when that
+/// is empty, `MERGE_MSG` cleaned of `#` lines. The branch moves with the
+/// reflog line `commit (merge): <subject>`, and the merge state files go.
+/// `Error.NoMerge` / `UnmergedPaths` / `EmptyMessage` write nothing.
+pub Result<Report, Error> continue_merge(str gitdir, str worktree, str message) {
+    List<str> heads = merge_heads(gitdir);
+    if (heads.size() == 0) {
+        return Result<Report, Error>.Err(Error.NoMerge);
+    }
+    GIT_index.Index index = read_index(gitdir)?;
+    for (GIT_index.Entry entry in index.entries) {
+        if (entry.stage != 0) {
+            return Result<Report, Error>.Err(Error.UnmergedPaths);
+        }
+    }
+    GIT_refs.Head head = GIT_refs.Head.Unborn("");
+    match (GIT_refs.head(gitdir)) {
+        case Ok(GIT_refs.Head found): {
+            head = found;
+        }
+        case Err(GIT_refs.Error error): {
+            return Result<Report, Error>.Err(Error.Refs(error));
+        }
+    }
+    str ours = "";
+    match (head) {
+        case Born(str name, str id): {
+            ours = id;
+        }
+        case Detached(str id): {
+            ours = id;
+        }
+        case Unborn(str name): {
+            return Result<Report, Error>.Err(Error.Unborn);
+        }
+    }
+    str text = message;
+    if (text == "") {
+        text = merge_message_text(gitdir);
+    }
+    text = clean_message(text);
+    if (text == "") {
+        return Result<Report, Error>.Err(Error.EmptyMessage);
+    }
+    List<GIT_index.Entry> sorted = clone(index.entries);
+    sorted.sort();
+    str tree = index_tree(gitdir, sorted, 0, sorted.size(), 0)?;
+    List<str> parents = [ours];
+    for (str id in heads) {
+        parents.push(id);
+    }
+    GIT_object.Commit commit = GIT_object.Commit(tree, parents, ident(gitdir, "AUTHOR"), ident(gitdir, "COMMITTER"), [], text.to_bytes());
+    str id = write_commit(gitdir, commit)?;
+    ref_update(gitdir, head_ref_name(head), id, Option<str>.Some(ours), "")?;
+    clear_state(gitdir);
+    List<Conflicted> none = [];
+    List<str> messages = [];
+    return Result<Report, Error>.Ok(Report(Ending.Merged, id, tree, none, messages));
+}
+
+// The tree for index entries[lo, hi) (sorted, all stage 0) whose paths agree
+// up to byte `depth`: one tree object per directory, written bottom-up.
+Result<str, Error> index_tree(str gitdir, List<GIT_index.Entry> entries, int lo, int hi, int depth) {
+    List<GIT_object.Entry> out = [];
+    int i = lo;
+    while (i < hi) {
+        bytes path = entries[i].path;
+        int slash = -1;
+        int k = depth;
+        while (k < path.size()) {
+            if (path[k] == '/') {
+                slash = k;
+                break;
+            }
+            k = k + 1;
+        }
+        if (slash < 0) {
+            out.push(GIT_object.Entry(entries[i].mode, path.substr(depth, path.size()), entries[i].id));
+            i = i + 1;
+            continue;
+        }
+        int j = i + 1;
+        while (j < hi && shares_prefix(entries[j].path, path, slash + 1)) {
+            j = j + 1;
+        }
+        str sub = index_tree(gitdir, entries, i, j, slash + 1)?;
+        out.push(GIT_object.Entry(0o40000, path.substr(depth, slash), sub));
+        i = j;
+    }
+    return write_tree(gitdir, out);
+}
+
+// Do `a` and `b` agree on their first `count` bytes?
+bool shares_prefix(bytes a, bytes b, int count) {
+    if (a.size() < count || b.size() < count) {
+        return false;
+    }
+    for (int i in 0 .. count) {
+        if (a[i] != b[i]) {
+            return false;
+        }
+    }
+    return true;
+}
+
+// --- aborting a merge ------------------------------------------------------------------
+
+/// `git merge --abort`, which is `git reset --merge`: every path the index
+/// holds differently from HEAD (staged, or in conflict) goes back to HEAD's
+/// version in the index and the working tree, a file HEAD lacks is removed;
+/// working-tree edits to other paths are kept. The merge state files go,
+/// `ORIG_HEAD` is HEAD and HEAD's reflog gets git's `reset: moving to HEAD`.
+/// A path staged differently from HEAD that also has unstaged edits refuses
+/// (`LocalChanges`) with nothing written, as `reset --merge` does.
+pub Result<bool, Error> abort_merge(str gitdir, str worktree) {
+    if (!in_progress(gitdir)) {
+        return Result<bool, Error>.Err(Error.NoMerge);
+    }
+    GIT_refs.Head head = GIT_refs.Head.Unborn("");
+    match (GIT_refs.head(gitdir)) {
+        case Ok(GIT_refs.Head found): {
+            head = found;
+        }
+        case Err(GIT_refs.Error error): {
+            return Result<bool, Error>.Err(Error.Refs(error));
+        }
+    }
+    str head_id = "";
+    match (head) {
+        case Born(str name, str id): {
+            head_id = id;
+        }
+        case Detached(str id): {
+            head_id = id;
+        }
+        case Unborn(str name): {
+            return Result<bool, Error>.Err(Error.Unborn);
+        }
+    }
+    Map<str, Side> want = flatten(gitdir, tree_of(gitdir, head_id)?)?;
+    GIT_status.Status status = status_of(gitdir, worktree)?;
+    Map<str, bool> reset = {};
+    for (GIT_status.Delta delta in status.staged) {
+        reset.set(delta.path.utf8().or(""), true);
+    }
+    List<str> edited = [];
+    for (GIT_status.Delta delta in status.unstaged) {
+        str path = delta.path.utf8().or("");
+        if (reset.contains(path)) {
+            edited.push(path);
+        }
+    }
+    if (edited.size() > 0) {
+        edited.sort();
+        return Result<bool, Error>.Err(Error.LocalChanges(edited));
+    }
+    for (GIT_status.Unmerged unmerged in status.unmerged) {
+        reset.set(unmerged.path.utf8().or(""), true);
+    }
+    List<str> paths = [];
+    for (str path in reset.keys()) {
+        if (path != "") {
+            paths.push(path);
+        }
+    }
+    paths.sort();
+    GIT_index.Index index = read_index(gitdir)?;
+    for (str path in paths) {
+        if (!want.contains(path)) {
+            drop_file(worktree, fs.join(worktree, path))?;
+        }
+    }
+    List<GIT_index.Entry> added = [];
+    for (str path in paths) {
+        if (want.contains(path)) {
+            added.push(put_file(gitdir, worktree, path, want.get(path).or(absent()))?);
+        }
+    }
+    List<GIT_index.Entry> kept = [];
+    for (GIT_index.Entry entry in index.entries) {
+        if (!reset.contains(entry.path.utf8().or(""))) {
+            kept.push(entry);
+        }
+    }
+    for (GIT_index.Entry entry in added) {
+        kept.push(entry);
+    }
+    kept.sort();
+    index.entries = kept;
+    write_index(gitdir, index)?;
+    clear_state(gitdir);
+    ref_update(gitdir, "ORIG_HEAD", head_id, Option<str>.None, "")?;
+    // The value does not change, so git logs it on HEAD only, not on the branch.
+    if (GIT_reflog.should_log(gitdir, "HEAD")) {
+        match (GIT_reflog.append(gitdir, "HEAD", head_id, head_id, GIT_reflog.default_ident(gitdir), "reset: moving to HEAD")) {
+            case Ok: {
+            }
+            case Err(_): {
+                return Result<bool, Error>.Err(Error.Io);
+            }
+        }
+    }
+    return Result<bool, Error>.Ok(true);
+}
+
+// --- working-tree files (the same moves as GIT_checkout's, which keeps them private) ---
+
+// Write the blob `want.id` at `path` under `worktree` with `want.mode` (a
+// symlink for 0o120000, otherwise 0o755 or 0o644), replacing what is there,
+// and return the stage-0 index entry for it.
+Result<GIT_index.Entry, Error> put_file(str gitdir, str worktree, str path, Side want) {
+    str full = fs.join(worktree, path);
+    bytes content = read_object(gitdir, want.id)?.raw;
+    str parent = parent_directory(full);
+    if (parent != "") {
+        match (fs.makedirs(parent)) {
+            case Ok: {
+            }
+            case Err(_): {
+                return Result<GIT_index.Entry, Error>.Err(Error.Io);
+            }
+        }
+    }
+    if (fs.exists(full) || fs.is_link(full)) {
+        match (fs.remove(full)) {
+            case Ok: {
+            }
+            case Err(_): {
+                return Result<GIT_index.Entry, Error>.Err(Error.Io);
+            }
+        }
+    }
+    if (want.mode >> 12 == 0o12) {
+        match (fs.symlink(content.utf8().or(""), full)) {
+            case Ok: {
+            }
+            case Err(_): {
+                return Result<GIT_index.Entry, Error>.Err(Error.Io);
+            }
+        }
+        return Result<GIT_index.Entry, Error>.Ok(GIT_index.Entry(0, 0, 0, 0, 0, 0, want.mode, 0, 0, content.size(), want.id, 0, false, path.to_bytes()));
+    }
+    int perm = 0o644;
+    if (want.mode & 0o111 != 0) {
+        perm = 0o755;
+    }
+    match (io.open(full, mode: io.Mode.Write, perm: perm)) {
+        case Ok(io.File file): {
+            match (file.write(content)) {
+                case Ok: {
+                }
+                case Err(_): {
+                    return Result<GIT_index.Entry, Error>.Err(Error.Io);
+                }
+            }
+            match (file.close()) {
+                case Ok: {
+                }
+                case Err(_): {
+                    return Result<GIT_index.Entry, Error>.Err(Error.Io);
+                }
+            }
+        }
+        case Err(_): {
+            return Result<GIT_index.Entry, Error>.Err(Error.Io);
+        }
+    }
+    match (fs.stat(full)) {
+        case Ok(fs.Stat stat): {
+            return Result<GIT_index.Entry, Error>.Ok(GIT_index.from_stat(path.to_bytes(), stat, false, want.id));
+        }
+        case Err(_): {
+            return Result<GIT_index.Entry, Error>.Err(Error.Io);
+        }
+    }
+}
+
+// Remove the file at `full`, then the directories above it that are left
+// empty, never `worktree` itself.
+Result<bool, Error> drop_file(str worktree, str full) {
+    if (fs.exists(full) || fs.is_link(full)) {
+        match (fs.remove(full)) {
+            case Ok: {
+            }
+            case Err(_): {
+                return Result<bool, Error>.Err(Error.Io);
+            }
+        }
+    }
+    str directory = parent_directory(full);
+    str root = fs.join(worktree, "");
+    while (directory != "" && directory != worktree && directory != root && directory.starts_with(worktree)) {
+        match (fs.rmdir(directory)) {
+            case Ok: {
+            }
+            case Err(_): {
+                return Result<bool, Error>.Ok(true);
+            }
+        }
+        directory = parent_directory(directory);
+    }
+    return Result<bool, Error>.Ok(true);
+}
+
+// Everything before the last `/`, or `""` when there is none.
+str parent_directory(str path) {
+    int cut = -1;
+    for (int i in 0 .. path.size()) {
+        if (path.byte_at(i) == '/') {
+            cut = i;
+        }
+    }
+    if (cut <= 0) {
+        return "";
+    }
+    return path.substr(0, cut);
+}
+
+/// The conflict style `merge.conflictstyle` asks for: `diff3` and `zdiff3`
+/// (written as diff3) give base sections, anything else is the plain style.
+pub GIT_diff3.Style configured_style(str gitdir) {
+    str value = GIT_config.get(gitdir, "merge", "", "conflictstyle").or("merge").to_lower();
+    if (value == "diff3" || value == "zdiff3") {
+        return GIT_diff3.Style.Diff3;
+    }
+    return GIT_diff3.Style.Merge;
+}

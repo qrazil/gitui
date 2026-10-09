@@ -1,0 +1,143 @@
+// Drives GIT_merge for test_merge.sh.
+//
+//   ./t_merge <gitdir> trees <base> <ours> <theirs> <ours-label> <theirs-label> <base-label> [diff3]
+//       prints `tree <id>`, one `stage <mode> <id> <n>\t<path>` per stage and
+//       one `kind <path> <word>` per conflict
+//   ./t_merge <gitdir> <worktree> merge <spec> [--no-ff|--ff-only|--unrelated] [diff3]
+//   ./t_merge <gitdir> <worktree> continue [message]
+//   ./t_merge <gitdir> <worktree> abort
+//   ./t_merge <gitdir> <worktree> apply <base> <ours> <theirs> [diff3]
+
+import GIT_diff3;
+import GIT_merge;
+import io;
+import os;
+
+str ending_word(GIT_merge.Ending ending) {
+    match (ending) {
+        case UpToDate: {
+            return "uptodate";
+        }
+        case FastForwarded: {
+            return "fastforward";
+        }
+        case Merged: {
+            return "merged";
+        }
+        case Conflicts: {
+            return "conflicts";
+        }
+    }
+}
+
+void print_conflicts(List<GIT_merge.Conflicted> conflicts) {
+    for (str line in GIT_merge.stage_lines(conflicts)) {
+        print("stage " + line);
+    }
+    for (GIT_merge.Conflicted c in conflicts) {
+        print("kind " + c.path + " " + c.kind.word());
+    }
+}
+
+void print_report(GIT_merge.Report report) {
+    print("ending " + ending_word(report.ending));
+    print("commit " + report.commit);
+    print("tree " + report.tree);
+    print_conflicts(report.conflicts);
+    for (str message in report.messages) {
+        print("msg " + message);
+    }
+}
+
+GIT_diff3.Style style_of(List<str> argv) {
+    for (str arg in argv) {
+        if (arg == "diff3") {
+            return GIT_diff3.Style.Diff3;
+        }
+    }
+    return GIT_diff3.Style.Merge;
+}
+
+List<str> argv = os.args();
+if (argv.size() < 3) {
+    io.eprint("usage: t_merge <gitdir> trees|<worktree> ...");
+    os.exit(2);
+}
+str gitdir = argv[1];
+if (argv[2] == "trees") {
+    GIT_diff3.Labels labels = GIT_diff3.Labels(argv[6], argv[8], argv[7]);
+    match (GIT_merge.merge_trees(gitdir, argv[3], argv[4], argv[5], labels, style: style_of(argv))) {
+        case Ok(GIT_merge.TreeMerge merged): {
+            print("tree " + merged.tree);
+            print_conflicts(merged.conflicts);
+        }
+        case Err(GIT_merge.Error error): {
+            print("refused " + error.to_str());
+        }
+    }
+    os.exit(0);
+}
+if (argv.size() < 4) {
+    io.eprint("usage: t_merge <gitdir> <worktree> merge|continue|abort|apply ...");
+    os.exit(2);
+}
+str worktree = argv[2];
+str command = argv[3];
+if (command == "merge") {
+    GIT_merge.StartOpts opts = GIT_merge.StartOpts(style: GIT_merge.configured_style(gitdir));
+    int i = 5;
+    while (i < argv.size()) {
+        if (argv[i] == "--no-ff") {
+            opts.ff = GIT_merge.FastForward.Never;
+        } else if (argv[i] == "--ff-only") {
+            opts.ff = GIT_merge.FastForward.Only;
+        } else if (argv[i] == "--unrelated") {
+            opts.allow_unrelated = true;
+        } else if (argv[i] == "-m" && i + 1 < argv.size()) {
+            opts.message = argv[i + 1];
+            i = i + 1;
+        }
+        i = i + 1;
+    }
+    match (GIT_merge.start(gitdir, worktree, argv[4], opts)) {
+        case Ok(GIT_merge.Report report): {
+            print_report(report);
+        }
+        case Err(GIT_merge.Error error): {
+            print("refused " + error.to_str());
+        }
+    }
+} else if (command == "continue") {
+    str message = "";
+    if (argv.size() > 4) {
+        message = argv[4];
+    }
+    match (GIT_merge.continue_merge(gitdir, worktree, message)) {
+        case Ok(GIT_merge.Report report): {
+            print_report(report);
+        }
+        case Err(GIT_merge.Error error): {
+            print("refused " + error.to_str());
+        }
+    }
+} else if (command == "abort") {
+    match (GIT_merge.abort_merge(gitdir, worktree)) {
+        case Ok(_): {
+            print("aborted");
+        }
+        case Err(GIT_merge.Error error): {
+            print("refused " + error.to_str());
+        }
+    }
+} else if (command == "apply") {
+    GIT_merge.Opts opts = GIT_merge.Opts(theirs_label: argv[7], style: GIT_merge.configured_style(gitdir));
+    match (GIT_merge.merge_with_base(gitdir, worktree, argv[4], argv[5], argv[6], opts)) {
+        case Ok(GIT_merge.Applied applied): {
+            print("tree " + applied.tree);
+            print_conflicts(applied.conflicts);
+        }
+        case Err(GIT_merge.Error error): {
+            print("refused " + error.to_str());
+        }
+    }
+}
