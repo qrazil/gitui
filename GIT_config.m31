@@ -79,6 +79,73 @@ pub Option<str> find(str text, str section, str subsection, str key) {
     return found;
 }
 
+/// One assignment found by `all`: the subsection of the section it sat in
+/// (the `<base>` of `url.<base>.insteadOf`) and its value.
+pub type Entry {
+    pub str subsection;
+    pub str value;
+}
+
+/// Every assignment of `section.*.key` in `text`, in file order, whatever
+/// the subsection -- what a multi-valued key under many subsections needs
+/// (`url.<base>.insteadOf`), where `find` can only ask about one named
+/// subsection and takes the last value. Same line syntax as `find`.
+pub List<Entry> all(str text, str section, str key) {
+    str want_section = section.to_lower();
+    str want_key = key.to_lower();
+    bool is_in_section = false;
+    str sub = "";
+    List<Entry> out = [];
+    for (str raw in text.split("\n")) {
+        str line = raw.trim();
+        if (line == "" || line.starts_with("#") || line.starts_with(";")) {
+            continue;
+        }
+        if (line.starts_with("[")) {
+            is_in_section = false;
+            match (parse_header(close_header(line))) {
+                case Some(Header header): {
+                    if (header.name.to_lower() == want_section) {
+                        is_in_section = true;
+                        sub = header.sub;
+                    }
+                }
+                case None: {
+                }
+            }
+            continue;
+        }
+        if (!is_in_section) {
+            continue;
+        }
+        match (line.index_of("=")) {
+            case Some(int equals_index): {
+                str line_key = line.substr(0, equals_index).trim().to_lower();
+                if (line_key == want_key) {
+                    out.push(Entry(sub, unquote(strip_comment(line.substr(equals_index + 1, line.size()).trim()))));
+                }
+            }
+            case None: {
+            }
+        }
+    }
+    return out;
+}
+
+/// `all`, over the repository's own config file (empty if it has none).
+pub List<Entry> all_in(str gitdir, str section, str key) {
+    str path = fs.join(GIT_repository.common(gitdir), "config");
+    match (io.read(path)) {
+        case Ok(str text): {
+            return all(text, section, key);
+        }
+        case Err: {
+            List<Entry> none = [];
+            return none;
+        }
+    }
+}
+
 // A header line up to and including its last `]`, dropping a trailing
 // comment (`[remote "x"] ; note`).
 str close_header(str line) {
@@ -112,10 +179,18 @@ str strip_comment(str value) {
     return value;
 }
 
-// Does a `[...]` header line name `section`/`subsection`?
-bool is_matching_header(str line, str want_section, str want_sub) {
+// A section header's two parts: its (not yet lower-cased) name and its
+// subsection, `""` for a bare `[section]`.
+type Header {
+    str name;
+    str sub;
+}
+
+// Split a `[...]` header line (already cut at its last `]`) into its section
+// and subsection, or `None` if it is not well-formed.
+Option<Header> parse_header(str line) {
     if (!line.ends_with("]")) {
-        return false;
+        return Option<Header>.None;
     }
     str inner = line.substr(1, line.size() - 1).trim();
     str name = inner;
@@ -127,7 +202,7 @@ bool is_matching_header(str line, str want_section, str want_sub) {
             if (quoted.size() >= 2 && quoted.ends_with("\"")) {
                 sub = unescape(quoted.substr(1, quoted.size() - 1));
             } else {
-                return false;
+                return Option<Header>.None;
             }
         }
         case None: {
@@ -141,7 +216,19 @@ bool is_matching_header(str line, str want_section, str want_sub) {
             }
         }
     }
-    return name.to_lower() == want_section && sub == want_sub;
+    return Option<Header>.Some(Header(name, sub));
+}
+
+// Does a `[...]` header line name `section`/`subsection`?
+bool is_matching_header(str line, str want_section, str want_sub) {
+    match (parse_header(line)) {
+        case Some(Header header): {
+            return header.name.to_lower() == want_section && header.sub == want_sub;
+        }
+        case None: {
+            return false;
+        }
+    }
 }
 
 // A value with its surrounding double quotes removed and unescaped, or

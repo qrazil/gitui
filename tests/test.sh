@@ -335,6 +335,13 @@ source tests/test_https.sh
 
 source tests/test_wire.sh
 
+# --- where a remote lives: URLs, insteadOf, ssh_config, known_hosts -----------
+#
+# `test_remote.sh` runs git, ssh and ssh-keygen only as oracles over mktemp
+# fixtures and starts no long-lived process.
+
+source tests/test_remote.sh
+
 echo
 if [ $fail -eq 0 ]; then
     printf '\033[32mall %d checks passed\033[0m\n' "$pass"
