@@ -1,0 +1,567 @@
+// The lines layer: staging, unstaging and discarding individual lines from the
+// diff view -- `git add -p`'s `e`, or the visual selection of a GUI.
+//
+// It sits between `DiffLayer` (the hunk-level view, `s` / `u` for a whole
+// hunk) and `CommitLayer`, and adds to the diff view:
+//
+//   v            start a visual range at the cursor; j / k extend it. `v`
+//                again or Escape cancels it.
+//   space/enter  act on the selected changed lines (or, with no range, the
+//                one line under the cursor; on a hunk header, the whole hunk):
+//                stage them in the unstaged and untracked views, unstage
+//                them in the staged view.
+//   x            discard the selected lines from the working tree (unstaged
+//                and untracked views), after a confirmation.
+//
+// --- what a selection is ----------------------------------------------------
+//
+// The view's rows are, per hunk, a header and then its lines. A line of
+// hunk `h` at index `l` is op `spans[h].start + l` of the edit script
+// `GIT_xdiff.diff_text(old, new)` -- the same script `GIT_hunks.hunks` made the
+// view from, grouped by the same `GIT_hunks.spans`, so the mapping is exact
+// by construction. The ops of the selected rows that are changes (`Add` /
+// `Remove`) go to `GIT_patch.apply_lines` / `revert_lines`, which produce the
+// bytes `git apply --cached` (or `-R`) gives for a patch of exactly those
+// lines. Context lines in a range are skipped; a single context line is
+// refused with a message.
+//
+// Which two files the view compares depends on the section, as in
+// `DiffLayer.show_diff_current`: unstaged = index vs working tree, staged =
+// HEAD vs index, untracked = nothing vs working tree. A partly staged index
+// entry gets size -1 and zeroed times, the same "never matches a stat"
+// rule `did_set_index_blob` uses, so `status` re-hashes it.
+
+import diff;
+import fs;
+import GIT_hunks;
+import GIT_index;
+import GIT_object;
+import GIT_patch;
+import GIT_ui_core;
+import GIT_ui_diff;
+import GIT_ui_model;
+import GIT_xdiff;
+import io;
+import term;
+import tui.TUI_app;
+import tui.TUI_buffer;
+import tui.TUI_diff_view;
+import tui.TUI_geometry;
+import tui.TUI_menu;
+import tui.TUI_style;
+import tui.TUI_widget;
+
+pub type LinesLayer {
+    pub GIT_ui_diff.DiffLayer;
+    /// The row the visual range started on, or -1 when there is none. The
+    /// range is this row and the cursor, whichever is first.
+    pub int visual_anchor = -1;
+}
+
+/// `v`: start (or cancel) the visual range at the cursor.
+pub void LinesLayer.toggle_visual() {
+    if (visual_anchor >= 0) {
+        visual_anchor = -1;
+        message = "visual: cancelled";
+        return;
+    }
+    if (is_diff_binary || diff_view.count() == 0) {
+        message = "visual: nothing to select";
+        return;
+    }
+    visual_anchor = diff_view.cursor;
+    say_selection();
+}
+
+/// j / k in the diff view: the cursor moves, and a visual range follows it.
+pub void LinesLayer.move_lines(int delta) {
+    diff_view.move(delta);
+    if (visual_anchor >= 0) {
+        say_selection();
+    }
+}
+
+/// q / Escape / Backspace: cancel a visual range first, else leave the diff.
+pub void LinesLayer.back_lines() {
+    if (visual_anchor >= 0) {
+        visual_anchor = -1;
+        message = "visual: cancelled";
+        return;
+    }
+    close_diff();
+}
+
+/// `s` / `u` of the hunk layer, with any visual range dropped first.
+pub void LinesLayer.stage_hunk_lines() {
+    visual_anchor = -1;
+    stage_hunk_current();
+}
+
+pub void LinesLayer.unstage_hunk_lines() {
+    visual_anchor = -1;
+    unstage_hunk_current();
+}
+
+/// The first and last row of the selection: the visual range, else the cursor.
+pub List<int> LinesLayer.selection_rows() {
+    int low = diff_view.cursor;
+    int high = diff_view.cursor;
+    if (visual_anchor >= 0) {
+        if (visual_anchor < low) {
+            low = visual_anchor;
+        }
+        if (visual_anchor > high) {
+            high = visual_anchor;
+        }
+    }
+    return [low, high];
+}
+
+// "visual: N changed lines selected" -- counted from the view's own lines.
+pub void LinesLayer.say_selection() {
+    List<int> rows = selection_rows();
+    int count = 0;
+    int row = 0;
+    for (TUI_diff_view.Hunk hunk in diff_view.hunks) {
+        row = row + 1;
+        for (TUI_diff_view.Line line in hunk.lines) {
+            if (row >= rows[0] && row <= rows[1]) {
+                match (line.kind) {
+                    case Context: {
+                    }
+                    case Add: {
+                        count = count + 1;
+                    }
+                    case Remove: {
+                        count = count + 1;
+                    }
+                }
+            }
+            row = row + 1;
+        }
+    }
+    message = "visual: " + count.to_str() + " changed line(s) selected -- space stages/unstages, x discards, v cancels";
+}
+
+// The two files the open diff compares, by section.
+pub Option<Sides> LinesLayer.sides_of(str section, bytes path) {
+    if (section == "untracked") {
+        return Option<Sides>.Some(Sides([], read_worktree(path)));
+    }
+    if (section == "unstaged") {
+        return Option<Sides>.Some(Sides(index_blob(path), read_worktree(path)));
+    }
+    if (section == "staged") {
+        return Option<Sides>.Some(Sides(head_blob(path), index_blob(path)));
+    }
+    return Option<Sides>.None;
+}
+
+// Resolve the selection to ops of the open diff. An error is a status line.
+pub Result<Picked, str> LinesLayer.pick() {
+    if (is_diff_binary) {
+        return Result<Picked, str>.Err("binary files: stage the whole file from the outline");
+    }
+    if (diff_section == "commit") {
+        return Result<Picked, str>.Err("a commit's diff is read-only");
+    }
+    Sides sides = Sides([], []);
+    match (sides_of(diff_section, diff_path)) {
+        case Some(Sides got): {
+            sides = got;
+        }
+        case None: {
+            return Result<Picked, str>.Err("no diff to select lines from");
+        }
+    }
+    List<diff.Op> ops = [];
+    match (GIT_xdiff.diff_text(sides.old, sides.new)) {
+        case Binary: {
+            return Result<Picked, str>.Err("binary files: stage the whole file from the outline");
+        }
+        case Lines(List<diff.Op> got): {
+            ops = got;
+        }
+    }
+    List<GIT_hunks.Span> spans = GIT_hunks.spans(ops);
+    if (spans.size() != diff_view.hunks.size()) {
+        return Result<Picked, str>.Err("the diff changed under the view -- press g to refresh");
+    }
+    List<int> rows = selection_rows();
+    List<int> selected = [];
+    int row = 0;
+    int hunk_index = 0;
+    while (hunk_index < spans.size()) {
+        TUI_diff_view.Hunk hunk = diff_view.hunks[hunk_index];
+        GIT_hunks.Span span = spans[hunk_index];
+        if (span.end - span.start != hunk.lines.size()) {
+            return Result<Picked, str>.Err("the diff changed under the view -- press g to refresh");
+        }
+        if (row >= rows[0] && row <= rows[1] && rows[0] == rows[1]) {
+            for (int index in GIT_patch.change_ops(ops, span)) {
+                selected.push(index);
+            }
+        }
+        row = row + 1;
+        int line_index = 0;
+        while (line_index < hunk.lines.size()) {
+            if (row >= rows[0] && row <= rows[1]) {
+                int op_index = span.start + line_index;
+                match (ops[op_index].kind) {
+                    case Keep: {
+                    }
+                    case Add: {
+                        selected.push(op_index);
+                    }
+                    case Remove: {
+                        selected.push(op_index);
+                    }
+                }
+            }
+            row = row + 1;
+            line_index = line_index + 1;
+        }
+        hunk_index = hunk_index + 1;
+    }
+    if (selected.size() == 0) {
+        return Result<Picked, str>.Err("not a changed line -- move onto a + or - line");
+    }
+    return Result<Picked, str>.Ok(Picked(sides, ops, selected));
+}
+
+/// space / enter: stage the selected lines (unstaged and untracked views) or
+/// unstage them (staged view).
+pub void LinesLayer.act_on_lines() {
+    Picked picked = Picked(Sides([], []), [], []);
+    match (pick()) {
+        case Ok(Picked got): {
+            picked = got;
+        }
+        case Err(str reason): {
+            message = reason;
+            return;
+        }
+    }
+    int keep = selection_rows()[0];
+    bool is_done = false;
+    if (diff_section == "staged") {
+        is_done = did_unstage_lines(diff_path, picked);
+    } else {
+        is_done = did_stage_lines(diff_path, picked);
+    }
+    if (!is_done) {
+        return;
+    }
+    visual_anchor = -1;
+    str said = message;
+    reload();
+    reopen_lines(keep);
+    message = said;
+}
+
+// Stage `picked` into the index: the index entry becomes `old` with the
+// selected changes applied.
+pub bool LinesLayer.did_stage_lines(bytes path, Picked picked) {
+    str shown = path.utf8().or("<non-utf8>");
+    str full = fs.join(worktree, path.utf8().or(""));
+    GIT_index.Index index = GIT_ui_model.read_index(gitdir);
+    int mode = 0o100644;
+    match (GIT_ui_model.find_index_entry(index, path)) {
+        case Some(GIT_index.Entry entry): {
+            mode = entry.mode;
+        }
+        case None: {
+            if (fs.is_link(full)) {
+                mode = 0o120000;
+            } else {
+                match (fs.stat(full)) {
+                    case Ok(fs.Stat file_stat): {
+                        mode = GIT_index.from_stat(path, file_stat, false, "").mode;
+                    }
+                    case Err: {
+                    }
+                }
+            }
+        }
+    }
+    if (mode == 0o120000 || mode == 0o160000) {
+        message = shown + " is a symlink or submodule: stage the whole entry from the outline";
+        return false;
+    }
+    match (GIT_patch.apply_lines(picked.sides.old, picked.ops, picked.selected)) {
+        case Some(bytes content): {
+            return did_put_index_blob(path, content, mode, "staged " + picked.selected.size().to_str() + " line(s) of " + shown);
+        }
+        case None: {
+            message = "cannot stage: the selection does not match the file -- press g";
+            return false;
+        }
+    }
+}
+
+// Unstage `picked` from the index: the index entry becomes its current
+// content with the selected changes undone.
+pub bool LinesLayer.did_unstage_lines(bytes path, Picked picked) {
+    str shown = path.utf8().or("<non-utf8>");
+    GIT_index.Index index = GIT_ui_model.read_index(gitdir);
+    int mode = 0o100644;
+    bool has_mode = false;
+    match (GIT_ui_model.find_index_entry(index, path)) {
+        case Some(GIT_index.Entry entry): {
+            mode = entry.mode;
+            has_mode = true;
+        }
+        case None: {
+        }
+    }
+    if (!has_mode) {
+        match (GIT_ui_model.head_tree_id(gitdir)) {
+            case Some(str tid): {
+                match (GIT_ui_model.find_in_tree(gitdir, tid, path)) {
+                    case Some(GIT_object.Entry entry): {
+                        mode = entry.mode;
+                    }
+                    case None: {
+                    }
+                }
+            }
+            case None: {
+            }
+        }
+    }
+    if (mode == 0o120000 || mode == 0o160000) {
+        message = shown + " is a symlink or submodule: unstage the whole entry from the outline";
+        return false;
+    }
+    match (GIT_patch.revert_lines(picked.sides.new, picked.ops, picked.selected)) {
+        case Some(bytes content): {
+            return did_put_index_blob(path, content, mode, "unstaged " + picked.selected.size().to_str() + " line(s) of " + shown);
+        }
+        case None: {
+            message = "cannot unstage: the selection does not match the index -- press g";
+            return false;
+        }
+    }
+}
+
+/// The index entry for `path` now names a fresh blob of `content` with `mode`
+/// and a stat that never matches (size -1, no times), so `status` re-hashes it.
+pub bool LinesLayer.did_put_index_blob(bytes path, bytes content, int mode, str said) {
+    str blob_id = "";
+    match (GIT_object.write_blob(gitdir, content)) {
+        case Ok(str id): {
+            blob_id = id;
+        }
+        case Err(GIT_object.Error error): {
+            message = "write_blob: " + error.to_str();
+            return false;
+        }
+    }
+    GIT_index.Index index = GIT_ui_model.read_index(gitdir);
+    GIT_ui_model.replace_entry(index, GIT_index.Entry(0, 0, 0, 0, 0, 0, mode, 0, 0, -1, blob_id, 0, false, path));
+    match (GIT_index.write(gitdir, index)) {
+        case Ok: {
+            message = said;
+            log_command(said);
+            return true;
+        }
+        case Err(GIT_index.Error error): {
+            message = "index write: " + error.to_str();
+            return false;
+        }
+    }
+}
+
+/// x in the diff view: ask, then discard the selected lines from the working
+/// tree (unstaged and untracked views only).
+pub void LinesLayer.discard_lines() {
+    if (diff_section != "unstaged" && diff_section != "untracked") {
+        if (diff_section == "staged") {
+            message = "staged lines: unstage them with space first, then discard";
+        } else {
+            message = "nothing to discard here";
+        }
+        return;
+    }
+    match (pick()) {
+        case Ok(Picked picked): {
+            push_overlay(LinesConfirm(this, diff_section, diff_path, picked.selected, picked.selected.size()));
+        }
+        case Err(str reason): {
+            message = reason;
+        }
+    }
+}
+
+/// Throw away `selected` (op indices of the open diff) from the working tree:
+/// the file becomes its current content with those changes undone, exactly
+/// `git apply -R` of a patch of those lines. An untracked file left empty is
+/// removed, with its emptied parent directories. True when the file changed.
+pub bool LinesLayer.did_discard_lines(str section, bytes path, List<int> selected) {
+    str shown = path.utf8().or("<non-utf8>");
+    str full = fs.join(worktree, path.utf8().or(""));
+    Sides sides = Sides([], []);
+    match (sides_of(section, path)) {
+        case Some(Sides got): {
+            sides = got;
+        }
+        case None: {
+            message = "discard: no diff";
+            return false;
+        }
+    }
+    List<diff.Op> ops = [];
+    match (GIT_xdiff.diff_text(sides.old, sides.new)) {
+        case Binary: {
+            message = "discard: binary files";
+            return false;
+        }
+        case Lines(List<diff.Op> got): {
+            ops = got;
+        }
+    }
+    int mode = 0o100644;
+    match (GIT_ui_model.find_index_entry(GIT_ui_model.read_index(gitdir), path)) {
+        case Some(GIT_index.Entry entry): {
+            mode = entry.mode;
+        }
+        case None: {
+        }
+    }
+    if (mode == 0o120000 || fs.is_link(full)) {
+        message = shown + " is a symlink: discard the whole file from the outline";
+        return false;
+    }
+    match (GIT_patch.revert_lines(sides.new, ops, selected)) {
+        case Some(bytes content): {
+            if (section == "untracked" && content.size() == 0) {
+                match (fs.remove(full)) {
+                    case Ok: {
+                    }
+                    case Err(io.Error error): {
+                        message = "cannot remove " + shown + ": " + error.to_str();
+                        return false;
+                    }
+                }
+                prune_empty_parents(path);
+            } else if (!did_write_worktree(path, mode, content)) {
+                return false;
+            }
+            message = "discarded " + selected.size().to_str() + " line(s) of " + shown;
+            log_command("discard " + selected.size().to_str() + " line(s) of " + shown);
+            return true;
+        }
+        case None: {
+            message = "cannot discard: the selection does not match the file -- press g";
+            return false;
+        }
+    }
+}
+
+/// Rebuild the open diff after the index or the file changed under it, with
+/// the cursor kept (clamped). An untracked file that is now in the index is
+/// an unstaged one. Nothing left to show closes the view.
+pub void LinesLayer.reopen_lines(int keep_cursor) {
+    str section = diff_section;
+    bytes path = diff_path;
+    str title = diff_title;
+    if (section == "untracked" && GIT_ui_model.find_index_entry(GIT_ui_model.read_index(gitdir), path).is_some()) {
+        section = "unstaged";
+    }
+    Sides sides = Sides([], []);
+    match (sides_of(section, path)) {
+        case Some(Sides got): {
+            sides = got;
+        }
+        case None: {
+            return;
+        }
+    }
+    if (GIT_patch.hunk_count(sides.old, sides.new) == 0) {
+        close_diff();
+        return;
+    }
+    open_diff(title, sides.old, sides.new);
+    diff_section = section;
+    diff_path = path;
+    diff_view.cursor = keep_cursor;
+    diff_view.move(0);
+}
+
+/// The diff view, with the visual range's rows drawn reversed and the title
+/// saying a range is open.
+pub void LinesLayer.draw_lines(TUI_buffer.Buffer buffer, TUI_geometry.Rect area) {
+    if (visual_anchor < 0 || is_diff_binary) {
+        draw_diff(buffer, area);
+        return;
+    }
+    str saved = diff_title;
+    diff_title = saved + " [visual]";
+    draw_diff(buffer, area);
+    diff_title = saved;
+    TUI_widget.Block block = TUI_widget.Block(title: "diff", borders: TUI_widget.Borders.Single);
+    TUI_geometry.Rect inner = block.inner(area);
+    List<int> rows = selection_rows();
+    int offset = diff_view.view.offset;
+    int row = rows[0];
+    while (row <= rows[1]) {
+        if (row >= offset && row < offset + inner.height) {
+            buffer.restyle(TUI_geometry.Rect(inner.x, inner.y + row - offset, inner.width, 1), TUI_style.Style(attrs: TUI_style.REVERSE | TUI_style.BOLD));
+        }
+        row = row + 1;
+    }
+}
+
+/// The two files the open diff compares.
+pub type Sides {
+    pub bytes old;
+    pub bytes new;
+}
+
+/// What a selection resolves to against the open diff.
+pub type Picked {
+    pub Sides sides;
+    pub List<diff.Op> ops;
+    pub List<int> selected;
+}
+
+/// "Discard these lines?" -- `y` does it, every other key keeps them.
+type LinesConfirm {
+    LinesLayer host;
+    str section;
+    bytes path;
+    List<int> selected;
+    int count;
+}
+
+pub TUI_app.Action LinesConfirm.handle_key(term.Code code) {
+    host.pop_overlay();
+    match (GIT_ui_core.lookup(GIT_ui_core.SCOPE_CONFIRM, code)) {
+        case Some(str cmd): {
+            if (cmd == GIT_ui_core.CMD_YES) {
+                int keep = host.selection_rows()[0];
+                if (host.did_discard_lines(section, path, selected)) {
+                    host.visual_anchor = -1;
+                    str said = host.message;
+                    host.reload();
+                    host.reopen_lines(keep);
+                    host.say(said);
+                }
+                return TUI_app.Action.Redraw;
+            }
+        }
+        case None: {
+        }
+    }
+    host.say("discard cancelled");
+    return TUI_app.Action.Redraw;
+}
+
+pub void LinesConfirm.render(TUI_buffer.Buffer buffer, TUI_geometry.Rect area) {
+    TUI_menu.WhichKey which_key = TUI_menu.WhichKey("discard " + count.to_str() + " line(s) of " + path.utf8().or("<non-utf8>") + " from the working tree?", [TUI_menu.Item("y", "yes, discard"), TUI_menu.Item("any other key", "no, keep them")]);
+    which_key.render(buffer, area);
+}
+
+pub List<GIT_ui_core.Hint> LinesConfirm.hints() {
+    return GIT_ui_core.hints_for(GIT_ui_core.SCOPE_CONFIRM);
+}

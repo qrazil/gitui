@@ -82,6 +82,7 @@ import GIT_ui_commit;
 import GIT_ui_core;
 import GIT_ui_diff;
 import GIT_ui_help;
+import GIT_ui_lines;
 import GIT_ui_log;
 import GIT_ui_model;
 import GIT_ui_outline;
@@ -110,7 +111,7 @@ pub type State {
 /// this constructor alone does no I/O, which is what makes it safe to build
 /// in a test that never touches a real repository.
 pub static State State.open(str gitdir, str worktree) {
-    State state = State(GIT_ui_remote.RemoteLayer(GIT_ui_branch.BranchLayer(GIT_ui_commit.CommitLayer(GIT_ui_diff.DiffLayer(GIT_ui_outline.OutlineLayer(GIT_ui_core.Core(gitdir, worktree)))))));
+    State state = State(GIT_ui_remote.RemoteLayer(GIT_ui_branch.BranchLayer(GIT_ui_commit.CommitLayer(GIT_ui_lines.LinesLayer(GIT_ui_diff.DiffLayer(GIT_ui_outline.OutlineLayer(GIT_ui_core.Core(gitdir, worktree))))))));
     state.set_editor_paths();
     return state;
 }
@@ -225,7 +226,7 @@ pub void State.draw(TUI_buffer.Buffer buffer, TUI_geometry.Rect area) {
     TUI_geometry.Rect main = bands[0];
     TUI_geometry.Rect footer_area = bands[1];
     if (is_diff_open) {
-        draw_diff(buffer, main);
+        draw_lines(buffer, main);
     } else {
         TUI_geometry.Rect outline_area = main;
         if (is_jump_shown) {
@@ -270,6 +271,9 @@ pub TUI_app.Action State.handle(term.Event event) {
 /// every key, bound or not -- and otherwise through the key table: the view's
 /// own scope (outline or diff), then the keys that work in every view.
 pub TUI_app.Action State.handle_key(term.Code code) {
+    if (!is_diff_open) {
+        visual_anchor = -1;
+    }
     if (has_overlay()) {
         GIT_ui_core.Overlay top = overlays[overlays.size() - 1];
         TUI_app.Action action = top.handle_key(code);
@@ -318,19 +322,28 @@ TUI_app.Action State.run_global_command(str cmd) {
 
 TUI_app.Action State.run_diff_command(str cmd) {
     if (cmd == GIT_ui_core.CMD_DOWN) {
-        diff_view.move(1);
+        move_lines(1);
     }
     if (cmd == GIT_ui_core.CMD_UP) {
-        diff_view.move(-1);
+        move_lines(-1);
     }
     if (cmd == GIT_ui_core.CMD_STAGE) {
-        stage_hunk_current();
+        stage_hunk_lines();
     }
     if (cmd == GIT_ui_core.CMD_UNSTAGE) {
-        unstage_hunk_current();
+        unstage_hunk_lines();
+    }
+    if (cmd == GIT_ui_core.CMD_VISUAL) {
+        toggle_visual();
+    }
+    if (cmd == GIT_ui_core.CMD_LINES) {
+        act_on_lines();
+    }
+    if (cmd == GIT_ui_core.CMD_DISCARD) {
+        discard_lines();
     }
     if (cmd == GIT_ui_core.CMD_BACK) {
-        close_diff();
+        back_lines();
     }
     return TUI_app.Action.Redraw;
 }

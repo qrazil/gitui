@@ -9,7 +9,7 @@ import GIT_index;
 import GIT_object;
 import GIT_refs;
 import GIT_ui_core;
-import GIT_ui_diff;
+import GIT_ui_lines;
 import GIT_ui_model;
 import io;
 import term;
@@ -19,7 +19,7 @@ import tui.TUI_geometry;
 import tui.TUI_menu;
 
 pub type CommitLayer {
-    pub GIT_ui_diff.DiffLayer;
+    pub GIT_ui_lines.LinesLayer;
 }
 
 /// `c`: open the commit overlay.

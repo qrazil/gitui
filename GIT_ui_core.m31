@@ -107,6 +107,8 @@ pub const str CMD_SUBMIT = "submit";
 pub const str CMD_ERASE = "erase";
 pub const str CMD_TOP = "top";
 pub const str CMD_BOTTOM = "bottom";
+pub const str CMD_VISUAL = "visual";
+pub const str CMD_LINES = "lines";
 /// What `pick_purpose` says a finished `GIT_ui_picker` was for.
 pub const str PICK_CHECKOUT = "checkout";
 /// How many lines of the command log are kept; the oldest go first.
@@ -475,7 +477,10 @@ pub List<Binding> key_table() {
     table.push(Binding(SCOPE_DIFF, CMD_UP, ["k", "up"], "move the diff cursor up", "", ""));
     table.push(Binding(SCOPE_DIFF, CMD_STAGE, ["s"], "stage the hunk under the cursor", "s", "stage hunk"));
     table.push(Binding(SCOPE_DIFF, CMD_UNSTAGE, ["u"], "unstage the hunk under the cursor", "u", "unstage hunk"));
-    table.push(Binding(SCOPE_DIFF, CMD_BACK, ["q", "escape", "backspace"], "back to the outline", "q/esc/backspace", "back"));
+    table.push(Binding(SCOPE_DIFF, CMD_VISUAL, ["v"], "start a visual range of lines (j/k extend it, v or Escape cancels)", "v", "lines"));
+    table.push(Binding(SCOPE_DIFF, CMD_LINES, ["space", "enter"], "stage the selected lines (unstage them in the staged view); the line under the cursor with no range, the whole hunk on its header", "", ""));
+    table.push(Binding(SCOPE_DIFF, CMD_DISCARD, ["x"], "discard the selected lines from the working tree (asks first)", "", ""));
+    table.push(Binding(SCOPE_DIFF, CMD_BACK, ["q", "escape", "backspace"], "cancel the visual range, else back to the outline", "q/esc/backspace", "back"));
     // In every view.
     table.push(Binding(SCOPE_GLOBAL, CMD_LOG, ["@"], "the command log: one line per write operation", "@", "log"));
     table.push(Binding(SCOPE_GLOBAL, CMD_HELP, ["?"], "this key help", "?", "help"));

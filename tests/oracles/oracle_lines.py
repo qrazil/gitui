@@ -266,9 +266,10 @@ def check(d, count, scratch):
     sys.exit(1 if failed else 0)
 
 
-if sys.argv[1] == "prepare-named":
-    print(prepare_named(sys.argv[2]))
-elif sys.argv[1] == "prepare":
-    prepare(sys.argv[2], int(sys.argv[3]), int(sys.argv[4]))
-else:
-    check(sys.argv[2], int(sys.argv[3]), sys.argv[4])
+if __name__ == "__main__":
+    if sys.argv[1] == "prepare-named":
+        print(prepare_named(sys.argv[2]))
+    elif sys.argv[1] == "prepare":
+        prepare(sys.argv[2], int(sys.argv[3]), int(sys.argv[4]))
+    else:
+        check(sys.argv[2], int(sys.argv[3]), sys.argv[4])

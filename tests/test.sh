@@ -301,6 +301,7 @@ source tests/test_lines.sh
 # does -- see its own header.
 
 source tests/test_gitui.sh
+source tests/test_uilines.sh
 
 # --- the overlay stack, key table and picker: unit-level ----------------------
 
