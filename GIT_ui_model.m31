@@ -443,7 +443,7 @@ pub List<TUI_outline.Node> commit_node(GIT_log.Entry entry, List<CommitFileDiff>
 /// cache and rebuilds (`State.toggle_current`). The computing happens
 /// elsewhere, this only ever renders what it is handed, which is what keeps
 /// this function itself free of I/O (this doc comment's own first line).
-pub TUI_outline.Outline build_outline(GIT_status.Status status, List<GIT_log.Entry> log, Map<str, List<CommitFileDiff>> changes_by_commit, Map<str, bool> collapsed, Map<str, bytes> out_paths, Map<str, CommitFileDiff> out_file_diffs, List<BranchRow> branches) {
+pub TUI_outline.Outline build_outline(GIT_status.Status status, List<GIT_log.Entry> log, Map<str, List<CommitFileDiff>> changes_by_commit, Map<str, bool> collapsed, Map<str, bytes> out_paths, Map<str, CommitFileDiff> out_file_diffs, List<BranchRow> branches, List<str> stashes = []) {
     out_paths.clear();
     out_file_diffs.clear();
     List<TUI_outline.Node> roots = [];
@@ -497,6 +497,16 @@ pub TUI_outline.Outline build_outline(GIT_status.Status status, List<GIT_log.Ent
         branch_children.push(TUI_outline.Node.leaf("branch:" + branch_row.branch.name, mark + branch_row.branch.name + "  " + branch_row.branch.id.substr(0, 7) + "  " + branch_row.subject));
     }
     roots.push(TUI_outline.Node.section("branches", "Branches (" + branch_children.size().to_str() + ")", branch_children, is_expanded: is_expanded_for(collapsed, "branches", true)));
+    // Stashes, newest first; Enter on one opens the stash list at it (`GIT_ui_stash`).
+    // The section is there only while a stash exists, so a repository without
+    // any keeps the outline it always had (`z` still opens the menu).
+    List<TUI_outline.Node> stash_children = [];
+    for (int n in 0 .. stashes.size()) {
+        stash_children.push(TUI_outline.Node.leaf("stash:" + n.to_str(), stashes[n]));
+    }
+    if (stash_children.size() > 0) {
+        roots.push(TUI_outline.Node.section("stashes", "Stashes (" + stash_children.size().to_str() + ")", stash_children, is_expanded: is_expanded_for(collapsed, "stashes", true)));
+    }
     return TUI_outline.Outline(roots);
 }
 

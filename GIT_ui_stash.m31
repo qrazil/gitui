@@ -1,0 +1,498 @@
+// The stash UI: `z` opens a menu over the outline, and the Stashes section of
+// the outline lists what is stacked. All the work is `GIT_stash`; this file is
+// the overlays and the lines that go in the status line and the `@` log.
+//
+//   z      the stash menu
+//     z push                    u push with the untracked files too
+//     k push, keeping the index m push with a message you type
+//     p pop    a apply    A apply and restore the index
+//     d drop (asks first)       b branch from the stash (asks for the name)
+//     l the stash list, a diff preview under it
+//   Enter on a row of the Stashes section opens the list at that stash.
+//
+// pop / apply / drop / branch act on the stash under the outline cursor when
+// it is in the Stashes section, else on `stash@{0}`; inside the list, on the
+// highlighted one.
+//
+// Every write goes through the `*_stash` functions below, which put one line
+// in the command log, say what happened in the message line, and reload.
+
+import GIT_stash;
+import GIT_ui_core;
+import GIT_ui_panel;
+import term;
+import text;
+import tui.TUI_app;
+import tui.TUI_buffer;
+import tui.TUI_geometry;
+import tui.TUI_menu;
+import tui.TUI_outline;
+import tui.TUI_style;
+import tui.TUI_text;
+
+// --- the work ------------------------------------------------------------------------
+
+str ref_name(int n) {
+    return "stash@{" + n.to_str() + "}";
+}
+
+/// `git stash push`, with `-u`, `-k` and `-m` as asked.
+pub void push_stash(GIT_ui_core.Core core, bool include_untracked, bool keep_index, str message) {
+    match (GIT_stash.push(core.gitdir, core.worktree, include_untracked: include_untracked, keep_index: keep_index, message: message)) {
+        case Ok(GIT_stash.Saved saved): {
+            str line = "stash push";
+            if (include_untracked) {
+                line = line + " -u";
+            }
+            if (keep_index) {
+                line = line + " -k";
+            }
+            if (message != "") {
+                line = line + " -m " + message;
+            }
+            core.log_command(line + " (" + GIT_ui_core.short_id(saved.commit) + ")");
+            core.say("saved " + saved.message);
+            core.reload();
+        }
+        case Err(GIT_stash.Error error): {
+            core.say("stash refused: " + error.to_str());
+        }
+    }
+}
+
+/// `git stash apply` (and with `drop_after`, `pop`) of `stash@{n}`.
+pub void apply_stash(GIT_ui_core.Core core, int n, bool restore_index, bool drop_after) {
+    GIT_stash.Applied done = GIT_stash.Applied(0, 0, 0);
+    if (drop_after) {
+        match (GIT_stash.pop(core.gitdir, core.worktree, n, restore_index: restore_index)) {
+            case Ok(GIT_stash.Applied found): {
+                done = found;
+            }
+            case Err(GIT_stash.Error error): {
+                core.say("pop refused: " + error.to_str());
+                return;
+            }
+        }
+        core.log_command("stash pop " + ref_name(n));
+    } else {
+        str id = "";
+        match (GIT_stash.resolve(core.gitdir, n)) {
+            case Ok(str found): {
+                id = found;
+            }
+            case Err(GIT_stash.Error error): {
+                core.say("apply refused: " + error.to_str());
+                return;
+            }
+        }
+        match (GIT_stash.apply(core.gitdir, core.worktree, id, restore_index: restore_index)) {
+            case Ok(GIT_stash.Applied found): {
+                done = found;
+            }
+            case Err(GIT_stash.Error error): {
+                core.say("apply refused: " + error.to_str());
+                return;
+            }
+        }
+        core.log_command("stash apply " + ref_name(n));
+    }
+    str verb = "applied ";
+    if (drop_after) {
+        verb = "popped ";
+    }
+    core.say(verb + ref_name(n) + " (" + done.written.to_str() + " written, " + done.removed.to_str() + " removed, " + done.untracked.to_str() + " untracked)");
+    core.reload();
+}
+
+/// `git stash drop stash@{n}`.
+pub void drop_stash(GIT_ui_core.Core core, int n) {
+    match (GIT_stash.drop(core.gitdir, n)) {
+        case Ok(str id): {
+            core.log_command("stash drop " + ref_name(n) + " (" + GIT_ui_core.short_id(id) + ")");
+            core.say("dropped " + ref_name(n) + " (" + GIT_ui_core.short_id(id) + ")");
+            core.reload();
+        }
+        case Err(GIT_stash.Error error): {
+            core.say("drop refused: " + error.to_str());
+        }
+    }
+}
+
+/// `git stash branch <name> stash@{n}`.
+pub void branch_stash(GIT_ui_core.Core core, int n, str name) {
+    if (name == "") {
+        core.say("no branch created (empty name)");
+        return;
+    }
+    match (GIT_stash.branch(core.gitdir, core.worktree, name, n)) {
+        case Ok(GIT_stash.Applied done): {
+            core.log_command("stash branch " + name + " " + ref_name(n));
+            core.say("created " + name + " from " + ref_name(n) + " (" + done.written.to_str() + " written)");
+            core.reload();
+        }
+        case Err(GIT_stash.Error error): {
+            core.say("stash branch refused: " + error.to_str());
+        }
+    }
+}
+
+/// The stash the menu acts on: the outline cursor's, when it is in the Stashes
+/// section, else the newest.
+pub int target(GIT_ui_core.Core core) {
+    match (core.outline.current()) {
+        case Some(TUI_outline.Row row): {
+            if (row.node.id.starts_with("stash:")) {
+                match (row.node.id.substr(6, row.node.id.size()).parse_int()) {
+                    case Some(int n): {
+                        return n;
+                    }
+                    case None: {
+                    }
+                }
+            }
+        }
+        case None: {
+        }
+    }
+    return 0;
+}
+
+bool has_stash(GIT_ui_core.Core core, int n) {
+    if (n >= core.stash_labels.size()) {
+        core.say("no stashes yet -- z, z saves the current changes");
+        return false;
+    }
+    return true;
+}
+
+// --- the menu ----------------------------------------------------------------------------
+
+type StashMenu {
+    GIT_ui_core.Core host;
+}
+
+pub TUI_app.Action StashMenu.handle_key(term.Code code) {
+    match (GIT_ui_core.lookup(GIT_ui_core.SCOPE_STASH, code)) {
+        case Some(str cmd): {
+            host.pop_overlay();
+            int n = target(host);
+            if (cmd == GIT_ui_core.CMD_STASH_PUSH) {
+                push_stash(host, false, false, "");
+            }
+            if (cmd == GIT_ui_core.CMD_STASH_UNTRACKED) {
+                push_stash(host, true, false, "");
+            }
+            if (cmd == GIT_ui_core.CMD_STASH_KEEP) {
+                push_stash(host, false, true, "");
+            }
+            if (cmd == GIT_ui_core.CMD_STASH_MESSAGE) {
+                host.push_overlay(PromptOverlay(host, "message", 0));
+            }
+            if (cmd == GIT_ui_core.CMD_STASH_POP && has_stash(host, n)) {
+                apply_stash(host, n, false, true);
+            }
+            if (cmd == GIT_ui_core.CMD_STASH_APPLY && has_stash(host, n)) {
+                apply_stash(host, n, false, false);
+            }
+            if (cmd == GIT_ui_core.CMD_STASH_APPLY_INDEX && has_stash(host, n)) {
+                apply_stash(host, n, true, false);
+            }
+            if (cmd == GIT_ui_core.CMD_STASH_DROP && has_stash(host, n)) {
+                host.push_overlay(DropConfirm(host, n));
+            }
+            if (cmd == GIT_ui_core.CMD_STASH_BRANCH && has_stash(host, n)) {
+                host.push_overlay(PromptOverlay(host, "branch", n));
+            }
+            if (cmd == GIT_ui_core.CMD_STASH_LIST) {
+                open_list(host, n);
+            }
+            return TUI_app.Action.Redraw;
+        }
+        case None: {
+        }
+    }
+    return TUI_app.Action.Continue;
+}
+
+pub void StashMenu.render(TUI_buffer.Buffer buffer, TUI_geometry.Rect area) {
+    List<TUI_menu.Item> items = [];
+    for (GIT_ui_core.Binding binding in GIT_ui_core.bindings_in(GIT_ui_core.SCOPE_STASH)) {
+        str key = binding.keys[0];
+        if (key == "escape") {
+            key = "esc";
+        }
+        items.push(TUI_menu.Item(key, binding.help));
+    }
+    TUI_menu.WhichKey which_key = TUI_menu.WhichKey("stash " + ref_name(target(host)), items);
+    which_key.render(buffer, area);
+}
+
+pub List<GIT_ui_core.Hint> StashMenu.hints() {
+    return GIT_ui_core.hints_for(GIT_ui_core.SCOPE_STASH);
+}
+
+/// `z`: open the menu.
+pub void open(GIT_ui_core.Core core) {
+    core.push_overlay(StashMenu(core));
+}
+
+// --- the typed prompt (a message, a branch name) ------------------------------------------------
+
+type PromptOverlay {
+    GIT_ui_core.Core host;
+    // "message" or "branch"
+    str purpose;
+    int n;
+    str input = "";
+}
+
+pub TUI_app.Action PromptOverlay.handle_key(term.Code code) {
+    match (GIT_ui_core.lookup(GIT_ui_core.SCOPE_STASH_PROMPT, code)) {
+        case Some(str cmd): {
+            if (cmd == GIT_ui_core.CMD_CLOSE) {
+                host.pop_overlay();
+                host.say("stash cancelled");
+            }
+            if (cmd == GIT_ui_core.CMD_ERASE) {
+                input = GIT_ui_core.drop_last(input);
+            }
+            if (cmd == GIT_ui_core.CMD_SUBMIT) {
+                host.pop_overlay();
+                if (purpose == "branch") {
+                    branch_stash(host, n, input.trim());
+                } else {
+                    push_stash(host, false, false, input.trim());
+                }
+            }
+            return TUI_app.Action.Redraw;
+        }
+        case None: {
+        }
+    }
+    match (GIT_ui_core.typed(code)) {
+        case Some(str typed): {
+            input = input + typed;
+            return TUI_app.Action.Redraw;
+        }
+        case None: {
+        }
+    }
+    return TUI_app.Action.Continue;
+}
+
+pub void PromptOverlay.render(TUI_buffer.Buffer buffer, TUI_geometry.Rect area) {
+    if (area.is_empty()) {
+        return;
+    }
+    str label = "stash message: ";
+    if (purpose == "branch") {
+        label = "branch from " + ref_name(n) + ": ";
+    }
+    TUI_geometry.Rect row = TUI_geometry.Rect(area.x, area.y + area.height - 1, area.width, 1);
+    TUI_style.Style style = TUI_style.Style(attrs: TUI_style.REVERSE);
+    buffer.fill(row, " ", style);
+    buffer.set_str(row.x, row.y, TUI_text.truncate(label + input + "_", row.width), style, max: row.width);
+}
+
+pub List<GIT_ui_core.Hint> PromptOverlay.hints() {
+    return GIT_ui_core.hints_for(GIT_ui_core.SCOPE_STASH_PROMPT);
+}
+
+// --- dropping asks first -------------------------------------------------------------------------
+
+type DropConfirm {
+    GIT_ui_core.Core host;
+    int n;
+}
+
+/// `y` drops; every other key keeps the stash.
+pub TUI_app.Action DropConfirm.handle_key(term.Code code) {
+    host.pop_overlay();
+    match (GIT_ui_core.lookup(GIT_ui_core.SCOPE_CONFIRM, code)) {
+        case Some(str cmd): {
+            if (cmd == GIT_ui_core.CMD_YES) {
+                drop_stash(host, n);
+                return TUI_app.Action.Redraw;
+            }
+        }
+        case None: {
+        }
+    }
+    host.say("drop cancelled");
+    return TUI_app.Action.Redraw;
+}
+
+pub void DropConfirm.render(TUI_buffer.Buffer buffer, TUI_geometry.Rect area) {
+    str label = "";
+    if (n < host.stash_labels.size()) {
+        label = host.stash_labels[n];
+    }
+    TUI_menu.WhichKey which_key = TUI_menu.WhichKey("drop " + label + "?", [TUI_menu.Item("y", "yes, drop it"), TUI_menu.Item("any other key", "no, keep it")]);
+    which_key.render(buffer, area);
+}
+
+pub List<GIT_ui_core.Hint> DropConfirm.hints() {
+    return GIT_ui_core.hints_for(GIT_ui_core.SCOPE_CONFIRM);
+}
+
+// --- the list, with a diff preview -----------------------------------------------------------------
+
+type ListOverlay {
+    GIT_ui_core.Core host;
+    int selected = 0;
+    int scroll = 0;
+    // the preview is cached per stash commit
+    str preview_id = "";
+    List<str> preview = [];
+}
+
+pub TUI_app.Action ListOverlay.handle_key(term.Code code) {
+    match (GIT_ui_core.lookup(GIT_ui_core.SCOPE_STASH_LIST, code)) {
+        case Some(str cmd): {
+            if (cmd == GIT_ui_core.CMD_CLOSE) {
+                host.pop_overlay();
+            }
+            if (cmd == GIT_ui_core.CMD_DOWN && selected < host.stash_labels.size() - 1) {
+                selected = selected + 1;
+                scroll = 0;
+            }
+            if (cmd == GIT_ui_core.CMD_UP && selected > 0) {
+                selected = selected - 1;
+                scroll = 0;
+            }
+            if (cmd == GIT_ui_core.CMD_PAGE_DOWN) {
+                scroll = scroll + 10;
+            }
+            if (cmd == GIT_ui_core.CMD_PAGE_UP) {
+                scroll = scroll - 10;
+                if (scroll < 0) {
+                    scroll = 0;
+                }
+            }
+            if (cmd == GIT_ui_core.CMD_STASH_POP && has_stash(host, selected)) {
+                host.pop_overlay();
+                apply_stash(host, selected, false, true);
+            }
+            if (cmd == GIT_ui_core.CMD_STASH_APPLY && has_stash(host, selected)) {
+                host.pop_overlay();
+                apply_stash(host, selected, false, false);
+            }
+            if (cmd == GIT_ui_core.CMD_STASH_DROP && has_stash(host, selected)) {
+                host.push_overlay(DropConfirm(host, selected));
+            }
+            return TUI_app.Action.Redraw;
+        }
+        case None: {
+        }
+    }
+    return TUI_app.Action.Continue;
+}
+
+// `git stash show -p -u` for the highlighted stash, as lines.
+void ListOverlay.load_preview() {
+    str id = "";
+    match (GIT_stash.resolve(host.gitdir, selected)) {
+        case Ok(str found): {
+            id = found;
+        }
+        case Err: {
+            preview_id = "";
+            preview = [];
+            return;
+        }
+    }
+    if (id == preview_id) {
+        return;
+    }
+    preview_id = id;
+    preview = [];
+    match (GIT_stash.show(host.gitdir, selected, include_untracked: true)) {
+        case Ok(bytes shown): {
+            match (shown.utf8()) {
+                case Some(str body): {
+                    preview = text.lines(body);
+                }
+                case None: {
+                    preview = ["(the diff is not valid UTF-8)"];
+                }
+            }
+        }
+        case Err(GIT_stash.Error error): {
+            preview = ["cannot show: " + error.to_str()];
+        }
+    }
+    if (preview.size() == 0) {
+        preview = ["(no changes to tracked files)"];
+    }
+}
+
+pub void ListOverlay.render(TUI_buffer.Buffer buffer, TUI_geometry.Rect area) {
+    List<str> labels = host.stash_labels;
+    TUI_geometry.Rect inner = GIT_ui_panel.frame(buffer, area, "stashes (" + labels.size().to_str() + ")");
+    if (inner.is_empty()) {
+        return;
+    }
+    if (labels.size() == 0) {
+        GIT_ui_panel.draw_lines(buffer, inner, ["(no stashes)"], 0, -1);
+        return;
+    }
+    if (selected >= labels.size()) {
+        selected = labels.size() - 1;
+    }
+    int list_height = labels.size();
+    int most = inner.height / 3;
+    if (most < 1) {
+        most = 1;
+    }
+    if (list_height > most) {
+        list_height = most;
+    }
+    int offset = 0;
+    if (selected >= list_height) {
+        offset = selected - list_height + 1;
+    }
+    TUI_geometry.Rect list_area = TUI_geometry.Rect(inner.x, inner.y, inner.width, list_height);
+    GIT_ui_panel.draw_lines(buffer, list_area, labels, offset, selected);
+    int top = list_height + 1;
+    if (top >= inner.height) {
+        return;
+    }
+    TUI_geometry.Rect view = TUI_geometry.Rect(inner.x, inner.y + top, inner.width, inner.height - top);
+    load_preview();
+    scroll = GIT_ui_panel.clamp(scroll, preview.size(), view.height);
+    int row = 0;
+    while (row < view.height && scroll + row < preview.size()) {
+        str line = preview[scroll + row];
+        buffer.set_str(view.x, view.y + row, TUI_text.truncate(line, view.width), diff_style(line), max: view.width);
+        row = row + 1;
+    }
+}
+
+pub List<GIT_ui_core.Hint> ListOverlay.hints() {
+    return GIT_ui_core.hints_for(GIT_ui_core.SCOPE_STASH_LIST);
+}
+
+TUI_style.Style diff_style(str line) {
+    if (line.starts_with("+++") || line.starts_with("---") || line.starts_with("diff ")) {
+        return TUI_style.Style(attrs: TUI_style.BOLD);
+    }
+    if (line.starts_with("+")) {
+        return TUI_style.Style(foreground: TUI_style.Colour.Indexed(2));
+    }
+    if (line.starts_with("-")) {
+        return TUI_style.Style(foreground: TUI_style.Colour.Indexed(1));
+    }
+    if (line.starts_with("@@")) {
+        return TUI_style.Style(foreground: TUI_style.Colour.Indexed(6));
+    }
+    return TUI_style.Style();
+}
+
+/// Open the stash list with `n` highlighted (`z`, `l`; Enter on a stash row).
+pub void open_list(GIT_ui_core.Core core, int n) {
+    int selected = n;
+    if (selected >= core.stash_labels.size()) {
+        selected = 0;
+    }
+    core.push_overlay(ListOverlay(core, selected: selected));
+}

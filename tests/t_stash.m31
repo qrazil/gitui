@@ -1,0 +1,150 @@
+// Drives `GIT_stash` against a disposable fixture so `test_stash.sh` can compare
+// each operation with real git's.
+//
+//   ./t_stash <gitdir> <worktree> push [-u] [-k] [-m <message>]   prints the stash commit id
+//   ./t_stash <gitdir> <worktree> list                            `stash@{n}: <message>` lines
+//   ./t_stash <gitdir> <worktree> show <n> [-u]                   the patch, as bytes
+//   ./t_stash <gitdir> <worktree> drop <n>                        the dropped commit id
+//   ./t_stash <gitdir> <worktree> apply [--index] <n>
+//   ./t_stash <gitdir> <worktree> pop [--index] <n>
+//   ./t_stash <gitdir> <worktree> branch <name> <n>
+//
+// A failure prints `error: <text>` and exits 1.
+
+import GIT_stash;
+import io;
+import os;
+
+str gitdir = "";
+str worktree = "";
+List<str> rest = [];
+List<str> argv = os.args();
+if (argv.size() < 4) {
+    io.eprint("usage: t_stash <gitdir> <worktree> push|list|show|drop|apply|pop|branch ...");
+    os.exit(2);
+}
+gitdir = argv[1];
+worktree = argv[2];
+str command = argv[3];
+for (int i in 4 .. argv.size()) {
+    rest.push(argv[i]);
+}
+
+void fail(GIT_stash.Error error) {
+    io.eprint("error: " + error.to_str());
+    print("error: " + error.to_str());
+    os.exit(1);
+}
+
+int number_of(List<str> words) {
+    for (str word in words) {
+        match (word.parse_int()) {
+            case Some(int n): {
+                return n;
+            }
+            case None: {
+            }
+        }
+    }
+    return 0;
+}
+
+bool has_flag(List<str> words, str flag) {
+    for (str word in words) {
+        if (word == flag) {
+            return true;
+        }
+    }
+    return false;
+}
+
+if (command == "push") {
+    str message = "";
+    for (int i in 0 .. rest.size()) {
+        if (rest[i] == "-m" && i + 1 < rest.size()) {
+            message = rest[i + 1];
+        }
+    }
+    match (GIT_stash.push(gitdir, worktree, include_untracked: has_flag(rest, "-u"), keep_index: has_flag(rest, "-k"), message: message)) {
+        case Ok(GIT_stash.Saved saved): {
+            print(saved.commit);
+        }
+        case Err(GIT_stash.Error error): {
+            fail(error);
+        }
+    }
+} else if (command == "list") {
+    for (str label in GIT_stash.labels(gitdir)) {
+        print(label);
+    }
+} else if (command == "show") {
+    match (GIT_stash.show(gitdir, number_of(rest), include_untracked: has_flag(rest, "-u"))) {
+        case Ok(bytes text): {
+            io.File out = io.stdout();
+            match (out.write(text)) {
+                case Ok: {
+                }
+                case Err: {
+                    os.exit(1);
+                }
+            }
+        }
+        case Err(GIT_stash.Error error): {
+            fail(error);
+        }
+    }
+} else if (command == "drop") {
+    match (GIT_stash.drop(gitdir, number_of(rest))) {
+        case Ok(str id): {
+            print(id);
+        }
+        case Err(GIT_stash.Error error): {
+            fail(error);
+        }
+    }
+} else if (command == "apply" || command == "pop") {
+    int n = number_of(rest);
+    bool with_index = has_flag(rest, "--index");
+    if (command == "apply") {
+        match (GIT_stash.resolve(gitdir, n)) {
+            case Ok(str id): {
+                match (GIT_stash.apply(gitdir, worktree, id, restore_index: with_index)) {
+                    case Ok(GIT_stash.Applied done): {
+                        print("applied " + done.written.to_str() + " " + done.removed.to_str() + " " + done.untracked.to_str());
+                    }
+                    case Err(GIT_stash.Error error): {
+                        fail(error);
+                    }
+                }
+            }
+            case Err(GIT_stash.Error error): {
+                fail(error);
+            }
+        }
+    } else {
+        match (GIT_stash.pop(gitdir, worktree, n, restore_index: with_index)) {
+            case Ok(GIT_stash.Applied done): {
+                print("applied " + done.written.to_str() + " " + done.removed.to_str() + " " + done.untracked.to_str());
+            }
+            case Err(GIT_stash.Error error): {
+                fail(error);
+            }
+        }
+    }
+} else if (command == "branch") {
+    if (rest.size() < 2) {
+        io.eprint("usage: branch <name> <n>");
+        os.exit(2);
+    }
+    match (GIT_stash.branch(gitdir, worktree, rest[0], number_of([rest[1]]))) {
+        case Ok(GIT_stash.Applied done): {
+            print("applied " + done.written.to_str() + " " + done.removed.to_str() + " " + done.untracked.to_str());
+        }
+        case Err(GIT_stash.Error error): {
+            fail(error);
+        }
+    }
+} else {
+    io.eprint("unknown command " + command);
+    os.exit(2);
+}

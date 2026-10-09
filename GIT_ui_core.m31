@@ -48,6 +48,7 @@ import GIT_log;
 import GIT_merge;
 import GIT_object;
 import GIT_refs;
+import GIT_stash;
 import GIT_status;
 import GIT_ui_merge_model;
 import GIT_ui_model;
@@ -74,6 +75,9 @@ pub const str SCOPE_PICKER = "picker";
 pub const str SCOPE_MERGE = "merge";
 pub const str SCOPE_MERGE_ASK = "merge-ask";
 pub const str SCOPE_RESOLVE = "resolve";
+pub const str SCOPE_STASH = "stash";
+pub const str SCOPE_STASH_LIST = "stash-list";
+pub const str SCOPE_STASH_PROMPT = "stash-prompt";
 pub const str CMD_QUIT = "quit";
 pub const str CMD_DOWN = "down";
 pub const str CMD_UP = "up";
@@ -122,6 +126,21 @@ pub const str CMD_BOTH = "both";
 pub const str CMD_BASE = "base";
 pub const str CMD_UNDO = "undo";
 pub const str CMD_STAGE_FILE = "stage-file";
+pub const str CMD_VISUAL = "visual";
+pub const str CMD_LINES = "lines";
+pub const str CMD_STASH = "stash";
+pub const str CMD_STASH_PUSH = "stash-push";
+pub const str CMD_STASH_UNTRACKED = "stash-untracked";
+pub const str CMD_STASH_KEEP = "stash-keep";
+pub const str CMD_STASH_MESSAGE = "stash-message";
+pub const str CMD_STASH_POP = "stash-pop";
+pub const str CMD_STASH_APPLY = "stash-apply";
+pub const str CMD_STASH_APPLY_INDEX = "stash-apply-index";
+pub const str CMD_STASH_DROP = "stash-drop";
+pub const str CMD_STASH_BRANCH = "stash-branch";
+pub const str CMD_STASH_LIST = "stash-list";
+pub const str CMD_PAGE_DOWN = "page-down";
+pub const str CMD_PAGE_UP = "page-up";
 /// What `pick_purpose` says a finished `GIT_ui_picker` was for.
 pub const str PICK_CHECKOUT = "checkout";
 /// The merge menu's three pickers: the branch to merge, and how.
@@ -191,6 +210,8 @@ pub type Core {
     /// serves both the commit message and the new-branch name.
     pub bool is_editor_for_branch = false;
     pub List<GIT_ui_model.BranchRow> branch_rows = [];
+    /// `stash@{n}: <message>` per stash, newest first -- the "Stashes" section.
+    pub List<str> stash_labels = [];
     /// Set by `edit_message` and read by `gitui.m31`'s own top-level driver
     /// after `TUI_app.Loop.run` returns: true means the loop stopped so
     /// `$EDITOR` could have the terminal, not because the operator pressed
@@ -317,6 +338,7 @@ pub void Core.refresh() {
         case Err: {
         }
     }
+    stash_labels = GIT_stash.labels(gitdir);
     match (GIT_refs.head(gitdir)) {
         case Ok(GIT_refs.Head head): {
             match (head) {
@@ -379,7 +401,7 @@ pub void Core.reload() {
         }
     }
     refresh();
-    outline = GIT_ui_model.build_outline(last_status, log, commit_changes_cache, collapsed, paths, file_diffs, branch_rows);
+    outline = GIT_ui_model.build_outline(last_status, log, commit_changes_cache, collapsed, paths, file_diffs, branch_rows, stashes: stash_labels);
     List<TUI_outline.Node> merge_roots = GIT_ui_merge_model.merge_roots(last_status, is_merging, collapsed, paths);
     if (merge_roots.size() > 0) {
         for (TUI_outline.Node node in outline.roots) {
@@ -496,6 +518,7 @@ pub List<Binding> key_table() {
     table.push(Binding(SCOPE_OUTLINE, CMD_BRANCH, ["b"], "branch: check out, new branch", "b", "branch"));
     table.push(Binding(SCOPE_OUTLINE, CMD_PUSH, ["P"], "push the current branch to origin (fast-forward only)", "P", "push"));
     table.push(Binding(SCOPE_OUTLINE, CMD_PULL, ["F"], "pull the current branch from origin (fast-forward only)", "F", "pull"));
+    table.push(Binding(SCOPE_OUTLINE, CMD_STASH, ["z"], "stash: push, pop, apply, drop, list (the stash under the cursor in the Stashes section, else the newest)", "z", "stash"));
     table.push(Binding(SCOPE_OUTLINE, CMD_JUMP, ["J"], "show or hide the jump list", "", ""));
     table.push(Binding(SCOPE_OUTLINE, CMD_FOCUS, ["w"], "give the jump list the keys, or take them back", "", ""));
     table.push(Binding(SCOPE_OUTLINE, CMD_SEARCH, ["/"], "search the outline and the log (smart-case: lower case ignores case)", "/", "search"));
@@ -509,7 +532,10 @@ pub List<Binding> key_table() {
     table.push(Binding(SCOPE_DIFF, CMD_UP, ["k", "up"], "move the diff cursor up", "", ""));
     table.push(Binding(SCOPE_DIFF, CMD_STAGE, ["s"], "stage the hunk under the cursor", "s", "stage hunk"));
     table.push(Binding(SCOPE_DIFF, CMD_UNSTAGE, ["u"], "unstage the hunk under the cursor", "u", "unstage hunk"));
-    table.push(Binding(SCOPE_DIFF, CMD_BACK, ["q", "escape", "backspace"], "back to the outline", "q/esc/backspace", "back"));
+    table.push(Binding(SCOPE_DIFF, CMD_VISUAL, ["v"], "start a visual range of lines (j/k extend it, v or Escape cancels)", "v", "lines"));
+    table.push(Binding(SCOPE_DIFF, CMD_LINES, ["space", "enter"], "stage the selected lines (unstage them in the staged view); the line under the cursor with no range, the whole hunk on its header", "", ""));
+    table.push(Binding(SCOPE_DIFF, CMD_DISCARD, ["x"], "discard the selected lines from the working tree (asks first)", "", ""));
+    table.push(Binding(SCOPE_DIFF, CMD_BACK, ["q", "escape", "backspace"], "cancel the visual range, else back to the outline", "q/esc/backspace", "back"));
     // In every view.
     table.push(Binding(SCOPE_GLOBAL, CMD_LOG, ["@"], "the command log: one line per write operation", "@", "log"));
     table.push(Binding(SCOPE_GLOBAL, CMD_HELP, ["?"], "this key help", "?", "help"));
@@ -529,6 +555,28 @@ pub List<Binding> key_table() {
     table.push(Binding(SCOPE_PULL, CMD_PULL, ["p"], "pull the current branch from origin", "p", "pull"));
     table.push(Binding(SCOPE_PULL, CMD_CLOSE, ["escape"], "close", "esc", "close"));
     // The discard confirmation: "y" and anything else.
+    table.push(Binding(SCOPE_STASH, CMD_STASH_PUSH, ["z"], "push: stash the changes to tracked files", "z", "push"));
+    table.push(Binding(SCOPE_STASH, CMD_STASH_UNTRACKED, ["u"], "push, untracked files too", "u", "+untracked"));
+    table.push(Binding(SCOPE_STASH, CMD_STASH_KEEP, ["k"], "push, but keep the staged changes in the index", "", ""));
+    table.push(Binding(SCOPE_STASH, CMD_STASH_MESSAGE, ["m"], "push with a message you type", "", ""));
+    table.push(Binding(SCOPE_STASH, CMD_STASH_POP, ["p"], "pop: apply the stash and drop it", "p", "pop"));
+    table.push(Binding(SCOPE_STASH, CMD_STASH_APPLY, ["a"], "apply the stash, keeping it", "a", "apply"));
+    table.push(Binding(SCOPE_STASH, CMD_STASH_APPLY_INDEX, ["A"], "apply the stash and restore its index too", "", ""));
+    table.push(Binding(SCOPE_STASH, CMD_STASH_DROP, ["d"], "drop the stash (asks first)", "d", "drop"));
+    table.push(Binding(SCOPE_STASH, CMD_STASH_BRANCH, ["b"], "branch: new branch from the stash's base, with the stash applied and dropped", "", ""));
+    table.push(Binding(SCOPE_STASH, CMD_STASH_LIST, ["l"], "list the stashes with a diff preview", "l", "list"));
+    table.push(Binding(SCOPE_STASH, CMD_CLOSE, ["escape"], "close", "esc", "close"));
+    table.push(Binding(SCOPE_STASH_LIST, CMD_DOWN, ["j", "down"], "next stash", "j/k", "select"));
+    table.push(Binding(SCOPE_STASH_LIST, CMD_UP, ["k", "up"], "previous stash", "", ""));
+    table.push(Binding(SCOPE_STASH_LIST, CMD_PAGE_DOWN, ["J", "page-down"], "scroll the diff preview down", "J/K", "scroll"));
+    table.push(Binding(SCOPE_STASH_LIST, CMD_PAGE_UP, ["K", "page-up"], "scroll the diff preview up", "", ""));
+    table.push(Binding(SCOPE_STASH_LIST, CMD_STASH_POP, ["p"], "pop the highlighted stash", "p", "pop"));
+    table.push(Binding(SCOPE_STASH_LIST, CMD_STASH_APPLY, ["a"], "apply the highlighted stash", "a", "apply"));
+    table.push(Binding(SCOPE_STASH_LIST, CMD_STASH_DROP, ["d"], "drop the highlighted stash (asks first)", "d", "drop"));
+    table.push(Binding(SCOPE_STASH_LIST, CMD_CLOSE, ["escape", "q"], "close", "esc", "close"));
+    table.push(Binding(SCOPE_STASH_PROMPT, CMD_SUBMIT, ["enter"], "use what is typed", "enter", "ok"));
+    table.push(Binding(SCOPE_STASH_PROMPT, CMD_CLOSE, ["escape"], "cancel", "esc", "cancel"));
+    table.push(Binding(SCOPE_STASH_PROMPT, CMD_ERASE, ["backspace"], "erase the last character", "", ""));
     table.push(Binding(SCOPE_CONFIRM, CMD_YES, ["y"], "yes, discard", "y", "discard"));
     table.push(Binding(SCOPE_CONFIRM, CMD_CLOSE, ["escape"], "any other key keeps the file", "any", "keep"));
     // The command log overlay.
@@ -667,12 +715,21 @@ pub str scope_title(str scope) {
     if (scope == SCOPE_RESOLVE) {
         return "conflict resolution (Enter on an unmerged path)";
     }
+    if (scope == SCOPE_STASH) {
+        return "stash overlay (z)";
+    }
+    if (scope == SCOPE_STASH_LIST) {
+        return "stash list (z, then l)";
+    }
+    if (scope == SCOPE_STASH_PROMPT) {
+        return "stash message / branch name prompt";
+    }
     return scope;
 }
 
 /// Every scope, in the order the help overlay lists them.
 pub List<str> all_scopes() {
-    return [SCOPE_OUTLINE, SCOPE_DIFF, SCOPE_GLOBAL, SCOPE_COMMIT, SCOPE_BRANCH, SCOPE_PUSH, SCOPE_PULL, SCOPE_CONFIRM, SCOPE_LOG, SCOPE_HELP, SCOPE_SEARCH, SCOPE_PICKER, SCOPE_MERGE, SCOPE_MERGE_ASK, SCOPE_RESOLVE];
+    return [SCOPE_OUTLINE, SCOPE_DIFF, SCOPE_GLOBAL, SCOPE_COMMIT, SCOPE_BRANCH, SCOPE_PUSH, SCOPE_PULL, SCOPE_CONFIRM, SCOPE_LOG, SCOPE_HELP, SCOPE_SEARCH, SCOPE_PICKER, SCOPE_MERGE, SCOPE_MERGE_ASK, SCOPE_RESOLVE, SCOPE_STASH, SCOPE_STASH_LIST, SCOPE_STASH_PROMPT];
 }
 
 // --- the overlay stack and the command log -------------------------------------
