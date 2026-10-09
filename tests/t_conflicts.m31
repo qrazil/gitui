@@ -1,0 +1,104 @@
+// `GIT_diff3` on hand-written cases, with the expected bytes written out: the
+// rules in its header (touching changes conflict, identical changes merge,
+// marker shapes, a missing final newline, CRLF, empty files) and the reader
+// (`parse_conflicts`, `render`, `resolve*`). The randomised comparison with
+// `git merge-file` is `t_diff3` + `oracles/oracle_diff3.py`.
+//
+//   ./t_conflicts
+//
+// Prints `<case> ok` or `<case> FAIL ...` per check and a last
+// `N checks, F failed` line; `test_diff3.sh` greps for it.
+
+import GIT_diff3;
+
+type Counter {
+    int checks = 0;
+    int failed = 0;
+}
+
+void Counter.check(str name, bool is_ok, str detail) {
+    checks = checks + 1;
+    if (is_ok) {
+        print(name + " ok");
+    } else {
+        failed = failed + 1;
+        print(name + " FAIL " + detail);
+    }
+}
+
+Counter counter = Counter();
+
+bytes b(str text) {
+    return text.to_bytes();
+}
+
+str s(bytes data) {
+    return data.hex();
+}
+
+void merges(Counter counter, str name, str base, str ours, str theirs, str want, int conflicts, GIT_diff3.Style style = GIT_diff3.Style.Merge, GIT_diff3.Level level = GIT_diff3.Level.ZealousAlnum) {
+    GIT_diff3.Merged got = GIT_diff3.merge3(base.to_bytes(), ours.to_bytes(), theirs.to_bytes(), GIT_diff3.Labels("ours", "base", "theirs"), style: style, level: level);
+    counter.check(name, got.text == want.to_bytes() && got.conflicts == conflicts, "got " + got.conflicts.to_str() + " conflicts, " + got.text.hex() + " want " + conflicts.to_str() + ", " + want.to_bytes().hex());
+}
+
+merges(counter, "disjoint changes merge", "a\nb\nc\nd\ne\nf\ng\nh\n", "a\nB\nc\nd\ne\nf\ng\nh\n", "a\nb\nc\nd\ne\nf\nG\nh\n", "a\nB\nc\nd\ne\nf\nG\nh\n", 0);
+merges(counter, "both sides identical change", "a\nb\nc\n", "a\nX\nc\n", "a\nX\nc\n", "a\nX\nc\n", 0);
+merges(counter, "identical change conflicts at Minimal", "a\nb\nc\n", "a\nX\nc\n", "a\nX\nc\n", "a\n<<<<<<< ours\nX\n=======\nX\n>>>>>>> theirs\nc\n", 1, level: GIT_diff3.Level.Minimal);
+merges(counter, "same line changed two ways", "a\nb\nc\n", "a\nX\nc\n", "a\nY\nc\n", "a\n<<<<<<< ours\nX\n=======\nY\n>>>>>>> theirs\nc\n", 1);
+merges(counter, "adjacent changes touch and conflict", "a\nb\nc\nd\n", "a\nB\nc\nd\n", "a\nb\nC\nd\n", "a\n<<<<<<< ours\nB\nc\n=======\nb\nC\n>>>>>>> theirs\nd\n", 1);
+merges(counter, "one line between: no conflict", "a\nb\nc\nd\ne\nf\ng\nh\ni\nj\n", "a\nB\nc\nd\ne\nf\ng\nh\ni\nj\n", "a\nb\nc\nd\ne\nf\ng\nh\nI\nj\n", "a\nB\nc\nd\ne\nf\ng\nh\nI\nj\n", 0);
+merges(counter, "diff3 style shows the base", "a\nb\nc\n", "a\nX\nc\n", "a\nY\nc\n", "a\n<<<<<<< ours\nX\n||||||| base\nb\n=======\nY\n>>>>>>> theirs\nc\n", 1, style: GIT_diff3.Style.Diff3);
+merges(counter, "delete against change", "a\nb\nc\n", "a\nc\n", "a\nY\nc\n", "a\n<<<<<<< ours\n=======\nY\n>>>>>>> theirs\nc\n", 1);
+merges(counter, "both add after the same line", "a\n", "a\nx\n", "a\ny\n", "a\n<<<<<<< ours\nx\n=======\ny\n>>>>>>> theirs\n", 1);
+merges(counter, "zealous narrowing keeps common lines out", "1\n2\n3\n4\n5\n6\n7\n8\n9\n", "1\nA\nB\nC\nD\n6\n7\n8\n9\n", "1\nA\nX\nC\nD\n6\n7\n8\n9\n", "1\nA\n<<<<<<< ours\nB\n=======\nX\n>>>>>>> theirs\nC\nD\n6\n7\n8\n9\n", 1);
+merges(counter, "diff3 style does not narrow", "1\n2\n3\n4\n5\n6\n7\n8\n9\n", "1\nA\nB\nC\nD\n6\n7\n8\n9\n", "1\nA\nX\nC\nD\n6\n7\n8\n9\n", "1\n<<<<<<< ours\nA\nB\nC\nD\n||||||| base\n2\n3\n4\n5\n=======\nA\nX\nC\nD\n>>>>>>> theirs\n6\n7\n8\n9\n", 1, style: GIT_diff3.Style.Diff3);
+merges(counter, "only ours changed: ours verbatim", "a\nb\n", "a\r\nB", "a\nb\n", "a\r\nB", 0);
+merges(counter, "only theirs changed: theirs verbatim", "a\nb\n", "a\nb\n", "A\nb", "A\nb", 0);
+merges(counter, "neither changed", "a\nb\n", "a\nb\n", "a\nb\n", "a\nb\n", 0);
+merges(counter, "empty base, both add", "", "x\n", "y\n", "<<<<<<< ours\nx\n=======\ny\n>>>>>>> theirs\n", 1);
+merges(counter, "empty base, both add the same", "", "x\n", "x\n", "x\n", 0);
+merges(counter, "ours deletes everything, theirs changes", "a\nb\n", "", "a\nB\n", "<<<<<<< ours\n=======\na\nB\n>>>>>>> theirs\n", 1);
+merges(counter, "missing final newline in a conflicting side", "a\nb\n", "a\nX", "a\nY\n", "a\n<<<<<<< ours\nX\n=======\nY\n>>>>>>> theirs\n", 1);
+merges(counter, "missing final newline on both, clean", "a\nb\nc\nd\ne\nf\ng\nh", "A\nb\nc\nd\ne\nf\ng\nh", "a\nb\nc\nd\ne\nf\ng\nH", "A\nb\nc\nd\ne\nf\ng\nH", 0);
+merges(counter, "CRLF files get CRLF markers", "a\r\nb\r\nc\r\n", "a\r\nX\r\nc\r\n", "a\r\nY\r\nc\r\n", "a\r\n<<<<<<< ours\r\nX\r\n=======\r\nY\r\n>>>>>>> theirs\r\nc\r\n", 1);
+merges(counter, "two conflicts three lines apart become one", "a\nb\nc\nd\ne\nf\ng\n", "A\nb\nc\nd\nE\nf\ng\n", "X\nb\nc\nd\nY\nf\ng\n", "<<<<<<< ours\nA\nb\nc\nd\nE\n=======\nX\nb\nc\nd\nY\n>>>>>>> theirs\nf\ng\n", 1);
+merges(counter, "two conflicts four lines apart stay two", "a\nb\nc\nd\ne\nf\ng\nh\n", "A\nb\nc\nd\ne\nF\ng\nh\n", "X\nb\nc\nd\ne\nY\ng\nh\n", "<<<<<<< ours\nA\n=======\nX\n>>>>>>> theirs\nb\nc\nd\ne\n<<<<<<< ours\nF\n=======\nY\n>>>>>>> theirs\ng\nh\n", 2);
+merges(counter, "distant conflicts joined across lines with no alphanumerics", "a\n-\n-\n-\n-\n-\nb\n", "A\n-\n-\n-\n-\n-\nB\n", "X\n-\n-\n-\n-\n-\nY\n", "<<<<<<< ours\nA\n-\n-\n-\n-\n-\nB\n=======\nX\n-\n-\n-\n-\n-\nY\n>>>>>>> theirs\n", 1);
+merges(counter, "... but not at Zealous", "a\n-\n-\n-\n-\n-\nb\n", "A\n-\n-\n-\n-\n-\nB\n", "X\n-\n-\n-\n-\n-\nY\n", "<<<<<<< ours\nA\n=======\nX\n>>>>>>> theirs\n-\n-\n-\n-\n-\n<<<<<<< ours\nB\n=======\nY\n>>>>>>> theirs\n", 2, level: GIT_diff3.Level.Zealous);
+merges(counter, "custom labels", "a\n", "b\n", "c\n", "<<<<<<< ours\nb\n=======\nc\n>>>>>>> theirs\n", 1);
+
+// --- the reader ---------------------------------------------------------------
+
+str three = "x\n<<<<<<< ours\nO1\nO2\n||||||| base\nB1\n=======\nT1\n>>>>>>> theirs\nmid\n<<<<<<< ours\n=======\nT2\n>>>>>>> theirs\nend";
+List<GIT_diff3.Segment> segs = GIT_diff3.parse_conflicts(b(three));
+counter.check("parse: 2 conflicts", GIT_diff3.count_conflicts(segs) == 2, GIT_diff3.count_conflicts(segs).to_str());
+counter.check("parse: render is the identity", GIT_diff3.render(segs) == b(three), GIT_diff3.render(segs).hex());
+counter.check("resolve_all Ours", GIT_diff3.resolve_all(segs, GIT_diff3.Choice.Ours) == b("x\nO1\nO2\nmid\nend"), GIT_diff3.resolve_all(segs, GIT_diff3.Choice.Ours).hex());
+counter.check("resolve_all Theirs", GIT_diff3.resolve_all(segs, GIT_diff3.Choice.Theirs) == b("x\nT1\nmid\nT2\nend"), GIT_diff3.resolve_all(segs, GIT_diff3.Choice.Theirs).hex());
+counter.check("resolve_all Both", GIT_diff3.resolve_all(segs, GIT_diff3.Choice.Both) == b("x\nO1\nO2\nT1\nmid\nT2\nend"), GIT_diff3.resolve_all(segs, GIT_diff3.Choice.Both).hex());
+counter.check("resolve_all BothReversed", GIT_diff3.resolve_all(segs, GIT_diff3.Choice.BothReversed) == b("x\nT1\nO1\nO2\nmid\nT2\nend"), GIT_diff3.resolve_all(segs, GIT_diff3.Choice.BothReversed).hex());
+counter.check("resolve_all Base", GIT_diff3.resolve_all(segs, GIT_diff3.Choice.Base) == b("x\nB1\nmid\nend"), GIT_diff3.resolve_all(segs, GIT_diff3.Choice.Base).hex());
+List<GIT_diff3.Segment> one = GIT_diff3.resolve_at(segs, 1, GIT_diff3.Choice.Theirs);
+counter.check("resolve_at 1 leaves one conflict", GIT_diff3.count_conflicts(one) == 1, GIT_diff3.count_conflicts(one).to_str());
+counter.check("resolve_at 1 rendered", GIT_diff3.render(one) == b("x\n<<<<<<< ours\nO1\nO2\n||||||| base\nB1\n=======\nT1\n>>>>>>> theirs\nmid\nT2\nend"), GIT_diff3.render(one).hex());
+counter.check("resolve_at out of range changes nothing", GIT_diff3.render(GIT_diff3.resolve_at(segs, 7, GIT_diff3.Choice.Ours)) == b(three), "changed");
+List<GIT_diff3.Segment> two = GIT_diff3.resolve_at(one, 0, GIT_diff3.Choice.Base);
+counter.check("resolve_at both: no conflict left", GIT_diff3.count_conflicts(two) == 0 && GIT_diff3.render(two) == b("x\nB1\nmid\nT2\nend"), GIT_diff3.render(two).hex());
+str crlf = "a\r\n<<<<<<< ours\r\nO\r\n=======\r\nT\r\n>>>>>>> theirs\r\nz\r\n";
+List<GIT_diff3.Segment> crsegs = GIT_diff3.parse_conflicts(b(crlf));
+counter.check("parse CRLF: 1 conflict", GIT_diff3.count_conflicts(crsegs) == 1, "n=" + GIT_diff3.count_conflicts(crsegs).to_str());
+counter.check("parse CRLF: round trip", GIT_diff3.render(crsegs) == b(crlf), GIT_diff3.render(crsegs).hex());
+counter.check("parse CRLF: ours keeps its CRLF", GIT_diff3.resolve_all(crsegs, GIT_diff3.Choice.Ours) == b("a\r\nO\r\nz\r\n"), GIT_diff3.resolve_all(crsegs, GIT_diff3.Choice.Ours).hex());
+str unfinished = "a\n<<<<<<< ours\nO\n=======\nT\nz\n";
+counter.check("an unterminated conflict stays text", GIT_diff3.count_conflicts(GIT_diff3.parse_conflicts(b(unfinished))) == 0 && GIT_diff3.render(GIT_diff3.parse_conflicts(b(unfinished))) == b(unfinished), "parsed");
+str nested = "<<<<<<< ours\n<<<<<<< ours\nO\n=======\nT\n>>>>>>> theirs\n";
+List<GIT_diff3.Segment> nsegs = GIT_diff3.parse_conflicts(b(nested));
+counter.check("a start marker inside a conflict restarts it", GIT_diff3.count_conflicts(nsegs) == 1 && GIT_diff3.render(nsegs) == b(nested), "n=" + GIT_diff3.count_conflicts(nsegs).to_str());
+str longer = "<<<<<<<< ours\nO\n=======\nT\n>>>>>>> theirs\n";
+counter.check("eight < is not a marker", GIT_diff3.count_conflicts(GIT_diff3.parse_conflicts(b(longer))) == 0, "parsed");
+counter.check("text without markers is one Text", GIT_diff3.parse_conflicts(b("a\nb\n")).size() == 1 && GIT_diff3.count_conflicts(GIT_diff3.parse_conflicts(b("a\nb\n"))) == 0, "segments");
+counter.check("empty text has no segments", GIT_diff3.parse_conflicts([]).size() == 0, "segments");
+GIT_diff3.Merged real = GIT_diff3.merge3(b("a\nb\nc\n"), b("a\nX\nc\n"), b("a\nY\nc\n"), GIT_diff3.Labels("ours", "base", "theirs"));
+counter.check("merge then resolve Ours is ours", GIT_diff3.resolve_all(GIT_diff3.parse_conflicts(real.text), GIT_diff3.Choice.Ours) == b("a\nX\nc\n"), s(real.text));
+counter.check("merge then resolve Theirs is theirs", GIT_diff3.resolve_all(GIT_diff3.parse_conflicts(real.text), GIT_diff3.Choice.Theirs) == b("a\nY\nc\n"), s(real.text));
+print(counter.checks.to_str() + " checks, " + counter.failed.to_str() + " failed");

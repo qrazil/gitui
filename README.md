@@ -39,7 +39,9 @@ bash scripts/build-gitui.sh -o ourgitui    # not build.sh -- it is the one with 
 | `GIT_status.m31` | working-tree status: staged, unstaged, untracked, and unmerged paths (index stages 1/2/3, with `git status`'s two-letter codes) |
 | `GIT_checkout.m31` | local branches, switching branches (the working-tree-writing primitive: refuses on local changes in the way), creating a branch; `apply_tree_diff` (`read-tree -m -u` between two trees) and `reset_hard` (`reset --hard`) |
 | `GIT_hunks.m31` | `lib/diff.m31`'s edit script, grouped into qrazil/tui's `TUI_diff_view.Hunk`/`Line` with context; `spans` is the one definition of where each hunk starts and ends |
-| `GIT_patch.m31` | apply or revert exactly one hunk of a diff, byte for byte -- what the diff view's `s`/`u` stage and unstage with |
+| `GIT_patch.m31` | apply or revert exactly one hunk of a diff, or any selection of its `+`/`-` lines (`apply_lines`, `revert_lines`), byte for byte -- what the diff view's `s`/`u` stage and unstage with |
+| `GIT_xdiff.m31` | a port of git's xdiff line diff (Myers with its heuristics, no indent heuristic): same edit script as `git diff --no-indent-heuristic`; `GIT_hunks` and `GIT_patch` diff with it |
+| `GIT_diff3.m31` | line-based three-way merge matching `git merge-file` byte for byte (`merge3`, merge and diff3 styles, `Level` Minimal..ZealousAlnum), and the conflict reader: `parse_conflicts`, `render`, `resolve`, `resolve_all` |
 | `GIT_log.m31` | the commit-history walk, shared by `git.m31 -log` and `gitui.m31` |
 | `GIT_client.m31` | the interactive client's state and logic (no top-level statements, so it is importable and testable) |
 | `gitui.m31` | the interactive client's thin driver: parses a path, runs `TUI_app.Loop` |

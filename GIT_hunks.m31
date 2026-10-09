@@ -1,4 +1,4 @@
-// Turning `diff.diff`'s edit script into what `TUI_diff_view.DiffView`
+// Turning `GIT_xdiff.diff_text`'s edit script into what `TUI_diff_view.DiffView`
 // renders: `Hunk`s, grouped with a few lines of unchanged context on each
 // side, the way `git diff`/`diff -u` group theirs.
 //
@@ -11,8 +11,11 @@
 //
 // --- the boundary this sits on -------------------------------------------------
 //
-// `lib/diff.m31` computes the generic edit script -- keep, add or remove,
-// line by line -- and knows nothing about hunks, context, or
+// The edit script comes from `GIT_xdiff.m31` (a port of the diff git itself
+// runs, so a hunk here is the hunk `git diff` prints: `lib/diff.m31`'s Myers
+// finds a shortest script too, but a different one whenever several tie).
+// `lib/diff.m31` defines the `Op` it is made of -- keep, add or remove, line
+// by line -- and knows nothing about hunks, context, or
 // `TUI_diff_view.Hunk`/`Line`; it cannot, because `lib/` does not depend on
 // `tui` (`docs/design.md`'s "Starting the client" section, and
 // `lib/diff.m31`'s own header, say why at more length). Grouping that script
@@ -40,6 +43,7 @@
 // lines regardless.
 
 import diff;
+import GIT_xdiff;
 import tui.TUI_diff_view;
 
 /// Three lines of context, `git diff`'s and `diff -u`'s own default.
@@ -57,7 +61,7 @@ pub enum Blob {
 
 /// `old` and `new`, as hunks a `TUI_diff_view.DiffView` can render.
 pub Blob hunks(bytes old, bytes new, int context = DEFAULT_CONTEXT) {
-    match (diff.diff(old, new)) {
+    match (GIT_xdiff.diff_text(old, new)) {
         case Binary: {
             return Blob.Binary;
         }

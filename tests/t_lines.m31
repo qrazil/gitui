@@ -1,0 +1,137 @@
+// Batch driver for `GIT_patch.apply_lines` / `revert_lines`, for
+// `tests/oracles/oracle_lines.py`: for each case DIR/NNNNN.{old,new,sel} (`sel`:
+// the indices, separated by spaces, of the ops of diff(old, new) -- as
+// `GIT_xdiff.diff_text` makes it -- that are selected) writes
+//
+//   NNNNN.applied    apply_lines(old, ops, sel)
+//   NNNNN.reverted   revert_lines(new, ops, sel)
+//   NNNNN.stale_applied, .stale_reverted, .far
+//                    only when NNNNN.stale exists: apply/revert of that text with
+//                    the same ops, and apply_lines with the index ops.size()
+//   NNNNN.ops        the number of ops, then the script, a ` `, `+` or `-` and
+//                    the line, so the oracle can cross-check the numbering
+//
+// A result of None is written as the single word `NONE`.
+//
+//   ./t_lines DIR COUNT
+
+import os;
+import io;
+import fs;
+import diff;
+import GIT_xdiff;
+import GIT_patch;
+
+void run() {
+    List<str> argv = os.args();
+    if (argv.size() != 3) {
+        print("usage: t_lines DIR COUNT");
+        os.exit(1);
+    }
+    str dir = argv[1];
+    int count = argv[2].parse_int().or(0);
+    int c = 0;
+    while (c < count) {
+        str stem = dir + "/" + pad(c);
+        bytes old = read(stem + ".old");
+        bytes new = read(stem + ".new");
+        List<int> selected = [];
+        for (str token in read_text(stem + ".sel").split(" ")) {
+            if (token.size() > 0) {
+                selected.push(token.parse_int().or(-1));
+            }
+        }
+        match (GIT_xdiff.diff_text(old, new)) {
+            case Binary: {
+                write(stem + ".applied", "NONE".to_bytes());
+                write(stem + ".reverted", "NONE".to_bytes());
+                write(stem + ".ops", "BINARY".to_bytes());
+            }
+            case Lines(List<diff.Op> ops): {
+                write(stem + ".applied", orNone(GIT_patch.apply_lines(old, ops, selected)));
+                write(stem + ".reverted", orNone(GIT_patch.revert_lines(new, ops, selected)));
+                write(stem + ".ops", listing(ops));
+                if (fs.exists(stem + ".stale")) {
+                    // a text the ops were not made from, and an index no op has: both None
+                    bytes stale = read(stem + ".stale");
+                    write(stem + ".stale_applied", orNone(GIT_patch.apply_lines(stale, ops, selected)));
+                    write(stem + ".stale_reverted", orNone(GIT_patch.revert_lines(stale, ops, selected)));
+                    List<int> far = [ops.size()];
+                    write(stem + ".far", orNone(GIT_patch.apply_lines(old, ops, far)));
+                }
+            }
+        }
+        c = c + 1;
+    }
+}
+
+bytes orNone(Option<bytes> result) {
+    match (result) {
+        case Some(bytes data): {
+            return data;
+        }
+        case None: {
+            return "NONE".to_bytes();
+        }
+    }
+}
+
+bytes listing(List<diff.Op> ops) {
+    bytes out = (ops.size().to_str() + "\n").to_bytes();
+    for (diff.Op op in ops) {
+        match (op.kind) {
+            case Keep: {
+                out.push(32);
+            }
+            case Add: {
+                out.push(43);
+            }
+            case Remove: {
+                out.push(45);
+            }
+        }
+        out.extend(op.line);
+        if (op.line[op.line.size() - 1] != 10) {
+            out.push(10);
+        }
+    }
+    return out;
+}
+
+str pad(int n) {
+    str s = n.to_str();
+    while (s.size() < 5) {
+        s = "0" + s;
+    }
+    return s;
+}
+
+bytes read(str path) {
+    match (io.read_bytes(path)) {
+        case Ok(bytes contents): {
+            return contents;
+        }
+        case Err(io.Error error): {
+            print("cannot read " + path + ": " + error.to_str());
+            os.exit(1);
+            return [];
+        }
+    }
+}
+
+str read_text(str path) {
+    return read(path).utf8().or("");
+}
+
+void write(str path, bytes data) {
+    match (io.write_bytes(path, data)) {
+        case Ok(int _n): {
+        }
+        case Err(io.Error error): {
+            print("cannot write " + path + ": " + error.to_str());
+            os.exit(1);
+        }
+    }
+}
+
+run();

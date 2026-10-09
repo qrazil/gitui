@@ -1,0 +1,778 @@
+// A line diff that makes the same choices git's xdiff library makes.
+//
+// `lib/diff.m31`'s Myers returns a shortest edit script, but a shortest edit
+// script is rarely unique, and when it is not, WHICH one you get decides where
+// a three-way merge sees two changes touch, and so whether it reports a
+// conflict. `git merge-file` and `git merge` run on xdiff; to merge the way they
+// do, byte for byte, the diff underneath has to be xdiff's. This is a port of
+// the parts of it that matter, in the order xdiff runs them:
+//
+//   1. classify  -- every distinct line gets a small integer; equal lines have
+//                   equal integers, so comparing lines is comparing ints.
+//   2. trim      -- the common first and last lines are never looked at again.
+//   3. cleanup   -- a line with no equal in the other file is changed for sure
+//                   and is dropped from the search; so is a line that is
+//                   repeated very often (xdl_cleanup_records).
+//   4. recs_cmp  -- Myers' divide-and-conquer middle-snake search in linear
+//                   space (xdl_split / xdl_recs_cmp), with xdiff's cost cut-off
+//                   and its "good snake" heuristics, which only engage on
+//                   large, very different inputs.
+//   5. compact   -- every group of changed lines is slid up and down as far as
+//                   identical neighbours allow, merging with a neighbouring
+//                   group it touches, and left where it lines up with a change
+//                   in the other file (xdl_change_compact; without git's
+//                   indent heuristic, which merge does not use).
+//
+// API
+// ---
+//   GIT_xdiff.split_lines(content)   -> List<bytes>   each line keeps its terminator
+//   GIT_xdiff.diff_lines(a, b)       -> Diff          which lines of a / b changed
+//   GIT_xdiff.edits(diff)            -> List<Edit>    the change script, in order
+//   GIT_xdiff.ops(a, b)              -> List<diff.Op> the same script as `lib/diff`'s ops
+//   GIT_xdiff.diff_text(old, new)         -> diff.Diff     `diff.diff`, but with git's choices
+//
+// A line is a run of bytes up to and including its `\n`; the last line of a
+// buffer has none if the buffer does not end in one, and "a" is a different
+// line from "a\n" (as in git). `\r\n` is not special here.
+
+import diff;
+
+const int SNAKE_CNT = 20;
+const int HEUR_MIN_COST = 256;
+const int MAX_COST_MIN = 256;
+const int K_HEUR = 4;
+const int MAX_EQLIMIT = 1024;
+const int SIMSCAN_WINDOW = 100;
+const int KPDIS_RUN = 4;
+const int LINE_MAX = 1073741823;
+
+/// One run of difference: `a[a_start .. a_start + a_len)` is replaced by
+/// `b[b_start .. b_start + b_len)`. Either length may be 0 (a pure insertion
+/// or deletion).
+pub type Edit {
+    pub int a_start;
+    pub int a_len;
+    pub int b_start;
+    pub int b_len;
+}
+
+/// The result of comparing two line lists: for each line, whether it was
+/// changed (removed from `a`, added to `b`), and each line's class number
+/// (`a_class[i] == b_class[j]` iff the two lines are equal).
+pub type Diff {
+    pub List<bool> a_changed;
+    pub List<bool> b_changed;
+    pub List<int> a_class;
+    pub List<int> b_class;
+}
+
+/// `content` as lines, each with its own terminator; an empty buffer has none.
+pub List<bytes> split_lines(bytes content) {
+    List<bytes> out = [];
+    int size = content.size();
+    int start = 0;
+    int i = 0;
+    while (i < size) {
+        if (content[i] == 10) {
+            out.push(content.substr(start, i + 1));
+            start = i + 1;
+        }
+        i = i + 1;
+    }
+    if (start < size) {
+        out.push(content.substr(start, size));
+    }
+    return out;
+}
+
+// --- classification --------------------------------------------------------------
+
+type LineKey {
+    bytes line;
+    int digest;
+}
+
+int LineKey.hash() {
+    return digest;
+}
+
+bool LineKey.eq(LineKey other) {
+    return line == other.line;
+}
+
+LineKey key_of(bytes line) {
+    int h = 5381;
+    for (int byte in line) {
+        h = (h * 33 + byte) % 1000000007;
+    }
+    return LineKey(line, h);
+}
+
+// `a` / `b` are the class number of every line; `count_a` / `count_b` say how
+// many lines of each file belong to each class.
+type Classes {
+    List<int> a;
+    List<int> b;
+    List<int> count_a;
+    List<int> count_b;
+}
+
+Classes classify(List<bytes> lines_a, List<bytes> lines_b) {
+    Map<LineKey, int> seen = {};
+    Classes cl = Classes([], [], [], []);
+    for (bytes line in lines_a) {
+        int id = class_of(seen, cl, line);
+        cl.a.push(id);
+        cl.count_a[id] = cl.count_a[id] + 1;
+    }
+    for (bytes line in lines_b) {
+        int id = class_of(seen, cl, line);
+        cl.b.push(id);
+        cl.count_b[id] = cl.count_b[id] + 1;
+    }
+    return cl;
+}
+
+int class_of(Map<LineKey, int> seen, Classes cl, bytes line) {
+    LineKey key = key_of(line);
+    match (seen.get(key)) {
+        case Some(int id): {
+            return id;
+        }
+        case None: {
+            int id = cl.count_a.size();
+            seen.set(key, id);
+            cl.count_a.push(0);
+            cl.count_b.push(0);
+            return id;
+        }
+    }
+}
+
+// --- the search -----------------------------------------------------------------------
+
+// xdl_bogosqrt: not a square root, but what xdiff uses as one.
+int bogosqrt(int n) {
+    int i = 1;
+    int rest = n;
+    while (rest > 0) {
+        i = i * 2;
+        rest = rest / 4;
+    }
+    return i;
+}
+
+type Split {
+    int i1;
+    int i2;
+    bool min_lo;
+    bool min_hi;
+}
+
+// The two files after cleanup: class numbers of the lines that are still in
+// play (`ha*`), where each came from (`rindex*`), and the change flags being
+// filled in (`rchg*`, indexed by original line number).
+type Env {
+    List<int> ha1;
+    List<int> ha2;
+    List<int> rindex1;
+    List<int> rindex2;
+    List<bool> rchg1;
+    List<bool> rchg2;
+    List<int> kvdf;
+    List<int> kvdb;
+    int kv_off;
+    int mxcost;
+}
+
+// xdl_recs_cmp: shrink the box by its common ends, then split it at the
+// middle snake and recurse on both halves.
+void Env.recs_cmp(int off1_in, int lim1_in, int off2_in, int lim2_in, bool need_min) {
+    int off1 = off1_in;
+    int lim1 = lim1_in;
+    int off2 = off2_in;
+    int lim2 = lim2_in;
+    while (off1 < lim1 && off2 < lim2 && ha1[off1] == ha2[off2]) {
+        off1 = off1 + 1;
+        off2 = off2 + 1;
+    }
+    while (off1 < lim1 && off2 < lim2 && ha1[lim1 - 1] == ha2[lim2 - 1]) {
+        lim1 = lim1 - 1;
+        lim2 = lim2 - 1;
+    }
+    if (off1 == lim1) {
+        while (off2 < lim2) {
+            rchg2[rindex2[off2]] = true;
+            off2 = off2 + 1;
+        }
+    } else if (off2 == lim2) {
+        while (off1 < lim1) {
+            rchg1[rindex1[off1]] = true;
+            off1 = off1 + 1;
+        }
+    } else {
+        Split spl = split_box(off1, lim1, off2, lim2, need_min);
+        recs_cmp(off1, spl.i1, off2, spl.i2, spl.min_lo);
+        recs_cmp(spl.i1, lim1, spl.i2, lim2, spl.min_hi);
+    }
+}
+
+// xdl_split: find the middle snake of the box by running a forward and a
+// backward search until they meet.
+Split Env.split_box(int off1, int lim1, int off2, int lim2, bool need_min) {
+    int o = kv_off;
+    int dmin = off1 - lim2;
+    int dmax = lim1 - off2;
+    int fmid = off1 - off2;
+    int bmid = lim1 - lim2;
+    int odd = (fmid - bmid) & 1;
+    int fmin = fmid;
+    int fmax = fmid;
+    int bmin = bmid;
+    int bmax = bmid;
+    Split spl = Split(0, 0, false, false);
+    kvdf[fmid + o] = off1;
+    kvdb[bmid + o] = lim1;
+    int ec = 1;
+    while (true) {
+        bool got_snake = false;
+        if (fmin > dmin) {
+            fmin = fmin - 1;
+            kvdf[fmin - 1 + o] = -1;
+        } else {
+            fmin = fmin + 1;
+        }
+        if (fmax < dmax) {
+            fmax = fmax + 1;
+            kvdf[fmax + 1 + o] = -1;
+        } else {
+            fmax = fmax - 1;
+        }
+        int d = fmax;
+        while (d >= fmin) {
+            int i1 = 0;
+            if (kvdf[d - 1 + o] >= kvdf[d + 1 + o]) {
+                i1 = kvdf[d - 1 + o] + 1;
+            } else {
+                i1 = kvdf[d + 1 + o];
+            }
+            int prev1 = i1;
+            int i2 = i1 - d;
+            while (i1 < lim1 && i2 < lim2 && ha1[i1] == ha2[i2]) {
+                i1 = i1 + 1;
+                i2 = i2 + 1;
+            }
+            if (i1 - prev1 > SNAKE_CNT) {
+                got_snake = true;
+            }
+            kvdf[d + o] = i1;
+            if (odd == 1 && bmin <= d && d <= bmax && kvdb[d + o] <= i1) {
+                spl.i1 = i1;
+                spl.i2 = i2;
+                spl.min_lo = true;
+                spl.min_hi = true;
+                return spl;
+            }
+            d = d - 2;
+        }
+        if (bmin > dmin) {
+            bmin = bmin - 1;
+            kvdb[bmin - 1 + o] = LINE_MAX;
+        } else {
+            bmin = bmin + 1;
+        }
+        if (bmax < dmax) {
+            bmax = bmax + 1;
+            kvdb[bmax + 1 + o] = LINE_MAX;
+        } else {
+            bmax = bmax - 1;
+        }
+        d = bmax;
+        while (d >= bmin) {
+            int i1 = 0;
+            if (kvdb[d - 1 + o] < kvdb[d + 1 + o]) {
+                i1 = kvdb[d - 1 + o];
+            } else {
+                i1 = kvdb[d + 1 + o] - 1;
+            }
+            int prev1 = i1;
+            int i2 = i1 - d;
+            while (i1 > off1 && i2 > off2 && ha1[i1 - 1] == ha2[i2 - 1]) {
+                i1 = i1 - 1;
+                i2 = i2 - 1;
+            }
+            if (prev1 - i1 > SNAKE_CNT) {
+                got_snake = true;
+            }
+            kvdb[d + o] = i1;
+            if (odd == 0 && fmin <= d && d <= fmax && i1 <= kvdf[d + o]) {
+                spl.i1 = i1;
+                spl.i2 = i2;
+                spl.min_lo = true;
+                spl.min_hi = true;
+                return spl;
+            }
+            d = d - 2;
+        }
+        if (!need_min) {
+            if (got_snake && ec > HEUR_MIN_COST) {
+                if (heuristic_forward(spl, off1, lim1, off2, lim2, fmin, fmax, fmid, ec)) {
+                    return spl;
+                }
+                if (heuristic_backward(spl, off1, lim1, off2, lim2, bmin, bmax, bmid, ec)) {
+                    return spl;
+                }
+            }
+            if (ec >= mxcost) {
+                return furthest(spl, off1, lim1, off2, lim2, fmin, fmax, bmin, bmax);
+            }
+        }
+        ec = ec + 1;
+    }
+}
+
+// The forward half of xdiff's "interesting snake" heuristic: a diagonal that
+// has already run a long way along a long match is taken as the split.
+bool Env.heuristic_forward(Split spl, int off1, int lim1, int off2, int lim2, int fmin, int fmax, int fmid, int ec) {
+    int o = kv_off;
+    int best = 0;
+    int d = fmax;
+    while (d >= fmin) {
+        int dd = abs_of(d - fmid);
+        int i1 = kvdf[d + o];
+        int i2 = i1 - d;
+        int v = (i1 - off1) + (i2 - off2) - dd;
+        if (v > K_HEUR * ec && v > best && off1 + SNAKE_CNT <= i1 && i1 < lim1 && off2 + SNAKE_CNT <= i2 && i2 < lim2) {
+            int k = 1;
+            while (ha1[i1 - k] == ha2[i2 - k]) {
+                if (k == SNAKE_CNT) {
+                    best = v;
+                    spl.i1 = i1;
+                    spl.i2 = i2;
+                    break;
+                }
+                k = k + 1;
+            }
+        }
+        d = d - 2;
+    }
+    if (best > 0) {
+        spl.min_lo = true;
+        spl.min_hi = false;
+        return true;
+    }
+    return false;
+}
+
+bool Env.heuristic_backward(Split spl, int off1, int lim1, int off2, int lim2, int bmin, int bmax, int bmid, int ec) {
+    int o = kv_off;
+    int best = 0;
+    int d = bmax;
+    while (d >= bmin) {
+        int dd = abs_of(d - bmid);
+        int i1 = kvdb[d + o];
+        int i2 = i1 - d;
+        int v = (lim1 - i1) + (lim2 - i2) - dd;
+        if (v > K_HEUR * ec && v > best && off1 < i1 && i1 <= lim1 - SNAKE_CNT && off2 < i2 && i2 <= lim2 - SNAKE_CNT) {
+            int k = 0;
+            while (ha1[i1 + k] == ha2[i2 + k]) {
+                if (k == SNAKE_CNT - 1) {
+                    best = v;
+                    spl.i1 = i1;
+                    spl.i2 = i2;
+                    break;
+                }
+                k = k + 1;
+            }
+        }
+        d = d - 2;
+    }
+    if (best > 0) {
+        spl.min_lo = false;
+        spl.min_hi = true;
+        return true;
+    }
+    return false;
+}
+
+// "Enough is enough": the search has cost `mxcost`; take the furthest-reaching
+// path found so far, from whichever end got further.
+Split Env.furthest(Split spl, int off1, int lim1, int off2, int lim2, int fmin, int fmax, int bmin, int bmax) {
+    int o = kv_off;
+    int fbest = -1;
+    int fbest1 = -1;
+    int d = fmax;
+    while (d >= fmin) {
+        int i1 = min_of(kvdf[d + o], lim1);
+        int i2 = i1 - d;
+        if (lim2 < i2) {
+            i1 = lim2 + d;
+            i2 = lim2;
+        }
+        if (fbest < i1 + i2) {
+            fbest = i1 + i2;
+            fbest1 = i1;
+        }
+        d = d - 2;
+    }
+    int bbest = LINE_MAX;
+    int bbest1 = LINE_MAX;
+    d = bmax;
+    while (d >= bmin) {
+        int i1 = max_of(off1, kvdb[d + o]);
+        int i2 = i1 - d;
+        if (i2 < off2) {
+            i1 = off2 + d;
+            i2 = off2;
+        }
+        if (i1 + i2 < bbest) {
+            bbest = i1 + i2;
+            bbest1 = i1;
+        }
+        d = d - 2;
+    }
+    if ((lim1 + lim2) - bbest < fbest - (off1 + off2)) {
+        spl.i1 = fbest1;
+        spl.i2 = fbest - fbest1;
+        spl.min_lo = true;
+        spl.min_hi = false;
+    } else {
+        spl.i1 = bbest1;
+        spl.i2 = bbest - bbest1;
+        spl.min_lo = false;
+        spl.min_hi = true;
+    }
+    return spl;
+}
+
+int min_of(int x, int y) {
+    if (x < y) {
+        return x;
+    }
+    return y;
+}
+
+int max_of(int x, int y) {
+    if (x > y) {
+        return x;
+    }
+    return y;
+}
+
+int abs_of(int x) {
+    if (x < 0) {
+        return 0 - x;
+    }
+    return x;
+}
+
+// --- cleanup -------------------------------------------------------------------------
+
+// xdl_clean_mmatch: should a line that occurs very often in the other file
+// (dis == 2) be thrown out, because it sits in a run of lines that mostly have
+// no counterpart?
+bool clean_mmatch(List<int> dis, int i, int s_in, int e_in) {
+    int s = s_in;
+    int e = e_in;
+    if (i - s > SIMSCAN_WINDOW) {
+        s = i - SIMSCAN_WINDOW;
+    }
+    if (e - i > SIMSCAN_WINDOW) {
+        e = i + SIMSCAN_WINDOW;
+    }
+    int r = 1;
+    int rdis0 = 0;
+    int rpdis0 = 1;
+    while (i - r >= s) {
+        if (dis[i - r] == 0) {
+            rdis0 = rdis0 + 1;
+        } else if (dis[i - r] == 2) {
+            rpdis0 = rpdis0 + 1;
+        } else {
+            break;
+        }
+        r = r + 1;
+    }
+    if (rdis0 == 0) {
+        return false;
+    }
+    r = 1;
+    int rdis1 = 0;
+    int rpdis1 = 1;
+    while (i + r <= e) {
+        if (dis[i + r] == 0) {
+            rdis1 = rdis1 + 1;
+        } else if (dis[i + r] == 2) {
+            rpdis1 = rpdis1 + 1;
+        } else {
+            break;
+        }
+        r = r + 1;
+    }
+    if (rdis1 == 0) {
+        return false;
+    }
+    rdis1 = rdis1 + rdis0;
+    rpdis1 = rpdis1 + rpdis0;
+    return rpdis1 * KPDIS_RUN < rpdis1 + rdis1;
+}
+
+// For one file: mark as changed every line in [dstart, dend] with no (or too
+// many, in a bad neighbourhood) equal lines in the other file; the survivors
+// are what the search sees.
+void discard(List<int> cls, List<int> other_count, int dstart, int dend, List<bool> rchg, List<int> ha, List<int> rindex) {
+    int n = cls.size();
+    int mlim = min_of(bogosqrt(n), MAX_EQLIMIT);
+    List<int> dis = [0; n + 1];
+    int i = dstart;
+    while (i <= dend) {
+        int nm = other_count[cls[i]];
+        if (nm == 0) {
+            dis[i] = 0;
+        } else if (nm >= mlim) {
+            dis[i] = 2;
+        } else {
+            dis[i] = 1;
+        }
+        i = i + 1;
+    }
+    i = dstart;
+    while (i <= dend) {
+        if (dis[i] == 1 || (dis[i] == 2 && !clean_mmatch(dis, i, dstart, dend))) {
+            ha.push(cls[i]);
+            rindex.push(i);
+        } else {
+            rchg[i] = true;
+        }
+        i = i + 1;
+    }
+}
+
+// --- compacting change groups --------------------------------------------------------
+
+// A maximal run of changed lines `[start, end)`, possibly empty. Between two
+// consecutive groups of one file is exactly one unchanged line, and both files
+// have the same number of unchanged lines, so the groups of the two files pair
+// up one to one: `compact` walks both in step.
+type Group {
+    int start;
+    int end;
+}
+
+Group group_init(List<bool> rchg) {
+    Group g = Group(0, 0);
+    while (g.end < rchg.size() && rchg[g.end]) {
+        g.end = g.end + 1;
+    }
+    return g;
+}
+
+// True when there is no next group.
+bool group_next(List<bool> rchg, Group g) {
+    if (g.end == rchg.size()) {
+        return true;
+    }
+    g.start = g.end + 1;
+    g.end = g.start;
+    while (g.end < rchg.size() && rchg[g.end]) {
+        g.end = g.end + 1;
+    }
+    return false;
+}
+
+bool group_previous(List<bool> rchg, Group g) {
+    if (g.start == 0) {
+        return true;
+    }
+    g.end = g.start - 1;
+    g.start = g.end;
+    while (g.start > 0 && rchg[g.start - 1]) {
+        g.start = g.start - 1;
+    }
+    return false;
+}
+
+// True when the group could not slide down by one line.
+bool group_slide_down(List<bool> rchg, List<int> cls, Group g) {
+    if (g.end < rchg.size() && cls[g.start] == cls[g.end]) {
+        rchg[g.start] = false;
+        g.start = g.start + 1;
+        rchg[g.end] = true;
+        g.end = g.end + 1;
+        while (g.end < rchg.size() && rchg[g.end]) {
+            g.end = g.end + 1;
+        }
+        return false;
+    }
+    return true;
+}
+
+bool group_slide_up(List<bool> rchg, List<int> cls, Group g) {
+    if (g.start > 0 && cls[g.start - 1] == cls[g.end - 1]) {
+        g.start = g.start - 1;
+        rchg[g.start] = true;
+        g.end = g.end - 1;
+        rchg[g.end] = false;
+        while (g.start > 0 && rchg[g.start - 1]) {
+            g.start = g.start - 1;
+        }
+        return false;
+    }
+    return true;
+}
+
+// xdl_change_compact: slide each group of `rchg` (class numbers `cls`) as far
+// up and down as identical lines allow, merging with groups it runs into,
+// then park it where it lines up with a group of `rchg_other` if it can, and
+// at its lowest position otherwise.
+void compact(List<bool> rchg, List<int> cls, List<bool> rchg_other) {
+    Group g = group_init(rchg);
+    Group go = group_init(rchg_other);
+    while (true) {
+        if (g.end != g.start) {
+            int groupsize = 0;
+            int earliest_end = 0;
+            int end_matching_other = -1;
+            while (true) {
+                groupsize = g.end - g.start;
+                end_matching_other = -1;
+                while (!group_slide_up(rchg, cls, g)) {
+                    group_previous(rchg_other, go);
+                }
+                earliest_end = g.end;
+                if (go.end > go.start) {
+                    end_matching_other = g.end;
+                }
+                while (true) {
+                    if (group_slide_down(rchg, cls, g)) {
+                        break;
+                    }
+                    group_next(rchg_other, go);
+                    if (go.end > go.start) {
+                        end_matching_other = g.end;
+                    }
+                }
+                if (groupsize == g.end - g.start) {
+                    break;
+                }
+            }
+            if (g.end != earliest_end && end_matching_other != -1) {
+                while (go.end == go.start) {
+                    group_slide_up(rchg, cls, g);
+                    group_previous(rchg_other, go);
+                }
+            }
+        }
+        if (group_next(rchg, g)) {
+            break;
+        }
+        group_next(rchg_other, go);
+    }
+}
+
+// --- entry points --------------------------------------------------------------------
+
+/// Compare two line lists the way xdiff does (Myers, with xdiff's cleanup,
+/// heuristics and change-group compaction).
+pub Diff diff_lines(List<bytes> a, List<bytes> b) {
+    int na = a.size();
+    int nb = b.size();
+    Classes cl = classify(a, b);
+    List<bool> flags_a = [false; na];
+    List<bool> flags_b = [false; nb];
+    int lim = min_of(na, nb);
+    int dstart = 0;
+    while (dstart < lim && cl.a[dstart] == cl.b[dstart]) {
+        dstart = dstart + 1;
+    }
+    int suffix = 0;
+    int room = lim - dstart;
+    while (suffix < room && cl.a[na - 1 - suffix] == cl.b[nb - 1 - suffix]) {
+        suffix = suffix + 1;
+    }
+    List<int> keep_a = [];
+    List<int> keep_b = [];
+    List<int> from_a = [];
+    List<int> from_b = [];
+    discard(cl.a, cl.count_b, dstart, na - suffix - 1, flags_a, keep_a, from_a);
+    discard(cl.b, cl.count_a, dstart, nb - suffix - 1, flags_b, keep_b, from_b);
+    int reduced_a = keep_a.size();
+    int reduced_b = keep_b.size();
+    int ndiags = reduced_a + reduced_b + 3;
+    int mxcost = bogosqrt(ndiags);
+    if (mxcost < MAX_COST_MIN) {
+        mxcost = MAX_COST_MIN;
+    }
+    Env env = Env(keep_a, keep_b, from_a, from_b, flags_a, flags_b, [0; ndiags + 1], [0; ndiags + 1], reduced_b + 1, mxcost);
+    env.recs_cmp(0, reduced_a, 0, reduced_b, false);
+    compact(flags_a, cl.a, flags_b);
+    compact(flags_b, cl.b, flags_a);
+    return Diff(flags_a, flags_b, cl.a, cl.b);
+}
+
+/// The groups of changed lines in `d`, in order (xdl_build_script).
+pub List<Edit> edits(Diff d) {
+    List<Edit> out = [];
+    int n1 = d.a_changed.size();
+    int n2 = d.b_changed.size();
+    int i1 = 0;
+    int i2 = 0;
+    while (i1 < n1 || i2 < n2) {
+        if ((i1 < n1 && d.a_changed[i1]) || (i2 < n2 && d.b_changed[i2])) {
+            int s1 = i1;
+            int s2 = i2;
+            while (i1 < n1 && d.a_changed[i1]) {
+                i1 = i1 + 1;
+            }
+            while (i2 < n2 && d.b_changed[i2]) {
+                i2 = i2 + 1;
+            }
+            out.push(Edit(s1, i1 - s1, s2, i2 - s2));
+        } else {
+            i1 = i1 + 1;
+            i2 = i2 + 1;
+        }
+    }
+    return out;
+}
+
+/// `a` against `b` as `lib/diff.m31`'s edit script: unchanged lines are
+/// `Keep`, then each group's removed lines before its added lines.
+pub List<diff.Op> ops(List<bytes> a, List<bytes> b) {
+    Diff d = diff_lines(a, b);
+    List<diff.Op> out = [];
+    int n1 = a.size();
+    int n2 = b.size();
+    int i1 = 0;
+    int i2 = 0;
+    while (i1 < n1 || i2 < n2) {
+        bool c1 = i1 < n1 && d.a_changed[i1];
+        bool c2 = i2 < n2 && d.b_changed[i2];
+        if (c1 || c2) {
+            while (i1 < n1 && d.a_changed[i1]) {
+                out.push(diff.Op(diff.Kind.Remove, a[i1]));
+                i1 = i1 + 1;
+            }
+            while (i2 < n2 && d.b_changed[i2]) {
+                out.push(diff.Op(diff.Kind.Add, b[i2]));
+                i2 = i2 + 1;
+            }
+        } else {
+            out.push(diff.Op(diff.Kind.Keep, a[i1]));
+            i1 = i1 + 1;
+            i2 = i2 + 1;
+        }
+    }
+    return out;
+}
+
+/// `diff.diff`, with the script xdiff picks instead of Myers' first shortest one:
+/// `Binary` if either buffer looks binary (`diff.is_binary`), else `Lines` of
+/// `ops` over their lines. This is what the diff view shows and what hunk
+/// and line staging edit, so the hunks on screen are the ones `git diff` prints.
+pub diff.Diff diff_text(bytes old, bytes new) {
+    if (diff.is_binary(old) || diff.is_binary(new)) {
+        return diff.Diff.Binary;
+    }
+    return diff.Diff.Lines(ops(split_lines(old), split_lines(new)));
+}
