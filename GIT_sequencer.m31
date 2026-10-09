@@ -347,7 +347,7 @@ bool Aborted.rewound() {
 
 // --- lifting GIT_merge's results ----------------------------------------------------
 
-Result<str, Error> lift_str(Result<str, GIT_merge.Error> found) {
+pub Result<str, Error> lift_str(Result<str, GIT_merge.Error> found) {
     match (found) {
         case Ok(str value): {
             return Result<str, Error>.Ok(value);
@@ -358,7 +358,7 @@ Result<str, Error> lift_str(Result<str, GIT_merge.Error> found) {
     }
 }
 
-Result<bool, Error> lift_bool(Result<bool, GIT_merge.Error> found) {
+pub Result<bool, Error> lift_bool(Result<bool, GIT_merge.Error> found) {
     match (found) {
         case Ok(bool value): {
             return Result<bool, Error>.Ok(value);
@@ -369,7 +369,7 @@ Result<bool, Error> lift_bool(Result<bool, GIT_merge.Error> found) {
     }
 }
 
-Result<GIT_object.Commit, Error> lift_commit(Result<GIT_object.Commit, GIT_merge.Error> found) {
+pub Result<GIT_object.Commit, Error> lift_commit(Result<GIT_object.Commit, GIT_merge.Error> found) {
     match (found) {
         case Ok(GIT_object.Commit value): {
             return Result<GIT_object.Commit, Error>.Ok(value);
@@ -380,7 +380,7 @@ Result<GIT_object.Commit, Error> lift_commit(Result<GIT_object.Commit, GIT_merge
     }
 }
 
-Result<GIT_index.Index, Error> lift_index(Result<GIT_index.Index, GIT_merge.Error> found) {
+pub Result<GIT_index.Index, Error> lift_index(Result<GIT_index.Index, GIT_merge.Error> found) {
     match (found) {
         case Ok(GIT_index.Index value): {
             return Result<GIT_index.Index, Error>.Ok(value);
@@ -391,7 +391,7 @@ Result<GIT_index.Index, Error> lift_index(Result<GIT_index.Index, GIT_merge.Erro
     }
 }
 
-Result<GIT_merge.Applied, Error> lift_applied(Result<GIT_merge.Applied, GIT_merge.Error> found) {
+pub Result<GIT_merge.Applied, Error> lift_applied(Result<GIT_merge.Applied, GIT_merge.Error> found) {
     match (found) {
         case Ok(GIT_merge.Applied value): {
             return Result<GIT_merge.Applied, Error>.Ok(value);
@@ -413,13 +413,13 @@ Result<Map<str, GIT_merge.Side>, Error> lift_files(Result<Map<str, GIT_merge.Sid
     }
 }
 
-Error io_error() {
+pub Error io_error() {
     return Error.Merge(GIT_merge.Error.Io);
 }
 
 // --- small file helpers --------------------------------------------------------------
 
-str read_text(str path) {
+pub str read_text(str path) {
     match (io.read(path)) {
         case Ok(str text): {
             return text;
@@ -430,7 +430,7 @@ str read_text(str path) {
     }
 }
 
-Result<bool, Error> write_text(str path, str text) {
+pub Result<bool, Error> write_text(str path, str text) {
     match (io.write(path, text)) {
         case Ok: {
             return Result<bool, Error>.Ok(true);
@@ -441,7 +441,7 @@ Result<bool, Error> write_text(str path, str text) {
     }
 }
 
-void remove_file(str path) {
+pub void remove_file(str path) {
     if (fs.exists(path) || fs.is_link(path)) {
         match (fs.remove(path)) {
             case Ok: {
@@ -526,13 +526,13 @@ Result<Head, Error> read_head(str gitdir) {
     }
 }
 
-Result<bool, Error> move_ref(str gitdir, str name, str new_id, Option<str> expect, str msg) {
+pub Result<bool, Error> move_ref(str gitdir, str name, str new_id, Option<str> expect, str msg) {
     return lift_bool(GIT_merge.ref_update(gitdir, name, new_id, expect, msg));
 }
 
 // --- messages ----------------------------------------------------------------------------
 
-str subject_of(str message) {
+pub str subject_of(str message) {
     List<str> lines = message.split("\n");
     if (lines.size() == 0) {
         return "";
@@ -540,7 +540,7 @@ str subject_of(str message) {
     return lines[0].trim();
 }
 
-Result<str, Error> message_of(GIT_object.Commit commit) {
+pub Result<str, Error> message_of(GIT_object.Commit commit) {
     match (commit.message.utf8()) {
         case Some(str text): {
             return Result<str, Error>.Ok(text);
@@ -694,7 +694,7 @@ Result<bool, Error> may_commit_empty(str gitdir, GIT_object.Commit commit, Optio
     return originally_empty(gitdir, commit, effective_mainline(commit, opts));
 }
 
-Result<str, Error> index_tree_of(str gitdir) {
+pub Result<str, Error> index_tree_of(str gitdir) {
     GIT_index.Index index = lift_index(GIT_merge.read_index(gitdir))?;
     for (GIT_index.Entry entry in index.entries) {
         if (entry.stage != 0) {

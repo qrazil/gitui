@@ -633,7 +633,7 @@ GIT_object.Commit stash_commit(str tree, List<str> parents, GIT_object.Ident aut
 /// Save the work tree and index as a stash: the W commit goes on `refs/stash`
 /// and its reflog, and the work tree and index go back to HEAD (the index and
 /// files of the index with `keep_index`). See the module header.
-pub Result<Saved, Error> push(str gitdir, str worktree, bool include_untracked = false, bool keep_index = false, str message = "") {
+pub Result<Saved, Error> push(str gitdir, str worktree, bool include_untracked = false, bool keep_index = false, str message = "", bool store = true) {
     HeadInfo head = head_info(gitdir)?;
     GIT_index.Index index = read_index(gitdir)?;
     for (GIT_index.Entry entry in index.entries) {
@@ -726,23 +726,9 @@ pub Result<Saved, Error> push(str gitdir, str worktree, bool include_untracked =
         text = "On " + head.branch + ": " + message;
     }
     str commit = put_commit(gitdir, stash_commit(work_tree, parents, author, committer, text))?;
-    // the stack: the ref and its log
-    str previous = "";
-    match (GIT_refs.resolve(gitdir, STASH_REF)) {
-        case Ok(str found): {
-            previous = found;
-        }
-        case Err: {
-        }
+    if (store) {
+        put_on_stack(gitdir, commit, text)?;
     }
-    match (GIT_reflog.append(gitdir, STASH_REF, previous, commit, committer, text)) {
-        case Ok: {
-        }
-        case Err(GIT_reflog.Error error): {
-            return Result<Saved, Error>.Err(Error.Failed("reflog: " + error.to_str()));
-        }
-    }
-    write_ref(gitdir, STASH_REF, commit)?;
     // the work tree and index back to HEAD
     match (GIT_checkout.reset_hard(gitdir, worktree, head.id)) {
         case Ok: {
@@ -765,6 +751,26 @@ pub Result<Saved, Error> push(str gitdir, str worktree, bool include_untracked =
         }
     }
     return Result<Saved, Error>.Ok(Saved(commit, text, untracked.size()));
+}
+
+/// The W commit on `refs/stash` and its reflog (`git stash store`).
+pub Result<bool, Error> put_on_stack(str gitdir, str commit, str text) {
+    str previous = "";
+    match (GIT_refs.resolve(gitdir, STASH_REF)) {
+        case Ok(str found): {
+            previous = found;
+        }
+        case Err: {
+        }
+    }
+    match (GIT_reflog.append(gitdir, STASH_REF, previous, commit, GIT_reflog.default_ident(gitdir), text)) {
+        case Ok: {
+        }
+        case Err(GIT_reflog.Error error): {
+            return Result<bool, Error>.Err(Error.Failed("reflog: " + error.to_str()));
+        }
+    }
+    return write_ref(gitdir, STASH_REF, commit);
 }
 
 void remove_and_prune(str worktree, str full) {
