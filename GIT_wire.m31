@@ -1,0 +1,953 @@
+// Git's wire protocol, version 0, with no transport in it: pkt-line framing,
+// the ref advertisement, capabilities, want/have negotiation, side-band-64k
+// demultiplexing, pack verification, and the receive-pack command and
+// report-status exchange. `GIT_http_fetch.m31` and `GIT_http_push.m31` are the
+// smart-HTTP adapters over it; an ssh adapter (a long-lived duplex channel
+// running `git-upload-pack` or `git-receive-pack`) is the other client it is
+// shaped for.
+//
+// API
+// ---
+//   interface Stream                       read(n) / write(bytes) / close()
+//
+//   GIT_wire.pkt_line(payload)             -> bytes
+//   GIT_wire.read_packet(buf, at)          -> Result<Packet, Error>     one packet out of memory
+//   GIT_wire.read_pkt(stream)              -> Result<Packet, Error>     one packet off a stream
+//
+//   GIT_wire.read_advertisement(stream)    -> Result<Advertisement, Error>
+//   GIT_wire.fetch_pack(stream, ad, wants, haves)  -> Result<DemuxResult, Error>   duplex negotiation
+//   GIT_wire.send_push(stream, ad, old, new, refname, pack) -> Result<ReportStatus, Error>
+//   GIT_wire.say_goodbye(stream)           -> Result<bool, Error>       a flush: "I want nothing"
+//
+// And the pure halves, which the stateless-RPC (HTTP) adapters use over a
+// request or response body already in memory (an `io.buffer_of(body)` is a
+// `Stream`):
+//   GIT_wire.negotiation_body(ad, wants, haves, agent)   -> bytes   one request: wants, flush, haves, done
+//   GIT_wire.read_fetch_response(stream)   -> Result<DemuxResult, Error>   ACK/NAK lines, then side-band
+//   GIT_wire.command_body(old, new, refname, pack, agent) -> bytes
+//   GIT_wire.read_report(stream, refname)  -> Result<ReportStatus, Error>
+//   GIT_wire.check_pack(pack) / verify_pack(pack, out_path) -> pack integrity, and the atomic write
+//
+// --- the interface ---------------------------------------------------------
+//
+// `Stream` is the three-method subset of `io.Stream` this protocol needs, in
+// `io.Error` terms, so a `net.Conn`, an `io.File` and an `io.Buffer` already
+// are one and a type written elsewhere (an ssh session channel) is one as soon
+// as it has the methods. `read(n)` returns between 1 and `n` bytes, or an
+// empty `bytes` once the peer has stopped sending -- `net.Conn.read`'s own
+// contract. Nothing here ever asks for more bytes than the next packet
+// needs, so no byte past a packet is ever consumed and no buffering layer
+// sits between this module and the stream: whatever follows the protocol
+// (nothing, for git) is still on the stream.
+//
+// --- the negotiation, and why it is not the HTTP one -----------------------
+//
+// Smart HTTP is stateless: one POST carries every `want`, every `have` and
+// `done`, and one response carries the answer, so there is no conversation
+// to deadlock and `negotiation_body` builds exactly that. A duplex stream
+// *is* a conversation. A client that writes all of a very long `have` list
+// before it reads anything can block in `write` with the server blocked in
+// `write` too (the server is answering `have`s it already understood, its
+// pipe is full, and it is not reading), and neither side ever reads again.
+// So `fetch_pack` asks for `multi_ack_detailed` whenever the server offers
+// it, which makes the server's behaviour deterministic -- one `ACK <id>
+// common|ready` per have it knows and then exactly one `NAK` per flush --
+// and sends the haves in rounds of at most `HAVES_PER_ROUND`, each ending in
+// a flush, reading until that round's `NAK` before the next round is
+// written. The most data either side has in flight is one round's worth. An
+// `ACK <id> ready` ends the rounds early: the server has what it needs.
+//
+// A server that does not offer `multi_ack_detailed` (nothing current)
+// answers a flush with a `NAK` only while it has found nothing in common and
+// is otherwise silent, so there is no count of lines to read; for it a
+// single round of at most `HAVES_PER_ROUND` haves is sent without a flush,
+// followed by `done`. That loses some haves (a larger pack), never
+// correctness, and it cannot wedge: the server's replies to those haves are
+// at most one `ACK`.
+//
+// `side-band-64k` is required and checked, as in `GIT_http_fetch.m31`;
+// `thin-pack` is never requested, so the pack received is self-contained.
+//
+// --- what is NOT here ------------------------------------------------------
+//
+// Protocol v2, `shallow`/`deepen`, `include-tag`, `push-options`, sha256
+// repositories, and any socket, TLS, HTTP or ssh code.
+
+import GIT_object;
+import GIT_sha1;
+import fs;
+import io;
+import random;
+
+/// Why a protocol exchange could not be completed. Payload-free
+/// (`docs/errors-decision.md` §4); the words a server said on its side-band
+/// error channel are in `DemuxResult.remote_error` and the words a `ng`
+/// carries are in `ReportStatus.reason`.
+pub enum Error {
+    /// A pkt-line's length prefix is not four hex digits, or names `1`, `2` or `3` --
+    /// protocol v2's delimiter and response-end packets, which a v0-only
+    /// client never sends and never expects back.
+    Syntax;
+    /// A pkt-line's length names more bytes than arrived: cut off in the middle.
+    Truncated;
+    /// The stream ended where a packet should have begun.
+    Closed;
+    /// The stream failed (`read`, `write` or `close` returned an error).
+    Io;
+    /// The ref advertisement is not shaped the way the protocol promises.
+    BadAdvertisement;
+    /// The server's object format is not SHA-1.
+    UnsupportedFormat;
+    /// The server does not offer `side-band-64k`, which a fetch requires.
+    NoSideBand;
+    /// A side-band pkt-line named a channel other than 1, 2 or 3, or carried none.
+    BadBand;
+    /// The server said so itself: an `ERR` packet, or side-band channel 3.
+    RemoteError;
+    /// An ACK/NAK line was not one.
+    BadAck;
+    /// The bytes meant to be a packfile do not begin with `PACK`.
+    BadPack;
+    /// The pack's trailing SHA-1 does not match what precedes it.
+    ChecksumMismatch;
+    /// A fetch was given no `want`.
+    NoWant;
+    /// A `want`, `have` or ref update's id is not 40 lowercase hex digits.
+    BadName;
+    /// The server does not offer `report-status`, so a push could never be confirmed.
+    NoReportStatus;
+    /// The server's report-status answer did not parse, or did not mention the ref.
+    BadReport;
+    /// The verified pack could not be written to disk.
+    Write;
+}
+
+pub str Error.to_str() {
+    match (this) {
+        case Syntax: {
+            return "the pkt-line framing is not well-formed, or is protocol v2's";
+        }
+        case Truncated: {
+            return "the message was cut off in the middle";
+        }
+        case Closed: {
+            return "the connection ended where a message should have begun";
+        }
+        case Io: {
+            return "the connection failed";
+        }
+        case BadAdvertisement: {
+            return "the ref advertisement is not well-formed";
+        }
+        case UnsupportedFormat: {
+            return "the server's object format is not SHA-1";
+        }
+        case NoSideBand: {
+            return "the server did not offer side-band-64k, which this module requires";
+        }
+        case BadBand: {
+            return "a side-band pkt-line named an unknown channel";
+        }
+        case RemoteError: {
+            return "the server reported an error";
+        }
+        case BadAck: {
+            return "the server's acknowledgement is not well-formed";
+        }
+        case BadPack: {
+            return "the bytes received are not a packfile";
+        }
+        case ChecksumMismatch: {
+            return "the pack's trailing checksum does not match its content";
+        }
+        case NoWant: {
+            return "no want was given -- nothing to fetch";
+        }
+        case BadName: {
+            return "not a well-formed object name: 40 lowercase hex digits";
+        }
+        case NoReportStatus: {
+            return "the server does not offer report-status";
+        }
+        case BadReport: {
+            return "the server's report-status answer is not well-formed";
+        }
+        case Write: {
+            return "the pack could not be written to disk";
+        }
+    }
+}
+
+/// Same variant? (`==` needs this; every variant has its own sentence.)
+pub bool Error.eq(Error other) {
+    return to_str() == other.to_str();
+}
+
+/// What the protocol needs of a transport: a subset of `io.Stream`, so a
+/// `net.Conn`, an `io.File` and an `io.Buffer` already satisfy it.
+pub interface Stream {
+    Result<bytes, io.Error> read(int n);
+    Result<int, io.Error> write(bytes data);
+    Result<bool, io.Error> close();
+}
+
+/// How many `have`s one negotiation round carries on a duplex stream.
+pub const int HAVES_PER_ROUND = 256;
+/// `"0000"`, as bytes -- the one control packet this (v0-only) module knows.
+pub const bytes FLUSH_PKT = [48, 48, 48, 48];
+const bytes SP1 = [32];
+const bytes NUL1 = [0];
+const bytes LF1 = [10];
+/// The all-zero object id: "no such object" in a ref update.
+pub const str ZERO_ID = "0000000000000000000000000000000000000000";
+
+// --- pkt-line framing --------------------------------------------------------
+
+/// One packet: `is_flush` with no payload, or `payload` -- the bytes after the
+/// four-hex-digit length prefix, which counts itself. `next` is the offset just
+/// past the packet when read out of memory by `read_packet`; `read_pkt` sets it
+/// to the number of bytes the packet occupied on the wire.
+pub type Packet {
+    pub bool is_flush;
+    pub bytes payload;
+    pub int next;
+}
+
+/// Encode `payload` as one pkt-line: its length (itself included), in four
+/// lowercase hex digits, then the payload verbatim. Never used for a flush --
+/// callers append `FLUSH_PKT` directly.
+pub bytes pkt_line(bytes payload) {
+    bytes out = length_hex(payload.size() + 4);
+    out.extend(payload);
+    return out;
+}
+
+// Two big-endian octets, then `bytes.hex()` -- which zero-pads every octet to
+// two digits -- gives exactly the four hex digits a pkt-line length is.
+bytes length_hex(int value) {
+    bytes two = [value >> 8 & 0xFF, value & 0xFF];
+    return two.hex().to_bytes();
+}
+
+int hex_value(int character) {
+    if (character >= '0' && character <= '9') {
+        return character - 48;
+    }
+    if (character >= 'a' && character <= 'f') {
+        return character - 87;
+    }
+    if (character >= 'A' && character <= 'F') {
+        return character - 55;
+    }
+    return -1;
+}
+
+// The length prefix at `buffer[offset ..]`: 0 for a flush, 4 or more for a
+// packet, `Syntax` for anything else (`1`..`3` included).
+Result<int, Error> decode_length(bytes buffer, int offset) {
+    int length = 0;
+    for (int i in 0 .. 4) {
+        int digit = hex_value(buffer[offset + i]);
+        if (digit < 0) {
+            return Result<int, Error>.Err(Error.Syntax);
+        }
+        length = length * 16 + digit;
+    }
+    if (length != 0 && length < 4) {
+        return Result<int, Error>.Err(Error.Syntax);
+    }
+    return Result<int, Error>.Ok(length);
+}
+
+/// Read one pkt-line at `buffer[offset ..]`. A length of `0000` is a flush; any
+/// other length must be at least 4 and no more than what remains in `buffer`.
+pub Result<Packet, Error> read_packet(bytes buffer, int offset) {
+    if (offset < 0 || offset + 4 > buffer.size()) {
+        return Result<Packet, Error>.Err(Error.Truncated);
+    }
+    int length = decode_length(buffer, offset)?;
+    if (length == 0) {
+        return Result<Packet, Error>.Ok(Packet(true, [], offset + 4));
+    }
+    int end = offset + length;
+    if (end > buffer.size()) {
+        return Result<Packet, Error>.Err(Error.Truncated);
+    }
+    return Result<Packet, Error>.Ok(Packet(false, buffer.substr(offset + 4, end), end));
+}
+
+// --- the stream ----------------------------------------------------------------
+
+// Exactly `count` bytes, however many reads that takes. The stream ending
+// before the first byte is `Closed`; after it, `Truncated`.
+Result<bytes, Error> read_exact(Stream stream, int count) {
+    bytes out = [];
+    while (out.size() < count) {
+        match (stream.read(count - out.size())) {
+            case Ok(bytes got): {
+                if (got.size() == 0) {
+                    if (out.size() == 0) {
+                        return Result<bytes, Error>.Err(Error.Closed);
+                    }
+                    return Result<bytes, Error>.Err(Error.Truncated);
+                }
+                out.extend(got);
+            }
+            case Err(_): {
+                return Result<bytes, Error>.Err(Error.Io);
+            }
+        }
+    }
+    return Result<bytes, Error>.Ok(out);
+}
+
+/// Everything in `data`, written to `stream`.
+pub Result<bool, Error> write_all(Stream stream, bytes data) {
+    match (stream.write(data)) {
+        case Ok(_): {
+            return Result<bool, Error>.Ok(true);
+        }
+        case Err(_): {
+            return Result<bool, Error>.Err(Error.Io);
+        }
+    }
+}
+
+/// One pkt-line off `stream`, consuming exactly its bytes. `Closed` if the
+/// stream ended before the packet began, `Truncated` if it ended inside one.
+pub Result<Packet, Error> read_pkt(Stream stream) {
+    bytes head = read_exact(stream, 4)?;
+    int length = decode_length(head, 0)?;
+    if (length == 0) {
+        return Result<Packet, Error>.Ok(Packet(true, [], 4));
+    }
+    bytes payload = [];
+    if (length > 4) {
+        match (read_exact(stream, length - 4)) {
+            case Ok(bytes got): {
+                payload = got;
+            }
+            case Err(Error error): {
+                if (error == Error.Closed) {
+                    return Result<Packet, Error>.Err(Error.Truncated);
+                }
+                return Result<Packet, Error>.Err(error);
+            }
+        }
+    }
+    return Result<Packet, Error>.Ok(Packet(false, payload, length));
+}
+
+/// A flush on its own: what a client sends to say it wants nothing.
+pub Result<bool, Error> say_goodbye(Stream stream) {
+    return write_all(stream, FLUSH_PKT);
+}
+
+// --- the ref advertisement -----------------------------------------------------
+
+/// One advertised ref: its full name and the object it points at. A tag's
+/// peeled entry (`refs/tags/v1^{}`) is an ordinary ref of this shape.
+pub type RemoteRef {
+    pub str name;
+    pub str id;
+}
+
+/// The service announcement (`""` over ssh, `git-upload-pack` over HTTP), the
+/// capabilities on the first ref line, and every ref in the server's own order.
+pub type Advertisement {
+    pub str service;
+    pub List<str> capabilities;
+    pub List<RemoteRef> refs;
+    pub str object_format;
+}
+
+/// The refs and capabilities a server sends first: pkt-lines up to the
+/// flush, the first carrying the capabilities after a NUL. Over HTTP the
+/// caller consumes the `# service=` preamble and its flush first and passes
+/// the service name; over ssh the advertisement is the first thing on the
+/// stream. An empty repository advertises one line, the all-zero id against
+/// `capabilities^{}`, which is dropped here. A leading `version 1` line is
+/// accepted and ignored; `ERR <message>` is `RemoteError`.
+pub Result<Advertisement, Error> read_advertisement(Stream stream, str service = "") {
+    List<str> caps = [];
+    List<RemoteRef> refs = [];
+    bool is_first_ref = true;
+    while (true) {
+        Packet packet = read_pkt(stream)?;
+        if (packet.is_flush) {
+            break;
+        }
+        bytes line = packet.payload;
+        if (line.starts_with("ERR ".to_bytes())) {
+            return Result<Advertisement, Error>.Err(Error.RemoteError);
+        }
+        if (line.ends_with(LF1)) {
+            line = line.substr(0, line.size() - 1);
+        }
+        if (is_first_ref && line.starts_with("version ".to_bytes())) {
+            continue;
+        }
+        if (is_first_ref) {
+            is_first_ref = false;
+            match (line.index_of(NUL1)) {
+                case Some(int nul): {
+                    bytes capbytes = line.substr(nul + 1, line.size());
+                    line = line.substr(0, nul);
+                    match (capbytes.utf8()) {
+                        case Some(str capability_text): {
+                            for (str capability in capability_text.split(" ")) {
+                                if (capability.size() > 0) {
+                                    caps.push(capability);
+                                }
+                            }
+                        }
+                        case None: {
+                            return Result<Advertisement, Error>.Err(Error.BadAdvertisement);
+                        }
+                    }
+                }
+                case None: {
+                }
+            }
+        }
+        RemoteRef remote_ref = parse_ref_line(line)?;
+        if (remote_ref.name != "capabilities^{}") {
+            refs.push(remote_ref);
+        }
+    }
+    str object_format = "sha1";
+    for (str capability in caps) {
+        if (capability.starts_with("object-format=")) {
+            object_format = capability.substr(14, capability.size());
+        }
+    }
+    if (object_format != "sha1") {
+        return Result<Advertisement, Error>.Err(Error.UnsupportedFormat);
+    }
+    return Result<Advertisement, Error>.Ok(Advertisement(service, caps, refs, object_format));
+}
+
+Result<RemoteRef, Error> parse_ref_line(bytes line) {
+    int space_index = 0;
+    match (line.index_of(SP1)) {
+        case Some(int found): {
+            space_index = found;
+        }
+        case None: {
+            return Result<RemoteRef, Error>.Err(Error.BadAdvertisement);
+        }
+    }
+    if (space_index != 40) {
+        return Result<RemoteRef, Error>.Err(Error.BadAdvertisement);
+    }
+    str id = "";
+    match (line.substr(0, 40).utf8()) {
+        case Some(str found): {
+            id = found;
+        }
+        case None: {
+            return Result<RemoteRef, Error>.Err(Error.BadAdvertisement);
+        }
+    }
+    if (!GIT_object.is_name(id) || id.size() != 40) {
+        return Result<RemoteRef, Error>.Err(Error.BadAdvertisement);
+    }
+    str name = "";
+    match (line.substr(41, line.size()).utf8()) {
+        case Some(str found): {
+            name = found;
+        }
+        case None: {
+            return Result<RemoteRef, Error>.Err(Error.BadAdvertisement);
+        }
+    }
+    if (name.size() == 0) {
+        return Result<RemoteRef, Error>.Err(Error.BadAdvertisement);
+    }
+    return Result<RemoteRef, Error>.Ok(RemoteRef(name, id));
+}
+
+/// Does the capability list offer `name` (bare, or as `name=value`)?
+pub bool has_cap(List<str> caps, str name) {
+    for (str capability in caps) {
+        if (capability == name || capability.starts_with(name + "=")) {
+            return true;
+        }
+    }
+    return false;
+}
+
+/// `name=value`'s value, or `None` if `name` is absent or has none
+/// (`symref=HEAD:refs/heads/main` is the one a client asks for).
+pub Option<str> cap_value(List<str> caps, str name) {
+    for (str capability in caps) {
+        if (capability.starts_with(name + "=")) {
+            return Option<str>.Some(capability.substr(name.size() + 1, capability.size()));
+        }
+    }
+    return Option<str>.None;
+}
+
+// --- fetching -------------------------------------------------------------------
+
+/// What a side-band-64k response held: the reassembled pack (channel 1), the
+/// progress text (channel 2, nothing here prints it), and whether channel 3
+/// carried an error, with its words. A caller that wants the old behaviour
+/// writes `progress` and `remote_error` to standard error itself.
+pub type DemuxResult {
+    pub bytes pack;
+    pub bool has_remote_error;
+    pub str progress;
+    pub str remote_error;
+}
+
+/// A pack's size and the object count in its own 12-byte header.
+pub type Summary {
+    pub int pack_bytes;
+    pub int object_count;
+}
+
+Result<bool, Error> check_names(List<str> wants, List<str> haves) {
+    if (wants.size() == 0) {
+        return Result<bool, Error>.Err(Error.NoWant);
+    }
+    for (str want in wants) {
+        if (!GIT_object.is_name(want) || want.size() != 40) {
+            return Result<bool, Error>.Err(Error.BadName);
+        }
+    }
+    for (str have in haves) {
+        if (!GIT_object.is_name(have) || have.size() != 40) {
+            return Result<bool, Error>.Err(Error.BadName);
+        }
+    }
+    return Result<bool, Error>.Ok(true);
+}
+
+// The `want` pkt-lines, capabilities on the first only, and the flush.
+bytes want_lines(Advertisement advertisement, List<str> wants, bool is_multi_ack, str agent) {
+    List<str> use = [];
+    if (is_multi_ack) {
+        use.push("multi_ack_detailed");
+    }
+    use.push("side-band-64k");
+    if (has_cap(advertisement.capabilities, "ofs-delta")) {
+        use.push("ofs-delta");
+    }
+    use.push("agent=" + agent);
+    str first_caps = use.join(" ");
+    bytes out = [];
+    bool is_first = true;
+    for (str want in wants) {
+        if (is_first) {
+            out.extend(pkt_line(("want " + want + " " + first_caps + "\n").to_bytes()));
+            is_first = false;
+        } else {
+            out.extend(pkt_line(("want " + want + "\n").to_bytes()));
+        }
+    }
+    out.extend(FLUSH_PKT);
+    return out;
+}
+
+bytes have_lines(List<str> haves, int from, int to) {
+    bytes out = [];
+    for (int i in from .. to) {
+        out.extend(pkt_line(("have " + haves[i] + "\n").to_bytes()));
+    }
+    return out;
+}
+
+const bytes DONE_PKT = [48, 48, 48, 57, 100, 111, 110, 101, 10];
+
+/// The whole of a stateless-RPC request: every `want` (capabilities on the
+/// first), a flush, every `have`, `done`. No `multi_ack` is requested, so the
+/// answer is zero or more `ACK`/`NAK` lines and then the side-band stream.
+/// This is the HTTP adapter's body; a duplex stream uses `fetch_pack`.
+pub bytes negotiation_body(Advertisement advertisement, List<str> wants, List<str> haves, str agent) {
+    bytes out = want_lines(advertisement, wants, false, agent);
+    out.extend(have_lines(haves, 0, haves.size()));
+    out.extend(DONE_PKT);
+    return out;
+}
+
+/// Negotiate and receive a pack over a duplex `stream` whose advertisement
+/// has been read (`read_advertisement`): wants, haves in rounds (see the
+/// module note), `done`, then the side-band stream up to its flush. Refuses
+/// `NoWant`, `BadName` and `NoSideBand` before writing a byte.
+pub Result<DemuxResult, Error> fetch_pack(Stream stream, Advertisement advertisement, List<str> wants, List<str> haves, str agent = "m31-wire/1") {
+    check_names(wants, haves)?;
+    if (!has_cap(advertisement.capabilities, "side-band-64k")) {
+        return Result<DemuxResult, Error>.Err(Error.NoSideBand);
+    }
+    bool is_multi_ack = has_cap(advertisement.capabilities, "multi_ack_detailed");
+    write_all(stream, want_lines(advertisement, wants, is_multi_ack, agent))?;
+    if (is_multi_ack) {
+        int at = 0;
+        bool is_ready = false;
+        while (at < haves.size() && !is_ready) {
+            int stop = at + HAVES_PER_ROUND;
+            if (stop > haves.size()) {
+                stop = haves.size();
+            }
+            bytes round = have_lines(haves, at, stop);
+            round.extend(FLUSH_PKT);
+            write_all(stream, round)?;
+            is_ready = read_round_replies(stream)?;
+            at = stop;
+        }
+    } else {
+        int stop = haves.size();
+        if (stop > HAVES_PER_ROUND) {
+            stop = HAVES_PER_ROUND;
+        }
+        write_all(stream, have_lines(haves, 0, stop))?;
+    }
+    write_all(stream, DONE_PKT)?;
+    return read_fetch_response(stream);
+}
+
+// Read one round's replies: `ACK <id> common|ready|continue` lines, then the
+// `NAK` multi_ack_detailed sends for the flush. True if any said `ready`.
+Result<bool, Error> read_round_replies(Stream stream) {
+    bool is_ready = false;
+    while (true) {
+        Packet packet = read_pkt(stream)?;
+        if (packet.is_flush) {
+            return Result<bool, Error>.Err(Error.BadAck);
+        }
+        str line = text_of(packet.payload);
+        if (line.starts_with("NAK")) {
+            return Result<bool, Error>.Ok(is_ready);
+        }
+        if (line.starts_with("ACK ")) {
+            if (line.ends_with(" ready")) {
+                is_ready = true;
+            }
+        } else if (line.starts_with("ERR ")) {
+            return Result<bool, Error>.Err(Error.RemoteError);
+        } else {
+            return Result<bool, Error>.Err(Error.BadAck);
+        }
+    }
+}
+
+str text_of(bytes payload) {
+    match (payload.utf8()) {
+        case Some(str text): {
+            return text.trim();
+        }
+        case None: {
+            return "";
+        }
+    }
+}
+
+/// The response to a fetch, off `stream`: zero or more plain `ACK`/`NAK` lines
+/// (a stateless server sends one `ACK` per common have; a duplex one sends the
+/// final `ACK` or `NAK` for `done`), then the side-band stream up to its flush
+/// or the end of the stream. The first packet that is neither an ACK nor a
+/// NAK begins the stream; that cannot be ambiguous with pack data, because a
+/// side-band payload begins with the byte `1`, `2` or `3`, never `A` or `N`.
+pub Result<DemuxResult, Error> read_fetch_response(Stream stream) {
+    Packet first = Packet(true, [], 0);
+    while (true) {
+        Packet packet = read_pkt(stream)?;
+        if (packet.is_flush) {
+            continue;
+        }
+        if (is_ack_or_nak(packet.payload)) {
+            continue;
+        }
+        first = packet;
+        break;
+    }
+    DemuxResult out = DemuxResult([], false, "", "");
+    apply_band(out, first.payload)?;
+    while (true) {
+        match (read_pkt(stream)) {
+            case Ok(Packet packet): {
+                if (packet.is_flush) {
+                    break;
+                }
+                apply_band(out, packet.payload)?;
+            }
+            case Err(Error error): {
+                if (error == Error.Closed) {
+                    break;
+                }
+                return Result<DemuxResult, Error>.Err(error);
+            }
+        }
+    }
+    return Result<DemuxResult, Error>.Ok(out);
+}
+
+bool is_ack_or_nak(bytes payload) {
+    match (payload.utf8()) {
+        case Some(str line): {
+            return line.starts_with("ACK ") || line.starts_with("NAK");
+        }
+        case None: {
+            return false;
+        }
+    }
+}
+
+// One side-band packet's payload into `state`.
+Result<bool, Error> apply_band(DemuxResult state, bytes payload) {
+    if (payload.size() == 0) {
+        return Result<bool, Error>.Err(Error.BadBand);
+    }
+    if (payload.starts_with("ERR ".to_bytes())) {
+        return Result<bool, Error>.Err(Error.RemoteError);
+    }
+    int band = payload[0];
+    bytes data = payload.substr(1, payload.size());
+    if (band == 1) {
+        state.pack.extend(data);
+    } else if (band == 2) {
+        match (data.utf8()) {
+            case Some(str message): {
+                state.progress = state.progress + message;
+            }
+            case None: {
+            }
+        }
+    } else if (band == 3) {
+        state.has_remote_error = true;
+        match (data.utf8()) {
+            case Some(str message): {
+                state.remote_error = state.remote_error + message;
+            }
+            case None: {
+                state.remote_error = state.remote_error + "(an error, not valid UTF-8)";
+            }
+        }
+    } else {
+        return Result<bool, Error>.Err(Error.BadBand);
+    }
+    return Result<bool, Error>.Ok(true);
+}
+
+/// Demultiplex a side-band-64k byte string already in memory (everything,
+/// flushes skipped) -- the pure form of what `read_fetch_response` does on a
+/// stream, for a test with no server.
+pub Result<DemuxResult, Error> demux(bytes body) {
+    int offset = 0;
+    DemuxResult out = DemuxResult([], false, "", "");
+    while (offset < body.size()) {
+        Packet packet = read_packet(body, offset)?;
+        offset = packet.next;
+        if (packet.is_flush) {
+            continue;
+        }
+        apply_band(out, packet.payload)?;
+    }
+    return Result<DemuxResult, Error>.Ok(out);
+}
+
+// --- pack verification --------------------------------------------------------------
+
+/// Check `pack`'s `PACK` magic and trailing 20-byte SHA-1 against everything
+/// before it, and return the object count from its header. `Truncated` if
+/// fewer than 32 bytes, `BadPack`, `ChecksumMismatch`.
+pub Result<int, Error> check_pack(bytes pack) {
+    if (pack.size() < 32) {
+        return Result<int, Error>.Err(Error.Truncated);
+    }
+    if (pack[0] != 'P' || pack[1] != 'A' || pack[2] != 'C' || pack[3] != 'K') {
+        return Result<int, Error>.Err(Error.BadPack);
+    }
+    int count = be32(pack, 8);
+    bytes content = pack.substr(0, pack.size() - 20);
+    bytes trailer = pack.substr(pack.size() - 20, pack.size());
+    if (GIT_sha1.sum(content) != trailer) {
+        return Result<int, Error>.Err(Error.ChecksumMismatch);
+    }
+    return Result<int, Error>.Ok(count);
+}
+
+/// `check_pack`, and only then the pack written to `out_path` -- a temporary
+/// file beside it, written whole, then renamed over.
+pub Result<Summary, Error> verify_pack(bytes pack, str out_path) {
+    int count = check_pack(pack)?;
+    match (write_atomic(out_path, pack)) {
+        case Ok: {
+            return Result<Summary, Error>.Ok(Summary(pack.size(), count));
+        }
+        case Err(_): {
+            return Result<Summary, Error>.Err(Error.Write);
+        }
+    }
+}
+
+int be32(bytes data, int offset) {
+    return data[offset] << 24 | data[offset + 1] << 16 | data[offset + 2] << 8 | data[offset + 3];
+}
+
+// Write `content` to `path` without ever leaving a half-written file there.
+Result<bool, io.Error> write_atomic(str path, bytes content) {
+    match (fs.makedirs(directory_of(path))) {
+        case Ok: {
+        }
+        case Err(io.Error error): {
+            return Result<bool, io.Error>.Err(error);
+        }
+    }
+    random.System rnd = random.system();
+    str temp = path + ".tmp" + rnd.hex(12);
+    match (io.write_bytes(temp, content)) {
+        case Ok: {
+        }
+        case Err(io.Error error): {
+            return Result<bool, io.Error>.Err(error);
+        }
+    }
+    return fs.rename(temp, path);
+}
+
+str directory_of(str path) {
+    int position = path.size() - 1;
+    while (position >= 0 && path.byte_at(position) != '/') {
+        position = position - 1;
+    }
+    if (position < 0) {
+        return ".";
+    }
+    return path.substr(0, position);
+}
+
+// --- pushing ------------------------------------------------------------------------------
+
+/// What the server said about one update: whether it unpacked what was sent
+/// (`is_unpacked`, with `reason` holding its words when it did not), and
+/// whether the ref itself was updated (`is_ok`, `reason` otherwise).
+pub type ReportStatus {
+    pub bool is_unpacked;
+    pub bool is_ok;
+    pub str refname;
+    pub str reason;
+}
+
+/// One ref update and its pack: `<old> <new> <refname>\0report-status
+/// agent=...\n` as a pkt-line, a flush, then `pack` raw (not pkt-line framed).
+/// Exactly one update, `report-status` only, no side-band: the answer is
+/// plain pkt-lines. Pure, so the exact bytes can be checked without a server.
+pub bytes command_body(str old, str new, str refname, bytes pack, str agent) {
+    bytes out = [];
+    bytes line = (old + " " + new + " " + refname).to_bytes();
+    line.push(0);
+    line.extend(("report-status agent=" + agent + "\n").to_bytes());
+    out.extend(pkt_line(line));
+    out.extend(FLUSH_PKT);
+    out.extend(pack);
+    return out;
+}
+
+/// Send one ref update and its pack over a duplex `stream` whose
+/// receive-pack advertisement has been read, and read the verdict. The
+/// server does not write until it has read the whole pack, so there is
+/// nothing to interleave. `NoReportStatus` and `BadName` before a byte is sent.
+pub Result<ReportStatus, Error> send_push(Stream stream, Advertisement advertisement, str old, str new, str refname, bytes pack, str agent = "m31-wire/1") {
+    if (!has_cap(advertisement.capabilities, "report-status")) {
+        return Result<ReportStatus, Error>.Err(Error.NoReportStatus);
+    }
+    if (!GIT_object.is_name(new) || new.size() != 40 || !GIT_object.is_name(old) || old.size() != 40 || !refname.starts_with("refs/")) {
+        return Result<ReportStatus, Error>.Err(Error.BadName);
+    }
+    write_all(stream, command_body(old, new, refname, pack, agent))?;
+    return read_report(stream, refname);
+}
+
+/// `report-status`'s plain pkt-lines: `unpack ok` or `unpack <why>`, then
+/// `ok <ref>` or `ng <ref> <why>` per command, then a flush.
+pub Result<ReportStatus, Error> read_report(Stream stream, str refname) {
+    bool is_unpacked = false;
+    str unpack_reason = "";
+    bool has_seen_unpack = false;
+    bool has_seen_ref = false;
+    bool is_accepted = false;
+    str reason = "";
+    while (true) {
+        Packet packet = Packet(true, [], 0);
+        match (read_pkt(stream)) {
+            case Ok(Packet got): {
+                packet = got;
+            }
+            case Err(Error error): {
+                if (error == Error.Closed) {
+                    break;
+                }
+                if (error == Error.Io) {
+                    return Result<ReportStatus, Error>.Err(error);
+                }
+                return Result<ReportStatus, Error>.Err(Error.BadReport);
+            }
+        }
+        if (packet.is_flush) {
+            break;
+        }
+        str line = "";
+        match (packet.payload.utf8()) {
+            case Some(str text): {
+                line = text.trim();
+            }
+            case None: {
+                return Result<ReportStatus, Error>.Err(Error.BadReport);
+            }
+        }
+        if (!has_seen_unpack) {
+            if (!line.starts_with("unpack ")) {
+                return Result<ReportStatus, Error>.Err(Error.BadReport);
+            }
+            has_seen_unpack = true;
+            str rest = line.substr(7, line.size());
+            is_unpacked = rest == "ok";
+            if (!is_unpacked) {
+                unpack_reason = rest;
+            }
+            continue;
+        }
+        if (line.starts_with("ok ")) {
+            if (line.substr(3, line.size()) == refname) {
+                has_seen_ref = true;
+                is_accepted = true;
+            }
+        } else if (line.starts_with("ng ")) {
+            str rest = line.substr(3, line.size());
+            str name = rest;
+            str why = "";
+            match (rest.index_of(" ")) {
+                case Some(int space_index): {
+                    name = rest.substr(0, space_index);
+                    why = rest.substr(space_index + 1, rest.size());
+                }
+                case None: {
+                }
+            }
+            if (name == refname) {
+                has_seen_ref = true;
+                is_accepted = false;
+                reason = why;
+            }
+        } else {
+            return Result<ReportStatus, Error>.Err(Error.BadReport);
+        }
+    }
+    if (!has_seen_unpack) {
+        return Result<ReportStatus, Error>.Err(Error.BadReport);
+    }
+    if (!is_unpacked) {
+        return Result<ReportStatus, Error>.Ok(ReportStatus(false, false, refname, unpack_reason));
+    }
+    if (!has_seen_ref) {
+        return Result<ReportStatus, Error>.Err(Error.BadReport);
+    }
+    return Result<ReportStatus, Error>.Ok(ReportStatus(true, is_accepted, refname, reason));
+}
+
+/// `read_report` over a response body already in memory.
+pub Result<ReportStatus, Error> parse_report(bytes body, str refname) {
+    return read_report(io.buffer_of(body), refname);
+}
