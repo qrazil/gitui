@@ -1,0 +1,1388 @@
+// `git cherry-pick` and `git revert`, without git: the same commits and the
+// same state files, so real git can `--continue`, `--skip` or `--abort` what
+// this started and this can finish what git started.
+//
+// API
+// ---
+//   GIT_sequencer.expand(gitdir, verb, specs)       -> Result<List<str>, Error>
+//       `A..B` is the commits reachable from B and not from A: oldest first
+//       for a pick, newest first for a revert (as git);
+//       anything else one commit (tags are followed), in the order given.
+//   GIT_sequencer.start(gitdir, worktree, verb, ids, opts)
+//                                                   -> Result<Report, Error>
+//   GIT_sequencer.continue_sequence(gitdir, worktree) -> Result<Report, Error>
+//   GIT_sequencer.skip(gitdir, worktree)            -> Result<Report, Error>
+//   GIT_sequencer.abort(gitdir, worktree)           -> Result<Aborted, Error>
+//   GIT_sequencer.quit(gitdir)                      -> Result<bool, Error>
+//   GIT_sequencer.in_progress(gitdir)               -> bool
+//   GIT_sequencer.state(gitdir)                     -> Option<State>
+//   GIT_sequencer.banner(gitdir)                    -> str   CHERRY-PICKING, REVERTING or ""
+//
+// The pieces a rebase driver reuses (it keeps its own state directory):
+//   GIT_sequencer.apply_step(gitdir, worktree, item, opts, log_prefix)
+//                                                   -> Result<StepResult, Error>
+//       One pick or revert onto HEAD: the three-way merge, then a commit, a
+//       staged result (`no_commit`), or a stop on conflicts or an empty result
+//       with `CHERRY_PICK_HEAD` / `REVERT_HEAD`, `MERGE_MSG` and `AUTO_MERGE`
+//       written. It reads and writes no sequencer directory.
+//   GIT_sequencer.finish_step(gitdir, worktree, pending, opts, log_prefix)
+//                                                   -> Result<StepResult, Error>
+//       Commit the resolved index of a stopped step (author from the picked
+//       commit for a pick) and clear the per-step state files.
+//   GIT_sequencer.pending(gitdir)                   -> Option<Pending>
+//   GIT_sequencer.read_todo(gitdir, dir) / write_todo(gitdir, dir, items)
+//   GIT_sequencer.read_options(dir) / write_options(dir, opts)
+//   GIT_sequencer.reset_to(gitdir, worktree, target, message)
+//       `git reset --merge <target>` with its reflog line and `ORIG_HEAD`.
+//   GIT_sequencer.clear_step_state(gitdir)
+//
+// --- the state, as git writes it ---------------------------------------------
+//
+// A single commit (`git cherry-pick X`) leaves only the per-step files:
+// `CHERRY_PICK_HEAD` (or `REVERT_HEAD`) holding the full id, `MERGE_MSG` (the
+// message, then git's `# Conflicts:` block when there are conflicts) and
+// `AUTO_MERGE` (the merged tree, written for every merge and never removed on
+// success). Several commits, or a range, add `.git/sequencer/`:
+//   head          HEAD when the sequence began
+//   abort-safety  HEAD after the last commit made (abort refuses to rewind
+//                 when HEAD is anywhere else)
+//   todo          `pick <abbrev> <subject>` / `revert ...`, the stopped step
+//                 first, then those still to do
+//   opts          git's config format, only the options that are not default:
+//                 no-commit, record-origin, mainline, allow-empty,
+//                 keep-redundant-commits
+// The directory goes when the last step is done.
+//
+// --- behaviour, as git ---------------------------------------------------------
+//
+//   - A pick keeps the author and takes the committer of the day; a revert is
+//     authored by the identity of the day. The base of a pick is the commit's
+//     parent (the `-m`th for a merge), of a revert the commit itself.
+//   - Conflicts label ours `HEAD` and the other side `<abbrev> (<subject>)`,
+//     the parent `parent of <abbrev> (<subject>)`; the index holds stages
+//     1/2/3 and the files hold markers (`GIT_merge.merge_with_base`).
+//   - A pick that comes out empty stops: a redundant commit always, an
+//     originally empty one unless `allow_empty`; `keep_redundant` commits
+//     both. `skip` drops it.
+//   - Without `no_commit` the index must equal HEAD to start. With it the
+//     changes pile up in the index and the files, one step on top of the next;
+//     `MERGE_MSG` holds the last message.
+//   - `-x` appends `(cherry picked from commit <id>)` after a blank line, or
+//     straight after a trailer block that is already there.
+//   - A revert says `Revert "<subject>"` and `This reverts commit <id>.`; a
+//     reverted `Revert "x"` is `Reapply "x"`; with `-m` the second line ends
+//     `, reversing\nchanges made to <parent>.`.
+//   - A merge commit needs `mainline`; on any other commit it is ignored.
+//   - Reflog lines: `cherry-pick: <subject>` / `revert: <subject>` for a step
+//     that went through, `commit (cherry-pick): <subject>` / `commit: ...` for
+//     one finished by `continue`, `reset: moving to <id>` for skip and abort.
+//
+// --- where this differs from git, on purpose ----------------------------------
+//
+//   - No rename detection, as `GIT_merge`.
+//   - A step that fails with an error (local changes in the way, say) as the
+//     first of a new sequence leaves nothing behind; git leaves the sequencer
+//     directory and then calls the operation "already in progress".
+//   - `commit --allow-empty` by hand on an empty stop is not offered: `skip`
+//     it, or start again with `allow_empty` / `keep_redundant`.
+//   - The editor is never run: messages are used as they are, `continue`
+//     cleans `MERGE_MSG` of `#` lines as `git commit` does.
+//   - `--signoff`, `--strategy`, `-X`, `--gpg-sign`, `--empty=` are not read
+//     from `opts`; a todo with other verbs than pick and revert is refused.
+//   - A commit message that is not UTF-8 is refused.
+
+import fs;
+import GIT_checkout;
+import GIT_diff3;
+import GIT_graph;
+import GIT_index;
+import GIT_merge;
+import GIT_object;
+import GIT_refs;
+import GIT_reflog;
+import io;
+
+pub enum Verb {
+    Pick;
+    Revert;
+}
+
+pub str Verb.word() {
+    match (this) {
+        case Pick: {
+            return "pick";
+        }
+        case Revert: {
+            return "revert";
+        }
+    }
+}
+
+/// `cherry-pick` or `revert`, as git calls the operation.
+pub str Verb.noun() {
+    match (this) {
+        case Pick: {
+            return "cherry-pick";
+        }
+        case Revert: {
+            return "revert";
+        }
+    }
+}
+
+pub bool Verb.eq(Verb other) {
+    return word() == other.word();
+}
+
+pub enum Error {
+    /// A cherry-pick or revert is already under way. Which.
+    InProgress(Verb);
+    /// A merge is under way (`MERGE_HEAD`).
+    Merging;
+    /// `continue`, `skip` or `abort` with nothing under way.
+    NoSequence;
+    /// `continue` with paths still in conflict.
+    UnmergedPaths;
+    /// The commit is a merge and no mainline was given. The commit.
+    NeedsMainline(str);
+    /// The merge commit has fewer parents than the mainline. The commit, the number.
+    NoSuchParent(str, int);
+    /// The message came out empty.
+    EmptyMessage;
+    /// Nothing to apply.
+    Nothing;
+    /// HEAD is on a branch with no commits.
+    Unborn;
+    /// A state file git reads is not in a shape this reads. Which.
+    BadState(str);
+    /// A name that is not a commit.
+    NotACommit(str);
+    /// Something this does not do. Why.
+    Unsupported(str);
+    Merge(GIT_merge.Error);
+}
+
+pub str Error.to_str() {
+    match (this) {
+        case InProgress(Verb verb): {
+            return verb.noun() + " is already in progress";
+        }
+        case Merging: {
+            return "a merge is in progress: finish or abort it first";
+        }
+        case NoSequence: {
+            return "no cherry-pick or revert in progress";
+        }
+        case UnmergedPaths: {
+            return "there are unmerged files: resolve them and stage them first";
+        }
+        case NeedsMainline(str id): {
+            return "commit " + id.substr(0, 7) + " is a merge but no mainline parent was given";
+        }
+        case NoSuchParent(str id, int number): {
+            return "commit " + id.substr(0, 7) + " does not have parent " + number.to_str();
+        }
+        case EmptyMessage: {
+            return "the commit message is empty";
+        }
+        case Nothing: {
+            return "no commits to apply";
+        }
+        case Unborn: {
+            return "HEAD has no commits yet";
+        }
+        case BadState(str what): {
+            return "cannot read the sequencer's " + what;
+        }
+        case NotACommit(str what): {
+            return what + " is not a commit";
+        }
+        case Unsupported(str why): {
+            return why;
+        }
+        case Merge(GIT_merge.Error error): {
+            return error.to_str();
+        }
+    }
+}
+
+// --- types -----------------------------------------------------------------------
+
+/// What to do and how: git's `-n`, `-x`, `-m`, `--allow-empty` and
+/// `--keep-redundant-commits`.
+pub type Options {
+    pub bool no_commit = false;
+    pub bool record_origin = false;
+    pub int mainline = 0;
+    pub bool allow_empty = false;
+    pub bool keep_redundant = false;
+    /// The commits came from a range: keep the sequencer state even for one.
+    pub bool as_range = false;
+    pub GIT_diff3.Style style = GIT_diff3.Style.Merge;
+}
+
+/// One line of a todo list.
+pub type Item {
+    pub Verb verb;
+    pub str id;
+    pub str subject;
+}
+
+/// The step that is stopped: `CHERRY_PICK_HEAD` or `REVERT_HEAD`.
+pub type Pending {
+    pub Verb verb;
+    pub str id;
+}
+
+/// What `state` reports of an operation under way.
+pub type State {
+    /// What it is doing: a pending step's verb, else the first todo item's.
+    pub Verb verb;
+    /// The commit being applied (the stopped one), or `""`.
+    pub str current;
+    /// A step is stopped (`CHERRY_PICK_HEAD` / `REVERT_HEAD`).
+    pub bool stopped;
+    /// The steps left, the stopped one first; empty for a single commit.
+    pub List<Item> todo;
+}
+
+pub enum Landed {
+    /// A commit was made (`StepResult.commit`).
+    Committed;
+    /// `no_commit`: the changes are in the index and the files.
+    Staged;
+    /// Conflicts: stages 1/2/3 in the index, markers in the files.
+    Conflicted;
+    /// The result is HEAD's own tree and `allow_empty` / `keep_redundant` did not allow it.
+    Empty;
+}
+
+int Landed.code() {
+    match (this) {
+        case Committed: {
+            return 0;
+        }
+        case Staged: {
+            return 1;
+        }
+        case Conflicted: {
+            return 2;
+        }
+        case Empty: {
+            return 3;
+        }
+    }
+}
+
+pub bool Landed.eq(Landed other) {
+    return code() == other.code();
+}
+
+pub type StepResult {
+    pub Landed landed;
+    pub str commit;
+    pub List<GIT_merge.Conflicted> conflicts;
+    pub List<str> messages;
+}
+
+pub enum Ending {
+    /// Every step is done.
+    Finished;
+    /// Stopped on conflicts.
+    Conflicts;
+    /// Stopped on an empty result.
+    Empty;
+}
+
+int Ending.code() {
+    match (this) {
+        case Finished: {
+            return 0;
+        }
+        case Conflicts: {
+            return 1;
+        }
+        case Empty: {
+            return 2;
+        }
+    }
+}
+
+pub bool Ending.eq(Ending other) {
+    return code() == other.code();
+}
+
+pub type Report {
+    pub Ending ending;
+    /// The commits made by this call, in order.
+    pub List<str> commits;
+    /// The picked commit it stopped on, or `""`.
+    pub str stopped;
+    pub Verb verb;
+    pub List<GIT_merge.Conflicted> conflicts;
+    pub List<str> messages;
+}
+
+pub enum Aborted {
+    /// HEAD and the files went back to where the sequence began.
+    Rewound;
+    /// HEAD was not where the sequence left it: the state is gone, nothing moved.
+    HeadMoved;
+}
+
+pub bool Aborted.eq(Aborted other) {
+    return rewound() == other.rewound();
+}
+
+bool Aborted.rewound() {
+    match (this) {
+        case Rewound: {
+            return true;
+        }
+        case HeadMoved: {
+            return false;
+        }
+    }
+}
+
+// --- lifting GIT_merge's results ----------------------------------------------------
+
+Result<str, Error> lift_str(Result<str, GIT_merge.Error> found) {
+    match (found) {
+        case Ok(str value): {
+            return Result<str, Error>.Ok(value);
+        }
+        case Err(GIT_merge.Error error): {
+            return Result<str, Error>.Err(Error.Merge(error));
+        }
+    }
+}
+
+Result<bool, Error> lift_bool(Result<bool, GIT_merge.Error> found) {
+    match (found) {
+        case Ok(bool value): {
+            return Result<bool, Error>.Ok(value);
+        }
+        case Err(GIT_merge.Error error): {
+            return Result<bool, Error>.Err(Error.Merge(error));
+        }
+    }
+}
+
+Result<GIT_object.Commit, Error> lift_commit(Result<GIT_object.Commit, GIT_merge.Error> found) {
+    match (found) {
+        case Ok(GIT_object.Commit value): {
+            return Result<GIT_object.Commit, Error>.Ok(value);
+        }
+        case Err(GIT_merge.Error error): {
+            return Result<GIT_object.Commit, Error>.Err(Error.Merge(error));
+        }
+    }
+}
+
+Result<GIT_index.Index, Error> lift_index(Result<GIT_index.Index, GIT_merge.Error> found) {
+    match (found) {
+        case Ok(GIT_index.Index value): {
+            return Result<GIT_index.Index, Error>.Ok(value);
+        }
+        case Err(GIT_merge.Error error): {
+            return Result<GIT_index.Index, Error>.Err(Error.Merge(error));
+        }
+    }
+}
+
+Result<GIT_merge.Applied, Error> lift_applied(Result<GIT_merge.Applied, GIT_merge.Error> found) {
+    match (found) {
+        case Ok(GIT_merge.Applied value): {
+            return Result<GIT_merge.Applied, Error>.Ok(value);
+        }
+        case Err(GIT_merge.Error error): {
+            return Result<GIT_merge.Applied, Error>.Err(Error.Merge(error));
+        }
+    }
+}
+
+Result<Map<str, GIT_merge.Side>, Error> lift_files(Result<Map<str, GIT_merge.Side>, GIT_merge.Error> found) {
+    match (found) {
+        case Ok(Map<str, GIT_merge.Side> value): {
+            return Result<Map<str, GIT_merge.Side>, Error>.Ok(value);
+        }
+        case Err(GIT_merge.Error error): {
+            return Result<Map<str, GIT_merge.Side>, Error>.Err(Error.Merge(error));
+        }
+    }
+}
+
+Error io_error() {
+    return Error.Merge(GIT_merge.Error.Io);
+}
+
+// --- small file helpers --------------------------------------------------------------
+
+str read_text(str path) {
+    match (io.read(path)) {
+        case Ok(str text): {
+            return text;
+        }
+        case Err(_): {
+            return "";
+        }
+    }
+}
+
+Result<bool, Error> write_text(str path, str text) {
+    match (io.write(path, text)) {
+        case Ok: {
+            return Result<bool, Error>.Ok(true);
+        }
+        case Err(_): {
+            return Result<bool, Error>.Err(io_error());
+        }
+    }
+}
+
+void remove_file(str path) {
+    if (fs.exists(path) || fs.is_link(path)) {
+        match (fs.remove(path)) {
+            case Ok: {
+            }
+            case Err(_): {
+            }
+        }
+    }
+}
+
+/// The directory `start` keeps a sequence in.
+pub str sequencer_dir(str gitdir) {
+    return fs.join(gitdir, "sequencer");
+}
+
+const str CHERRY_PICK_HEAD = "CHERRY_PICK_HEAD";
+const str REVERT_HEAD = "REVERT_HEAD";
+
+str head_file(Verb verb) {
+    match (verb) {
+        case Pick: {
+            return CHERRY_PICK_HEAD;
+        }
+        case Revert: {
+            return REVERT_HEAD;
+        }
+    }
+}
+
+/// Remove `CHERRY_PICK_HEAD`, `REVERT_HEAD` and `MERGE_MSG`.
+pub void clear_step_state(str gitdir) {
+    remove_file(fs.join(gitdir, CHERRY_PICK_HEAD));
+    remove_file(fs.join(gitdir, REVERT_HEAD));
+    remove_file(fs.join(gitdir, "MERGE_MSG"));
+}
+
+void clear_all_state(str gitdir) {
+    clear_step_state(gitdir);
+    remove_file(fs.join(gitdir, "AUTO_MERGE"));
+}
+
+void remove_dir(str dir) {
+    List<str> names = ["todo", "head", "opts", "abort-safety"];
+    for (str name in names) {
+        remove_file(fs.join(dir, name));
+    }
+    if (fs.exists(dir)) {
+        match (fs.rmdir(dir)) {
+            case Ok: {
+            }
+            case Err(_): {
+            }
+        }
+    }
+}
+
+// --- HEAD ------------------------------------------------------------------------------
+
+type Head {
+    str ref;
+    str id;
+}
+
+Result<Head, Error> read_head(str gitdir) {
+    match (GIT_refs.head(gitdir)) {
+        case Ok(GIT_refs.Head head): {
+            match (head) {
+                case Born(str name, str id): {
+                    return Result<Head, Error>.Ok(Head(name, id));
+                }
+                case Detached(str id): {
+                    return Result<Head, Error>.Ok(Head("HEAD", id));
+                }
+                case Unborn(str name): {
+                    return Result<Head, Error>.Err(Error.Unborn);
+                }
+            }
+        }
+        case Err(GIT_refs.Error error): {
+            return Result<Head, Error>.Err(Error.Merge(GIT_merge.Error.Refs(error)));
+        }
+    }
+}
+
+Result<bool, Error> move_ref(str gitdir, str name, str new_id, Option<str> expect, str msg) {
+    return lift_bool(GIT_merge.ref_update(gitdir, name, new_id, expect, msg));
+}
+
+// --- messages ----------------------------------------------------------------------------
+
+str subject_of(str message) {
+    List<str> lines = message.split("\n");
+    if (lines.size() == 0) {
+        return "";
+    }
+    return lines[0].trim();
+}
+
+Result<str, Error> message_of(GIT_object.Commit commit) {
+    match (commit.message.utf8()) {
+        case Some(str text): {
+            return Result<str, Error>.Ok(text);
+        }
+        case None: {
+            return Result<str, Error>.Err(Error.Unsupported("a commit message that is not UTF-8"));
+        }
+    }
+}
+
+// The shortest prefix of at least seven digits that names `id` alone.
+pub str abbrev(str gitdir, str id) {
+    int size = 7;
+    while (size < id.size() && GIT_object.matching(gitdir, id.substr(0, size)).size() > 1) {
+        size = size + 1;
+    }
+    return id.substr(0, size);
+}
+
+bool is_trailer_line(str line) {
+    int colon = line.index_of(":").or(-1);
+    if (colon <= 0) {
+        return false;
+    }
+    for (int i in 0 .. colon) {
+        int c = line.byte_at(i);
+        bool word = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '-';
+        if (!word) {
+            return false;
+        }
+    }
+    return true;
+}
+
+// git's `has_conforming_footer`: the last paragraph, which is not the title,
+// is made of trailers (or has a known one and mostly trailers).
+bool has_footer(str message) {
+    List<str> lines = [];
+    for (str line in message.split("\n")) {
+        lines.push(line);
+    }
+    while (lines.size() > 0 && lines[lines.size() - 1].trim() == "") {
+        lines.pop();
+    }
+    int from = -1;
+    for (int i in 0 .. lines.size()) {
+        if (lines[i].trim() == "") {
+            from = i + 1;
+        }
+    }
+    if (from < 0 || from >= lines.size()) {
+        return false;
+    }
+    int trailers = 0;
+    int others = 0;
+    bool known = false;
+    for (int i in from .. lines.size()) {
+        str line = lines[i];
+        if (line.starts_with("(cherry picked from commit ") || line.starts_with("Signed-off-by: ")) {
+            known = true;
+            trailers = trailers + 1;
+        } else if (is_trailer_line(line)) {
+            trailers = trailers + 1;
+        } else if (line.starts_with(" ") || line.starts_with("\t")) {
+        } else {
+            others = others + 1;
+        }
+    }
+    if (trailers > 0 && others == 0) {
+        return true;
+    }
+    return known && trailers * 3 >= others;
+}
+
+str pick_message(str original, str id, bool record_origin) {
+    str text = original;
+    if (record_origin) {
+        if (!text.ends_with("\n")) {
+            text = text + "\n";
+        }
+        if (!has_footer(text)) {
+            text = text + "\n";
+        }
+        text = text + "(cherry picked from commit " + id + ")\n";
+    }
+    return text;
+}
+
+str revert_message(str original, str id, str mainline_parent) {
+    str subject = subject_of(original);
+    str title = "Revert \"" + subject + "\"";
+    if (subject.starts_with("Revert \"") && subject.ends_with("\"") && subject.size() > 9) {
+        title = "Reapply \"" + subject.substr(8, subject.size() - 1) + "\"";
+    }
+    str text = title + "\n\nThis reverts commit " + id;
+    if (mainline_parent != "") {
+        text = text + ", reversing\nchanges made to " + mainline_parent;
+    }
+    return text + ".\n";
+}
+
+// --- one step -----------------------------------------------------------------------------
+
+str mainline_parent(GIT_object.Commit commit, str id, int mainline) {
+    if (mainline <= 0) {
+        if (commit.parents.size() == 0) {
+            return "";
+        }
+        return commit.parents[0];
+    }
+    return commit.parents[mainline - 1];
+}
+
+// The mainline that counts: git ignores it for a commit that is not a merge.
+int effective_mainline(GIT_object.Commit commit, Options opts) {
+    if (commit.parents.size() < 2) {
+        return 0;
+    }
+    return opts.mainline;
+}
+
+Result<bool, Error> check_mainline(GIT_object.Commit commit, str id, int mainline) {
+    if (commit.parents.size() > 1) {
+        if (mainline <= 0) {
+            return Result<bool, Error>.Err(Error.NeedsMainline(id));
+        }
+        if (mainline > commit.parents.size()) {
+            return Result<bool, Error>.Err(Error.NoSuchParent(id, mainline));
+        }
+    }
+    return Result<bool, Error>.Ok(true);
+}
+
+// Was the commit empty to begin with: its tree its mainline parent's?
+Result<bool, Error> originally_empty(str gitdir, GIT_object.Commit commit, int mainline) {
+    if (commit.parents.size() == 0) {
+        Map<str, GIT_merge.Side> files = lift_files(GIT_merge.flatten(gitdir, commit.tree))?;
+        return Result<bool, Error>.Ok(files.size() == 0);
+    }
+    GIT_object.Commit parent = lift_commit(GIT_merge.read_commit(gitdir, mainline_parent(commit, "", mainline)))?;
+    return Result<bool, Error>.Ok(parent.tree == commit.tree);
+}
+
+Result<bool, Error> may_commit_empty(str gitdir, GIT_object.Commit commit, Options opts) {
+    if (opts.keep_redundant) {
+        return Result<bool, Error>.Ok(true);
+    }
+    if (!opts.allow_empty) {
+        return Result<bool, Error>.Ok(false);
+    }
+    return originally_empty(gitdir, commit, effective_mainline(commit, opts));
+}
+
+Result<str, Error> index_tree_of(str gitdir) {
+    GIT_index.Index index = lift_index(GIT_merge.read_index(gitdir))?;
+    for (GIT_index.Entry entry in index.entries) {
+        if (entry.stage != 0) {
+            return Result<str, Error>.Err(Error.UnmergedPaths);
+        }
+    }
+    List<GIT_index.Entry> sorted = clone(index.entries);
+    sorted.sort();
+    return lift_str(GIT_merge.index_tree(gitdir, sorted, 0, sorted.size(), 0));
+}
+
+/// One pick or revert of `item` onto HEAD. `log_prefix` heads the reflog line
+/// (`cherry-pick`, `revert`, `rebase (pick)`). Without `no_commit` the index
+/// must be HEAD's (`Merge(IndexDirty)` otherwise); with it, the step goes on
+/// top of whatever the index holds. The result says what was left behind; the
+/// per-step state files are written for a conflict and an empty stop, and no
+/// other file is touched. See the module header.
+pub Result<StepResult, Error> apply_step(str gitdir, str worktree, Item item, Options opts, str log_prefix) {
+    Head head = read_head(gitdir)?;
+    GIT_object.Commit picked = lift_commit(GIT_merge.read_commit(gitdir, item.id))?;
+    int mainline = effective_mainline(picked, opts);
+    check_mainline(picked, item.id, mainline)?;
+    str original = message_of(picked)?;
+    str parent = mainline_parent(picked, item.id, mainline);
+    str label = abbrev(gitdir, item.id) + " (" + subject_of(original) + ")";
+    str parent_label = "parent of " + label;
+    str base = parent;
+    str theirs = item.id;
+    str base_label = parent_label;
+    str theirs_label = label;
+    str message = pick_message(original, item.id, opts.record_origin);
+    if (item.verb == Verb.Revert) {
+        base = item.id;
+        theirs = parent;
+        base_label = label;
+        theirs_label = parent_label;
+        str shown = "";
+        if (mainline > 0) {
+            shown = parent;
+        }
+        message = revert_message(original, item.id, shown);
+    }
+    str ours = head.id;
+    if (opts.no_commit) {
+        ours = index_tree_of(gitdir)?;
+    }
+    GIT_merge.Opts merge_opts = GIT_merge.Opts(ours_label: "HEAD", theirs_label: theirs_label, base_label: base_label, style: opts.style);
+    GIT_merge.Applied applied = lift_applied(GIT_merge.merge_with_base(gitdir, worktree, base, ours, theirs, merge_opts))?;
+    lift_bool(GIT_merge.write_state(gitdir, "AUTO_MERGE", applied.tree + "\n"))?;
+    if (applied.conflicts.size() > 0) {
+        lift_bool(GIT_merge.write_state(gitdir, "MERGE_MSG", message + GIT_merge.conflicts_block(applied.conflicts)))?;
+        if (!opts.no_commit || item.verb == Verb.Revert) {
+            lift_bool(GIT_merge.write_state(gitdir, head_file(item.verb), item.id + "\n"))?;
+        }
+        return Result<StepResult, Error>.Ok(StepResult(Landed.Conflicted, "", applied.conflicts, applied.messages));
+    }
+    List<GIT_merge.Conflicted> none = [];
+    if (opts.no_commit) {
+        lift_bool(GIT_merge.write_state(gitdir, "MERGE_MSG", message))?;
+        if (item.verb == Verb.Revert) {
+            lift_bool(GIT_merge.write_state(gitdir, head_file(item.verb), item.id + "\n"))?;
+        }
+        return Result<StepResult, Error>.Ok(StepResult(Landed.Staged, "", none, applied.messages));
+    }
+    str head_tree = lift_str(GIT_merge.tree_of(gitdir, head.id))?;
+    if (applied.tree == head_tree && !may_commit_empty(gitdir, picked, opts)?) {
+        lift_bool(GIT_merge.write_state(gitdir, head_file(item.verb), item.id + "\n"))?;
+        lift_bool(GIT_merge.write_state(gitdir, "MERGE_MSG", message))?;
+        return Result<StepResult, Error>.Ok(StepResult(Landed.Empty, "", none, applied.messages));
+    }
+    GIT_object.Ident author = picked.author;
+    if (item.verb == Verb.Revert) {
+        author = GIT_merge.ident(gitdir, "AUTHOR");
+    }
+    GIT_object.Commit made = GIT_object.Commit(applied.tree, [head.id], author, GIT_merge.ident(gitdir, "COMMITTER"), [], message.to_bytes());
+    str id = lift_str(GIT_merge.write_commit(gitdir, made))?;
+    move_ref(gitdir, head.ref, id, Option<str>.Some(head.id), log_prefix + ": " + subject_of(message))?;
+    return Result<StepResult, Error>.Ok(StepResult(Landed.Committed, id, none, applied.messages));
+}
+
+/// Commit the index of a stopped step: the tree is the index (no unmerged
+/// path allowed), the message `MERGE_MSG` without its `#` lines, the author
+/// the picked commit's for a pick. A result equal to HEAD's tree stops as
+/// `Landed.Empty` unless the options allow it. On success the per-step state
+/// files and `AUTO_MERGE` go, as after `git commit`.
+pub Result<StepResult, Error> finish_step(str gitdir, str worktree, Pending stopped_step, Options opts, str log_prefix) {
+    Head head = read_head(gitdir)?;
+    str tree = index_tree_of(gitdir)?;
+    GIT_object.Commit picked = lift_commit(GIT_merge.read_commit(gitdir, stopped_step.id))?;
+    str text = GIT_merge.clean_message(read_text(fs.join(gitdir, "MERGE_MSG")));
+    if (text == "") {
+        return Result<StepResult, Error>.Err(Error.EmptyMessage);
+    }
+    List<GIT_merge.Conflicted> none = [];
+    List<str> no_messages = [];
+    str head_tree = lift_str(GIT_merge.tree_of(gitdir, head.id))?;
+    if (tree == head_tree && !may_commit_empty(gitdir, picked, opts)?) {
+        return Result<StepResult, Error>.Ok(StepResult(Landed.Empty, "", none, no_messages));
+    }
+    GIT_object.Ident author = picked.author;
+    if (stopped_step.verb == Verb.Revert) {
+        author = GIT_merge.ident(gitdir, "AUTHOR");
+    }
+    GIT_object.Commit made = GIT_object.Commit(tree, [head.id], author, GIT_merge.ident(gitdir, "COMMITTER"), [], text.to_bytes());
+    str id = lift_str(GIT_merge.write_commit(gitdir, made))?;
+    move_ref(gitdir, head.ref, id, Option<str>.Some(head.id), log_prefix + ": " + subject_of(text))?;
+    clear_all_state(gitdir);
+    return Result<StepResult, Error>.Ok(StepResult(Landed.Committed, id, none, no_messages));
+}
+
+// --- the todo and options files ---------------------------------------------------------------
+
+/// `pick <abbrev> <subject>` / `revert ...`, one line each.
+pub List<str> todo_lines(str gitdir, List<Item> items) {
+    List<str> out = [];
+    for (Item item in items) {
+        out.push(item.verb.word() + " " + abbrev(gitdir, item.id) + " " + item.subject);
+    }
+    return out;
+}
+
+/// Write `<dir>/todo`, creating `dir`.
+pub Result<bool, Error> write_todo(str gitdir, str dir, List<Item> items) {
+    match (fs.makedirs(dir)) {
+        case Ok: {
+        }
+        case Err(_): {
+            return Result<bool, Error>.Err(io_error());
+        }
+    }
+    str text = "";
+    for (str line in todo_lines(gitdir, items)) {
+        text = text + line + "\n";
+    }
+    return write_text(fs.join(dir, "todo"), text);
+}
+
+/// The items of `<dir>/todo`; the ids are resolved to commits. `#` lines and
+/// blank lines are skipped, `p` and `r` stand for pick and revert.
+pub Result<List<Item>, Error> read_todo(str gitdir, str dir) {
+    List<Item> out = [];
+    for (str raw in read_text(fs.join(dir, "todo")).split("\n")) {
+        str line = raw.trim();
+        if (line == "" || line.starts_with("#")) {
+            continue;
+        }
+        int space = line.index_of(" ").or(-1);
+        if (space < 0) {
+            return Result<List<Item>, Error>.Err(Error.BadState("todo"));
+        }
+        str word = line.substr(0, space);
+        Verb verb = Verb.Pick;
+        if (word == "pick" || word == "p") {
+            verb = Verb.Pick;
+        } else if (word == "revert" || word == "r") {
+            verb = Verb.Revert;
+        } else {
+            return Result<List<Item>, Error>.Err(Error.Unsupported("a todo line that is not a pick or a revert: " + line));
+        }
+        str rest = line.substr(space + 1, line.size()).trim();
+        int cut = rest.index_of(" ").or(-1);
+        str token = rest;
+        str subject = "";
+        if (cut >= 0) {
+            token = rest.substr(0, cut);
+            subject = rest.substr(cut + 1, rest.size()).trim();
+        }
+        match (GIT_refs.rev_parse(gitdir, token)) {
+            case Ok(str found): {
+                out.push(Item(verb, found, subject));
+            }
+            case Err(_): {
+                return Result<List<Item>, Error>.Err(Error.BadState("todo"));
+            }
+        }
+    }
+    return Result<List<Item>, Error>.Ok(out);
+}
+
+/// `<dir>/opts` in git's config format; a missing file is the defaults.
+pub Options read_options(str dir) {
+    Options opts = Options();
+    for (str raw in read_text(fs.join(dir, "opts")).split("\n")) {
+        str line = raw.trim();
+        int equals = line.index_of("=").or(-1);
+        if (equals < 0) {
+            continue;
+        }
+        str key = line.substr(0, equals).trim();
+        str value = line.substr(equals + 1, line.size()).trim();
+        bool on = value == "true";
+        if (key == "no-commit") {
+            opts.no_commit = on;
+        } else if (key == "record-origin") {
+            opts.record_origin = on;
+        } else if (key == "allow-empty") {
+            opts.allow_empty = on;
+        } else if (key == "keep-redundant-commits") {
+            opts.keep_redundant = on;
+        } else if (key == "mainline") {
+            opts.mainline = value.parse_int().or(0);
+        }
+    }
+    return opts;
+}
+
+/// Write `<dir>/opts` with the options that are not default; no file when
+/// there are none. A revert always has `edit = false`: no editor is run.
+pub Result<bool, Error> write_options(str dir, Verb verb, Options opts) {
+    str body = "";
+    if (verb == Verb.Revert) {
+        body = body + "\tedit = false\n";
+    }
+    if (opts.no_commit) {
+        body = body + "\tno-commit = true\n";
+    }
+    if (opts.record_origin) {
+        body = body + "\trecord-origin = true\n";
+    }
+    if (opts.mainline > 0) {
+        body = body + "\tmainline = " + opts.mainline.to_str() + "\n";
+    }
+    if (opts.allow_empty) {
+        body = body + "\tallow-empty = true\n";
+    }
+    if (opts.keep_redundant) {
+        body = body + "\tkeep-redundant-commits = true\n";
+    }
+    if (body == "") {
+        return Result<bool, Error>.Ok(true);
+    }
+    return write_text(fs.join(dir, "opts"), "[options]\n" + body);
+}
+
+// --- what is under way ---------------------------------------------------------------------------
+
+/// The stopped step, from `CHERRY_PICK_HEAD` or `REVERT_HEAD`.
+pub Option<Pending> pending(str gitdir) {
+    List<Verb> verbs = [Verb.Pick, Verb.Revert];
+    for (Verb verb in verbs) {
+        str text = read_text(fs.join(gitdir, head_file(verb))).trim();
+        if (text.size() == 40 && GIT_object.is_name(text)) {
+            return Option<Pending>.Some(Pending(verb, text));
+        }
+    }
+    return Option<Pending>.None;
+}
+
+bool has_pending(str gitdir) {
+    match (pending(gitdir)) {
+        case Some(_): {
+            return true;
+        }
+        case None: {
+            return false;
+        }
+    }
+}
+
+/// Is a cherry-pick or revert under way: a stopped step or a sequencer directory.
+pub bool in_progress(str gitdir) {
+    return fs.exists(sequencer_dir(gitdir)) || fs.exists(fs.join(gitdir, CHERRY_PICK_HEAD)) || fs.exists(fs.join(gitdir, REVERT_HEAD));
+}
+
+/// What is under way, or None.
+pub Option<State> state(str gitdir) {
+    if (!in_progress(gitdir)) {
+        return Option<State>.None;
+    }
+    List<Item> todo = [];
+    match (read_todo(gitdir, sequencer_dir(gitdir))) {
+        case Ok(List<Item> found): {
+            todo = found;
+        }
+        case Err(_): {
+        }
+    }
+    match (pending(gitdir)) {
+        case Some(Pending stopped): {
+            return Option<State>.Some(State(stopped.verb, stopped.id, true, todo));
+        }
+        case None: {
+        }
+    }
+    if (todo.size() > 0) {
+        return Option<State>.Some(State(todo[0].verb, todo[0].id, false, todo));
+    }
+    return Option<State>.Some(State(Verb.Pick, "", false, todo));
+}
+
+/// `CHERRY-PICKING`, `REVERTING`, or `""` when nothing is under way.
+pub str banner(str gitdir) {
+    match (state(gitdir)) {
+        case Some(State found): {
+            if (found.verb == Verb.Revert) {
+                return "REVERTING";
+            }
+            return "CHERRY-PICKING";
+        }
+        case None: {
+            return "";
+        }
+    }
+}
+
+// --- the commits to apply ----------------------------------------------------------------------------
+
+Result<str, Error> resolve_commit(str gitdir, str spec) {
+    match (GIT_refs.rev_parse(gitdir, spec)) {
+        case Ok(str found): {
+            match (GIT_refs.peel(gitdir, spec, found)) {
+                case Ok(str commit): {
+                    return Result<str, Error>.Ok(commit);
+                }
+                case Err(_): {
+                    return Result<str, Error>.Err(Error.NotACommit(spec));
+                }
+            }
+        }
+        case Err(_): {
+            return Result<str, Error>.Err(Error.NotACommit(spec));
+        }
+    }
+}
+
+/// The commits `specs` name, in the order they are applied: `A..B` is what B
+/// has and A has not, oldest first for a pick and newest first for a revert (an empty side is HEAD); any other spec is
+/// one commit. Specs are not merged: a commit named twice is applied twice.
+pub Result<List<str>, Error> expand(str gitdir, Verb verb, List<str> specs) {
+    List<str> out = [];
+    for (str spec in specs) {
+        int dots = spec.index_of("..").or(-1);
+        if (dots < 0) {
+            out.push(resolve_commit(gitdir, spec)?);
+            continue;
+        }
+        if (spec.substr(dots, spec.size()).starts_with("...")) {
+            return Result<List<str>, Error>.Err(Error.Unsupported("a symmetric range cannot be applied: " + spec));
+        }
+        str left = spec.substr(0, dots);
+        str right = spec.substr(dots + 2, spec.size());
+        if (left == "") {
+            left = "HEAD";
+        }
+        if (right == "") {
+            right = "HEAD";
+        }
+        str low = resolve_commit(gitdir, left)?;
+        str high = resolve_commit(gitdir, right)?;
+        match (GIT_graph.rev_list(gitdir, [high], [low])) {
+            case Ok(List<str> found): {
+                if (verb == Verb.Revert) {
+                    for (str id in found) {
+                        out.push(id);
+                    }
+                } else {
+                    int at = found.size();
+                    while (at > 0) {
+                        at = at - 1;
+                        out.push(found[at]);
+                    }
+                }
+            }
+            case Err(GIT_graph.Error error): {
+                return Result<List<str>, Error>.Err(Error.Merge(GIT_merge.Error.Graph(error)));
+            }
+        }
+    }
+    return Result<List<str>, Error>.Ok(out);
+}
+
+Result<List<Item>, Error> items_of(str gitdir, Verb verb, List<str> ids) {
+    List<Item> out = [];
+    for (str id in ids) {
+        GIT_object.Commit commit = lift_commit(GIT_merge.read_commit(gitdir, id))?;
+        out.push(Item(verb, id, subject_of(message_of(commit)?)));
+    }
+    return Result<List<Item>, Error>.Ok(out);
+}
+
+// --- running a todo ------------------------------------------------------------------------------------
+
+str log_prefix_of(Verb verb) {
+    return verb.noun();
+}
+
+Result<bool, Error> write_abort_safety(str dir, str id) {
+    return write_text(fs.join(dir, "abort-safety"), id + "\n");
+}
+
+Report stopped_report(Ending ending, List<str> made, Item item, StepResult step) {
+    return Report(ending, made, item.id, item.verb, step.conflicts, step.messages);
+}
+
+// Apply `items` one after the other. With `sequence` the todo is rewritten
+// before each step and `abort-safety` follows HEAD. A stop leaves the state,
+// the end of the list removes the directory.
+Result<Report, Error> run(str gitdir, str worktree, List<Item> items, Options opts, bool sequence) {
+    str dir = sequencer_dir(gitdir);
+    List<str> made = [];
+    for (int i in 0 .. items.size()) {
+        Item item = items[i];
+        if (sequence) {
+            write_todo(gitdir, dir, items.slice(i, items.size()))?;
+        }
+        StepResult step = apply_step(gitdir, worktree, item, opts, log_prefix_of(item.verb))?;
+        match (step.landed) {
+            case Committed: {
+                made.push(step.commit);
+                if (sequence) {
+                    write_abort_safety(dir, step.commit)?;
+                }
+            }
+            case Staged: {
+            }
+            case Conflicted: {
+                return Result<Report, Error>.Ok(stopped_report(Ending.Conflicts, made, item, step));
+            }
+            case Empty: {
+                return Result<Report, Error>.Ok(stopped_report(Ending.Empty, made, item, step));
+            }
+        }
+    }
+    if (sequence) {
+        remove_dir(dir);
+    }
+    List<GIT_merge.Conflicted> none = [];
+    List<str> no_messages = [];
+    return Result<Report, Error>.Ok(Report(Ending.Finished, made, "", Verb.Pick, none, no_messages));
+}
+
+Result<bool, Error> refuse_if_busy(str gitdir) {
+    match (state(gitdir)) {
+        case Some(State found): {
+            return Result<bool, Error>.Err(Error.InProgress(found.verb));
+        }
+        case None: {
+        }
+    }
+    if (GIT_merge.in_progress(gitdir)) {
+        return Result<bool, Error>.Err(Error.Merging);
+    }
+    return Result<bool, Error>.Ok(true);
+}
+
+/// Pick or revert `ids` (commit ids, in the order to apply them) onto HEAD. One commit not
+/// from a range runs as a single step, as `git cherry-pick <commit>` does;
+/// anything else is a sequence with `.git/sequencer/`. A stop on conflicts or
+/// an empty result is a `Report`, not an error; an error before the first step
+/// is done leaves nothing behind.
+pub Result<Report, Error> start(str gitdir, str worktree, Verb verb, List<str> ids, Options opts) {
+    if (ids.size() == 0) {
+        return Result<Report, Error>.Err(Error.Nothing);
+    }
+    refuse_if_busy(gitdir)?;
+    Head head = read_head(gitdir)?;
+    List<Item> items = items_of(gitdir, verb, ids)?;
+    bool sequence = items.size() > 1 || opts.as_range;
+    str dir = sequencer_dir(gitdir);
+    if (sequence) {
+        write_text_in(dir, "head", head.id + "\n")?;
+        write_abort_safety(dir, head.id)?;
+        write_options(dir, verb, opts)?;
+    }
+    match (run(gitdir, worktree, items, opts, sequence)) {
+        case Ok(Report report): {
+            return Result<Report, Error>.Ok(report);
+        }
+        case Err(Error error): {
+            if (sequence && read_text(fs.join(dir, "head")) != "" && !fs.exists(fs.join(gitdir, head_file(verb)))) {
+                if (read_text(fs.join(dir, "abort-safety")).trim() == head.id) {
+                    remove_dir(dir);
+                }
+            }
+            return Result<Report, Error>.Err(error);
+        }
+    }
+}
+
+Result<bool, Error> write_text_in(str dir, str name, str text) {
+    match (fs.makedirs(dir)) {
+        case Ok: {
+        }
+        case Err(_): {
+            return Result<bool, Error>.Err(io_error());
+        }
+    }
+    return write_text(fs.join(dir, name), text);
+}
+
+// Carry on with `rest` after a step is done or skipped.
+Result<Report, Error> carry_on(str gitdir, str worktree, List<Item> rest, Options opts, List<str> made) {
+    str dir = sequencer_dir(gitdir);
+    if (rest.size() == 0) {
+        remove_dir(dir);
+        List<GIT_merge.Conflicted> none = [];
+        List<str> no_messages = [];
+        return Result<Report, Error>.Ok(Report(Ending.Finished, made, "", Verb.Pick, none, no_messages));
+    }
+    Report report = run(gitdir, worktree, rest, opts, true)?;
+    List<str> all = clone(made);
+    for (str id in report.commits) {
+        all.push(id);
+    }
+    report.commits = all;
+    return Result<Report, Error>.Ok(report);
+}
+
+/// `git cherry-pick --continue` / `git revert --continue`: commit the stopped
+/// step (its conflicts must be resolved and staged), then do the rest of the
+/// sequence. A stopped step that is still empty stops again as `Ending.Empty`.
+/// With no stopped step (`git commit` made the commit, or `no_commit`) the
+/// first todo item counts as done.
+pub Result<Report, Error> continue_sequence(str gitdir, str worktree) {
+    str dir = sequencer_dir(gitdir);
+    bool sequence = fs.exists(dir);
+    Option<Pending> stopped = pending(gitdir);
+    if (!sequence && !has_pending(gitdir)) {
+        return Result<Report, Error>.Err(Error.NoSequence);
+    }
+    Options opts = read_options(dir);
+    List<str> made = [];
+    List<Item> todo = [];
+    if (sequence) {
+        todo = read_todo(gitdir, dir)?;
+    }
+    match (stopped) {
+        case Some(Pending found): {
+            StepResult step = finish_step(gitdir, worktree, found, opts, commit_log(found.verb))?;
+            if (step.landed == Landed.Empty) {
+                List<GIT_merge.Conflicted> none = [];
+                List<str> no_messages = [];
+                return Result<Report, Error>.Ok(Report(Ending.Empty, made, found.id, found.verb, none, no_messages));
+            }
+            made.push(step.commit);
+            if (sequence) {
+                write_abort_safety(dir, step.commit)?;
+            }
+        }
+        case None: {
+            if (!opts.no_commit) {
+                Head head = read_head(gitdir)?;
+                GIT_index.Index index = lift_index(GIT_merge.read_index(gitdir))?;
+                str head_tree = lift_str(GIT_merge.tree_of(gitdir, head.id))?;
+                List<str> dirty = lift_dirty(GIT_merge.index_differences(gitdir, index, head_tree))?;
+                if (dirty.size() > 0) {
+                    return Result<Report, Error>.Err(Error.Merge(GIT_merge.Error.IndexDirty(dirty)));
+                }
+            }
+        }
+    }
+    if (!sequence) {
+        List<GIT_merge.Conflicted> none = [];
+        List<str> no_messages = [];
+        return Result<Report, Error>.Ok(Report(Ending.Finished, made, "", Verb.Pick, none, no_messages));
+    }
+    List<Item> rest = [];
+    for (int i in 1 .. todo.size()) {
+        rest.push(todo[i]);
+    }
+    return carry_on(gitdir, worktree, rest, opts, made);
+}
+
+str commit_log(Verb verb) {
+    match (verb) {
+        case Pick: {
+            return "commit (cherry-pick)";
+        }
+        case Revert: {
+            return "commit";
+        }
+    }
+}
+
+// --- skip, abort, quit ------------------------------------------------------------------------------------------
+
+/// `git reset --merge <target>` for the sequencer: paths the index holds
+/// differently from HEAD (staged, conflicted) go back, then HEAD and the
+/// files move to `target` when that is another commit. The per-step state
+/// files and `AUTO_MERGE` go, `ORIG_HEAD` is HEAD as it was, the reflog says
+/// `message` (git logs `reset: moving to <id>`). Local edits that the move
+/// would overwrite refuse with `Merge(LocalChanges)`, nothing written.
+pub Result<bool, Error> reset_to(str gitdir, str worktree, str target, str message) {
+    Head head = read_head(gitdir)?;
+    lift_bool(GIT_merge.reset_merge_paths(gitdir, worktree, head.id))?;
+    if (target != head.id) {
+        str from_tree = lift_str(GIT_merge.tree_of(gitdir, head.id))?;
+        str to_tree = lift_str(GIT_merge.tree_of(gitdir, target))?;
+        GIT_index.Index index = lift_index(GIT_merge.read_index(gitdir))?;
+        match (GIT_checkout.apply_tree_diff(gitdir, worktree, from_tree, to_tree, index)) {
+            case Ok(_): {
+            }
+            case Err(GIT_checkout.Error error): {
+                return Result<bool, Error>.Err(Error.Merge(GIT_merge.Error.Checkout(error)));
+            }
+        }
+    }
+    clear_all_state(gitdir);
+    move_ref(gitdir, "ORIG_HEAD", head.id, Option<str>.None, "")?;
+    if (target != head.id) {
+        move_ref(gitdir, head.ref, target, Option<str>.Some(head.id), message)?;
+    } else if (GIT_reflog.should_log(gitdir, "HEAD")) {
+        match (GIT_reflog.append(gitdir, "HEAD", head.id, head.id, GIT_reflog.default_ident(gitdir), message)) {
+            case Ok: {
+            }
+            case Err(_): {
+                return Result<bool, Error>.Err(io_error());
+            }
+        }
+    }
+    return Result<bool, Error>.Ok(true);
+}
+
+/// `--skip`: forget the stopped step (index and files back to HEAD) and do
+/// the rest of the sequence.
+pub Result<Report, Error> skip(str gitdir, str worktree) {
+    str dir = sequencer_dir(gitdir);
+    bool sequence = fs.exists(dir);
+    if (!sequence && !has_pending(gitdir)) {
+        return Result<Report, Error>.Err(Error.NoSequence);
+    }
+    Head head = read_head(gitdir)?;
+    Options opts = read_options(dir);
+    List<Item> todo = [];
+    if (sequence) {
+        todo = read_todo(gitdir, dir)?;
+    }
+    reset_to(gitdir, worktree, head.id, "reset: moving to " + head.id)?;
+    List<str> made = [];
+    if (!sequence) {
+        List<GIT_merge.Conflicted> none = [];
+        List<str> no_messages = [];
+        return Result<Report, Error>.Ok(Report(Ending.Finished, made, "", Verb.Pick, none, no_messages));
+    }
+    List<Item> rest = [];
+    for (int i in 1 .. todo.size()) {
+        rest.push(todo[i]);
+    }
+    return carry_on(gitdir, worktree, rest, opts, made);
+}
+
+/// `--abort`: back to where the sequence began (`.git/sequencer/head`), the
+/// state gone. When HEAD is not where the sequence left it nothing is rewound
+/// and only the state goes (`Aborted.HeadMoved`). A single step is undone by
+/// a `reset --merge` to HEAD.
+pub Result<Aborted, Error> abort(str gitdir, str worktree) {
+    str dir = sequencer_dir(gitdir);
+    if (!fs.exists(dir)) {
+        if (!has_pending(gitdir)) {
+            return Result<Aborted, Error>.Err(Error.NoSequence);
+        }
+        Head now = read_head(gitdir)?;
+        reset_to(gitdir, worktree, now.id, "reset: moving to " + now.id)?;
+        return Result<Aborted, Error>.Ok(Aborted.Rewound);
+    }
+    Head head = read_head(gitdir)?;
+    str start_id = read_text(fs.join(dir, "head")).trim();
+    if (start_id.size() != 40 || !GIT_object.is_name(start_id)) {
+        return Result<Aborted, Error>.Err(Error.BadState("head"));
+    }
+    str safety = read_text(fs.join(dir, "abort-safety")).trim();
+    if (safety != "" && safety != head.id) {
+        remove_dir(dir);
+        return Result<Aborted, Error>.Ok(Aborted.HeadMoved);
+    }
+    reset_to(gitdir, worktree, start_id, "reset: moving to " + start_id)?;
+    remove_dir(dir);
+    return Result<Aborted, Error>.Ok(Aborted.Rewound);
+}
+
+/// `--quit`: forget the operation, leaving the index, the files and HEAD as
+/// they are. The sequencer directory and the per-step files go.
+pub Result<bool, Error> quit(str gitdir) {
+    if (!in_progress(gitdir)) {
+        return Result<bool, Error>.Err(Error.NoSequence);
+    }
+    remove_dir(sequencer_dir(gitdir));
+    clear_all_state(gitdir);
+    return Result<bool, Error>.Ok(true);
+}
+
+Result<List<str>, Error> lift_dirty(Result<List<str>, GIT_merge.Error> found) {
+    match (found) {
+        case Ok(List<str> value): {
+            return Result<List<str>, Error>.Ok(value);
+        }
+        case Err(GIT_merge.Error error): {
+            return Result<List<str>, Error>.Err(Error.Merge(error));
+        }
+    }
+}

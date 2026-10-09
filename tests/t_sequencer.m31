@@ -1,0 +1,145 @@
+// Drives GIT_sequencer for test_sequencer.sh.
+//
+//   ./t_sequencer <gitdir> <worktree> pick|revert [-n] [-x] [-m N] [--allow-empty] [--keep-redundant] [--range] <spec>...
+//       prints `ending <word>`, `commit <id>` per commit made, `stopped <id>`,
+//       one `kind <path> <word>` per conflict; `refused <why>` on an error
+//   ./t_sequencer <gitdir> <worktree> continue|skip|quit
+//   ./t_sequencer <gitdir> <worktree> abort      prints `rewound` or `head-moved`
+//   ./t_sequencer <gitdir> <worktree> state      prints `none` or `<banner> <stopped|todo> <current>` and the todo
+//   ./t_sequencer <gitdir> <worktree> abbrev <id>
+
+import GIT_diff3;
+import GIT_merge;
+import GIT_sequencer;
+import io;
+import os;
+
+str ending_word(GIT_sequencer.Ending ending) {
+    match (ending) {
+        case Finished: {
+            return "finished";
+        }
+        case Conflicts: {
+            return "conflicts";
+        }
+        case Empty: {
+            return "empty";
+        }
+    }
+}
+
+void print_report(GIT_sequencer.Report report) {
+    print("ending " + ending_word(report.ending));
+    for (str id in report.commits) {
+        print("commit " + id);
+    }
+    if (report.stopped != "") {
+        print("stopped " + report.stopped);
+    }
+    for (GIT_merge.Conflicted c in report.conflicts) {
+        print("kind " + c.path + " " + c.kind.word());
+    }
+}
+
+void print_result(Result<GIT_sequencer.Report, GIT_sequencer.Error> found) {
+    match (found) {
+        case Ok(GIT_sequencer.Report report): {
+            print_report(report);
+        }
+        case Err(GIT_sequencer.Error error): {
+            print("refused " + error.to_str());
+        }
+    }
+}
+
+List<str> argv = os.args();
+if (argv.size() < 4) {
+    io.eprint("usage: t_sequencer <gitdir> <worktree> pick|revert|continue|skip|abort|quit|state ...");
+    os.exit(2);
+}
+str gitdir = argv[1];
+str worktree = argv[2];
+str command = argv[3];
+if (command == "pick" || command == "revert") {
+    GIT_sequencer.Options opts = GIT_sequencer.Options(style: GIT_merge.configured_style(gitdir));
+    List<str> specs = [];
+    int i = 4;
+    while (i < argv.size()) {
+        if (argv[i] == "-n") {
+            opts.no_commit = true;
+        } else if (argv[i] == "-x") {
+            opts.record_origin = true;
+        } else if (argv[i] == "--allow-empty") {
+            opts.allow_empty = true;
+        } else if (argv[i] == "--keep-redundant") {
+            opts.keep_redundant = true;
+        } else if (argv[i] == "--range") {
+            opts.as_range = true;
+        } else if (argv[i] == "-m" && i + 1 < argv.size()) {
+            opts.mainline = argv[i + 1].parse_int().or(0);
+            i = i + 1;
+        } else {
+            if (argv[i].index_of("..").or(-1) >= 0) {
+                opts.as_range = true;
+            }
+            specs.push(argv[i]);
+        }
+        i = i + 1;
+    }
+    GIT_sequencer.Verb verb = GIT_sequencer.Verb.Pick;
+    if (command == "revert") {
+        verb = GIT_sequencer.Verb.Revert;
+    }
+    match (GIT_sequencer.expand(gitdir, verb, specs)) {
+        case Ok(List<str> ids): {
+            print_result(GIT_sequencer.start(gitdir, worktree, verb, ids, opts));
+        }
+        case Err(GIT_sequencer.Error error): {
+            print("refused " + error.to_str());
+        }
+    }
+} else if (command == "continue") {
+    print_result(GIT_sequencer.continue_sequence(gitdir, worktree));
+} else if (command == "skip") {
+    print_result(GIT_sequencer.skip(gitdir, worktree));
+} else if (command == "abort") {
+    match (GIT_sequencer.abort(gitdir, worktree)) {
+        case Ok(GIT_sequencer.Aborted aborted): {
+            if (aborted == GIT_sequencer.Aborted.Rewound) {
+                print("rewound");
+            } else {
+                print("head-moved");
+            }
+        }
+        case Err(GIT_sequencer.Error error): {
+            print("refused " + error.to_str());
+        }
+    }
+} else if (command == "quit") {
+    match (GIT_sequencer.quit(gitdir)) {
+        case Ok(_): {
+            print("quit");
+        }
+        case Err(GIT_sequencer.Error error): {
+            print("refused " + error.to_str());
+        }
+    }
+} else if (command == "state") {
+    match (GIT_sequencer.state(gitdir)) {
+        case Some(GIT_sequencer.State found): {
+            str kind = "todo";
+            if (found.stopped) {
+                kind = "stopped";
+            }
+            print(GIT_sequencer.banner(gitdir) + " " + kind + " " + found.current);
+            for (str line in GIT_sequencer.todo_lines(gitdir, found.todo)) {
+                print("todo " + line);
+            }
+        }
+        case None: {
+            print("none");
+        }
+    }
+} else if (command == "abbrev") {
+    print(GIT_sequencer.abbrev(gitdir, argv[4]));
+}

@@ -317,6 +317,7 @@ source tests/test_graph.sh
 source tests/test_unmerged.sh
 source tests/test_treediff.sh
 source tests/test_merge.sh
+source tests/test_sequencer.sh
 source tests/test_blame.sh
 source tests/test_undo.sh
 source tests/test_branches.sh
