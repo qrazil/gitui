@@ -155,6 +155,17 @@ if [ "${pp_up:-0}" = 1 ] && [ -x "$WORK/t_pull" ]; then
     else
         bad "pull fast-forward" "$got" "$(git -C "$pl_cl" status --short | head -5)" "$(head -5 "$WORK/pull-ff.fsck")"
     fi
+    pl_rl_ok=1
+    for pl_rl in HEAD refs/heads/main; do
+        pl_rl_line=$(git -C "$pl_cl" reflog show --format='%H %gs' "$pl_rl" | head -1)
+        [ "$pl_rl_line" = "$pl_want_tip pull: Fast-forward" ] || { pl_rl_ok=0; pl_rl_why="$pl_rl: $pl_rl_line"; }
+        [ "$(tail -1 "$pl_cl/.git/logs/$pl_rl" | cut -d' ' -f1)" = "$pl_old" ] || { pl_rl_ok=0; pl_rl_why="$pl_rl old id"; }
+    done
+    if [ $pl_rl_ok = 1 ] && [ "$(git -C "$pl_cl" reflog show --format='%gs' refs/remotes/origin/main | head -1)" = "pull: fast-forward" ]; then
+        note "pull: HEAD and the branch each log 'pull: Fast-forward' from the old tip to the new, origin/main logs 'pull: fast-forward'"
+    else
+        bad "pull: reflog lines" "$pl_rl_why" "$(git -C "$pl_cl" reflog show --format='%H %gs' refs/remotes/origin/main | head -2)"
+    fi
     if [ "$(git -C "$pl_cl" ls-files -s)" = "$(git -C "$pl_work" ls-files -s)" ] &&
         diff -r -x .git -x scratch.txt "$pl_cl" "$pl_work" >"$WORK/pull-ff.diff" 2>&1 &&
         [ -x "$pl_cl/d/e/f1.txt" ] && [ ! -e "$pl_cl/d/e/f2.txt" ] && [ -f "$pl_cl/scratch.txt" ]; then

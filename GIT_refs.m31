@@ -53,6 +53,7 @@ import io;
 import fs;
 import text;
 import GIT_object;
+import GIT_reflog;
 import GIT_repository;
 import random;
 
@@ -472,24 +473,125 @@ bool is_safe_name(str name) {
 /// and the ref does not exist yet -- and a mismatch is `Error.Mismatch` with
 /// nothing written. See the module header for exactly what this does and does
 /// not guarantee against a second writer.
-pub Result<bool, Error> update(str gitdir, str name, str new_id, Option<str> expect_old) {
+///
+/// The move is recorded in the reflog (`GIT_reflog`), on the ref's own log
+/// and on `HEAD`'s when `name` is the branch `HEAD` is on, as git does.
+/// `msg` is the line's message (`checkout: moving from a to b`); left empty,
+/// it is worked out from the commit the ref now points at -- `commit: <subject>`,
+/// `commit (initial): ...`, `commit (merge): ...`, or `commit (amend): ...` when
+/// the new commit has the old one's parents -- and is `update` for anything
+/// else. A failure to write the log never fails the update: the ref is the
+/// state, the log is the history of it, and git itself treats the two this way.
+pub Result<bool, Error> update(str gitdir, str name, str new_id, Option<str> expect_old, str msg = "") {
     if (!is_safe_name(name)) {
         return Result<bool, Error>.Err(Error.Malformed);
     }
     if (!GIT_object.is_name(new_id) || new_id.size() != 40) {
         return Result<bool, Error>.Err(Error.BadValue);
     }
+    str previous = "";
     match (expect_old) {
         case Some(str want): {
             str have = current_or_empty(gitdir, name)?;
             if (have != want) {
                 return Result<bool, Error>.Err(Error.Mismatch);
             }
+            previous = have;
         }
         case None: {
+            match (current_or_empty(gitdir, name)) {
+                case Ok(str have): {
+                    previous = have;
+                }
+                case Err(_): {
+                }
+            }
         }
     }
-    return write_atomic(where_for(gitdir, name), new_id + "\n");
+    write_atomic(where_for(gitdir, name), new_id + "\n")?;
+    str message = msg;
+    if (message == "") {
+        message = inferred_message(gitdir, previous, new_id);
+    }
+    match (GIT_reflog.log_update(gitdir, name, previous, new_id, message)) {
+        case Ok(_): {
+        }
+        case Err(_): {
+        }
+    }
+    return Result<bool, Error>.Ok(true);
+}
+
+// The reflog message for a ref that moved from `previous` to the commit
+// `new_id`, when the caller did not say. See `update`.
+str inferred_message(str gitdir, str previous, str new_id) {
+    match (GIT_object.read(gitdir, new_id)) {
+        case Ok(GIT_object.Object object): {
+            match (object.body) {
+                case Commit(GIT_object.Commit commit): {
+                    str subject = commit.message.utf8().or("").split("\n")[0];
+                    if (commit.parents.size() == 0) {
+                        return "commit (initial): " + subject;
+                    }
+                    if (commit.parents.size() > 1) {
+                        return "commit (merge): " + subject;
+                    }
+                    if (previous != "" && commit.parents[0] == previous) {
+                        return "commit: " + subject;
+                    }
+                    if (previous != "" && has_same_parents(gitdir, previous, commit)) {
+                        return "commit (amend): " + subject;
+                    }
+                    return "update";
+                }
+                case Blob: {
+                    return "update";
+                }
+                case Tree(_): {
+                    return "update";
+                }
+                case Tag(_): {
+                    return "update";
+                }
+            }
+        }
+        case Err(_): {
+            return "update";
+        }
+    }
+}
+
+// Is `previous` a commit whose parents are exactly `commit`'s?
+bool has_same_parents(str gitdir, str previous, GIT_object.Commit commit) {
+    match (GIT_object.read(gitdir, previous)) {
+        case Ok(GIT_object.Object object): {
+            match (object.body) {
+                case Commit(GIT_object.Commit earlier): {
+                    if (earlier.parents.size() != commit.parents.size()) {
+                        return false;
+                    }
+                    for (int i in 0 .. earlier.parents.size()) {
+                        if (earlier.parents[i] != commit.parents[i]) {
+                            return false;
+                        }
+                    }
+                    return true;
+                }
+                case Blob: {
+                    return false;
+                }
+                case Tree(_): {
+                    return false;
+                }
+                case Tag(_): {
+                    return false;
+                }
+            }
+        }
+        case Err(_): {
+            return false;
+        }
+    }
 }
 
 /// Write `name` as a symbolic ref: `ref: <target>`. `target` is a ref name,

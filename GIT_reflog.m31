@@ -1,0 +1,506 @@
+// Reflogs: the `.git/logs/<ref>` files that record every move of a ref, in
+// git's exact line format, so `git reflog` reads what this program wrote and
+// this program reads what git wrote.
+//
+//   GIT_reflog.append(gitdir, ref, old, new, who, msg)  -> Result<bool, Error>
+//   GIT_reflog.log_update(gitdir, ref, old, new, msg)   -> Result<bool, Error>
+//   GIT_reflog.read(gitdir, ref)                        -> Result<List<Entry>, Error>
+//   GIT_reflog.delete(gitdir, ref, n, rewrite)          -> Result<bool, Error>
+//   GIT_reflog.delete_log(gitdir, ref)                  -> Result<bool, Error>
+//   GIT_reflog.exists(gitdir, ref)                      -> bool
+//   GIT_reflog.should_log(gitdir, ref)                  -> bool
+//   GIT_reflog.default_ident(gitdir)                    -> GIT_object.Ident
+//
+// A line is
+//
+//     <old id> <new id> <name> <<email>> <seconds> <zone>\t<message>\n
+//
+// with forty zeros for "the ref did not exist" on either side. The file is
+// oldest first; `read` returns it in that order, and `delete` counts from the
+// newest the way `HEAD@{n}` does (`0` is the latest).
+//
+// The reflog of `HEAD` is per working tree (`<gitdir>/logs/HEAD`); every other
+// ref's lives in the shared directory (`GIT_repository.common`).
+//
+// --- which refs are logged -----------------------------------------------------
+//
+// `should_log` follows `core.logAllRefUpdates`: unset means "true in a
+// repository with a working tree" (so not when `core.bare` is true), and then
+// `HEAD` and the refs under `refs/heads/`, `refs/remotes/` and `refs/notes/`
+// are logged and the rest (tags, say) are not; `always` logs everything, and
+// `false` logs nothing. A ref that already has a log file is always logged,
+// whatever the setting, as git does.
+//
+// `log_update` is what a ref update calls: it appends to the ref's own log
+// and, when the ref is the branch `HEAD` is on, to `HEAD`'s as well with the
+// same line -- which is why a commit shows in both `git reflog` and
+// `git reflog show main`.
+//
+// --- the message ---------------------------------------------------------------
+//
+// Whitespace runs in a message become one space and the ends are trimmed
+// (`copy_reflog_msg`), so a message can never contain the tab or newline that
+// delimit the line. Who is recorded comes from `default_ident`:
+// `GIT_COMMITTER_NAME`/`_EMAIL`, then `user.name`/`user.email` in the config,
+// then `$USER`. `GIT_COMMITTER_DATE` in git's raw form (`1700000000 +0000`)
+// sets the time; otherwise it is now, in UTC.
+
+import GIT_config;
+import GIT_object;
+import GIT_repository;
+import date;
+import fs;
+import io;
+import os;
+import random;
+
+/// The id that stands for "no such ref" on either side of a line.
+pub const str ZERO = "0000000000000000000000000000000000000000";
+
+/// Why a reflog could not be read or changed. Payload-free
+/// (docs/errors-decision.md §4).
+pub enum Error {
+    /// A file could not be read, written or removed.
+    Io;
+    /// A line is not in the reflog format.
+    Malformed;
+    /// `delete` of an entry that is not there.
+    NotFound;
+    /// A ref name that cannot be a path, or an id that is not forty hex digits.
+    BadValue;
+}
+
+pub str Error.to_str() {
+    match (this) {
+        case Io: {
+            return "the reflog could not be read or written";
+        }
+        case Malformed: {
+            return "the reflog has a line that is not in git's format";
+        }
+        case NotFound: {
+            return "no such reflog entry";
+        }
+        case BadValue: {
+            return "not a ref name or object id";
+        }
+    }
+}
+
+/// One line of a reflog.
+pub type Entry {
+    pub str old;
+    pub str new;
+    pub str name;
+    pub str email;
+    pub int when;
+    pub str zone;
+    pub str message;
+}
+
+/// Where the log of `ref` lives.
+pub str log_path(str gitdir, str ref) {
+    if (GIT_repository.is_per_worktree(ref)) {
+        return fs.join(fs.join(gitdir, "logs"), ref);
+    }
+    return fs.join(fs.join(GIT_repository.common(gitdir), "logs"), ref);
+}
+
+/// Does this ref have a log file already?
+pub bool exists(str gitdir, str ref) {
+    return fs.exists(log_path(gitdir, ref));
+}
+
+bool is_safe_ref(str ref) {
+    if (ref.size() == 0 || ref.starts_with("/") || ref.contains("\\")) {
+        return false;
+    }
+    for (str part in ref.split("/")) {
+        if (part.size() == 0 || part == "." || part == "..") {
+            return false;
+        }
+    }
+    return true;
+}
+
+bool is_id(str id) {
+    return id.size() == 40 && GIT_object.is_name(id);
+}
+
+// --- policy --------------------------------------------------------------------
+
+/// Would git log an update to this ref? See the header.
+pub bool should_log(str gitdir, str ref) {
+    if (exists(gitdir, ref)) {
+        return true;
+    }
+    str setting = GIT_config.get(gitdir, "core", "", "logallrefupdates").or("").to_lower();
+    if (setting == "always") {
+        return true;
+    }
+    if (setting == "false" || setting == "no" || setting == "off" || setting == "0") {
+        return false;
+    }
+    if (setting == "") {
+        str bare = GIT_config.get(gitdir, "core", "", "bare").or("false").to_lower();
+        if (bare == "true" || bare == "yes" || bare == "on" || bare == "1") {
+            return false;
+        }
+    }
+    return ref == "HEAD" || ref.starts_with("refs/heads/") || ref.starts_with("refs/remotes/") || ref.starts_with("refs/notes/");
+}
+
+// --- who and what --------------------------------------------------------------
+
+/// The identity a reflog line records. See the header.
+pub GIT_object.Ident default_ident(str gitdir) {
+    str who = os.env("GIT_COMMITTER_NAME").or("");
+    if (who == "") {
+        who = GIT_config.get(gitdir, "user", "", "name").or("");
+    }
+    if (who == "") {
+        who = os.env("USER").or("unknown");
+    }
+    str mail = os.env("GIT_COMMITTER_EMAIL").or("");
+    if (mail == "") {
+        mail = GIT_config.get(gitdir, "user", "", "email").or("");
+    }
+    if (mail == "") {
+        mail = who + "@localhost";
+    }
+    int when = date.now();
+    str zone = "+0000";
+    match (parse_raw_date(os.env("GIT_COMMITTER_DATE").or(""))) {
+        case Some(GIT_object.Ident parsed): {
+            when = parsed.when;
+            zone = parsed.zone;
+        }
+        case None: {
+        }
+    }
+    return GIT_object.Ident(clean_ident(who).to_bytes(), clean_ident(mail).to_bytes(), when, zone_offset(zone), zone);
+}
+
+// `1700000000 +0000`, git's raw date; anything else is not understood here.
+Option<GIT_object.Ident> parse_raw_date(str raw) {
+    List<str> parts = raw.trim().split(" ");
+    if (parts.size() != 2) {
+        return Option<GIT_object.Ident>.None;
+    }
+    str zone = parts[1];
+    if (zone.size() != 5 || (zone.byte_at(0) != '+' && zone.byte_at(0) != '-')) {
+        return Option<GIT_object.Ident>.None;
+    }
+    match (parts[0].parse_int()) {
+        case Some(int when): {
+            return Option<GIT_object.Ident>.Some(GIT_object.Ident("".to_bytes(), "".to_bytes(), when, zone_offset(zone), zone));
+        }
+        case None: {
+            return Option<GIT_object.Ident>.None;
+        }
+    }
+}
+
+// `+0530` as minutes east of UTC.
+int zone_offset(str zone) {
+    if (zone.size() != 5) {
+        return 0;
+    }
+    int hours = zone.substr(1, 3).parse_int().or(0);
+    int minutes = zone.substr(3, 5).parse_int().or(0);
+    int total = hours * 60 + minutes;
+    if (zone.byte_at(0) == '-') {
+        return 0 - total;
+    }
+    return total;
+}
+
+// git strips `<`, `>` and newlines from a name or email, and the whitespace at
+// its ends.
+str clean_ident(str raw) {
+    List<int> out = [];
+    for (int c in raw.chars()) {
+        if (c != '<' && c != '>' && c != '\n') {
+            out.push(c);
+        }
+    }
+    return str.from_chars(out).trim();
+}
+
+// `copy_reflog_msg`: whitespace runs to one space, leading and trailing gone.
+str clean_message(str raw) {
+    List<int> out = [];
+    bool was_space = true;
+    for (int c in raw.chars()) {
+        bool is_space = c == ' ' || c == '\t' || c == '\n' || c == '\r' || c == 11 || c == 12;
+        if (is_space) {
+            if (!was_space) {
+                out.push(' ');
+            }
+            was_space = true;
+        } else {
+            out.push(c);
+            was_space = false;
+        }
+    }
+    return str.from_chars(out).trim();
+}
+
+// --- reading -------------------------------------------------------------------
+
+/// Every line of the log of `ref`, oldest first. A ref with no log is an empty
+/// list, not an error.
+pub Result<List<Entry>, Error> read(str gitdir, str ref) {
+    if (!is_safe_ref(ref)) {
+        return Result<List<Entry>, Error>.Err(Error.BadValue);
+    }
+    str path = log_path(gitdir, ref);
+    List<Entry> out = [];
+    if (!fs.exists(path)) {
+        return Result<List<Entry>, Error>.Ok(out);
+    }
+    match (io.read(path)) {
+        case Ok(str body): {
+            for (str line in body.split("\n")) {
+                if (line == "") {
+                    continue;
+                }
+                out.push(parse_line(line)?);
+            }
+            return Result<List<Entry>, Error>.Ok(out);
+        }
+        case Err(_): {
+            return Result<List<Entry>, Error>.Err(Error.Io);
+        }
+    }
+}
+
+Result<Entry, Error> parse_line(str line) {
+    if (line.size() < 83 || line.byte_at(40) != ' ' || line.byte_at(81) != ' ') {
+        return Result<Entry, Error>.Err(Error.Malformed);
+    }
+    str old = line.substr(0, 40);
+    str new = line.substr(41, 81);
+    if (!is_id(old) || !is_id(new)) {
+        return Result<Entry, Error>.Err(Error.Malformed);
+    }
+    str rest = line.substr(82, line.size());
+    str message = "";
+    str who = rest;
+    match (rest.index_of("\t")) {
+        case Some(int tab): {
+            who = rest.substr(0, tab);
+            message = rest.substr(tab + 1, rest.size());
+        }
+        case None: {
+        }
+    }
+    // `Name <email> seconds zone`, found from the right so a name with a `<`
+    // in it still parses.
+    int angle_end = -1;
+    int angle_start = -1;
+    for (int i in 0 .. who.size()) {
+        if (who.byte_at(i) == '>') {
+            angle_end = i;
+        }
+    }
+    if (angle_end < 0) {
+        return Result<Entry, Error>.Err(Error.Malformed);
+    }
+    for (int i in 0 .. angle_end) {
+        if (who.byte_at(i) == '<') {
+            angle_start = i;
+        }
+    }
+    if (angle_start < 0) {
+        return Result<Entry, Error>.Err(Error.Malformed);
+    }
+    str name = who.substr(0, angle_start).trim();
+    str email = who.substr(angle_start + 1, angle_end);
+    List<str> tail = who.substr(angle_end + 1, who.size()).trim().split(" ");
+    if (tail.size() != 2) {
+        return Result<Entry, Error>.Err(Error.Malformed);
+    }
+    match (tail[0].parse_int()) {
+        case Some(int when): {
+            return Result<Entry, Error>.Ok(Entry(old, new, name, email, when, tail[1], message));
+        }
+        case None: {
+            return Result<Entry, Error>.Err(Error.Malformed);
+        }
+    }
+}
+
+// --- writing -------------------------------------------------------------------
+
+str format_line(str old, str new, GIT_object.Ident who, str msg) {
+    str name = who.name.utf8().or("unknown");
+    str email = who.email.utf8().or("");
+    str line = old + " " + new + " " + name + " <" + email + "> " + who.when.to_str() + " " + who.zone;
+    str message = clean_message(msg);
+    if (message != "") {
+        line = line + "\t" + message;
+    }
+    return line + "\n";
+}
+
+/// Append one line to the log of `ref`, whether or not git would have logged
+/// this ref (`should_log` decides that; `append` obeys). `old`/`new` are
+/// forty-hex ids, `""` meaning "none" (forty zeros).
+pub Result<bool, Error> append(str gitdir, str ref, str old, str new, GIT_object.Ident who, str msg) {
+    if (!is_safe_ref(ref)) {
+        return Result<bool, Error>.Err(Error.BadValue);
+    }
+    str from = old;
+    if (from == "") {
+        from = ZERO;
+    }
+    str to = new;
+    if (to == "") {
+        to = ZERO;
+    }
+    if (!is_id(from) || !is_id(to)) {
+        return Result<bool, Error>.Err(Error.BadValue);
+    }
+    str path = log_path(gitdir, ref);
+    match (fs.makedirs(parent_of(path))) {
+        case Ok: {
+        }
+        case Err(_): {
+            return Result<bool, Error>.Err(Error.Io);
+        }
+    }
+    match (io.append(path, format_line(from, to, who, msg))) {
+        case Ok(_): {
+            return Result<bool, Error>.Ok(true);
+        }
+        case Err(_): {
+            return Result<bool, Error>.Err(Error.Io);
+        }
+    }
+}
+
+str parent_of(str path) {
+    int cut = path.size();
+    while (cut > 0 && path.byte_at(cut - 1) != '/') {
+        cut = cut - 1;
+    }
+    if (cut <= 1) {
+        return ".";
+    }
+    return path.substr(0, cut - 1);
+}
+
+// The branch `HEAD` is on, or `""` when it is detached or unreadable.
+str head_target(str gitdir) {
+    match (io.read(fs.join(gitdir, "HEAD"))) {
+        case Ok(str body): {
+            str line = body.trim();
+            if (line.starts_with("ref:")) {
+                return line.substr(4, line.size()).trim();
+            }
+            return "";
+        }
+        case Err(_): {
+            return "";
+        }
+    }
+}
+
+/// Record a ref update the way git does: on the ref's own log (if
+/// `should_log`), and on `HEAD`'s as well when `ref` is the branch `HEAD` is on.
+/// Returns whether anything was written.
+pub Result<bool, Error> log_update(str gitdir, str ref, str old, str new, str msg) {
+    GIT_object.Ident who = default_ident(gitdir);
+    bool wrote = false;
+    if (should_log(gitdir, ref)) {
+        append(gitdir, ref, old, new, who, msg)?;
+        wrote = true;
+    }
+    if (ref != "HEAD" && head_target(gitdir) == ref && should_log(gitdir, "HEAD")) {
+        append(gitdir, "HEAD", old, new, who, msg)?;
+        wrote = true;
+    }
+    return Result<bool, Error>.Ok(wrote);
+}
+
+/// Remove entry `n` (0 is the newest) from the log of `ref`. With `rewrite`,
+/// every kept entry's old id is made the previous kept entry's new id (the
+/// oldest keeps zeros), which is `git reflog delete --rewrite`. Without it the
+/// other lines are untouched. `Error.NotFound` if the log has fewer entries.
+pub Result<bool, Error> delete(str gitdir, str ref, int n, bool rewrite) {
+    List<Entry> entries = read(gitdir, ref)?;
+    int target = entries.size() - 1 - n;
+    if (n < 0 || target < 0) {
+        return Result<bool, Error>.Err(Error.NotFound);
+    }
+    str out = "";
+    str previous = ZERO;
+    for (int i in 0 .. entries.size()) {
+        if (i == target) {
+            continue;
+        }
+        Entry entry = entries[i];
+        str old = entry.old;
+        if (rewrite) {
+            old = previous;
+        }
+        previous = entry.new;
+        out = out + old + " " + entry.new + " " + entry.name + " <" + entry.email + "> " + entry.when.to_str() + " " + entry.zone;
+        if (entry.message != "") {
+            out = out + "\t" + entry.message;
+        }
+        out = out + "\n";
+    }
+    str path = log_path(gitdir, ref);
+    random.System rnd = random.system();
+    str temp = path + ".tmp" + rnd.hex(12);
+    match (io.write(temp, out)) {
+        case Ok(_): {
+        }
+        case Err(_): {
+            return Result<bool, Error>.Err(Error.Io);
+        }
+    }
+    match (fs.rename(temp, path)) {
+        case Ok(_): {
+            return Result<bool, Error>.Ok(true);
+        }
+        case Err(_): {
+            return Result<bool, Error>.Err(Error.Io);
+        }
+    }
+}
+
+/// Remove the whole log of `ref` (a deleted branch's), and any directories
+/// that leaves empty under `logs/`. No log is not an error.
+pub Result<bool, Error> delete_log(str gitdir, str ref) {
+    if (!is_safe_ref(ref)) {
+        return Result<bool, Error>.Err(Error.BadValue);
+    }
+    str path = log_path(gitdir, ref);
+    if (!fs.exists(path)) {
+        return Result<bool, Error>.Ok(false);
+    }
+    match (fs.remove(path)) {
+        case Ok(_): {
+        }
+        case Err(_): {
+            return Result<bool, Error>.Err(Error.Io);
+        }
+    }
+    str root = parent_of(log_path(gitdir, "refs/heads/x"));
+    root = parent_of(parent_of(root));
+    str dir = parent_of(path);
+    while (dir.size() > root.size() && dir.starts_with(root)) {
+        match (fs.rmdir(dir)) {
+            case Ok(_): {
+            }
+            case Err(_): {
+                break;
+            }
+        }
+        dir = parent_of(dir);
+    }
+    return Result<bool, Error>.Ok(true);
+}

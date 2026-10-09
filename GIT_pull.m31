@@ -174,7 +174,7 @@ pub Result<Outcome, Error> pull(str gitdir, str worktree, GIT_http_push.Remote r
             return Result<Outcome, Error>.Err(Error.Checkout(error));
         }
     }
-    match (GIT_refs.update(gitdir, refname, remote_tip, Option<str>.Some(old))) {
+    match (GIT_refs.update(gitdir, refname, remote_tip, Option<str>.Some(old), msg: "pull: Fast-forward")) {
         case Ok(_): {
         }
         case Err(GIT_refs.Error error): {
@@ -183,7 +183,12 @@ pub Result<Outcome, Error> pull(str gitdir, str worktree, GIT_http_push.Remote r
     }
     if (refname.starts_with("refs/heads/")) {
         // Best effort: the remote-tracking ref is bookkeeping, not the pull.
-        match (GIT_refs.update(gitdir, "refs/remotes/origin/" + refname.substr(11, refname.size()), remote_tip, Option<str>.None)) {
+        str tracking = "refs/remotes/origin/" + refname.substr(11, refname.size());
+        str tracking_message = "pull: storing head";
+        if (GIT_refs.has_ref(gitdir, tracking)) {
+            tracking_message = "pull: fast-forward";
+        }
+        match (GIT_refs.update(gitdir, tracking, remote_tip, Option<str>.None, msg: tracking_message)) {
             case Ok(_): {
             }
             case Err(_): {

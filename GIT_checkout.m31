@@ -41,6 +41,7 @@ import GIT_index;
 import io;
 import GIT_object;
 import GIT_refs;
+import GIT_reflog;
 import GIT_status;
 
 /// Why a checkout did not happen (nothing written) or did not finish.
@@ -184,14 +185,17 @@ pub Result<bool, Error> create_branch(str gitdir, str name) {
         return Result<bool, Error>.Err(Error.BranchExists);
     }
     str head_id = "";
+    str from_name = "";
     match (GIT_refs.head(gitdir)) {
         case Ok(GIT_refs.Head head): {
             match (head) {
-                case Born(_, str id): {
+                case Born(str born_name, str id): {
                     head_id = id;
+                    from_name = short_branch(born_name);
                 }
                 case Detached(str id): {
                     head_id = id;
+                    from_name = id;
                 }
                 case Unborn(_): {
                     // Nothing committed yet: the new branch is unborn too, so
@@ -212,7 +216,7 @@ pub Result<bool, Error> create_branch(str gitdir, str name) {
             return Result<bool, Error>.Err(Error.Refs(error));
         }
     }
-    match (GIT_refs.update(gitdir, full, head_id, Option<str>.Some(""))) {
+    match (GIT_refs.update(gitdir, full, head_id, Option<str>.Some(""), msg: "branch: Created from HEAD")) {
         case Ok: {
         }
         case Err(GIT_refs.Error error): {
@@ -221,6 +225,7 @@ pub Result<bool, Error> create_branch(str gitdir, str name) {
     }
     match (GIT_refs.update_symbolic(gitdir, "HEAD", full)) {
         case Ok: {
+            log_head_move(gitdir, head_id, head_id, moving_message(from_name, name));
             return Result<bool, Error>.Ok(true);
         }
         case Err(GIT_refs.Error error): {
@@ -264,10 +269,14 @@ pub Result<Summary, Error> checkout(str gitdir, str worktree, str target_commit_
         }
     }
     Map<str, TreeEntry> current = {};
+    str from_label = "";
+    str from_id = "";
     match (GIT_refs.head(gitdir)) {
         case Ok(GIT_refs.Head head): {
             match (head) {
                 case Born(str name, str id): {
+                    from_label = short_branch(name);
+                    from_id = id;
                     match (tree_of_commit(gitdir, id)) {
                         case Ok(Map<str, TreeEntry> tree): {
                             current = tree;
@@ -278,6 +287,8 @@ pub Result<Summary, Error> checkout(str gitdir, str worktree, str target_commit_
                     }
                 }
                 case Detached(str id): {
+                    from_label = id;
+                    from_id = id;
                     match (tree_of_commit(gitdir, id)) {
                         case Ok(Map<str, TreeEntry> tree): {
                             current = tree;
@@ -288,6 +299,7 @@ pub Result<Summary, Error> checkout(str gitdir, str worktree, str target_commit_
                     }
                 }
                 case Unborn(str name): {
+                    from_label = short_branch(name);
                 }
             }
         }
@@ -439,7 +451,7 @@ pub Result<Summary, Error> checkout(str gitdir, str worktree, str target_commit_
     }
     // --- 5. HEAD ---------------------------------------------------------
     if (target_ref == "") {
-        match (GIT_refs.update(gitdir, "HEAD", target_commit_id, Option<str>.None)) {
+        match (GIT_refs.update(gitdir, "HEAD", target_commit_id, Option<str>.None, msg: moving_message(from_label, target_commit_id))) {
             case Ok: {
             }
             case Err(GIT_refs.Error error): {
@@ -454,8 +466,35 @@ pub Result<Summary, Error> checkout(str gitdir, str worktree, str target_commit_
                 return Result<Summary, Error>.Err(Error.Refs(error));
             }
         }
+        if (from_id != "") {
+            log_head_move(gitdir, from_id, target_commit_id, moving_message(from_label, short_branch(target_ref)));
+        }
     }
     return Result<Summary, Error>.Ok(Summary(written, removed));
+}
+
+// `main` for `refs/heads/main`; anything else as it is.
+str short_branch(str name) {
+    if (name.starts_with("refs/heads/")) {
+        return name.substr(11, name.size());
+    }
+    return name;
+}
+
+// git's message for a checkout: `checkout: moving from main to feature`.
+str moving_message(str from_label, str to_label) {
+    return "checkout: moving from " + from_label + " to " + to_label;
+}
+
+// HEAD's reflog line for a move that changed which branch it is on and so was
+// not a ref update. Best effort, like every reflog write.
+void log_head_move(str gitdir, str old_id, str new_id, str msg) {
+    match (GIT_reflog.log_update(gitdir, "HEAD", old_id, new_id, msg)) {
+        case Ok(_): {
+        }
+        case Err(_): {
+        }
+    }
 }
 
 // One blob in a flattened tree: its mode and name. `mode` 0 / `id` "" is
