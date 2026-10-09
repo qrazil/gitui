@@ -482,7 +482,7 @@ Result<str, Error> write_tree(str gitdir, List<GIT_object.Entry> entries) {
     }
 }
 
-Result<str, Error> write_commit(str gitdir, GIT_object.Commit commit) {
+pub Result<str, Error> write_commit(str gitdir, GIT_object.Commit commit) {
     match (GIT_object.write_commit(gitdir, commit)) {
         case Ok(str id): {
             return Result<str, Error>.Ok(id);
@@ -517,7 +517,7 @@ Result<List<GIT_object.Entry>, Error> read_tree(str gitdir, str id) {
 }
 
 /// The commit `id` as a Commit, or Error.NotACommit.
-Result<GIT_object.Commit, Error> read_commit(str gitdir, str id) {
+pub Result<GIT_object.Commit, Error> read_commit(str gitdir, str id) {
     GIT_object.Object object = read_object(gitdir, id)?;
     match (object.body) {
         case Commit(GIT_object.Commit commit): {
@@ -536,7 +536,7 @@ Result<GIT_object.Commit, Error> read_commit(str gitdir, str id) {
 }
 
 /// A tree id from a commit id or a tree id; `""` stays `""` (the empty tree).
-Result<str, Error> tree_of(str gitdir, str id) {
+pub Result<str, Error> tree_of(str gitdir, str id) {
     if (id == "") {
         return Result<str, Error>.Ok("");
     }
@@ -574,7 +574,7 @@ Result<Map<str, Side>, Error> side_map(List<GIT_object.Entry> entries) {
 }
 
 /// Every non-directory a tree reaches, by full path.
-Result<Map<str, Side>, Error> flatten(str gitdir, str tree) {
+pub Result<Map<str, Side>, Error> flatten(str gitdir, str tree) {
     Map<str, Side> out = {};
     flatten_into(gitdir, tree, "", out)?;
     return Result<Map<str, Side>, Error>.Ok(out);
@@ -952,7 +952,7 @@ int cmp_bytes(bytes left, bytes right) {
 
 // --- wrapping the other modules' errors -------------------------------------------
 
-Result<GIT_index.Index, Error> read_index(str gitdir) {
+pub Result<GIT_index.Index, Error> read_index(str gitdir) {
     match (GIT_index.read(gitdir)) {
         case Ok(GIT_index.Index index): {
             return Result<GIT_index.Index, Error>.Ok(index);
@@ -985,7 +985,7 @@ Result<GIT_index.Index, Error> read_index(str gitdir) {
     }
 }
 
-Result<bool, Error> write_index(str gitdir, GIT_index.Index index) {
+pub Result<bool, Error> write_index(str gitdir, GIT_index.Index index) {
     match (GIT_index.write(gitdir, index)) {
         case Ok: {
             return Result<bool, Error>.Ok(true);
@@ -1007,7 +1007,7 @@ Result<bool, Error> graph_is_ancestor(str gitdir, str ancestor, str descendant) 
     }
 }
 
-Result<bool, Error> ref_update(str gitdir, str name, str new_id, Option<str> expect_old, str msg) {
+pub Result<bool, Error> ref_update(str gitdir, str name, str new_id, Option<str> expect_old, str msg) {
     match (GIT_refs.update(gitdir, name, new_id, expect_old, msg: msg)) {
         case Ok: {
             return Result<bool, Error>.Ok(true);
@@ -1065,7 +1065,7 @@ pub str merge_message_text(str gitdir) {
     }
 }
 
-Result<bool, Error> write_state(str gitdir, str name, str text) {
+pub Result<bool, Error> write_state(str gitdir, str name, str text) {
     match (io.write(fs.join(gitdir, name), text)) {
         case Ok: {
             return Result<bool, Error>.Ok(true);
@@ -1097,7 +1097,7 @@ pub void clear_state(str gitdir) {
 
 // `GIT_<prefix>_NAME/EMAIL/DATE`, then `user.name` / `user.email`, then the
 // login name; a date that is not git's raw `<seconds> <+zone>` is ignored.
-GIT_object.Ident ident(str gitdir, str prefix) {
+pub GIT_object.Ident ident(str gitdir, str prefix) {
     str who = os.env("GIT_" + prefix + "_NAME").or("");
     if (who == "") {
         who = GIT_config.get(gitdir, "user", "", "name").or("");
@@ -1233,7 +1233,7 @@ pub str clean_message(str raw) {
 }
 
 // `# Conflicts:` block git appends to MERGE_MSG: one `#\t<path>` per unmerged path.
-str conflicts_block(List<Conflicted> conflicts) {
+pub str conflicts_block(List<Conflicted> conflicts) {
     str out = "\n# Conflicts:\n";
     str last = "";
     for (Conflicted c in conflicts) {
@@ -1301,7 +1301,7 @@ Result<BaseTree, Error> base_for(str gitdir, str ours, str theirs, GIT_diff3.Sty
 // --- merging onto the working tree and index -----------------------------------------
 
 // The index must be exactly `tree` at stage 0: the paths where it is not.
-Result<List<str>, Error> index_differences(str gitdir, GIT_index.Index index, str tree) {
+pub Result<List<str>, Error> index_differences(str gitdir, GIT_index.Index index, str tree) {
     Map<str, Side> want = flatten(gitdir, tree)?;
     Map<str, bool> seen = {};
     List<str> out = [];
@@ -1417,7 +1417,7 @@ pub Result<Applied, Error> merge_with_base(str gitdir, str worktree, str base, s
     return Result<Applied, Error>.Ok(Applied(merged.tree, merged.conflicts, merged.messages));
 }
 
-Result<GIT_status.Status, Error> status_of(str gitdir, str worktree) {
+pub Result<GIT_status.Status, Error> status_of(str gitdir, str worktree) {
     match (GIT_status.status(gitdir, worktree)) {
         case Ok(GIT_status.Status status): {
             return Result<GIT_status.Status, Error>.Ok(status);
@@ -1469,7 +1469,7 @@ str trim_end(str line) {
 
 // --- starting a merge -----------------------------------------------------------------
 
-str head_ref_name(GIT_refs.Head head) {
+pub str head_ref_name(GIT_refs.Head head) {
     match (head) {
         case Born(str name, str id): {
             return name;
@@ -1669,7 +1669,7 @@ pub Result<Report, Error> continue_merge(str gitdir, str worktree, str message) 
 
 // The tree for index entries[lo, hi) (sorted, all stage 0) whose paths agree
 // up to byte `depth`: one tree object per directory, written bottom-up.
-Result<str, Error> index_tree(str gitdir, List<GIT_index.Entry> entries, int lo, int hi, int depth) {
+pub Result<str, Error> index_tree(str gitdir, List<GIT_index.Entry> entries, int lo, int hi, int depth) {
     List<GIT_object.Entry> out = [];
     int i = lo;
     while (i < hi) {
@@ -1746,6 +1746,27 @@ pub Result<bool, Error> abort_merge(str gitdir, str worktree) {
             return Result<bool, Error>.Err(Error.Unborn);
         }
     }
+    reset_merge_paths(gitdir, worktree, head_id)?;
+    clear_state(gitdir);
+    ref_update(gitdir, "ORIG_HEAD", head_id, Option<str>.None, "")?;
+    // The value does not change, so git logs it on HEAD only, not on the branch.
+    if (GIT_reflog.should_log(gitdir, "HEAD")) {
+        match (GIT_reflog.append(gitdir, "HEAD", head_id, head_id, GIT_reflog.default_ident(gitdir), "reset: moving to HEAD")) {
+            case Ok: {
+            }
+            case Err(_): {
+                return Result<bool, Error>.Err(Error.Io);
+            }
+        }
+    }
+    return Result<bool, Error>.Ok(true);
+}
+
+/// The file part of `git reset --merge HEAD`: every path the index holds
+/// differently from `head_id`'s tree (staged, or in conflict) goes back to
+/// that version in the index and the working tree; the rest is left alone.
+/// No state file, ref or reflog is touched. `LocalChanges` as `abort_merge`.
+pub Result<bool, Error> reset_merge_paths(str gitdir, str worktree, str head_id) {
     Map<str, Side> want = flatten(gitdir, tree_of(gitdir, head_id)?)?;
     GIT_status.Status status = status_of(gitdir, worktree)?;
     Map<str, bool> reset = {};
@@ -1797,18 +1818,6 @@ pub Result<bool, Error> abort_merge(str gitdir, str worktree) {
     kept.sort();
     index.entries = kept;
     write_index(gitdir, index)?;
-    clear_state(gitdir);
-    ref_update(gitdir, "ORIG_HEAD", head_id, Option<str>.None, "")?;
-    // The value does not change, so git logs it on HEAD only, not on the branch.
-    if (GIT_reflog.should_log(gitdir, "HEAD")) {
-        match (GIT_reflog.append(gitdir, "HEAD", head_id, head_id, GIT_reflog.default_ident(gitdir), "reset: moving to HEAD")) {
-            case Ok: {
-            }
-            case Err(_): {
-                return Result<bool, Error>.Err(Error.Io);
-            }
-        }
-    }
     return Result<bool, Error>.Ok(true);
 }
 
