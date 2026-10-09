@@ -1,0 +1,136 @@
+// `/` search over the outline (which holds the log: commits are rows under
+// "Commits"), `n` / `N` to step through the matches. Smart-case: an all
+// lower-case query ignores case, one capital makes it exact.
+
+import GIT_ui_core;
+import term;
+import tui.TUI_app;
+import tui.TUI_buffer;
+import tui.TUI_geometry;
+import tui.TUI_outline;
+import tui.TUI_style;
+import tui.TUI_text;
+
+type SearchOverlay {
+    GIT_ui_core.Core host;
+    str input = "";
+}
+
+pub TUI_app.Action SearchOverlay.handle_key(term.Code code) {
+    match (GIT_ui_core.lookup(GIT_ui_core.SCOPE_SEARCH, code)) {
+        case Some(str cmd): {
+            if (cmd == GIT_ui_core.CMD_CLOSE) {
+                host.pop_overlay();
+            }
+            if (cmd == GIT_ui_core.CMD_ERASE) {
+                input = GIT_ui_core.drop_last(input);
+            }
+            if (cmd == GIT_ui_core.CMD_SUBMIT) {
+                host.pop_overlay();
+                host.set_search(input);
+                jump(host, true, true);
+            }
+            return TUI_app.Action.Redraw;
+        }
+        case None: {
+        }
+    }
+    match (GIT_ui_core.typed(code)) {
+        case Some(str text): {
+            input = input + text;
+            return TUI_app.Action.Redraw;
+        }
+        case None: {
+        }
+    }
+    return TUI_app.Action.Continue;
+}
+
+pub void SearchOverlay.render(TUI_buffer.Buffer buffer, TUI_geometry.Rect area) {
+    if (area.is_empty()) {
+        return;
+    }
+    TUI_geometry.Rect row = TUI_geometry.Rect(area.x, area.y + area.height - 1, area.width, 1);
+    TUI_style.Style style = TUI_style.Style(attrs: TUI_style.REVERSE);
+    buffer.fill(row, " ", style);
+    buffer.set_str(row.x, row.y, TUI_text.truncate("/" + input + "_", row.width), style, max: row.width);
+}
+
+pub List<GIT_ui_core.Hint> SearchOverlay.hints() {
+    return GIT_ui_core.hints_for(GIT_ui_core.SCOPE_SEARCH);
+}
+
+/// `/`: open the prompt.
+pub void open(GIT_ui_core.Core core) {
+    core.push_overlay(SearchOverlay(core));
+}
+
+/// Does `query` have an upper-case ASCII letter?
+pub bool has_capital(str query) {
+    for (int character in query.chars()) {
+        if (character >= 'A' && character <= 'Z') {
+            return true;
+        }
+    }
+    return false;
+}
+
+/// Smart-case substring match of `query` in `label`. An empty query matches.
+pub bool is_match(str label, str query) {
+    if (has_capital(query)) {
+        return label.contains(query);
+    }
+    return label.to_lower().contains(query);
+}
+
+/// Move the outline cursor to the next row matching the remembered query:
+/// after the cursor going forward, before it going back, wrapping round. With
+/// `is_from_cursor` the row under the cursor itself counts (a fresh `/`).
+/// The message line says which match this is, or that there is none.
+pub void jump(GIT_ui_core.Core core, bool is_forward, bool is_from_cursor) {
+    str query = core.search_query;
+    if (query == "") {
+        core.say("search: press / and type something first");
+        return;
+    }
+    List<TUI_outline.Row> rows = core.outline.rows();
+    int total = rows.size();
+    int matches = 0;
+    for (TUI_outline.Row row in rows) {
+        if (is_match(row.node.label, query)) {
+            matches = matches + 1;
+        }
+    }
+    if (matches == 0) {
+        core.say("/" + query + ": no match");
+        return;
+    }
+    int step = 1;
+    if (!is_forward) {
+        step = -1;
+    }
+    int at = core.outline.cursor;
+    int tried = 0;
+    if (!is_from_cursor) {
+        at = at + step;
+        tried = 1;
+    }
+    while (tried <= total) {
+        int index = ((at % total) + total) % total;
+        if (is_match(rows[index].node.label, query)) {
+            core.outline.cursor = index;
+            int ordinal = 0;
+            int seen = 0;
+            while (seen <= index) {
+                if (is_match(rows[seen].node.label, query)) {
+                    ordinal = ordinal + 1;
+                }
+                seen = seen + 1;
+            }
+            core.say("/" + query + ": match " + ordinal.to_str() + " of " + matches.to_str());
+            return;
+        }
+        at = at + step;
+        tried = tried + 1;
+    }
+}

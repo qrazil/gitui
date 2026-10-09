@@ -1,0 +1,58 @@
+// The drawing the full-size overlays share: a bordered panel over most of the
+// body and a window of text lines in it.
+
+import tui.TUI_buffer;
+import tui.TUI_geometry;
+import tui.TUI_style;
+import tui.TUI_text;
+import tui.TUI_widget;
+
+/// Draw a titled panel over most of `area` and answer the rectangle inside it.
+pub TUI_geometry.Rect frame(TUI_buffer.Buffer buffer, TUI_geometry.Rect area, str title) {
+    int margin_x = area.width / 8;
+    if (margin_x > 4) {
+        margin_x = 4;
+    }
+    int margin_y = area.height / 8;
+    if (margin_y > 1) {
+        margin_y = 1;
+    }
+    TUI_geometry.Rect box = area.inset_xy(margin_x, margin_y);
+    if (box.is_empty()) {
+        return box;
+    }
+    TUI_widget.Block block = TUI_widget.Block(title: title, borders: TUI_widget.Borders.Rounded, title_style: TUI_style.Style(attrs: TUI_style.BOLD), pad_x: 1);
+    block.render(buffer, box);
+    return block.inner(box);
+}
+
+/// `offset` pulled into `0 .. max(total - visible, 0)`.
+pub int clamp(int offset, int total, int visible) {
+    int most = total - visible;
+    if (most < 0) {
+        most = 0;
+    }
+    if (offset > most) {
+        return most;
+    }
+    if (offset < 0) {
+        return 0;
+    }
+    return offset;
+}
+
+/// Draw `lines` from `offset` down `inner`; the line `highlighted` (an index
+/// into `lines`, or -1) in reverse video.
+pub void draw_lines(TUI_buffer.Buffer buffer, TUI_geometry.Rect inner, List<str> lines, int offset, int highlighted) {
+    int row = 0;
+    while (row < inner.height && offset + row < lines.size()) {
+        int index = offset + row;
+        TUI_style.Style style = TUI_style.Style();
+        if (index == highlighted) {
+            style = TUI_style.Style(attrs: TUI_style.REVERSE);
+            buffer.fill(TUI_geometry.Rect(inner.x, inner.y + row, inner.width, 1), " ", style);
+        }
+        buffer.set_str(inner.x, inner.y + row, TUI_text.truncate(lines[index], inner.width), style, max: inner.width);
+        row = row + 1;
+    }
+}

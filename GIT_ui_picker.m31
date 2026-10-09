@@ -1,0 +1,148 @@
+// A generic fuzzy picker overlay: type to filter, up / down to move, enter to
+// choose, escape to cancel. It knows nothing about what it is picking. The
+// caller says what the pick is FOR (`purpose`) and gives the items; the choice
+// lands in `Core.picked_purpose` / `picked_item` and the top module's `settle`
+// acts on it. `PICK_CHECKOUT` (the branch overlay's `/`) is the first user;
+// merge, rebase and cherry-pick are meant to be the next ones: add a purpose
+// constant and a `settle` case, nothing here changes.
+
+import GIT_ui_core;
+import GIT_ui_panel;
+import term;
+import tui.TUI_app;
+import tui.TUI_buffer;
+import tui.TUI_geometry;
+import tui.TUI_style;
+import tui.TUI_text;
+
+type PickerOverlay {
+    GIT_ui_core.Core host;
+    str purpose;
+    str title;
+    List<str> items;
+    str input = "";
+    int selected = 0;
+}
+
+pub TUI_app.Action PickerOverlay.handle_key(term.Code code) {
+    List<str> shown = filter(items, input);
+    match (GIT_ui_core.lookup(GIT_ui_core.SCOPE_PICKER, code)) {
+        case Some(str cmd): {
+            if (cmd == GIT_ui_core.CMD_CLOSE) {
+                host.pop_overlay();
+            }
+            if (cmd == GIT_ui_core.CMD_ERASE) {
+                input = GIT_ui_core.drop_last(input);
+                selected = 0;
+            }
+            if (cmd == GIT_ui_core.CMD_DOWN && selected < shown.size() - 1) {
+                selected = selected + 1;
+            }
+            if (cmd == GIT_ui_core.CMD_UP && selected > 0) {
+                selected = selected - 1;
+            }
+            if (cmd == GIT_ui_core.CMD_SUBMIT) {
+                if (shown.size() == 0) {
+                    return TUI_app.Action.Continue;
+                }
+                host.pop_overlay();
+                host.finish_pick(purpose, shown[selected]);
+            }
+            return TUI_app.Action.Redraw;
+        }
+        case None: {
+        }
+    }
+    match (GIT_ui_core.typed(code)) {
+        case Some(str text): {
+            input = input + text;
+            selected = 0;
+            return TUI_app.Action.Redraw;
+        }
+        case None: {
+        }
+    }
+    return TUI_app.Action.Continue;
+}
+
+pub void PickerOverlay.render(TUI_buffer.Buffer buffer, TUI_geometry.Rect area) {
+    TUI_geometry.Rect inner = GIT_ui_panel.frame(buffer, area, title);
+    if (inner.is_empty()) {
+        return;
+    }
+    List<str> shown = filter(items, input);
+    if (selected >= shown.size()) {
+        selected = 0;
+    }
+    buffer.set_str(inner.x, inner.y, TUI_text.truncate("> " + input + "_", inner.width), TUI_style.Style(), max: inner.width);
+    TUI_geometry.Rect list_area = TUI_geometry.Rect(inner.x, inner.y + 1, inner.width, inner.height - 1);
+    if (list_area.is_empty()) {
+        return;
+    }
+    if (shown.size() == 0) {
+        GIT_ui_panel.draw_lines(buffer, list_area, ["(nothing matches)"], 0, -1);
+        return;
+    }
+    int offset = 0;
+    if (selected >= list_area.height) {
+        offset = selected - list_area.height + 1;
+    }
+    GIT_ui_panel.draw_lines(buffer, list_area, shown, offset, selected);
+}
+
+pub List<GIT_ui_core.Hint> PickerOverlay.hints() {
+    return GIT_ui_core.hints_for(GIT_ui_core.SCOPE_PICKER);
+}
+
+/// Open a picker over `items`, titled `title`, for `purpose`.
+pub void open(GIT_ui_core.Core core, str purpose, str title, List<str> items) {
+    core.push_overlay(PickerOverlay(core, purpose, title, items));
+}
+
+/// Is `query` a subsequence of `item`, characters in order, not necessarily
+/// adjacent? Smart-case like the search: no capital in the query ignores case.
+pub bool is_subsequence(str item, str query) {
+    str haystack = item;
+    str needle = query;
+    bool has_capital = false;
+    for (int character in query.chars()) {
+        if (character >= 'A' && character <= 'Z') {
+            has_capital = true;
+        }
+    }
+    if (!has_capital) {
+        haystack = item.to_lower();
+    }
+    List<int> wanted = needle.chars();
+    int next = 0;
+    for (int character in haystack.chars()) {
+        if (next < wanted.size() && character == wanted[next]) {
+            next = next + 1;
+        }
+    }
+    return next == wanted.size();
+}
+
+/// The items that match `query`, a contiguous match before a scattered one,
+/// each group in the caller's order.
+pub List<str> filter(List<str> items, str query) {
+    List<str> first = [];
+    List<str> rest = [];
+    for (str item in items) {
+        if (is_subsequence(item, query)) {
+            bool is_contiguous = item.contains(query);
+            if (!is_contiguous) {
+                is_contiguous = item.to_lower().contains(query.to_lower());
+            }
+            if (is_contiguous) {
+                first.push(item);
+            } else {
+                rest.push(item);
+            }
+        }
+    }
+    for (str item in rest) {
+        first.push(item);
+    }
+    return first;
+}

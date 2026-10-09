@@ -1,0 +1,351 @@
+// The commit layer: the commit overlay (`c`), the message file and the
+// `$EDITOR` handoff that starts, `git commit --amend`, and writing the commit.
+//
+// See `GIT_client.m31`'s header, "launching `$EDITOR`, and the terminal
+// handoff that takes", for why `edit_message` cannot launch the editor itself.
+
+import fs;
+import GIT_index;
+import GIT_object;
+import GIT_refs;
+import GIT_ui_core;
+import GIT_ui_diff;
+import GIT_ui_model;
+import io;
+import term;
+import tui.TUI_app;
+import tui.TUI_buffer;
+import tui.TUI_geometry;
+import tui.TUI_menu;
+
+pub type CommitLayer {
+    pub GIT_ui_diff.DiffLayer;
+}
+
+/// `c`: open the commit overlay.
+pub void CommitLayer.open_commit() {
+    is_amending = false;
+    push_overlay(CommitOverlay(this));
+}
+
+/// Write the commit-message template at `commit_message_path`, unless something
+/// -- a previous `e`, or a person's own `git commit` in another terminal --
+/// already left one there, and ask `gitui.m31`'s own driver to actually
+/// launch `$EDITOR` on it once the terminal is safe to hand over.
+///
+/// This cannot call `os.run` itself: the terminal is still in raw mode with
+/// the alternate screen on, owned by a `term.Session` this state has no
+/// access to (`TUI_app.Loop.run`'s own scope). Setting `is_editor_wanted` and
+/// letting the which-key's `e` return `Quit` is what unwinds that scope --
+/// see this module's own header, "launching `$EDITOR`, and the terminal
+/// handoff that takes" -- so `launch_editor` below is where the actual
+/// launch happens, called back once the terminal is cooked again.
+pub void CommitLayer.edit_message() {
+    if (!fs.exists(commit_message_path)) {
+        match (io.write(commit_message_path, GIT_ui_model.commit_template())) {
+            case Ok: {
+            }
+            case Err(io.Error error): {
+                message = "cannot write " + commit_message_path + ": " + error.to_str();
+                return;
+            }
+        }
+    }
+    is_editor_wanted = true;
+    message = "launching editor...";
+}
+
+pub void CommitLayer.abort_commit() {
+    if (fs.exists(commit_message_path)) {
+        match (fs.remove(commit_message_path)) {
+            case Ok: {
+            }
+            case Err: {
+            }
+        }
+    }
+    is_overlay_done = true;
+    is_amending = false;
+    message = "commit aborted";
+}
+
+/// `c` then `A`: turn the open commit overlay into `git commit --amend`.
+/// HEAD's own message is written to `commit_message_path` (with the template's
+/// comment lines after it, so `e` opens something a person recognises and
+/// `f` straight away is `--amend --no-edit`), and `is_amending` tells
+/// `finish_commit` to replace HEAD rather than add to it. Refused, with the
+/// overlay left open on its ordinary meaning, when there is no HEAD to
+/// amend: an unborn branch, or a HEAD whose commit cannot be read.
+pub void CommitLayer.start_amend() {
+    str head_id = "";
+    match (GIT_refs.head(gitdir)) {
+        case Ok(GIT_refs.Head head): {
+            match (head) {
+                case Born(str name, str id): {
+                    head_id = id;
+                }
+                case Unborn(str name): {
+                    message = "nothing to amend: no commits yet on " + GIT_ui_model.branch_name(name);
+                    return;
+                }
+                case Detached(str id): {
+                    head_id = id;
+                }
+            }
+        }
+        case Err(GIT_refs.Error error): {
+            message = "nothing to amend: refs.head: " + error.to_str();
+            return;
+        }
+    }
+    bytes head_message = [];
+    match (GIT_object.read(gitdir, head_id)) {
+        case Ok(GIT_object.Object object): {
+            match (object.body) {
+                case Commit(GIT_object.Commit commit): {
+                    head_message = commit.message;
+                }
+                case Blob: {
+                    message = "nothing to amend: HEAD is not a commit";
+                    return;
+                }
+                case Tree(List<GIT_object.Entry> ignored): {
+                    message = "nothing to amend: HEAD is not a commit";
+                    return;
+                }
+                case Tag: {
+                    message = "nothing to amend: HEAD is not a commit";
+                    return;
+                }
+            }
+        }
+        case Err(GIT_object.Error error): {
+            message = "nothing to amend: cannot read HEAD's commit: " + error.to_str();
+            return;
+        }
+    }
+    str prefill = head_message.utf8().or("");
+    if (!prefill.ends_with("\n")) {
+        prefill = prefill + "\n";
+    }
+    match (io.write(commit_message_path, prefill + GIT_ui_model.commit_template())) {
+        case Ok: {
+        }
+        case Err(io.Error error): {
+            message = "cannot write " + commit_message_path + ": " + error.to_str();
+            return;
+        }
+    }
+    is_amending = true;
+    message = "amending " + head_id.substr(0, 7) + ": e to edit its message, f to finish, a to abort";
+}
+
+/// Read `commit_message_path` back, strip it the way git's default cleanup does,
+/// and either refuse (an empty result, git's own "Aborting commit due to
+/// empty commit message") or actually commit: `build_tree` over the current
+/// index, `GIT_object.write_commit` with HEAD as the sole parent (none for an
+/// unborn branch), and `GIT_refs.update` to move the branch -- or `HEAD` itself,
+/// detached -- forward by compare-and-swap against the value just read, so a
+/// second writer racing this one is refused rather than silently overwritten
+/// (`GIT_refs.m31`'s own guarantee).
+pub void CommitLayer.finish_commit() {
+    str raw = "";
+    match (io.read(commit_message_path)) {
+        case Ok(str edited_text): {
+            raw = edited_text;
+        }
+        case Err(io.Error error): {
+            message = "cannot read " + commit_message_path + ": " + error.to_str();
+            return;
+        }
+    }
+    str commit_message = GIT_ui_model.strip_comment_lines(raw);
+    if (commit_message == "") {
+        message = "aborting commit due to empty commit message";
+        is_overlay_done = true;
+        is_amending = false;
+        return;
+    }
+    GIT_index.Index index = GIT_ui_model.read_index(gitdir);
+    str tree_id = "";
+    match (GIT_ui_model.build_tree(gitdir, index.entries)) {
+        case Ok(str tree): {
+            tree_id = tree;
+        }
+        case Err(GIT_object.Error error): {
+            message = "write_tree: " + error.to_str();
+            return;
+        }
+    }
+    List<str> parents = [];
+    str ref_name = "HEAD";
+    str expect_old = "";
+    bool has_old = false;
+    match (GIT_refs.head(gitdir)) {
+        case Ok(GIT_refs.Head head): {
+            match (head) {
+                case Born(str name, str id): {
+                    parents.push(id);
+                    ref_name = name;
+                    expect_old = id;
+                    has_old = true;
+                }
+                case Unborn(str name): {
+                    ref_name = name;
+                    expect_old = "";
+                    has_old = true;
+                }
+                case Detached(str id): {
+                    parents.push(id);
+                    ref_name = "HEAD";
+                    expect_old = id;
+                    has_old = true;
+                }
+            }
+        }
+        case Err(GIT_refs.Error error): {
+            message = "refs.head: " + error.to_str();
+            return;
+        }
+    }
+    GIT_object.Ident author = GIT_ui_model.author_ident();
+    if (is_amending) {
+        // `--amend`: the new commit takes HEAD's place, so it gets HEAD's own
+        // parents and author (date and zone included -- real git keeps the
+        // original authorship and only the committer is "now"); HEAD itself
+        // is what the compare-and-swap below expects to replace.
+        if (parents.size() == 0) {
+            message = "nothing to amend: no commits yet";
+            return;
+        }
+        match (GIT_object.read(gitdir, parents[0])) {
+            case Ok(GIT_object.Object object): {
+                match (object.body) {
+                    case Commit(GIT_object.Commit commit): {
+                        parents = commit.parents;
+                        author = commit.author;
+                    }
+                    case Blob: {
+                        message = "amend: HEAD is not a commit";
+                        return;
+                    }
+                    case Tree(List<GIT_object.Entry> ignored): {
+                        message = "amend: HEAD is not a commit";
+                        return;
+                    }
+                    case Tag: {
+                        message = "amend: HEAD is not a commit";
+                        return;
+                    }
+                }
+            }
+            case Err(GIT_object.Error error): {
+                message = "amend: cannot read HEAD's commit: " + error.to_str();
+                return;
+            }
+        }
+    }
+    GIT_object.Commit commit = GIT_object.Commit(tree_id, parents, author, GIT_ui_model.committer_ident(), [], (commit_message + "\n").to_bytes());
+    str commit_id = "";
+    match (GIT_object.write_commit(gitdir, commit)) {
+        case Ok(str id): {
+            commit_id = id;
+        }
+        case Err(GIT_object.Error error): {
+            message = "write_commit: " + error.to_str();
+            return;
+        }
+    }
+    Option<str> want = Option<str>.None;
+    if (has_old) {
+        want = Option<str>.Some(expect_old);
+    }
+    match (GIT_refs.update(gitdir, ref_name, commit_id, want)) {
+        case Ok: {
+            str old_short = GIT_ui_core.short_id(expect_old);
+            if (is_amending) {
+                log_command("amend " + commit_id.substr(0, 7));
+            } else {
+                log_command("commit " + commit_id.substr(0, 7));
+            }
+            log_command("update-ref " + ref_name + " " + old_short + ".." + commit_id.substr(0, 7));
+        }
+        case Err(GIT_refs.Error error): {
+            message = "refs.update: " + error.to_str();
+            return;
+        }
+    }
+    if (fs.exists(commit_message_path)) {
+        match (fs.remove(commit_message_path)) {
+            case Ok: {
+            }
+            case Err: {
+            }
+        }
+    }
+    if (is_amending) {
+        message = "amended: HEAD is now " + commit_id.substr(0, 7);
+    } else {
+        message = "committed " + commit_id.substr(0, 7);
+    }
+    is_overlay_done = true;
+    is_amending = false;
+    reload();
+}
+
+// --- the overlay ------------------------------------------------------------------
+
+/// The commit which-key: `e` edit the message in `$EDITOR`, `f` finish, `A`
+/// amend HEAD, `a`/`Escape` abort. Every other key is swallowed.
+type CommitOverlay {
+    CommitLayer host;
+}
+
+pub TUI_app.Action CommitOverlay.handle_key(term.Code code) {
+    match (GIT_ui_core.lookup(GIT_ui_core.SCOPE_COMMIT, code)) {
+        case Some(str cmd): {
+            if (cmd == GIT_ui_core.CMD_EDIT) {
+                host.edit_message();
+                // `Quit` unwinds `TUI_app.Loop.run`'s own `Session`, which is
+                // what actually leaves raw mode and the alternate screen --
+                // see `edit_message`'s own header. `gitui.m31`'s driver reads
+                // `is_editor_wanted` on the way out and calls `Loop.run` again
+                // once `launch_editor` is done.
+                if (host.is_editor_wanted) {
+                    return TUI_app.Action.Quit;
+                }
+                return TUI_app.Action.Redraw;
+            }
+            if (cmd == GIT_ui_core.CMD_FINISH) {
+                host.finish_commit();
+                return TUI_app.Action.Redraw;
+            }
+            if (cmd == GIT_ui_core.CMD_ABORT) {
+                host.abort_commit();
+                return TUI_app.Action.Redraw;
+            }
+            if (cmd == GIT_ui_core.CMD_AMEND) {
+                host.start_amend();
+                return TUI_app.Action.Redraw;
+            }
+        }
+        case None: {
+        }
+    }
+    return TUI_app.Action.Continue;
+}
+
+pub void CommitOverlay.render(TUI_buffer.Buffer buffer, TUI_geometry.Rect area) {
+    str title = "commit";
+    str finish = "finish: write the commit";
+    if (host.is_amending) {
+        title = "amend HEAD";
+        finish = "finish: replace HEAD with the amended commit";
+    }
+    TUI_menu.WhichKey which_key = TUI_menu.WhichKey(title, [TUI_menu.Item("e", "edit message in $EDITOR (" + host.commit_message_path + ")"), TUI_menu.Item("f", finish), TUI_menu.Item("A", "amend HEAD: its message prefilled, its parents and author kept"), TUI_menu.Item("a", "abort")]);
+    which_key.render(buffer, area);
+}
+
+pub List<GIT_ui_core.Hint> CommitOverlay.hints() {
+    return GIT_ui_core.hints_for(GIT_ui_core.SCOPE_COMMIT);
+}

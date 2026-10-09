@@ -67,7 +67,6 @@ while (is_running) {
     match (loop.run((TUI_buffer.Buffer buffer, TUI_geometry.Rect area) => state.draw(buffer, area), (term.Event event) => state.handle(event))) {
         case Ok(_): {
             if (state.is_editor_wanted) {
-                state.is_editor_wanted = false;
                 state.launch_editor();
             } else {
                 is_running = false;

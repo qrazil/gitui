@@ -1,0 +1,213 @@
+// The branch layer: the branch overlay (`b`), checking a branch out, and
+// making a new one with the name asked for in `$EDITOR`.
+//
+// The overlay's `/` opens the generic fuzzy picker (`GIT_ui_picker`) over the
+// branch names; the pick comes back through `Core.picked_item` and
+// `GIT_client.State.settle` calls `checkout_branch` with it.
+
+import fs;
+import GIT_checkout;
+import GIT_ui_commit;
+import GIT_ui_core;
+import GIT_ui_model;
+import GIT_ui_picker;
+import io;
+import os;
+import term;
+import tui.TUI_app;
+import tui.TUI_buffer;
+import tui.TUI_geometry;
+import tui.TUI_menu;
+import tui.TUI_outline;
+
+pub type BranchLayer {
+    pub GIT_ui_commit.CommitLayer;
+}
+
+/// `b`: open the branch overlay.
+pub void BranchLayer.open_branch() {
+    push_overlay(BranchOverlay(this));
+}
+
+/// `b`, then `/`: pick the branch to check out by typing part of its name.
+pub void BranchLayer.open_branch_picker() {
+    List<str> names = [];
+    for (GIT_ui_model.BranchRow branch_row in branch_rows) {
+        names.push(branch_row.branch.name);
+    }
+    GIT_ui_picker.open(core(), GIT_ui_core.PICK_CHECKOUT, "check out a branch", names);
+}
+
+/// Check out the branch under the cursor (`b`, then `c`): `GIT_checkout.checkout`
+/// with every refusal it makes shown in the message line, word for word --
+/// a dirty file, an untracked file in the way, a submodule. A no-op with a
+/// message on anything that is not a branch row, or on the current branch.
+pub void BranchLayer.checkout_current() {
+    str name = "";
+    match (outline.current()) {
+        case Some(TUI_outline.Row row): {
+            if (row.node.id.starts_with("branch:")) {
+                name = row.node.id.substr(7, row.node.id.size());
+            }
+        }
+        case None: {
+        }
+    }
+    if (name == "") {
+        message = "checkout: put the cursor on a branch first";
+        return;
+    }
+    checkout_branch(name);
+}
+
+/// `git switch <name>`, by name -- `checkout_current`'s work, callable from a
+/// test harness without an outline.
+pub void BranchLayer.checkout_branch(str name) {
+    for (GIT_ui_model.BranchRow branch_row in branch_rows) {
+        if (branch_row.branch.name == name) {
+            if (branch_row.branch.is_current) {
+                message = "already on " + name;
+                return;
+            }
+            match (GIT_checkout.checkout(gitdir, worktree, branch_row.branch.id, branch_row.branch.full)) {
+                case Ok(GIT_checkout.Summary summary): {
+                    message = "switched to " + name + " (" + summary.written.to_str() + " written, " + summary.removed.to_str() + " removed)";
+                    log_command("checkout " + name);
+                    reload();
+                }
+                case Err(GIT_checkout.Error error): {
+                    message = "checkout refused: " + error.to_str();
+                }
+            }
+            return;
+        }
+    }
+    message = "no such branch: " + name;
+}
+
+/// `b`, then `n`: ask for a name the same way `c` asks for a message -- a
+/// file (`branch_name_path`) handed to `$EDITOR` once `TUI_app.Loop.run` has
+/// given the terminal back (see `edit_message`'s own header for why the
+/// launch cannot happen here). `launch_branch_editor` reads it back.
+pub void BranchLayer.new_branch() {
+    match (io.write(branch_name_path, "\n# Name the new branch on the first line. It starts at HEAD and\n# becomes the current branch. An empty name aborts.\n")) {
+        case Ok: {
+        }
+        case Err(io.Error error): {
+            message = "cannot write " + branch_name_path + ": " + error.to_str();
+            return;
+        }
+    }
+    is_editor_for_branch = true;
+    is_editor_wanted = true;
+    message = "launching editor...";
+}
+
+/// The second half of `new_branch`, after `$EDITOR` has run: the first
+/// non-comment line is the name; `GIT_checkout.create_branch` does the rest.
+pub void BranchLayer.launch_branch_editor() {
+    str editor = GIT_ui_model.pick_editor(os.env("EDITOR"));
+    bool has_run = false;
+    match (os.run([editor, branch_name_path])) {
+        case Ok(os.ExitStatus exit_status): {
+            match (exit_status) {
+                case Exited(int code): {
+                    if (code == 0) {
+                        has_run = true;
+                    } else {
+                        message = "editor '" + editor + "' exited " + code.to_str() + "; no branch created";
+                    }
+                }
+                case Signaled(int sig): {
+                    message = "editor '" + editor + "' was killed by signal " + sig.to_str() + "; no branch created";
+                }
+            }
+        }
+        case Err(io.Error error): {
+            message = "cannot launch '" + editor + "' (" + error.to_str() + "); no branch created";
+        }
+    }
+    if (has_run) {
+        finish_new_branch();
+    }
+    if (fs.exists(branch_name_path)) {
+        match (fs.remove(branch_name_path)) {
+            case Ok: {
+            }
+            case Err: {
+            }
+        }
+    }
+}
+
+/// Create the branch named in `branch_name_path` and switch to it -- split
+/// from `launch_branch_editor` so a harness can write the file itself and
+/// drive this directly, the way `t_gitclient_ops.m31`'s `commit` does for
+/// `finish_commit`.
+pub void BranchLayer.finish_new_branch() {
+    str raw = "";
+    match (io.read(branch_name_path)) {
+        case Ok(str branch_text): {
+            raw = branch_text;
+        }
+        case Err(io.Error error): {
+            message = "cannot read " + branch_name_path + ": " + error.to_str();
+            return;
+        }
+    }
+    str name = GIT_ui_model.strip_comment_lines(raw).trim();
+    if (name == "") {
+        message = "no branch created (empty name)";
+        return;
+    }
+    match (GIT_checkout.create_branch(gitdir, name)) {
+        case Ok: {
+            message = "created and switched to " + name;
+            log_command("branch " + name);
+            log_command("checkout " + name);
+            reload();
+        }
+        case Err(GIT_checkout.Error error): {
+            message = "new branch refused: " + error.to_str();
+        }
+    }
+}
+
+// --- the overlay ------------------------------------------------------------------
+
+type BranchOverlay {
+    BranchLayer host;
+}
+
+pub TUI_app.Action BranchOverlay.handle_key(term.Code code) {
+    match (GIT_ui_core.lookup(GIT_ui_core.SCOPE_BRANCH, code)) {
+        case Some(str cmd): {
+            host.pop_overlay();
+            if (cmd == GIT_ui_core.CMD_CHECKOUT) {
+                host.checkout_current();
+            }
+            if (cmd == GIT_ui_core.CMD_PICK_BRANCH) {
+                host.open_branch_picker();
+            }
+            if (cmd == GIT_ui_core.CMD_NEW_BRANCH) {
+                host.new_branch();
+                if (host.is_editor_wanted) {
+                    return TUI_app.Action.Quit;
+                }
+            }
+            return TUI_app.Action.Redraw;
+        }
+        case None: {
+        }
+    }
+    return TUI_app.Action.Continue;
+}
+
+pub void BranchOverlay.render(TUI_buffer.Buffer buffer, TUI_geometry.Rect area) {
+    TUI_menu.WhichKey which_key = TUI_menu.WhichKey("branch", [TUI_menu.Item("c", "check out the branch under the cursor"), TUI_menu.Item("/", "check out a branch picked by typing part of its name"), TUI_menu.Item("n", "new branch from HEAD: name it in $EDITOR, then switch to it"), TUI_menu.Item("a", "abort")]);
+    which_key.render(buffer, area);
+}
+
+pub List<GIT_ui_core.Hint> BranchOverlay.hints() {
+    return GIT_ui_core.hints_for(GIT_ui_core.SCOPE_BRANCH);
+}

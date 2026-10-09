@@ -1,0 +1,169 @@
+// The remote layer: the push (`P`) and pull (`F`) overlays and the two
+// operations behind them, fast-forward only, over smart HTTP.
+
+import GIT_config;
+import GIT_http_push;
+import GIT_pull;
+import GIT_refs;
+import GIT_ui_branch;
+import GIT_ui_core;
+import term;
+import tui.TUI_app;
+import tui.TUI_buffer;
+import tui.TUI_geometry;
+import tui.TUI_menu;
+
+pub type RemoteLayer {
+    pub GIT_ui_branch.BranchLayer;
+}
+
+/// `P`: open the push overlay.
+pub void RemoteLayer.open_push() {
+    push_overlay(RemoteOverlay(this, true));
+}
+
+/// `F`: open the pull overlay.
+pub void RemoteLayer.open_pull() {
+    push_overlay(RemoteOverlay(this, false));
+}
+
+/// Push the current branch to the same-named branch on `origin`, over
+/// smart HTTP, fast-forward only. The outcome -- success or the reason it
+/// did not happen -- is the status line's message; a password is never part
+/// of it (`GIT_http_push.parse_remote` strips it from the URL before anything
+/// else sees the URL).
+pub void RemoteLayer.push_current() {
+    str refname = "";
+    str id = "";
+    match (GIT_refs.head(gitdir)) {
+        case Ok(GIT_refs.Head head): {
+            match (head) {
+                case Born(str name, str old_id): {
+                    refname = name;
+                    id = old_id;
+                }
+                case Unborn(str name): {
+                    message = "push: " + name + " has no commits yet";
+                    return;
+                }
+                case Detached(str old_id): {
+                    message = "push: HEAD is detached; check out a branch first";
+                    return;
+                }
+            }
+        }
+        case Err(GIT_refs.Error error): {
+            message = "push: " + error.to_str();
+            return;
+        }
+    }
+    Option<str> url = GIT_config.get(gitdir, "remote", "origin", "url");
+    if (!url.is_some()) {
+        message = "push: no remote 'origin' in .git/config";
+        return;
+    }
+    GIT_http_push.Remote remote = GIT_http_push.Remote("", Option<GIT_http_push.Credentials>.None);
+    match (GIT_http_push.parse_remote(url.or(""))) {
+        case Ok(GIT_http_push.Remote parsed): {
+            remote = parsed;
+        }
+        case Err(GIT_http_push.Error error): {
+            message = "push: " + error.to_str();
+            return;
+        }
+    }
+    match (GIT_http_push.push(gitdir, remote, refname, id)) {
+        case Ok(GIT_http_push.Report report): {
+            if (report.is_ok) {
+                message = "pushed " + refname + " to origin";
+                log_command("push origin " + refname + " " + GIT_ui_core.short_id(id));
+            } else {
+                message = "push refused by origin: " + report.reason;
+            }
+        }
+        case Err(GIT_http_push.Error error): {
+            message = "push: " + error.to_str();
+        }
+    }
+    reload();
+}
+
+/// Pull the current branch from `origin`, fast-forward only (`GIT_pull.pull`):
+/// refused on a dirty tree and on a diverged branch. The outcome is the
+/// status line's message.
+pub void RemoteLayer.pull_current() {
+    Option<str> url = GIT_config.get(gitdir, "remote", "origin", "url");
+    if (!url.is_some()) {
+        message = "pull: no remote 'origin' in .git/config";
+        return;
+    }
+    GIT_http_push.Remote remote = GIT_http_push.Remote("", Option<GIT_http_push.Credentials>.None);
+    match (GIT_http_push.parse_remote(url.or(""))) {
+        case Ok(GIT_http_push.Remote parsed): {
+            remote = parsed;
+        }
+        case Err(GIT_http_push.Error error): {
+            message = "pull: " + error.to_str();
+            return;
+        }
+    }
+    match (GIT_pull.pull(gitdir, worktree, remote)) {
+        case Ok(GIT_pull.Outcome outcome): {
+            if (outcome.has_moved) {
+                message = "pulled: fast-forwarded " + outcome.old_id.substr(0, 7) + ".." + outcome.new_id.substr(0, 7);
+                log_command("pull origin " + GIT_ui_core.short_id(outcome.old_id) + ".." + GIT_ui_core.short_id(outcome.new_id));
+            } else {
+                message = "pull: already up to date";
+            }
+        }
+        case Err(GIT_pull.Error error): {
+            message = "pull: " + error.to_str();
+        }
+    }
+    reload();
+}
+
+// --- the overlays -----------------------------------------------------------------
+
+/// One type serves both: `is_push` picks the table scope and the text.
+type RemoteOverlay {
+    RemoteLayer host;
+    bool is_push;
+}
+
+pub TUI_app.Action RemoteOverlay.handle_key(term.Code code) {
+    str scope = GIT_ui_core.SCOPE_PULL;
+    if (is_push) {
+        scope = GIT_ui_core.SCOPE_PUSH;
+    }
+    match (GIT_ui_core.lookup(scope, code)) {
+        case Some(str cmd): {
+            host.pop_overlay();
+            if (cmd == GIT_ui_core.CMD_PUSH) {
+                host.push_current();
+            }
+            if (cmd == GIT_ui_core.CMD_PULL) {
+                host.pull_current();
+            }
+            return TUI_app.Action.Redraw;
+        }
+        case None: {
+        }
+    }
+    return TUI_app.Action.Continue;
+}
+
+pub void RemoteOverlay.render(TUI_buffer.Buffer buffer, TUI_geometry.Rect area) {
+    TUI_menu.WhichKey which_key = TUI_menu.WhichKey("pull", [TUI_menu.Item("p", "pull current branch from origin (fast-forward only)")]);
+    if (is_push) {
+        which_key = TUI_menu.WhichKey("push", [TUI_menu.Item("p", "push current branch to origin (fast-forward only)")]);
+    }
+    which_key.render(buffer, area);
+}
+
+pub List<GIT_ui_core.Hint> RemoteOverlay.hints() {
+    if (is_push) {
+        return GIT_ui_core.hints_for(GIT_ui_core.SCOPE_PUSH);
+    }
+    return GIT_ui_core.hints_for(GIT_ui_core.SCOPE_PULL);
+}

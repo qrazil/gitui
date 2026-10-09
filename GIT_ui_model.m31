@@ -1,0 +1,809 @@
+// The client's model: everything the interactive client computes from the
+// repository that needs no client state -- the outline built from a status
+// and a log, a commit's per-file diff stats, the commit-message template and
+// its comment stripping, a tree built from the index, one path found in
+// HEAD's tree, and the small index helpers every writing operation shares.
+//
+// Nothing here holds state or touches the terminal, so every layer of the
+// client (`GIT_ui_core` up to `GIT_client`) can import it and the unit tests
+// can call it with hand-built values and no repository at all.
+
+import GIT_checkout;
+import date;
+import GIT_log;
+import GIT_index;
+import io;
+import GIT_object;
+import os;
+import GIT_status;
+import text;
+import GIT_hunks;
+import GIT_refs;
+import tui.TUI_diff_view;
+import tui.TUI_outline;
+import tui.TUI_text;
+
+/// One row of a change list (`GIT_status.Status.staged`/`.unstaged`, or
+/// `.untracked`), ready to sort and to show: `path` is what a human reads,
+/// `raw` is the exact bytes staging/unstaging needs, and `mark` is the
+/// status letter (`'A'`, `'M'`, `'D'`) or `0` for an untracked path, which
+/// has none.
+type PathRow {
+    str path;
+    bytes raw;
+    int mark;
+}
+
+int PathRow.cmp(PathRow other) {
+    return str_cmp(path, other.path);
+}
+
+/// One row of the outline's "Branches" section: the branch, and its tip's
+/// short id and first message line -- read once, in `Core.refresh`, so
+/// `build_outline` stays free of I/O (its own header's promise).
+pub type BranchRow {
+    pub GIT_checkout.Branch branch;
+    pub str subject;
+}
+
+/// One file a commit changed against its first parent (`commit_changes`,
+/// below): `old_id`/`new_id` are the two blob ids `show_diff_current`'s own
+/// commit-file branch reads to build the diff, `None` on whichever side the
+/// path did not exist (an add has no `old_id`, a delete has no `new_id`).
+/// `insertions`/`deletions` are exact line counts from the same
+/// `GIT_hunks.hunks` call `show_diff_current` itself would make -- computed in
+/// `commit_changes`, once per commit, the first time it is unfolded, so the
+/// stat the outline shows next to a file never disagrees with the diff
+/// `Enter` opens on it. `is_binary` is `GIT_hunks.hunks` reporting `Binary` for this pair;
+/// `insertions`/`deletions` are both 0 then, the same "nothing to count"
+/// `open_diff`'s own `is_diff_binary` path already means elsewhere.
+pub type CommitFileDiff {
+    pub bytes path;
+    pub GIT_status.Change kind;
+    pub Option<str> old_id;
+    pub Option<str> new_id;
+    pub bool is_binary;
+    pub int insertions;
+    pub int deletions;
+}
+
+// `str` has no ordering operator (`GIT_refs.m31`'s own `before`, the same
+// reason, written out again here because a type with a `str` field has to
+// supply its own `cmp` and there is nothing to call).
+pub int str_cmp(str left, str right) {
+    int length = left.size();
+    if (right.size() < length) {
+        length = right.size();
+    }
+    for (int i in 0 .. length) {
+        int x = left.byte_at(i);
+        int y = right.byte_at(i);
+        if (x != y) {
+            return x - y;
+        }
+    }
+    return left.size() - right.size();
+}
+
+pub int cmp_bytes(bytes left, bytes right) {
+    int length = left.size();
+    if (right.size() < length) {
+        length = right.size();
+    }
+    for (int i in 0 .. length) {
+        if (left[i] != right[i]) {
+            return left[i] - right[i];
+        }
+    }
+    return left.size() - right.size();
+}
+
+pub bool is_bytes_equal(bytes left, bytes right) {
+    return left.size() == right.size() && cmp_bytes(left, right) == 0;
+}
+
+pub int find_byte(bytes haystack, int needle, int from) {
+    int index = from;
+    int length = haystack.size();
+    while (index < length) {
+        if (haystack[index] == needle) {
+            return index;
+        }
+        index = index + 1;
+    }
+    return -1;
+}
+
+/// `GIT_status.Change` to the same character `mark_str` already turns into a
+/// letter -- `rows_from_deltas`'s own `GIT_status.Change` -> `int` mapping,
+/// pulled out so `commit_node`'s file rows can share it instead of
+/// repeating the match.
+pub int change_mark(GIT_status.Change kind) {
+    match (kind) {
+        case Added: {
+            return 'A';
+        }
+        case Modified: {
+            return 'M';
+        }
+        case Deleted: {
+            return 'D';
+        }
+    }
+}
+
+pub str mark_str(int mark) {
+    if (mark == 'A') {
+        return "A";
+    }
+    if (mark == 'D') {
+        return "D";
+    }
+    return "M";
+}
+
+/// `deltas`, converted to sorted `PathRow`s -- one status letter per path,
+/// `GIT_status.Change`'s own three variants.
+pub List<PathRow> rows_from_deltas(List<GIT_status.Delta> deltas) {
+    List<PathRow> out = [];
+    for (GIT_status.Delta delta in deltas) {
+        str path_text = delta.path.utf8().or("<non-utf8 path>");
+        out.push(PathRow(path_text, delta.path, change_mark(delta.kind)));
+    }
+    out.sort();
+    return out;
+}
+
+/// `paths`, converted to sorted, markless `PathRow`s.
+pub List<PathRow> rows_from_untracked(List<bytes> paths) {
+    List<PathRow> out = [];
+    for (bytes path in paths) {
+        out.push(PathRow(path.utf8().or("<non-utf8 path>"), path, 0));
+    }
+    out.sort();
+    return out;
+}
+
+/// The first line of a commit message, decoded as far as it will go -- the
+/// one-line summary the outline's commit rows show.
+pub str first_line(bytes message) {
+    int newline_index = find_byte(message, '\n', 0);
+    bytes line = message;
+    if (newline_index >= 0) {
+        line = message.substr(0, newline_index);
+    }
+    return line.utf8().or("<non-utf8 message>");
+}
+
+/// Is `id` expanded, given what the caller has recorded about it and what it
+/// defaults to when nothing has been recorded yet? A toggled-closed section
+/// survives a rebuild of the outline this way -- see `State.toggle_current`.
+pub bool is_expanded_for(Map<str, bool> collapsed, str id, bool is_default_expanded) {
+    match (collapsed.get(id)) {
+        case Some(bool is_collapsed): {
+            return !is_collapsed;
+        }
+        case None: {
+            return is_default_expanded;
+        }
+    }
+}
+
+// A commit message line, wrapped to a fixed fallback width rather than the
+// outline's real render width, because `commit_node` cannot see that width.
+//
+// `build_outline` (and so `commit_node`) runs once, from `State.reload()`,
+// after an action that changes the repository -- not on every frame. The
+// outline it returns is then rendered against whatever `TUI_geometry.Rect` the
+// terminal loop hands `State.draw()`, which can change across a resize with
+// no `reload()` in between (see `draw()` below: it calls `outline.render`
+// straight on the stored tree). So the real column count is known only
+// inside `TUI_outline.Outline.render`, one row = one screen line, well after
+// these nodes are built.
+//
+// Making `TUI_outline` itself wrap-aware -- so a resize could reflow without
+// a full rebuild -- would mean one logical `Row` can occupy a *variable*
+// number of physical lines, which reaches into `rows()`, `move()`,
+// `did_select_id()` and the `Viewport.reveal`/`clamped` scroll math that all
+// currently assume "one row is one line". That is a real feature, but a
+// bigger one than this fix: it would change the widget's row model for
+// every caller (`tui's `browse.m31`` included), not just this one.
+//
+// So this wraps eagerly, here, against `COMMIT_BODY_WRAP_COLUMNS` -- a stand-in
+// for a typical terminal, chosen so it still looks right at the common case
+// rather than picking an arbitrary round number. Neither direction loses a
+// character: `TUI_text.wrap` only drops whitespace exactly at a line break
+// it introduces, never a non-space byte, so joining a message line's
+// wrapped rows back together (with a single space where a break was)
+// reproduces the original line. General wrap-awareness in `TUI_outline`
+// itself is a real follow-up, not attempted here.
+//
+// A terminal narrower than this fallback still clips a wrapped row's tail
+// in `Outline.render`, exactly as it always could for any other row (a long
+// file path, the author line below, never wrapped at all) -- `h`/`l` and
+// the left/right arrows now cover that case directly, via
+// `TUI_outline.Outline.scroll_h`, rather than waiting on wrap-awareness to
+// close it. Content is reachable by scrolling sideways; it no longer just
+// clips with no way back.
+pub const int COMMIT_BODY_WRAP_COLUMNS = 72;
+/// Columns `h`/`l`/the left and right arrows move the outline's horizontal
+/// scroll per press -- a whole word or two at a time, not one column, so a
+/// long line clears in a handful of presses.
+pub const int SCROLL_H_STEP = 4;
+/// How many commits one `GIT_log.walk` fetches, and by how many the "load
+/// more" row at the bottom of the Commits section grows that each time it
+/// is activated. A `log` at least this long may have more behind it, which
+/// is when `build_outline` appends that row (`LOAD_MORE_ID`).
+pub const int LOG_PAGE = 200;
+pub const str LOAD_MORE_ID = "commits:more";
+
+/// `id`'s blob, or empty if it has none (the add/delete side of a
+/// `CommitFileDiff`) -- the commit-history equivalent of `State.read_blob`,
+/// free rather than a method since `commit_changes` runs before a `State`
+/// exists for the commits it is building rows for (`reload`'s own order:
+/// `refresh` first, then this, then `build_outline`).
+pub bytes commit_blob(str gitdir, Option<str> id) {
+    match (id) {
+        case Some(str old_id): {
+            match (GIT_object.read(gitdir, old_id)) {
+                case Ok(GIT_object.Object object): {
+                    return object.raw;
+                }
+                case Err: {
+                    return [];
+                }
+            }
+        }
+        case None: {
+            return [];
+        }
+    }
+}
+
+/// Every file `c` changed against its first parent -- the empty tree, for a
+/// root commit, matching git's own treatment of the initial commit as
+/// entirely additions, since there is nothing to diff it against. First
+/// parent only for a merge, the simpler choice `git log --first-parent -p`
+/// and GitHub's own PR view make, not git's full combined-diff format: this
+/// client is for stepping through history, not auditing a merge's conflict
+/// resolution.
+///
+/// Two trees flattened to `path -> blob id` (`GIT_object.flatten_tree`) and
+/// compared by path, the exact three-way split `GIT_status.status` already
+/// makes between the index and HEAD's tree (added/modified/deleted) --
+/// unchanged paths (`old_id == new_id`) are left out entirely, the same way
+/// `GIT_status.status` only ever reports what actually differs.
+pub Result<List<CommitFileDiff>, GIT_object.Error> commit_changes(str gitdir, GIT_object.Commit commit) {
+    Map<str, str> new_tree = GIT_object.flatten_tree(gitdir, commit.tree)?;
+    Map<str, str> old_tree = {};
+    if (commit.parents.size() > 0) {
+        match (GIT_object.read(gitdir, commit.parents[0])) {
+            case Ok(GIT_object.Object object): {
+                match (object.body) {
+                    case Commit(GIT_object.Commit parent_commit): {
+                        old_tree = GIT_object.flatten_tree(gitdir, parent_commit.tree)?;
+                    }
+                    case Blob: {
+                    }
+                    case Tree(List<GIT_object.Entry> ignored): {
+                    }
+                    case Tag: {
+                    }
+                }
+            }
+            case Err(GIT_object.Error error): {
+                return Result<List<CommitFileDiff>, GIT_object.Error>.Err(error);
+            }
+        }
+    }
+    List<str> paths = [];
+    for (str path in new_tree.keys()) {
+        paths.push(path);
+    }
+    for (str path in old_tree.keys()) {
+        if (!new_tree.contains(path)) {
+            paths.push(path);
+        }
+    }
+    paths.sort();
+    List<CommitFileDiff> out = [];
+    for (str path in paths) {
+        Option<str> old_blob_id = old_tree.get(path);
+        Option<str> new_blob_id = new_tree.get(path);
+        GIT_status.Change kind = GIT_status.Change.Modified;
+        bool is_skipping = false;
+        match (old_blob_id) {
+            case Some(str old_id): {
+                match (new_blob_id) {
+                    case Some(str new_id): {
+                        if (old_id == new_id) {
+                            is_skipping = true;
+                        }
+                    }
+                    case None: {
+                        kind = GIT_status.Change.Deleted;
+                    }
+                }
+            }
+            case None: {
+                kind = GIT_status.Change.Added;
+            }
+        }
+        if (is_skipping) {
+            continue;
+        }
+        bytes old_bytes = commit_blob(gitdir, old_blob_id);
+        bytes new_bytes = commit_blob(gitdir, new_blob_id);
+        bool is_binary = false;
+        int insertions = 0;
+        int deletions = 0;
+        match (GIT_hunks.hunks(old_bytes, new_bytes)) {
+            case Binary: {
+                is_binary = true;
+            }
+            case Hunks(List<TUI_diff_view.Hunk> hunks): {
+                for (TUI_diff_view.Hunk hunk in hunks) {
+                    for (TUI_diff_view.Line line in hunk.lines) {
+                        match (line.kind) {
+                            case Add: {
+                                insertions = insertions + 1;
+                            }
+                            case Remove: {
+                                deletions = deletions + 1;
+                            }
+                            case Context: {
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        out.push(CommitFileDiff(path.to_bytes(), kind, old_blob_id, new_blob_id, is_binary, insertions, deletions));
+    }
+    return Result<List<CommitFileDiff>, GIT_object.Error>.Ok(out);
+}
+
+/// The outline's commit section: one collapsible node per commit, its short
+/// id and first message line as the label, and -- expanded -- its author,
+/// date and full message as leaf rows underneath. See `TUI_outline.m31`'s own
+/// header on why every row needs a stable `id`: folding must not renumber
+/// what the jump list or a saved cursor position names.
+///
+/// Unlike the summary rows this client builds elsewhere (a file path, a
+/// commit's own hash-plus-first-line label), a message line is not something
+/// anything needs to select as its own addressable row -- so, unlike those,
+/// a message line longer than the available width is wrapped across
+/// multiple leaf rows here rather than left for `Outline.render` to clip
+/// silently. A short line still yields exactly one leaf row.
+///
+/// A nested "Files changed" subsection follows the message, one addressable
+/// row per `CommitFileDiff` in `changes` -- `show_diff_current`'s own
+/// commit-file branch is what `Enter` on one of these reaches, through
+/// `out_file_diffs`, the same "every leaf row recorded in an out-param"
+/// convention `build_outline`'s own header documents for `out_paths`.
+/// Open by default once the commit itself is unfolded -- the commit stays
+/// collapsed until asked, so nothing is tall until the reader asks for it,
+/// and then the files are what they asked for: `Enter` on a commit shows its
+/// files at once, `Enter` on a file shows its diff. A fold recorded in
+/// `collapsed` still wins, as everywhere else.
+pub List<TUI_outline.Node> commit_node(GIT_log.Entry entry, List<CommitFileDiff> changes, Map<str, bool> collapsed, Map<str, CommitFileDiff> out_file_diffs) {
+    str id = "commit:" + entry.id;
+    str label = entry.id.substr(0, 7) + "  " + first_line(entry.commit.message);
+    List<TUI_outline.Node> body = [];
+    str author = entry.commit.author.name.utf8().or("<non-utf8>") + " <" + entry.commit.author.email.utf8().or("<non-utf8>") + ">";
+    body.push(TUI_outline.Node.leaf(id + ":author", "Author: " + author));
+    body.push(TUI_outline.Node.leaf(id + ":date", "Date:   " + date.iso(entry.commit.author.when)));
+    str message = entry.commit.message.utf8().or("<non-utf8 message>");
+    int line_index = 0;
+    for (str line in text.lines(message)) {
+        int wrapped_index = 0;
+        for (str wrapped in TUI_text.wrap(line, COMMIT_BODY_WRAP_COLUMNS)) {
+            body.push(TUI_outline.Node.leaf(id + ":m" + line_index.to_str() + ":" + wrapped_index.to_str(), "  " + wrapped));
+            wrapped_index = wrapped_index + 1;
+        }
+        line_index = line_index + 1;
+    }
+    List<TUI_outline.Node> file_nodes = [];
+    int file_index = 0;
+    for (CommitFileDiff change in changes) {
+        str file_id = id + ":file:" + file_index.to_str();
+        str path_text = change.path.utf8().or("<non-utf8 path>");
+        str stat = "+" + change.insertions.to_str() + " -" + change.deletions.to_str();
+        if (change.is_binary) {
+            stat = "(binary)";
+        }
+        file_nodes.push(TUI_outline.Node.leaf(file_id, mark_str(change_mark(change.kind)) + "  " + path_text + "  " + stat));
+        out_file_diffs.set(file_id, change);
+        file_index = file_index + 1;
+    }
+    str files_id = id + ":files";
+    body.push(TUI_outline.Node.section(files_id, "Files changed (" + file_nodes.size().to_str() + ")", file_nodes, is_expanded: is_expanded_for(collapsed, files_id, true)));
+    return [TUI_outline.Node.section(id, label, body, is_expanded: is_expanded_for(collapsed, id, false))];
+}
+
+/// The primary document, from a `Status` and a commit walk alone -- no
+/// terminal, no `gitdir`, no I/O of any kind, which is what makes this the
+/// piece `t_gitclient.m31` calls directly.
+///
+/// Every leaf row this builds is recorded in `out_paths` (row id -> the raw
+/// bytes to stage or unstage), which `State` keeps and `stage_current`/
+/// `unstage_current` read from -- there is no other way to get from "the
+/// cursor is on this row" back to a path, since `TUI_outline.Row` only knows
+/// the label it was given. A commit's own file rows are recorded a second
+/// time in `out_file_diffs` (row id -> the `CommitFileDiff` `commit_changes`
+/// already computed for it), which `show_diff_current`'s commit-file branch
+/// reads instead of re-deriving blob ids from a bare path the way the
+/// working-tree sections' rows do -- there is no index or working tree to
+/// fall back on for a path that existed only in some past commit.
+///
+/// `changes_by_commit` is `State.commit_changes_cache`: `commit_changes`'s
+/// result for every commit unfolded so far, keyed by commit id. A commit
+/// not in it (never unfolded) renders with an empty file list -- which is
+/// never visible, since it is only ever the unfolding itself that fills the
+/// cache and rebuilds (`State.toggle_current`). The computing happens
+/// elsewhere, this only ever renders what it is handed, which is what keeps
+/// this function itself free of I/O (this doc comment's own first line).
+pub TUI_outline.Outline build_outline(GIT_status.Status status, List<GIT_log.Entry> log, Map<str, List<CommitFileDiff>> changes_by_commit, Map<str, bool> collapsed, Map<str, bytes> out_paths, Map<str, CommitFileDiff> out_file_diffs, List<BranchRow> branches) {
+    out_paths.clear();
+    out_file_diffs.clear();
+    List<TUI_outline.Node> roots = [];
+    List<TUI_outline.Node> untracked_children = [];
+    for (PathRow row in rows_from_untracked(status.untracked)) {
+        str id = "untracked:" + row.path;
+        out_paths.set(id, row.raw);
+        untracked_children.push(TUI_outline.Node.leaf(id, row.path));
+    }
+    roots.push(TUI_outline.Node.section("untracked", "Untracked files (" + untracked_children.size().to_str() + ")", untracked_children, is_expanded: is_expanded_for(collapsed, "untracked", true)));
+    List<TUI_outline.Node> unstaged_children = [];
+    for (PathRow row in rows_from_deltas(status.unstaged)) {
+        str id = "unstaged:" + row.path;
+        out_paths.set(id, row.raw);
+        unstaged_children.push(TUI_outline.Node.leaf(id, mark_str(row.mark) + "  " + row.path));
+    }
+    roots.push(TUI_outline.Node.section("unstaged", "Unstaged changes (" + unstaged_children.size().to_str() + ")", unstaged_children, is_expanded: is_expanded_for(collapsed, "unstaged", true)));
+    List<TUI_outline.Node> staged_children = [];
+    for (PathRow row in rows_from_deltas(status.staged)) {
+        str id = "staged:" + row.path;
+        out_paths.set(id, row.raw);
+        staged_children.push(TUI_outline.Node.leaf(id, mark_str(row.mark) + "  " + row.path));
+    }
+    roots.push(TUI_outline.Node.section("staged", "Staged changes (" + staged_children.size().to_str() + ")", staged_children, is_expanded: is_expanded_for(collapsed, "staged", true)));
+    List<TUI_outline.Node> commit_children = [];
+    for (GIT_log.Entry entry in log) {
+        List<CommitFileDiff> changes = changes_by_commit.get(entry.id).or([]);
+        for (TUI_outline.Node node in commit_node(entry, changes, collapsed, out_file_diffs)) {
+            commit_children.push(node);
+        }
+    }
+    str commits_label = "Commits (" + log.size().to_str() + ")";
+    if (log.size() >= LOG_PAGE) {
+        // The walk hit its limit, so there may be more behind it: one last,
+        // addressable row that `handle_enter` turns into a longer walk.
+        commit_children.push(TUI_outline.Node.leaf(LOAD_MORE_ID, "… load " + LOG_PAGE.to_str() + " more commits"));
+        commits_label = "Commits (" + log.size().to_str() + "+)";
+    }
+    roots.push(TUI_outline.Node.section("commits", commits_label, commit_children, is_expanded: is_expanded_for(collapsed, "commits", true)));
+    // Local branches, the current one starred -- `b` acts on the row under
+    // the cursor (`checkout_current`). Last, after the commits, so the row
+    // positions every existing check counts on (untracked first, commits
+    // fourth) are untouched; design.md's own Magit comparison lists branches
+    // as one more section of the same document, not a panel of its own.
+    List<TUI_outline.Node> branch_children = [];
+    for (BranchRow branch_row in branches) {
+        str mark = "  ";
+        if (branch_row.branch.is_current) {
+            mark = "* ";
+        }
+        branch_children.push(TUI_outline.Node.leaf("branch:" + branch_row.branch.name, mark + branch_row.branch.name + "  " + branch_row.branch.id.substr(0, 7) + "  " + branch_row.subject));
+    }
+    roots.push(TUI_outline.Node.section("branches", "Branches (" + branch_children.size().to_str() + ")", branch_children, is_expanded: is_expanded_for(collapsed, "branches", true)));
+    return TUI_outline.Outline(roots);
+}
+
+// --- the commit message: writing the template, reading it back -------------
+
+/// git's own cleanup mode with no flags given: `--cleanup=strip`. Every line
+/// beginning with `#` is dropped, and the remainder is trimmed of leading and
+/// trailing blank lines and whitespace. An empty result is exactly the case
+/// `finish_commit` refuses, matching real `git commit`'s own "Aborting
+/// commit due to empty commit message."
+pub str strip_comment_lines(str raw) {
+    List<str> keep = [];
+    for (str line in text.lines(raw)) {
+        if (line.starts_with("#")) {
+            continue;
+        }
+        keep.push(line);
+    }
+    return keep.join("\n").trim();
+}
+
+/// The template written at `COMMIT_EDITMSG` for a person (or a script driving
+/// one) to edit -- git's own comment lines, minus the fuller status summary
+/// real git includes, which needs nothing this client cannot already show in
+/// the outline above it.
+pub str commit_template() {
+    return "\n# Please enter the commit message for your changes. Lines starting\n# with '#' will be ignored, and an empty message aborts the commit.\n";
+}
+
+// --- building a tree from the index's flat, sorted paths --------------------
+
+// One entry on its way into a tree, carrying only what `GIT_object.write_tree`
+// needs plus the bytes to group by -- not a full `GIT_index.Entry`, so the
+// recursion below never has to reconstruct one.
+type Leaf {
+    int mode;
+    str id;
+    bytes path;
+}
+
+/// The tree `entries` describes, written recursively: `GIT_object.write_tree`
+/// already sorts one directory level and hashes it, so this only has to
+/// group a flat list of paths into the directories git's tree format
+/// actually nests, bottom-up. Grouped by raw `bytes`, not `str`, because
+/// `GIT_index.Entry.path` need not be UTF-8 (`GIT_index.m31`'s own module header)
+/// and dropping a non-UTF-8 path here -- the way `GIT_status.m31` drops one from
+/// a *display* -- would silently leave a real, currently-staged file out of
+/// the commit, which is a correctness bug and not a display gap.
+pub Result<str, GIT_object.Error> build_tree(str gitdir, List<GIT_index.Entry> entries) {
+    List<Leaf> leaves = [];
+    for (GIT_index.Entry entry in entries) {
+        leaves.push(Leaf(entry.mode, entry.id, entry.path));
+    }
+    return build_tree_of(gitdir, leaves);
+}
+
+pub Result<str, GIT_object.Error> build_tree_of(str gitdir, List<Leaf> leaves) {
+    List<GIT_object.Entry> out = [];
+    List<bytes> dirnames = [];
+    List<List<Leaf>> groups = [];
+    for (Leaf leaf in leaves) {
+        int slash = find_byte(leaf.path, '/', 0);
+        if (slash < 0) {
+            out.push(GIT_object.Entry(leaf.mode, leaf.path, leaf.id));
+            continue;
+        }
+        bytes directory = leaf.path.substr(0, slash);
+        bytes rest = leaf.path.substr(slash + 1, leaf.path.size());
+        Leaf sub = Leaf(leaf.mode, leaf.id, rest);
+        int index = find_directory(dirnames, directory);
+        if (index < 0) {
+            dirnames.push(directory);
+            groups.push([sub]);
+        } else {
+            groups[index].push(sub);
+        }
+    }
+    int index = 0;
+    while (index < dirnames.size()) {
+        str sub_id = build_tree_of(gitdir, groups[index])?;
+        out.push(GIT_object.Entry(0o40000, dirnames[index], sub_id));
+        index = index + 1;
+    }
+    return GIT_object.write_tree(gitdir, out);
+}
+
+pub int find_directory(List<bytes> dirnames, bytes directory) {
+    int index = 0;
+    while (index < dirnames.size()) {
+        if (is_bytes_equal(dirnames[index], directory)) {
+            return index;
+        }
+        index = index + 1;
+    }
+    return -1;
+}
+
+// --- finding one path in HEAD's tree, for unstaging --------------------------
+
+/// HEAD's tree, or `None` for an unborn branch or a detached HEAD this
+/// cannot read -- `GIT_status.m31`'s own `head_tree`, minus the `Status`-shaped
+/// error, since `unstage_path` only needs to know whether there is one.
+pub Option<str> head_tree_id(str gitdir) {
+    match (GIT_refs.head(gitdir)) {
+        case Ok(GIT_refs.Head head): {
+            match (head) {
+                case Unborn(str name): {
+                    return Option<str>.None;
+                }
+                case Born(str name, str id): {
+                    return commit_tree_id(gitdir, id);
+                }
+                case Detached(str id): {
+                    return commit_tree_id(gitdir, id);
+                }
+            }
+        }
+        case Err(_): {
+            return Option<str>.None;
+        }
+    }
+}
+
+pub Option<str> commit_tree_id(str gitdir, str id) {
+    match (GIT_object.read(gitdir, id)) {
+        case Ok(GIT_object.Object object): {
+            match (object.body) {
+                case Commit(GIT_object.Commit commit): {
+                    return Option<str>.Some(commit.tree);
+                }
+                case Blob: {
+                    return Option<str>.None;
+                }
+                case Tree: {
+                    return Option<str>.None;
+                }
+                case Tag: {
+                    return Option<str>.None;
+                }
+            }
+        }
+        case Err: {
+            return Option<str>.None;
+        }
+    }
+}
+
+/// The tree entry at `path`, following one path segment per subtree read.
+/// `None` for a path this tree does not have, at all or at that type -- a
+/// directory where the caller asked for a blob is the same "not there" as a
+/// missing name, since either way there is no blob to restore.
+pub Option<GIT_object.Entry> find_in_tree(str gitdir, str tree_id, bytes path) {
+    int slash = find_byte(path, '/', 0);
+    bytes seg = path;
+    bytes rest = [];
+    bool has_rest = false;
+    if (slash >= 0) {
+        seg = path.substr(0, slash);
+        rest = path.substr(slash + 1, path.size());
+        has_rest = true;
+    }
+    match (GIT_object.read(gitdir, tree_id)) {
+        case Ok(GIT_object.Object object): {
+            match (object.body) {
+                case Tree(List<GIT_object.Entry> entries): {
+                    for (GIT_object.Entry entry in entries) {
+                        if (is_bytes_equal(entry.name, seg)) {
+                            if (has_rest) {
+                                if (entry.is_tree()) {
+                                    return find_in_tree(gitdir, entry.id, rest);
+                                }
+                                return Option<GIT_object.Entry>.None;
+                            }
+                            return Option<GIT_object.Entry>.Some(entry);
+                        }
+                    }
+                    return Option<GIT_object.Entry>.None;
+                }
+                case Blob: {
+                    return Option<GIT_object.Entry>.None;
+                }
+                case Commit: {
+                    return Option<GIT_object.Entry>.None;
+                }
+                case Tag: {
+                    return Option<GIT_object.Entry>.None;
+                }
+            }
+        }
+        case Err: {
+            return Option<GIT_object.Entry>.None;
+        }
+    }
+}
+
+/// The commit a row id belongs to, if it is a commit's own section row or
+/// its "Files changed" subsection -- the two rows whose unfolding is what
+/// first needs that commit's file list. `commit:<40 hex>` or
+/// `commit:<40 hex>:files`; every other id (a file row, an author/date/
+/// message leaf, any other section) answers `None`.
+pub Option<str> commit_id_of_unfoldable(str id) {
+    if (!id.starts_with("commit:") || id.size() < 47) {
+        return Option<str>.None;
+    }
+    str cid = id.substr(7, 47);
+    if (id == "commit:" + cid || id == "commit:" + cid + ":files") {
+        return Option<str>.Some(cid);
+    }
+    return Option<str>.None;
+}
+
+/// The directory part of a slash-separated path, `.` for a bare name --
+/// `GIT_http_fetch.m31`'s own `directory_of`, private to it, repeated here rather than
+/// exported from a module about the wire protocol.
+pub str directory_of(str path) {
+    int index = path.size() - 1;
+    while (index >= 0 && path.byte_at(index) != '/') {
+        index = index - 1;
+    }
+    if (index < 0) {
+        return ".";
+    }
+    return path.substr(0, index);
+}
+
+/// `path`'s entry in `ix`, if it has one.
+pub Option<GIT_index.Entry> find_index_entry(GIT_index.Index index, bytes path) {
+    int entry_index = 0;
+    while (entry_index < index.entries.size()) {
+        if (is_bytes_equal(index.entries[entry_index].path, path)) {
+            return Option<GIT_index.Entry>.Some(index.entries[entry_index]);
+        }
+        entry_index = entry_index + 1;
+    }
+    return Option<GIT_index.Entry>.None;
+}
+
+/// Which command real git's own editor flow would launch: `$EDITOR` if it is
+/// set, `vi` otherwise -- git's own fallback (`core.editor` and `$VISUAL`
+/// come before `vi` in real git's own chain, but both come from
+/// `.git/config`, which this client already does not read, `GIT_object.m31`'s
+/// own README names that gap). Pure and total, so `t_gitclient.m31` can
+/// check it with no environment and no process at all.
+pub str pick_editor(Option<str> env_editor) {
+    return env_editor.or("vi");
+}
+
+pub str branch_name(str full) {
+    str prefix = "refs/heads/";
+    if (full.starts_with(prefix)) {
+        return full.substr(prefix.size(), full.size());
+    }
+    return full;
+}
+
+// --- index helpers shared by whole-file (stage_path/unstage_path) and hunk-level staging --
+
+pub GIT_index.Index read_index(str gitdir) {
+    match (GIT_index.read(gitdir)) {
+        case Ok(GIT_index.Index index): {
+            return index;
+        }
+        case Err: {
+            return GIT_index.Index([]);
+        }
+    }
+}
+
+pub void replace_entry(GIT_index.Index index, GIT_index.Entry entry) {
+    int entry_index = 0;
+    while (entry_index < index.entries.size()) {
+        if (is_bytes_equal(index.entries[entry_index].path, entry.path)) {
+            index.entries[entry_index] = entry;
+            return;
+        }
+        entry_index = entry_index + 1;
+    }
+    index.entries.push(entry);
+}
+
+pub void remove_entry(GIT_index.Index index, bytes path) {
+    int entry_index = 0;
+    while (entry_index < index.entries.size()) {
+        if (is_bytes_equal(index.entries[entry_index].path, path)) {
+            index.entries.remove_at(entry_index);
+            return;
+        }
+        entry_index = entry_index + 1;
+    }
+}
+
+// --- committing ---------------------------------------------------------------
+
+// No `.git/config` is read anywhere in this program (`GIT_object.m31`'s own
+// README names this gap); `GIT_AUTHOR_*`/`GIT_COMMITTER_*` are the one
+// identity source this client has, the same environment variables real git
+// itself honours over its config. `date.now()` is UTC-only
+// (`lib/date.m31`'s own header), so every commit this client writes is
+// timestamped `+0000`.
+pub GIT_object.Ident author_ident() {
+    str who = os.env("GIT_AUTHOR_NAME").or(os.env("USER").or("unknown"));
+    str mail = os.env("GIT_AUTHOR_EMAIL").or(who + "@localhost");
+    return GIT_object.Ident(who.to_bytes(), mail.to_bytes(), date.now(), 0, "+0000");
+}
+
+pub GIT_object.Ident committer_ident() {
+    str who = os.env("GIT_COMMITTER_NAME").or(os.env("USER").or("unknown"));
+    str mail = os.env("GIT_COMMITTER_EMAIL").or(who + "@localhost");
+    return GIT_object.Ident(who.to_bytes(), mail.to_bytes(), date.now(), 0, "+0000");
+}

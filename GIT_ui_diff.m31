@@ -1,0 +1,368 @@
+// The diff layer: the hunk-level diff view that replaces the outline when `d`
+// (or `enter` on a commit's file) is pressed, and staging or unstaging one
+// hunk of it. The diff view is not an overlay -- it REPLACES the document, the
+// way a preview pane changes with the selection -- so it is a mode of the
+// document (`is_diff_open`), with its own scope in the key table
+// (`GIT_ui_core.SCOPE_DIFF`).
+
+import fs;
+import GIT_hunks;
+import GIT_index;
+import GIT_object;
+import GIT_patch;
+import GIT_ui_core;
+import GIT_ui_model;
+import GIT_ui_outline;
+import tui.TUI_buffer;
+import tui.TUI_diff_view;
+import tui.TUI_geometry;
+import tui.TUI_outline;
+import tui.TUI_widget;
+
+pub type DiffLayer {
+    pub GIT_ui_outline.OutlineLayer;
+}
+
+/// Real, hunk-level diff for the row under the cursor -- the diff-algorithm
+/// track (`lib/diff.m31`/`GIT_hunks.m31`) and the rendering widget
+/// (`TUI_diff_view.DiffView`) both already existed; this is the
+/// wiring `docs/design.md`'s "Starting the client" section named as the
+/// follow-up once they did. A no-op on anything that is not a path row (a
+/// section heading or a commit).
+///
+/// The comparison made depends on which section the row is in, matching
+/// `GIT_status.m31`'s own two-stage model exactly rather than picking a
+/// simplification of it:
+///
+///   - **unstaged** -- the index's blob for this path (`GIT_status.m31`'s own
+///     "working tree vs index" comparison) against the file's content on
+///     disk right now. A path missing from disk (staged-deleted-on-disk)
+///     compares against an empty `new`, an all-removed hunk.
+///   - **staged** -- HEAD's tree's blob for this path against the index's
+///     blob for it (`GIT_status.m31`'s "index vs HEAD" comparison). A path
+///     HEAD does not have compares an empty `old` (all-added, the newly
+///     staged file's whole content); a path the index no longer has (staged
+///     for deletion, though this client's own `stage`/`unstage` never
+///     produces that today) compares against an empty `new`.
+///   - **untracked** -- there is no "old" side at all, so this compares an
+///     empty `old` against the file's content on disk: one all-added hunk,
+///     the whole file. Deliberately not a separate "new file" display
+///     state: it reuses the exact same `GIT_hunks.hunks`/`DiffView` path every
+///     other case does, so an untracked file's diff is addressable and
+///     scrollable exactly like any other, and it matches what `git diff`
+///     itself shows for an intent-to-add path (`git add -N`) -- the closest
+///     real-git analogue to "tracked, nothing committed yet".
+///   - **a commit's own file row** -- `commit_changes`'s `old_id`/`new_id`
+///     for that path, directly (`file_diffs`, not `paths`: there is no disk
+///     or index to fall back on for a path that only ever existed in some
+///     past commit, unlike the three cases above). Either side missing
+///     (an add or a delete) is `commit_blob`'s own empty-bytes default, the
+///     same "no blob there" shape `head_blob` already uses for a path HEAD
+///     does not have.
+///
+/// `GIT_hunks.hunks` reporting `Binary` (either side trips `diff.is_binary`'s
+/// NUL heuristic) sets `is_diff_binary` instead of populating `diff_view`,
+/// which `draw` shows as "Binary files differ", git's own wording, rather
+/// than attempting to render binary content as text.
+pub void DiffLayer.show_diff_current() {
+    match (outline.current()) {
+        case Some(TUI_outline.Row row): {
+            if (row.node.id.contains(":file:")) {
+                match (file_diffs.get(row.node.id)) {
+                    case Some(GIT_ui_model.CommitFileDiff commit_file_diff): {
+                        open_diff(row.node.label, GIT_ui_model.commit_blob(gitdir, commit_file_diff.old_id), GIT_ui_model.commit_blob(gitdir, commit_file_diff.new_id));
+                        diff_section = "commit";
+                        diff_path = commit_file_diff.path;
+                    }
+                    case None: {
+                        message = "diff: nothing to show here";
+                    }
+                }
+                return;
+            }
+            match (paths.get(row.node.id)) {
+                case Some(bytes path): {
+                    if (row.node.id.starts_with("untracked:")) {
+                        open_diff(row.node.label, [], read_worktree(path));
+                        diff_section = "untracked";
+                        diff_path = path;
+                    } else if (row.node.id.starts_with("unstaged:")) {
+                        open_diff(row.node.label, index_blob(path), read_worktree(path));
+                        diff_section = "unstaged";
+                        diff_path = path;
+                    } else if (row.node.id.starts_with("staged:")) {
+                        open_diff(row.node.label, head_blob(path), index_blob(path));
+                        diff_section = "staged";
+                        diff_path = path;
+                    } else {
+                        message = "diff: nothing to show here";
+                    }
+                }
+                case None: {
+                    message = "diff: nothing to show here";
+                }
+            }
+        }
+        case None: {
+        }
+    }
+}
+
+/// Compute `old` vs `new`'s hunks and open the diff view over them --
+/// `title` is what the border shows while it is open. Shared by every
+/// section `show_diff_current` handles, so the binary case and the
+/// addressable cursor behave identically regardless of which comparison fed
+/// it. `pub`, like `stage_path`/`unstage_path`, so a unit test can drive the
+/// hunks/binary wiring directly with hand-built `bytes` and no repository at
+/// all -- `t_gitclient.m31`'s own reason for testing those two directly.
+pub void DiffLayer.open_diff(str title, bytes old, bytes new) {
+    diff_title = title;
+    match (GIT_hunks.hunks(old, new)) {
+        case Binary: {
+            is_diff_binary = true;
+            diff_view = TUI_diff_view.DiffView([]);
+        }
+        case Hunks(List<TUI_diff_view.Hunk> hunks): {
+            is_diff_binary = false;
+            diff_view = TUI_diff_view.DiffView(hunks);
+        }
+    }
+    is_diff_open = true;
+    message = "";
+}
+
+/// Back out of the diff view to the outline -- `backspace`, the same "go
+/// back" key `tui's `browse.m31`` already uses for leaving a drilled-into
+/// view, and `q`/`Escape` too (`handle_diff_key`'s own comment has why).
+pub void DiffLayer.close_diff() {
+    is_diff_open = false;
+    is_diff_binary = false;
+    diff_view = TUI_diff_view.DiffView([]);
+    diff_section = "";
+    diff_path = [];
+    message = "";
+}
+
+/// `s` in the diff view: stage only the hunk under the cursor -- `git add
+/// -p`'s "y" for exactly one hunk. Meaningful only for a diff opened from an
+/// UNSTAGED row (index vs working tree): the index's content with that one
+/// hunk applied becomes the new index blob, so the path is then both staged
+/// and unstaged, exactly as git shows a partially staged file (`MM`). An
+/// untracked row has no index content to patch -- the outline's own `s`
+/// stages the whole file -- and a staged or commit diff has nothing to
+/// stage, so those just say so. The cursor on a hunk's header or any line
+/// inside it addresses that hunk (`DiffView.at().hunk`); line-level
+/// staging is not attempted.
+pub void DiffLayer.stage_hunk_current() {
+    if (diff_section != "unstaged") {
+        if (diff_section == "untracked") {
+            message = "untracked: stage the whole file with s from the outline";
+        } else {
+            message = "nothing to stage here";
+        }
+        return;
+    }
+    match (diff_view.at()) {
+        case Some(TUI_diff_view.Row row): {
+            int keep = diff_view.cursor;
+            if (did_stage_hunk(diff_path, row.hunk)) {
+                str said = message;
+                reload();
+                reopen_diff(keep);
+                message = said;
+            }
+        }
+        case None: {
+            message = "no hunk under the cursor";
+        }
+    }
+}
+
+/// `u` in the diff view: unstage only the hunk under the cursor -- `git
+/// reset -p`'s "y" for one hunk, on a diff opened from a STAGED row (HEAD vs
+/// index): the index's content with that one hunk reverted becomes the new
+/// index blob. The same no-ops as `stage_hunk_current` for every other
+/// section.
+pub void DiffLayer.unstage_hunk_current() {
+    if (diff_section != "staged") {
+        message = "nothing to unstage here";
+        return;
+    }
+    match (diff_view.at()) {
+        case Some(TUI_diff_view.Row row): {
+            int keep = diff_view.cursor;
+            if (did_unstage_hunk(diff_path, row.hunk)) {
+                str said = message;
+                reload();
+                reopen_diff(keep);
+                message = said;
+            }
+        }
+        case None: {
+            message = "no hunk under the cursor";
+        }
+    }
+}
+
+/// Stage hunk `k` (0-based, in `GIT_hunks.hunks(index, worktree)`'s order) of
+/// `relative_path`'s unstaged change: `GIT_patch.apply_hunk` over the index's blob and
+/// the file on disk, written as a new blob and put in the index with the
+/// entry's stat fields reset (the same `size: -1` rule `unstage_path`
+/// uses, so `GIT_status.status` re-hashes it rather than trusting a snapshot
+/// that was never taken). Applying the deletion hunk of a file gone from
+/// disk leaves nothing, which is `git add -p`'s "stage deletion": the entry
+/// is dropped instead. `pub`, like `stage_path`, so `t_gitclient_ops.m31`
+/// can drive it against a real fixture and real git. True when the index
+/// changed.
+pub bool DiffLayer.did_stage_hunk(bytes relative_path, int hunk_index) {
+    bytes old = index_blob(relative_path);
+    bytes new = read_worktree(relative_path);
+    match (GIT_patch.apply_hunk(old, new, hunk_index)) {
+        case Some(bytes content): {
+            str full = fs.join(worktree, relative_path.utf8().or(""));
+            if (content.size() == 0 && !fs.exists(full)) {
+                return did_drop_index_entry(relative_path, "staged deletion of " + relative_path.utf8().or("<non-utf8>"));
+            }
+            return did_set_index_blob(relative_path, content, "staged hunk " + (hunk_index + 1).to_str() + " of " + relative_path.utf8().or("<non-utf8>"));
+        }
+        case None: {
+            message = "no such hunk to stage";
+            return false;
+        }
+    }
+}
+
+/// Unstage hunk `k` (0-based, in `GIT_hunks.hunks(HEAD, index)`'s order) of
+/// `relative_path`'s staged change: `GIT_patch.revert_hunk` over HEAD's blob and the
+/// index's, written back the same way `did_stage_hunk` writes. Reverting the
+/// one all-added hunk of a path HEAD does not have leaves nothing, which is
+/// `git reset -p`'s "unstage addition": the entry is dropped, the file is
+/// untracked again. True when the index changed.
+pub bool DiffLayer.did_unstage_hunk(bytes relative_path, int hunk_index) {
+    bytes old = head_blob(relative_path);
+    bytes new = index_blob(relative_path);
+    match (GIT_patch.revert_hunk(old, new, hunk_index)) {
+        case Some(bytes content): {
+            if (content.size() == 0 && !is_in_head_tree(relative_path)) {
+                return did_drop_index_entry(relative_path, "unstaged addition of " + relative_path.utf8().or("<non-utf8>"));
+            }
+            return did_set_index_blob(relative_path, content, "unstaged hunk " + (hunk_index + 1).to_str() + " of " + relative_path.utf8().or("<non-utf8>"));
+        }
+        case None: {
+            message = "no such hunk to unstage";
+            return false;
+        }
+    }
+}
+
+/// Rebuild the open diff view for the same section and path after the index
+/// changed under it, keeping the cursor where it was (clamped: the view
+/// usually has one hunk fewer now). Nothing left to show -- the last hunk
+/// was staged or unstaged -- closes the view, and the outline underneath,
+/// already rebuilt by `reload`, no longer has that row either.
+pub void DiffLayer.reopen_diff(int keep_cursor) {
+    str section = diff_section;
+    bytes path = diff_path;
+    str title = diff_title;
+    bytes old = [];
+    bytes new = [];
+    if (section == "unstaged") {
+        old = index_blob(path);
+        new = read_worktree(path);
+    } else if (section == "staged") {
+        old = head_blob(path);
+        new = index_blob(path);
+    } else {
+        return;
+    }
+    if (GIT_patch.hunk_count(old, new) == 0) {
+        close_diff();
+        return;
+    }
+    open_diff(title, old, new);
+    diff_section = section;
+    diff_path = path;
+    diff_view.cursor = keep_cursor;
+    diff_view.move(0);
+}
+
+/// Does HEAD's tree have `relative_path` at all? False on an unborn branch too.
+pub bool DiffLayer.is_in_head_tree(bytes relative_path) {
+    match (GIT_ui_model.head_tree_id(gitdir)) {
+        case Some(str tid): {
+            return GIT_ui_model.find_in_tree(gitdir, tid, relative_path).is_some();
+        }
+        case None: {
+            return false;
+        }
+    }
+}
+
+/// `relative_path`'s index entry now names a fresh blob of `content`, mode kept,
+/// stat fields reset so the next `status` re-hashes it. `said` becomes the
+/// status-line message on success.
+pub bool DiffLayer.did_set_index_blob(bytes relative_path, bytes content, str said) {
+    str blob_id = "";
+    match (GIT_object.write_blob(gitdir, content)) {
+        case Ok(str id): {
+            blob_id = id;
+        }
+        case Err(GIT_object.Error error): {
+            message = "write_blob: " + error.to_str();
+            return false;
+        }
+    }
+    GIT_index.Index index = GIT_ui_model.read_index(gitdir);
+    int mode = 0o100644;
+    match (GIT_ui_model.find_index_entry(index, relative_path)) {
+        case Some(GIT_index.Entry entry): {
+            mode = entry.mode;
+        }
+        case None: {
+        }
+    }
+    GIT_ui_model.replace_entry(index, GIT_index.Entry(0, 0, 0, 0, 0, 0, mode, 0, 0, -1, blob_id, 0, false, relative_path));
+    match (GIT_index.write(gitdir, index)) {
+        case Ok: {
+            message = said;
+            log_command(said);
+            return true;
+        }
+        case Err(GIT_index.Error error): {
+            message = "index write: " + error.to_str();
+            return false;
+        }
+    }
+}
+
+pub bool DiffLayer.did_drop_index_entry(bytes relative_path, str said) {
+    GIT_index.Index index = GIT_ui_model.read_index(gitdir);
+    GIT_ui_model.remove_entry(index, relative_path);
+    match (GIT_index.write(gitdir, index)) {
+        case Ok: {
+            message = said;
+            log_command(said);
+            return true;
+        }
+        case Err(GIT_index.Error error): {
+            message = "index write: " + error.to_str();
+            return false;
+        }
+    }
+}
+
+/// The diff view, in place of the outline: a bordered block naming the file
+/// (`diff_title`), and inside it either "binary files differ" (git's own
+/// wording, `is_diff_binary`) or `diff_view` itself -- a `DiffView` whose
+/// `at()`/`move()` already give hunk- and line-granular addressing, even
+/// though nothing in this change acts on that address yet.
+pub void DiffLayer.draw_diff(TUI_buffer.Buffer buffer, TUI_geometry.Rect area) {
+    TUI_widget.Block block = TUI_widget.Block(title: "diff: " + diff_title, borders: TUI_widget.Borders.Single);
+    block.render(buffer, area);
+    TUI_geometry.Rect inner = block.inner(area);
+    if (is_diff_binary) {
+        TUI_widget.Paragraph("binary files differ").render(buffer, inner);
+        return;
+    }
+    diff_view.render(buffer, inner);
+}
