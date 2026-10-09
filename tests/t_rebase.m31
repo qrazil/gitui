@@ -1,0 +1,215 @@
+// Drives GIT_rebase for test_rebase.sh.
+//
+//   ./t_rebase <gitdir> <worktree> start [-i] [--autosquash] [--autostash] [--root] [--keep-base] [--onto X] [<upstream>]
+//       prints `ending <word>`, `stopped <id>`, `kind <path> <word>` per conflict,
+//       `note <line>` per message, `output <line>` for a failed exec;
+//       `refused <why>` on an error. `-i` takes the todo from $GIT_SEQUENCE_EDITOR,
+//       messages go through $GIT_EDITOR; DECLINE=1 leaves messages to the caller.
+//   ./t_rebase <gitdir> <worktree> continue [-m <message>]
+//   ./t_rebase <gitdir> <worktree> skip
+//   ./t_rebase <gitdir> <worktree> abort|quit
+//   ./t_rebase <gitdir> <worktree> state
+
+import fs;
+import GIT_merge;
+import GIT_rebase;
+import GIT_rebase_todo;
+import GIT_sequencer;
+import io;
+import os;
+
+str slurp(str path) {
+    match (io.read(path)) {
+        case Ok(str text): {
+            return text;
+        }
+        case Err(_): {
+            return "";
+        }
+    }
+}
+
+void spit(str path, str text) {
+    match (io.write(path, text)) {
+        case Ok(_): {
+        }
+        case Err(_): {
+            io.eprint("cannot write " + path);
+        }
+    }
+}
+
+pub type Shell {
+    pub int calls = 0;
+}
+
+pub Option<str> Shell.edit(str purpose, str text) {
+    calls = calls + 1;
+    if (os.env("DECLINE").is_some()) {
+        return Option<str>.None;
+    }
+    match (os.env("GIT_EDITOR")) {
+        case Some(str editor): {
+            str path = os.env("T_SCRATCH").or("/tmp") + "/t_rebase_msg";
+            spit(path, text);
+            match (os.run(["sh", "-c", editor + " " + quote(path)])) {
+                case Ok(os.ExitStatus status): {
+                    if (!status.success()) {
+                        return Option<str>.None;
+                    }
+                }
+                case Err(_): {
+                    return Option<str>.None;
+                }
+            }
+            return Option<str>.Some(slurp(path));
+        }
+        case None: {
+            return Option<str>.Some(text);
+        }
+    }
+}
+
+str quote(str text) {
+    return "'" + text.split("'").join("'\\''") + "'";
+}
+
+void print_report(GIT_rebase.Report report) {
+    print("ending " + report.ending.word());
+    if (report.stopped != "") {
+        print("stopped " + report.stopped);
+    }
+    for (GIT_merge.Conflicted c in report.conflicts) {
+        print("kind " + c.path + " " + c.kind.word());
+    }
+    for (str line in report.messages) {
+        print("note " + line);
+    }
+    if (report.output != "") {
+        for (str line in report.output.split("\n")) {
+            print("output " + line);
+        }
+    }
+}
+
+void print_result(Result<GIT_rebase.Report, GIT_sequencer.Error> found) {
+    match (found) {
+        case Ok(GIT_rebase.Report report): {
+            print_report(report);
+        }
+        case Err(GIT_sequencer.Error error): {
+            print("refused " + error.to_str());
+        }
+    }
+}
+
+void print_notes(Result<List<str>, GIT_sequencer.Error> found) {
+    match (found) {
+        case Ok(List<str> notes): {
+            for (str line in notes) {
+                print("note " + line);
+            }
+            print("done");
+        }
+        case Err(GIT_sequencer.Error error): {
+            print("refused " + error.to_str());
+        }
+    }
+}
+
+// What GIT_SEQUENCE_EDITOR makes of the list.
+Result<List<GIT_rebase_todo.Command>, GIT_sequencer.Error> edited(str gitdir, GIT_rebase.Plan plan) {
+    str text = GIT_rebase_todo.editor_text(gitdir, plan.commands, "x..y", "z");
+    match (os.env("GIT_SEQUENCE_EDITOR")) {
+        case Some(str editor): {
+            str path = os.env("T_SCRATCH").or("/tmp") + "/t_rebase_todo";
+            spit(path, text);
+            match (os.run(["sh", "-c", editor + " " + quote(path)])) {
+                case Ok(os.ExitStatus status): {
+                    if (!status.success()) {
+                        return Result<List<GIT_rebase_todo.Command>, GIT_sequencer.Error>.Err(GIT_sequencer.Error.Unsupported("the sequence editor failed"));
+                    }
+                }
+                case Err(_): {
+                    return Result<List<GIT_rebase_todo.Command>, GIT_sequencer.Error>.Err(GIT_sequencer.Error.Unsupported("the sequence editor failed"));
+                }
+            }
+            return GIT_rebase_todo.parse(gitdir, slurp(path));
+        }
+        case None: {
+            return Result<List<GIT_rebase_todo.Command>, GIT_sequencer.Error>.Ok(plan.commands);
+        }
+    }
+}
+
+List<str> argv = os.args();
+if (argv.size() < 4) {
+    io.eprint("usage: t_rebase <gitdir> <worktree> start|continue|skip|abort|quit|state ...");
+    os.exit(2);
+}
+str gitdir = argv[1];
+str worktree = argv[2];
+str command = argv[3];
+Shell shell = Shell();
+if (command == "start") {
+    GIT_rebase.PlanOpts popts = GIT_rebase.PlanOpts();
+    GIT_rebase.StartOpts sopts = GIT_rebase.StartOpts();
+    int i = 4;
+    while (i < argv.size()) {
+        if (argv[i] == "-i") {
+            popts.interactive = true;
+            sopts.interactive = true;
+        } else if (argv[i] == "--autosquash") {
+            popts.autosquash = true;
+        } else if (argv[i] == "--autostash") {
+            sopts.autostash = true;
+        } else if (argv[i] == "--root") {
+            popts.root = true;
+        } else if (argv[i] == "--keep-base") {
+            popts.keep_base = true;
+        } else if (argv[i] == "--onto" && i + 1 < argv.size()) {
+            popts.onto = argv[i + 1];
+            i = i + 1;
+        } else {
+            popts.upstream = argv[i];
+        }
+        i = i + 1;
+    }
+    match (GIT_rebase.plan(gitdir, popts)) {
+        case Ok(GIT_rebase.Plan plan): {
+            match (edited(gitdir, plan)) {
+                case Ok(List<GIT_rebase_todo.Command> todo): {
+                    print_result(GIT_rebase.start(gitdir, worktree, plan, todo, sopts, shell));
+                }
+                case Err(GIT_sequencer.Error error): {
+                    print("refused " + error.to_str());
+                }
+            }
+        }
+        case Err(GIT_sequencer.Error error): {
+            print("refused " + error.to_str());
+        }
+    }
+} else if (command == "continue") {
+    Option<str> message = Option<str>.None;
+    if (argv.size() >= 6 && argv[4] == "-m") {
+        message = Option<str>.Some(argv[5]);
+    }
+    print_result(GIT_rebase.continue_rebase(gitdir, worktree, message, shell));
+} else if (command == "skip") {
+    print_result(GIT_rebase.skip(gitdir, worktree, shell));
+} else if (command == "abort") {
+    print_notes(GIT_rebase.abort(gitdir, worktree));
+} else if (command == "quit") {
+    print_notes(GIT_rebase.quit(gitdir, worktree));
+} else if (command == "state") {
+    match (GIT_rebase.state(gitdir)) {
+        case Some(GIT_rebase.State found): {
+            print(GIT_rebase.banner(gitdir) + " " + found.stopped);
+            print(GIT_rebase_todo.short_text(gitdir, found.upcoming));
+        }
+        case None: {
+            print("none");
+        }
+    }
+}
