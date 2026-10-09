@@ -77,16 +77,20 @@
 // before the launch attempt, same as before), and the operator is told to
 // edit it externally and press `f`.
 
+import GIT_ui_blame;
 import GIT_ui_branch;
 import GIT_ui_commit;
 import GIT_ui_core;
 import GIT_ui_diff;
+import GIT_ui_filelog;
 import GIT_ui_help;
 import GIT_ui_log;
 import GIT_ui_model;
 import GIT_ui_outline;
 import GIT_ui_remote;
 import GIT_ui_search;
+import GIT_ui_tags;
+import GIT_ui_undo;
 import io;
 import os;
 import term;
@@ -183,7 +187,7 @@ pub void State.settle() {
     }
     match (take_pick(GIT_ui_core.PICK_CHECKOUT)) {
         case Some(str name): {
-            checkout_branch(name);
+            checkout_branch(GIT_ui_model.picked_name(name));
         }
         case None: {
         }
@@ -332,6 +336,12 @@ TUI_app.Action State.run_diff_command(str cmd) {
     if (cmd == GIT_ui_core.CMD_BACK) {
         close_diff();
     }
+    if (cmd == GIT_ui_core.CMD_BLAME) {
+        GIT_ui_blame.open_current(core());
+    }
+    if (cmd == GIT_ui_core.CMD_HISTORY) {
+        GIT_ui_filelog.open_current(core());
+    }
     return TUI_app.Action.Redraw;
 }
 
@@ -411,6 +421,18 @@ TUI_app.Action State.run_outline_command(str cmd, str name) {
     }
     if (cmd == GIT_ui_core.CMD_REFRESH) {
         reload();
+    }
+    if (cmd == GIT_ui_core.CMD_BLAME) {
+        GIT_ui_blame.open_current(core());
+    }
+    if (cmd == GIT_ui_core.CMD_HISTORY) {
+        GIT_ui_filelog.open_current(core());
+    }
+    if (cmd == GIT_ui_core.CMD_UNDO) {
+        GIT_ui_undo.open(core());
+    }
+    if (cmd == GIT_ui_core.CMD_TAGS) {
+        GIT_ui_tags.open(core());
     }
     return TUI_app.Action.Redraw;
 }

@@ -1,0 +1,74 @@
+// A one-line text prompt on the bottom row, for the overlays that need a name
+// or a message (`T` tags). Enter hands the text to a `Receiver` and closes;
+// Escape closes without calling it. The receiver is any value with a
+// `received(purpose, text)` method (structural), so the prompt knows nothing
+// about what it asks for.
+
+import GIT_ui_core;
+import term;
+import tui.TUI_app;
+import tui.TUI_buffer;
+import tui.TUI_geometry;
+import tui.TUI_style;
+import tui.TUI_text;
+
+/// Who gets the text.
+pub interface Receiver {
+    void received(str purpose, str text);
+}
+
+type PromptOverlay {
+    GIT_ui_core.Core host;
+    Receiver receiver;
+    str purpose;
+    str label;
+    str input = "";
+}
+
+pub TUI_app.Action PromptOverlay.handle_key(term.Code code) {
+    match (GIT_ui_core.lookup(GIT_ui_core.SCOPE_PROMPT, code)) {
+        case Some(str cmd): {
+            if (cmd == GIT_ui_core.CMD_CLOSE) {
+                host.pop_overlay();
+            }
+            if (cmd == GIT_ui_core.CMD_ERASE) {
+                input = GIT_ui_core.drop_last(input);
+            }
+            if (cmd == GIT_ui_core.CMD_SUBMIT) {
+                host.pop_overlay();
+                receiver.received(purpose, input);
+            }
+            return TUI_app.Action.Redraw;
+        }
+        case None: {
+        }
+    }
+    match (GIT_ui_core.typed(code)) {
+        case Some(str text): {
+            input = input + text;
+            return TUI_app.Action.Redraw;
+        }
+        case None: {
+        }
+    }
+    return TUI_app.Action.Continue;
+}
+
+pub void PromptOverlay.render(TUI_buffer.Buffer buffer, TUI_geometry.Rect area) {
+    if (area.is_empty()) {
+        return;
+    }
+    TUI_geometry.Rect row = TUI_geometry.Rect(area.x, area.y + area.height - 1, area.width, 1);
+    TUI_style.Style style = TUI_style.Style(attrs: TUI_style.REVERSE);
+    buffer.fill(row, " ", style);
+    buffer.set_str(row.x, row.y, TUI_text.truncate(label + ": " + input + "_", row.width), style, max: row.width);
+}
+
+pub List<GIT_ui_core.Hint> PromptOverlay.hints() {
+    return GIT_ui_core.hints_for(GIT_ui_core.SCOPE_PROMPT);
+}
+
+/// Ask `label` on the bottom row; `receiver.received(purpose, text)` gets the answer.
+pub void open(GIT_ui_core.Core core, Receiver receiver, str purpose, str label) {
+    core.push_overlay(PromptOverlay(core, receiver, purpose, label));
+}

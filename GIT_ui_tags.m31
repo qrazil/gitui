@@ -1,0 +1,194 @@
+// `T`: tags. A list of every tag (annotated ones marked), with
+//   n   new lightweight tag      a   new annotated tag (name, then message)
+//   d   delete the tag under the cursor (asks for a `y`)
+// New tags point at the commit under the outline cursor when the overlay was
+// opened from a commit row, else at HEAD. Every write goes in the `@` log.
+
+import GIT_branches;
+import GIT_refs;
+import GIT_ui_core;
+import GIT_ui_panel;
+import GIT_ui_prompt;
+import term;
+import tui.TUI_app;
+import tui.TUI_buffer;
+import tui.TUI_geometry;
+import tui.TUI_outline;
+
+type TagsOverlay {
+    GIT_ui_core.Core host;
+    // The commit new tags point at (40 hex) and how to name it on screen.
+    str target;
+    str target_label;
+    List<GIT_branches.Tag> tags;
+    int selected = 0;
+    int offset = 0;
+    // The name typed for an annotated tag, while its message is asked.
+    str pending_name = "";
+}
+
+pub TUI_app.Action TagsOverlay.handle_key(term.Code code) {
+    match (GIT_ui_core.lookup(GIT_ui_core.SCOPE_TAGS, code)) {
+        case Some(str cmd): {
+            if (cmd == GIT_ui_core.CMD_CLOSE) {
+                host.pop_overlay();
+            }
+            if (cmd == GIT_ui_core.CMD_DOWN && selected < tags.size() - 1) {
+                selected = selected + 1;
+            }
+            if (cmd == GIT_ui_core.CMD_UP && selected > 0) {
+                selected = selected - 1;
+            }
+            if (cmd == GIT_ui_core.CMD_NEW) {
+                GIT_ui_prompt.open(host, this, "new", "new tag at " + target_label);
+            }
+            if (cmd == GIT_ui_core.CMD_ANNOTATE) {
+                GIT_ui_prompt.open(host, this, "annotate-name", "new annotated tag at " + target_label);
+            }
+            if (cmd == GIT_ui_core.CMD_DELETE && tags.size() > 0) {
+                GIT_ui_prompt.open(host, this, "delete", "delete tag " + tags[selected].name + "? type y");
+            }
+            return TUI_app.Action.Redraw;
+        }
+        case None: {
+        }
+    }
+    return TUI_app.Action.Continue;
+}
+
+/// The prompt's answer (`GIT_ui_prompt.Receiver`).
+pub void TagsOverlay.received(str purpose, str text) {
+    if (purpose == "new") {
+        match (GIT_branches.create_lightweight(host.gitdir, text, target)) {
+            case Ok(bool made): {
+                host.log_command("tag " + text + " " + target.substr(0, 7));
+                host.say("tag " + text + " created at " + target_label);
+                load(text);
+            }
+            case Err(GIT_branches.Error error): {
+                host.say("tag " + text + ": " + error.to_str());
+            }
+        }
+    }
+    if (purpose == "annotate-name") {
+        if (text == "") {
+            host.say("tag: a tag needs a name");
+            return;
+        }
+        pending_name = text;
+        GIT_ui_prompt.open(host, this, "annotate-message", "message for " + text);
+    }
+    if (purpose == "annotate-message") {
+        match (GIT_branches.create_annotated(host.gitdir, pending_name, target, text)) {
+            case Ok(str id): {
+                host.log_command("tag -a " + pending_name + " " + target.substr(0, 7));
+                host.say("annotated tag " + pending_name + " created at " + target_label);
+                load(pending_name);
+            }
+            case Err(GIT_branches.Error error): {
+                host.say("tag " + pending_name + ": " + error.to_str());
+            }
+        }
+    }
+    if (purpose == "delete") {
+        if (text != "y" || tags.size() == 0) {
+            host.say("tag: not deleted");
+            return;
+        }
+        str name = tags[selected].name;
+        match (GIT_branches.delete_tag(host.gitdir, name)) {
+            case Ok(bool gone): {
+                host.log_command("tag -d " + name);
+                host.say("tag " + name + " deleted");
+                load("");
+            }
+            case Err(GIT_branches.Error error): {
+                host.say("tag -d " + name + ": " + error.to_str());
+            }
+        }
+    }
+}
+
+// Re-read the tags, putting the cursor on `keep` when it is there.
+void TagsOverlay.load(str keep) {
+    match (GIT_branches.tags(host.gitdir)) {
+        case Ok(List<GIT_branches.Tag> found): {
+            tags = found;
+        }
+        case Err(GIT_branches.Error error): {
+            host.say("tags: " + error.to_str());
+            return;
+        }
+    }
+    selected = 0;
+    for (int index in 0 .. tags.size()) {
+        if (keep != "" && tags[index].name == keep) {
+            selected = index;
+        }
+    }
+}
+
+pub void TagsOverlay.render(TUI_buffer.Buffer buffer, TUI_geometry.Rect area) {
+    TUI_geometry.Rect inner = GIT_ui_panel.frame(buffer, area, "tags (" + tags.size().to_str() + ") -- new ones point at " + target_label);
+    if (inner.is_empty()) {
+        return;
+    }
+    if (selected < offset) {
+        offset = selected;
+    }
+    if (selected >= offset + inner.height) {
+        offset = selected - inner.height + 1;
+    }
+    offset = GIT_ui_panel.clamp(offset, tags.size(), inner.height);
+    List<str> text = [];
+    for (GIT_branches.Tag tag in tags) {
+        str kind = "  ";
+        if (tag.is_annotated) {
+            kind = "a ";
+        }
+        text.push(kind + tag.name + "  " + tag.commit.substr(0, 7) + "  " + tag.subject);
+    }
+    if (text.size() == 0) {
+        text = ["(no tags yet: n for a lightweight tag, a for an annotated one)"];
+    }
+    GIT_ui_panel.draw_lines(buffer, inner, text, offset, selected);
+}
+
+pub List<GIT_ui_core.Hint> TagsOverlay.hints() {
+    return GIT_ui_core.hints_for(GIT_ui_core.SCOPE_TAGS);
+}
+
+/// `T`: open the list. Unborn HEAD has nothing to tag, but the list opens
+/// anyway so existing tags can be seen and deleted.
+pub void open(GIT_ui_core.Core core) {
+    str target = "";
+    str label = "HEAD";
+    match (core.outline.current()) {
+        case Some(TUI_outline.Row row): {
+            if (row.node.id.starts_with("commit:") && !row.node.id.contains(":file:")) {
+                target = row.node.id.substr(7, 47);
+                label = target.substr(0, 7);
+            }
+        }
+        case None: {
+        }
+    }
+    if (target == "") {
+        match (GIT_refs.rev_parse(core.gitdir, "HEAD")) {
+            case Ok(str id): {
+                target = id;
+            }
+            case Err(GIT_refs.Error error): {
+                label = "HEAD (unborn)";
+            }
+        }
+    }
+    match (GIT_branches.tags(core.gitdir)) {
+        case Ok(List<GIT_branches.Tag> found): {
+            core.push_overlay(TagsOverlay(core, target, label, found));
+        }
+        case Err(GIT_branches.Error error): {
+            core.say("tags: " + error.to_str());
+        }
+    }
+}

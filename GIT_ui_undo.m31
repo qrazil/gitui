@@ -1,0 +1,137 @@
+// `Z`: undo and redo through the reflog, lazygit's way. The overlay shows what
+// one press would do -- the reflog entry it reverses and where HEAD (and its
+// branch) will end up -- and `y` / Enter does it. `r` and `z` switch the
+// overlay between the redo and the undo side. Worktree changes and stashes are
+// not touched by design (`GIT_undo.NOTE` says so on screen).
+
+import GIT_checkout;
+import GIT_undo;
+import GIT_ui_core;
+import GIT_ui_panel;
+import term;
+import tui.TUI_app;
+import tui.TUI_buffer;
+import tui.TUI_geometry;
+
+type UndoOverlay {
+    GIT_ui_core.Core host;
+    bool is_redo = false;
+}
+
+pub TUI_app.Action UndoOverlay.handle_key(term.Code code) {
+    match (GIT_ui_core.lookup(GIT_ui_core.SCOPE_UNDO, code)) {
+        case Some(str cmd): {
+            if (cmd == GIT_ui_core.CMD_CLOSE) {
+                host.pop_overlay();
+            }
+            if (cmd == GIT_ui_core.CMD_REDO) {
+                is_redo = true;
+            }
+            if (cmd == GIT_ui_core.CMD_UNDO) {
+                is_redo = false;
+            }
+            if (cmd == GIT_ui_core.CMD_YES) {
+                apply_now();
+            }
+            return TUI_app.Action.Redraw;
+        }
+        case None: {
+        }
+    }
+    return TUI_app.Action.Continue;
+}
+
+// Do what the overlay shows. On success the overlay closes; on a refusal it
+// stays open, with the reason on the message line.
+void UndoOverlay.apply_now() {
+    match (GIT_undo.plan(host.gitdir)) {
+        case Ok(GIT_undo.Plan plan): {
+            Option<GIT_undo.Action> chosen = plan.undo;
+            if (is_redo) {
+                chosen = plan.redo;
+            }
+            match (chosen) {
+                case Some(GIT_undo.Action action): {
+                    run(action);
+                }
+                case None: {
+                    host.say(why(plan));
+                }
+            }
+        }
+        case Err(GIT_undo.Error error): {
+            host.say("undo: " + error.to_str());
+        }
+    }
+}
+
+void UndoOverlay.run(GIT_undo.Action action) {
+    match (GIT_undo.apply(host.gitdir, host.worktree, action)) {
+        case Ok(GIT_checkout.Summary summary): {
+            host.log_command(action.title + " (" + action.detail + ")");
+            host.pop_overlay();
+            host.reload();
+            host.say(action.title + ": " + action.detail);
+        }
+        case Err(GIT_undo.Error error): {
+            host.say(action.title + " failed: " + error.to_str());
+        }
+    }
+}
+
+// Why the side being shown has nothing to do.
+str UndoOverlay.why(GIT_undo.Plan plan) {
+    if (plan.busy != "") {
+        return plan.busy;
+    }
+    if (is_redo) {
+        return plan.redo_why;
+    }
+    return plan.undo_why;
+}
+
+pub void UndoOverlay.render(TUI_buffer.Buffer buffer, TUI_geometry.Rect area) {
+    str name = "undo";
+    if (is_redo) {
+        name = "redo";
+    }
+    TUI_geometry.Rect inner = GIT_ui_panel.frame(buffer, area, name + " (reflog)");
+    if (inner.is_empty()) {
+        return;
+    }
+    List<str> lines = [];
+    match (GIT_undo.plan(host.gitdir)) {
+        case Ok(GIT_undo.Plan plan): {
+            Option<GIT_undo.Action> chosen = plan.undo;
+            if (is_redo) {
+                chosen = plan.redo;
+            }
+            match (chosen) {
+                case Some(GIT_undo.Action action): {
+                    lines.push(action.title);
+                    lines.push("  " + action.detail);
+                    lines.push("");
+                    lines.push("press y to do it, esc to cancel");
+                }
+                case None: {
+                    lines.push("Nothing to " + name + ": " + why(plan));
+                }
+            }
+        }
+        case Err(GIT_undo.Error error): {
+            lines.push("cannot read the reflog: " + error.to_str());
+        }
+    }
+    lines.push("");
+    lines.push(GIT_undo.NOTE);
+    GIT_ui_panel.draw_lines(buffer, inner, lines, 0, -1);
+}
+
+pub List<GIT_ui_core.Hint> UndoOverlay.hints() {
+    return GIT_ui_core.hints_for(GIT_ui_core.SCOPE_UNDO);
+}
+
+/// `Z`: open the overlay on the undo side.
+pub void open(GIT_ui_core.Core core) {
+    core.push_overlay(UndoOverlay(core));
+}

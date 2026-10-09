@@ -33,7 +33,7 @@ pub void BranchLayer.open_branch() {
 pub void BranchLayer.open_branch_picker() {
     List<str> names = [];
     for (GIT_ui_model.BranchRow branch_row in branch_rows) {
-        names.push(branch_row.branch.name);
+        names.push(GIT_ui_model.picker_item(branch_row));
     }
     GIT_ui_picker.open(core(), GIT_ui_core.PICK_CHECKOUT, "check out a branch", names);
 }

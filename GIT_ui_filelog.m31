@@ -1,0 +1,111 @@
+// `H`: the history of one file -- the commits that changed it, newest first,
+// the same list `git log -- <path>` gives. Enter shows a commit and what it
+// did to the file; `B` blames the file as of that commit.
+
+import GIT_filelog;
+import GIT_log;
+import GIT_ui_blame;
+import GIT_ui_core;
+import GIT_ui_panel;
+import GIT_ui_show;
+import date;
+import term;
+import tui.TUI_app;
+import tui.TUI_buffer;
+import tui.TUI_geometry;
+import tui.TUI_text;
+
+/// How many commits `H` reads: a file's whole history can be very long.
+pub const int LIMIT = 500;
+
+type HistoryOverlay {
+    GIT_ui_core.Core host;
+    str path;
+    List<GIT_log.Entry> entries;
+    int selected = 0;
+    int offset = 0;
+}
+
+pub TUI_app.Action HistoryOverlay.handle_key(term.Code code) {
+    match (GIT_ui_core.lookup(GIT_ui_core.SCOPE_FILELOG, code)) {
+        case Some(str cmd): {
+            if (cmd == GIT_ui_core.CMD_CLOSE) {
+                host.pop_overlay();
+            }
+            if (cmd == GIT_ui_core.CMD_DOWN && selected < entries.size() - 1) {
+                selected = selected + 1;
+            }
+            if (cmd == GIT_ui_core.CMD_UP && selected > 0) {
+                selected = selected - 1;
+            }
+            if (cmd == GIT_ui_core.CMD_OPEN && entries.size() > 0) {
+                GIT_ui_show.open(host, entries[selected].id, path);
+            }
+            if (cmd == GIT_ui_core.CMD_BLAME && entries.size() > 0) {
+                GIT_ui_blame.open(host, entries[selected].id, path);
+            }
+            return TUI_app.Action.Redraw;
+        }
+        case None: {
+        }
+    }
+    return TUI_app.Action.Continue;
+}
+
+pub void HistoryOverlay.render(TUI_buffer.Buffer buffer, TUI_geometry.Rect area) {
+    TUI_geometry.Rect inner = GIT_ui_panel.frame(buffer, area, "history of " + path + " (" + entries.size().to_str() + ")");
+    if (inner.is_empty()) {
+        return;
+    }
+    if (selected < offset) {
+        offset = selected;
+    }
+    if (selected >= offset + inner.height) {
+        offset = selected - inner.height + 1;
+    }
+    offset = GIT_ui_panel.clamp(offset, entries.size(), inner.height);
+    List<str> text = [];
+    for (GIT_log.Entry entry in entries) {
+        text.push(line_of(entry));
+    }
+    if (text.size() == 0) {
+        text = ["(no commit changed this file)"];
+    }
+    GIT_ui_panel.draw_lines(buffer, inner, text, offset, selected);
+}
+
+pub List<GIT_ui_core.Hint> HistoryOverlay.hints() {
+    return GIT_ui_core.hints_for(GIT_ui_core.SCOPE_FILELOG);
+}
+
+/// "abc1234 2023-11-14 Author  subject".
+pub str line_of(GIT_log.Entry entry) {
+    str message = entry.commit.message.utf8().or("(message is not UTF-8)");
+    str subject = message.split("\n")[0];
+    str who = entry.commit.author.name.utf8().or("?");
+    return entry.id.substr(0, 7) + " " + date.iso(entry.commit.author.when).substr(0, 10) + " " + TUI_text.truncate(who, 14, ellipsis: "") + "  " + subject;
+}
+
+/// The commits that changed `path` as of `rev`, over everything.
+pub void open(GIT_ui_core.Core core, str rev, str path) {
+    match (GIT_filelog.history(core.gitdir, rev, path, LIMIT)) {
+        case Ok(List<GIT_log.Entry> entries): {
+            core.push_overlay(HistoryOverlay(core, path, entries));
+        }
+        case Err(GIT_log.Error error): {
+            core.say("history " + path + ": " + error.to_str());
+        }
+    }
+}
+
+/// `H` from the outline or the diff view.
+pub void open_current(GIT_ui_core.Core core) {
+    match (GIT_ui_blame.target(core)) {
+        case Ok(GIT_ui_blame.Target found): {
+            open(core, found.rev, found.path);
+        }
+        case Err(str why): {
+            core.say("history: " + why);
+        }
+    }
+}
