@@ -74,6 +74,8 @@ bash scripts/build-gitui.sh -o ourgitui    # not build.sh -- it is the one with 
 | `scripts/compare.sh` | every command beside the real `git`, compared octet for octet |
 | `GIT_merge.m31` | `git merge` with conflicts: `start` (fast-forward, no-ff, ff-only, already up to date, unrelated histories), `merge_trees`/`merge_with_base` (per-path three-way merge, stages 1/2/3, rename-free like `merge.renames=false`), a virtual merge base when there are several (criss-cross, like git's recursive/ort), `continue_merge`, `abort_merge`, `mark_resolved` and `take_side` for the resolution view; writes MERGE_HEAD/MERGE_MSG/MERGE_MODE/ORIG_HEAD and reflogs as git does |
 | `GIT_ui_merge.m31`, `GIT_ui_merge_model.m31` | the merge layer: the `m` menu and branch picker, the abort prompt, the conflict-resolution view, the "Unmerged paths" outline section and the MERGING banner (the model is pure and unit-testable) |
+| `GIT_sequencer.m31` | `git cherry-pick` and `git revert` with git's own on-disk state: `expand` (`A..B`, tags followed), `start`, `continue_sequence`, `skip`, `abort`, `quit`, over `GIT_merge.merge_with_base`; writes CHERRY_PICK_HEAD / REVERT_HEAD, MERGE_MSG, AUTO_MERGE, `.git/sequencer/{head,abort-safety,todo,opts}` and the reflog lines git writes, so either tool can finish what the other started. Also exports the per-step pieces (`apply_step`, `finish_step`, `read_todo`/`write_todo`, `read_options`/`write_options`, `reset_to`, `clear_step_state`) for a rebase driver that keeps its own state directory |
+| `GIT_ui_sequencer.m31` | the `A` (cherry-pick) and `V` (revert) menus, the range prompt, the continue / skip / abort / quit menu, and the CHERRY-PICKING / REVERTING banner (the banner text is in `GIT_ui_merge_model.m31`) |
 | `GIT_pull.m31` | fast-forward-only pull: fetches over smart HTTP (`GIT_http_fetch.m31`), unpacks the pack with `GIT_pack.read_pack`, refuses a dirty tree and anything but a fast-forward, then `GIT_checkout.m31` moves the working tree and the ref |
 | `tests/test.sh` | all of the above (sources the `tests/test_*.sh` files next to it) |
 | `docs/FRICTION.md` | **the other half of this**: what the language made hard, and what it made easy |
@@ -242,6 +244,8 @@ the top one takes every key.
 | `c` | outline | commit overlay: `e` edit, `f` finish, `A` amend, `a` abort |
 | `b` | outline | branch overlay: `c` check out, `/` fuzzy-pick a branch, `n` new, `a` abort |
 | `m` | outline | merge overlay: `f` merge (fast-forward when possible), `n` always make a merge commit, `o` fast-forward only, each fuzzy-picking a branch; while merging `c` continue (commit), `a` abort (asks first) |
+| `A` / `V` | outline | cherry-pick / revert the commit under the cursor (a Commits row, or a Branches row for that branch's tip): `p` now, `x` cherry-pick `-x`, `n` `-n` (apply, do not commit), `k` keep a pick that comes out empty, `r` type a range (`A..B` or commits; `R` with `-x`), `1` / `2` a merge commit against its first / second parent |
+| `c` `s` `a` `q` | `A` / `V` while a pick or revert is under way | continue (commit the resolved step), skip it, abort (asks first), quit (forget the state, keep the files) |
 | `Enter` | outline, on an unmerged path | open the resolution view |
 | `a` `b` `B` `z` | resolution view | take ours / theirs / both / the base for the conflict under the cursor (`z` undoes) |
 | `j` `k` / `n` `p` | resolution view | next / previous conflict |
@@ -545,3 +549,38 @@ and `merge.ff` / merge drivers; submodules conflict and keep ours.
 `test_merge.sh` runs every case on twin repositories, one merged by git and one
 by us, and compares HEAD, index, status, working tree, state files and reflogs;
 `pty_merge.py` drives the screens under a real pty.
+
+## Cherry-pick and revert (`GIT_sequencer.m31`, `GIT_ui_sequencer.m31`)
+
+`A` cherry-picks and `V` reverts the commit under the cursor. The commits in
+the outline are those reachable from HEAD, so to pick from another branch put
+the cursor on its row under Branches (the tip is picked) or type a range with
+`r`. The menu offers `-x`, `-n`, `-m 1` / `-m 2` and a range; a range is the
+commits reachable from B and not from A, oldest first for a pick and newest
+first for a revert, as git orders them. Several commits (or any range) keep
+`.git/sequencer/` with `head`, `abort-safety`, `todo` and `opts`; a single
+commit leaves only the per-step files, as git does. A conflict leaves stages
+1/2/3 and markers, CHERRY_PICK_HEAD / REVERT_HEAD, MERGE_MSG with its
+`# Conflicts:` block and AUTO_MERGE; the outline shows a CHERRY-PICKING or
+REVERTING banner and the same "Unmerged paths" section and resolution view the
+merge uses. `A c` / `V c` commits the resolved step and goes on (the pick keeps
+its author), `s` drops it, `a` puts HEAD and the files back (and, as git does,
+only if HEAD is still where the sequence left it), `q` forgets the sequence.
+A step that comes out empty stops with a message; `s` skips it.
+
+While a pick or revert is under way, commit, branch, merge, pull, undo and
+stash apply / pop / branch refuse with a message. A sequence git started is
+recognised on startup and the other way round; `test_sequencer.sh` compares 54
+cases against twin repositories (working tree, index, refs, reflogs, every
+state file, commit ids) in all four git/ours pairings of start and finish, and
+`pty_sequencer.py` drives the screens.
+
+Not done: rename detection (as the merge), the editor (messages are used as
+they are; `MERGE_MSG` is cleaned of `#` lines on continue), `--signoff`,
+`--strategy`, `-X`, `--gpg-sign`, `--edit`, a todo with verbs other than pick
+and revert, committing an empty step by hand or picking an originally empty commit
+(`k` keeps a pick that came out redundant, nothing offers `--allow-empty`),
+and non-UTF-8 commit messages. A first step that fails
+with an error (a local change in the way) leaves nothing behind, where git
+leaves the sequencer directory and then calls the operation "already in
+progress".
