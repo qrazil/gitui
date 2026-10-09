@@ -314,7 +314,7 @@ str short_or_none(str id) {
     return label_of(id);
 }
 
-List<TUI_menu.Item> items_of(str scope) {
+pub List<TUI_menu.Item> items_of(str scope) {
     List<TUI_menu.Item> items = [];
     for (GIT_ui_core.Binding binding in GIT_ui_core.bindings_in(scope)) {
         str key = binding.keys[0];
@@ -400,6 +400,10 @@ pub List<GIT_ui_core.Hint> AbortAsk.hints() {
 /// `A` or `V`: the menu for the commit under the cursor, or the one for the
 /// operation under way.
 pub void open(GIT_ui_core.Core core, GIT_sequencer.Verb verb) {
+    if (core.is_rebasing) {
+        core.say(core.sequence_word + " is under way: r continues, skips or aborts it");
+        return;
+    }
     if (core.is_sequencing) {
         core.push_overlay(BusyMenu(core));
         return;

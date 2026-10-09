@@ -6,6 +6,7 @@
 //   MERGING (2 conflicts)            a banner, only while MERGE_HEAD exists
 //   CHERRY-PICKING (1 conflict)      the same for a cherry-pick or revert under
 //   REVERTING (no conflicts left)    way (CHERRY_PICK_HEAD, REVERT_HEAD, .git/sequencer)
+//   REBASING 2/5 (1 conflict)        the same for a rebase (.git/rebase-merge)
 //   Unmerged paths (2)               only while some path is unmerged
 //     UU  src/main.m31                 Enter opens the resolution view
 //     UD  old.txt
@@ -48,6 +49,9 @@ pub str sequence_banner_text(str word, int conflicts, int left) {
     str key = "A";
     if (word == "REVERTING") {
         key = "V";
+    }
+    if (word.starts_with("REBASING")) {
+        key = "r";
     }
     if (conflicts == 0) {
         return word + " (no conflicts left: " + key + " c continues" + more + ")";

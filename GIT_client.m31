@@ -91,6 +91,7 @@ import GIT_ui_merge;
 import GIT_ui_merge_model;
 import GIT_ui_model;
 import GIT_ui_outline;
+import GIT_ui_rebase;
 import GIT_ui_remote;
 import GIT_ui_search;
 import GIT_ui_sequencer;
@@ -120,7 +121,7 @@ pub type State {
 /// this constructor alone does no I/O, which is what makes it safe to build
 /// in a test that never touches a real repository.
 pub static State State.open(str gitdir, str worktree) {
-    State state = State(GIT_ui_remote.RemoteLayer(GIT_ui_merge.MergeLayer(GIT_ui_branch.BranchLayer(GIT_ui_commit.CommitLayer(GIT_ui_lines.LinesLayer(GIT_ui_diff.DiffLayer(GIT_ui_outline.OutlineLayer(GIT_ui_core.Core(gitdir, worktree)))))))));
+    State state = State(GIT_ui_remote.RemoteLayer(GIT_ui_rebase.RebaseLayer(GIT_ui_merge.MergeLayer(GIT_ui_branch.BranchLayer(GIT_ui_commit.CommitLayer(GIT_ui_lines.LinesLayer(GIT_ui_diff.DiffLayer(GIT_ui_outline.OutlineLayer(GIT_ui_core.Core(gitdir, worktree))))))))));
     state.set_editor_paths();
     return state;
 }
@@ -154,6 +155,11 @@ pub void State.launch_editor() {
     is_editor_wanted = false;
     if (resolve_edit_path != "") {
         launch_resolve_editor();
+        settle();
+        return;
+    }
+    if (rebase_edit_path != "") {
+        launch_rebase_editor();
         settle();
         return;
     }
@@ -197,6 +203,7 @@ pub void State.settle() {
         pop_overlay();
     }
     settle_merge_picks();
+    settle_rebase_picks();
     match (take_pick(GIT_ui_core.PICK_CHECKOUT)) {
         case Some(str name): {
             checkout_branch(GIT_ui_model.picked_name(name));
@@ -293,6 +300,9 @@ pub TUI_app.Action State.handle_key(term.Code code) {
         GIT_ui_core.Overlay top = overlays[overlays.size() - 1];
         TUI_app.Action action = top.handle_key(code);
         settle();
+        if (is_editor_wanted && rebase_edit_path != "") {
+            return TUI_app.Action.Quit;
+        }
         return action;
     }
     str scope = GIT_ui_core.SCOPE_OUTLINE;
@@ -424,6 +434,9 @@ TUI_app.Action State.run_outline_command(str cmd, str name) {
     }
     if (cmd == GIT_ui_core.CMD_MERGE) {
         open_merge();
+    }
+    if (cmd == GIT_ui_core.CMD_REBASE) {
+        open_rebase();
     }
     if (cmd == GIT_ui_core.CMD_PUSH) {
         open_push();

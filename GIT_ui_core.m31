@@ -48,6 +48,7 @@ import GIT_checkout;
 import GIT_log;
 import GIT_merge;
 import GIT_object;
+import GIT_rebase;
 import GIT_refs;
 import GIT_sequencer;
 import GIT_stash;
@@ -89,6 +90,10 @@ pub const str SCOPE_PROMPT = "prompt";
 pub const str SCOPE_PICK = "pick";
 pub const str SCOPE_REVERT = "revert";
 pub const str SCOPE_SEQUENCE = "sequence";
+pub const str SCOPE_REBASE = "rebase";
+pub const str SCOPE_REBASE_BUSY = "rebase-busy";
+pub const str SCOPE_REBASE_TODO = "rebase-todo";
+pub const str SCOPE_PULL_ASK = "pull-ask";
 pub const str CMD_QUIT = "quit";
 pub const str CMD_DOWN = "down";
 pub const str CMD_UP = "up";
@@ -140,6 +145,23 @@ pub const str CMD_PICK_PARENT_2 = "pick-parent-2";
 pub const str CMD_SEQUENCE_CONTINUE = "sequence-continue";
 pub const str CMD_SEQUENCE_SKIP = "sequence-skip";
 pub const str CMD_SEQUENCE_QUIT = "sequence-quit";
+pub const str CMD_REBASE = "rebase";
+pub const str CMD_REBASE_BRANCH = "rebase-branch";
+pub const str CMD_REBASE_INTERACTIVE = "rebase-interactive";
+pub const str CMD_REBASE_HERE = "rebase-here";
+pub const str CMD_REBASE_ONTO = "rebase-onto";
+pub const str CMD_REBASE_EDIT_TODO = "rebase-edit-todo";
+pub const str CMD_AUTOSQUASH = "autosquash";
+pub const str CMD_AUTOSTASH = "autostash";
+pub const str CMD_VERB_PICK = "verb-pick";
+pub const str CMD_VERB_REWORD = "verb-reword";
+pub const str CMD_VERB_EDIT = "verb-edit";
+pub const str CMD_VERB_SQUASH = "verb-squash";
+pub const str CMD_VERB_FIXUP = "verb-fixup";
+pub const str CMD_VERB_DROP = "verb-drop";
+pub const str CMD_MOVE_DOWN = "move-down";
+pub const str CMD_MOVE_UP = "move-up";
+pub const str CMD_EXTERNAL = "external";
 pub const str CMD_MERGE = "merge";
 pub const str CMD_MERGE_NO_FF = "merge-no-ff";
 pub const str CMD_MERGE_FF_ONLY = "merge-ff-only";
@@ -181,6 +203,11 @@ pub const str PICK_CHECKOUT = "checkout";
 pub const str PICK_MERGE = "merge";
 pub const str PICK_MERGE_NO_FF = "merge-no-ff";
 pub const str PICK_MERGE_FF_ONLY = "merge-ff-only";
+/// The rebase menu's pickers: onto a branch, interactively, and `--onto`'s two.
+pub const str PICK_REBASE = "rebase";
+pub const str PICK_REBASE_INTERACTIVE = "rebase-interactive";
+pub const str PICK_REBASE_ONTO = "rebase-onto";
+pub const str PICK_REBASE_UPSTREAM = "rebase-upstream";
 /// How many lines of the command log are kept; the oldest go first.
 pub const int COMMAND_LOG_CAPACITY = 500;
 
@@ -296,6 +323,9 @@ pub type Core {
     pub bool is_sequencing = false;
     pub str sequence_word = "";
     pub int sequence_left = 0;
+    /// A rebase is under way; it also sets the three `sequence_` fields, so
+    /// the banner and the blocking work as for a cherry-pick.
+    pub bool is_rebasing = false;
     /// The file the conflict-resolution view asked `$EDITOR` for, and whether
     /// the editor ran since the view last read it (see `GIT_ui_merge`).
     pub str resolve_edit_path = "";
@@ -386,6 +416,17 @@ pub void Core.refresh() {
         case None: {
         }
     }
+    is_rebasing = false;
+    match (GIT_rebase.state(gitdir)) {
+        case Some(GIT_rebase.State found): {
+            is_rebasing = true;
+            is_sequencing = true;
+            sequence_word = GIT_rebase.banner(gitdir);
+            sequence_left = found.upcoming.size();
+        }
+        case None: {
+        }
+    }
     branch_rows = [];
     match (GIT_checkout.branches(gitdir)) {
         case Ok(List<GIT_checkout.Branch> branches): {
@@ -441,7 +482,11 @@ pub bool Core.is_blocked_by_sequence(str what) {
     if (!is_sequencing) {
         return false;
     }
-    message = what + " is blocked while " + sequence_word + " (A or V: continue, skip or abort)";
+    str keys = "A or V";
+    if (is_rebasing) {
+        keys = "r";
+    }
+    message = what + " is blocked while " + sequence_word + " (" + keys + ": continue, skip or abort)";
     return true;
 }
 
@@ -627,6 +672,7 @@ pub List<Binding> key_table() {
     table.push(Binding(SCOPE_OUTLINE, CMD_MERGE, ["m"], "merge: a branch into the current one, continue or abort a merge, resolve conflicts (Enter on an unmerged path)", "m", "merge"));
     table.push(Binding(SCOPE_OUTLINE, CMD_PICK, ["A"], "cherry-pick the commit under the cursor (menu: now, -x, -n, a range); while one is under way: continue, skip, abort", "A", "pick"));
     table.push(Binding(SCOPE_OUTLINE, CMD_REVERT, ["V"], "revert the commit under the cursor (menu: now, -n, a range); while one is under way: continue, skip, abort", "V", "revert"));
+    table.push(Binding(SCOPE_OUTLINE, CMD_REBASE, ["r"], "rebase the current branch (menu: onto a branch, interactively, from the commit under the cursor, --onto); while one is under way: continue, skip, abort, quit, edit the todo list", "r", "rebase"));
     table.push(Binding(SCOPE_OUTLINE, CMD_REFRESH, ["g", "R"], "re-read the repository", "g", "refresh"));
     table.push(Binding(SCOPE_OUTLINE, CMD_QUIT, ["q", "escape"], "quit", "q", "quit"));
     // The document: the diff view.
@@ -727,6 +773,35 @@ pub List<Binding> key_table() {
     table.push(Binding(SCOPE_SEQUENCE, CMD_ABORT, ["a"], "abort: put HEAD and the files back where they were (asks first)", "a", "abort"));
     table.push(Binding(SCOPE_SEQUENCE, CMD_SEQUENCE_QUIT, ["q"], "quit: forget the sequence, keeping HEAD and the files as they are", "q", "quit"));
     table.push(Binding(SCOPE_SEQUENCE, CMD_CLOSE, ["escape"], "close", "esc", "close"));
+    table.push(Binding(SCOPE_REBASE, CMD_REBASE_BRANCH, ["r"], "rebase the current branch onto a branch you pick (its upstream is listed first)", "r", "onto"));
+    table.push(Binding(SCOPE_REBASE, CMD_REBASE_INTERACTIVE, ["i"], "rebase -i onto a branch you pick: edit the todo list, then start", "i", "interactive"));
+    table.push(Binding(SCOPE_REBASE, CMD_REBASE_HERE, ["h"], "rebase -i from the commit under the cursor: it and every commit after it", "h", "from here"));
+    table.push(Binding(SCOPE_REBASE, CMD_REBASE_ONTO, ["o"], "rebase --onto: pick the new base, then the branch whose commits are left out", "o", "--onto"));
+    table.push(Binding(SCOPE_REBASE, CMD_AUTOSQUASH, ["s"], "toggle --autosquash: fixup! and squash! commits move next to their target (interactive)", "s", "autosquash"));
+    table.push(Binding(SCOPE_REBASE, CMD_AUTOSTASH, ["a"], "toggle --autostash: stash a dirty tree for the rebase, apply it after", "a", "autostash"));
+    table.push(Binding(SCOPE_REBASE, CMD_CLOSE, ["escape"], "close", "esc", "close"));
+    table.push(Binding(SCOPE_REBASE_BUSY, CMD_SEQUENCE_CONTINUE, ["c"], "continue: commit the resolved or amended step and go on", "c", "continue"));
+    table.push(Binding(SCOPE_REBASE_BUSY, CMD_SEQUENCE_SKIP, ["s"], "skip the stopped commit: drop its changes and go on", "s", "skip"));
+    table.push(Binding(SCOPE_REBASE_BUSY, CMD_ABORT, ["a"], "abort: put the branch, HEAD and the files back as before (asks first)", "a", "abort"));
+    table.push(Binding(SCOPE_REBASE_BUSY, CMD_SEQUENCE_QUIT, ["q"], "quit: forget the rebase, keeping HEAD and the files as they are", "q", "quit"));
+    table.push(Binding(SCOPE_REBASE_BUSY, CMD_REBASE_EDIT_TODO, ["e"], "edit the todo list: what is left to do", "e", "edit todo"));
+    table.push(Binding(SCOPE_REBASE_BUSY, CMD_CLOSE, ["escape"], "close", "esc", "close"));
+    table.push(Binding(SCOPE_REBASE_TODO, CMD_DOWN, ["j", "down"], "move the cursor down", "j/k", "move"));
+    table.push(Binding(SCOPE_REBASE_TODO, CMD_UP, ["k", "up"], "move the cursor up", "", ""));
+    table.push(Binding(SCOPE_REBASE_TODO, CMD_VERB_PICK, ["p"], "pick: use the commit", "p/r/e/s/f/d", "verb"));
+    table.push(Binding(SCOPE_REBASE_TODO, CMD_VERB_REWORD, ["r"], "reword: use the commit, edit its message", "", ""));
+    table.push(Binding(SCOPE_REBASE_TODO, CMD_VERB_EDIT, ["e"], "edit: use the commit, then stop to amend it", "", ""));
+    table.push(Binding(SCOPE_REBASE_TODO, CMD_VERB_SQUASH, ["s"], "squash: meld into the commit before, keeping both messages", "", ""));
+    table.push(Binding(SCOPE_REBASE_TODO, CMD_VERB_FIXUP, ["f"], "fixup: meld into the commit before, keeping only its message", "", ""));
+    table.push(Binding(SCOPE_REBASE_TODO, CMD_VERB_DROP, ["d"], "drop: leave the commit out", "", ""));
+    table.push(Binding(SCOPE_REBASE_TODO, CMD_MOVE_DOWN, ["J"], "move the line down (later)", "J/K", "move line"));
+    table.push(Binding(SCOPE_REBASE_TODO, CMD_MOVE_UP, ["K"], "move the line up (earlier)", "", ""));
+    table.push(Binding(SCOPE_REBASE_TODO, CMD_EXTERNAL, ["E"], "edit the whole list in $EDITOR (exec and break lines can be added there)", "E", "$EDITOR"));
+    table.push(Binding(SCOPE_REBASE_TODO, CMD_SUBMIT, ["enter"], "start the rebase with this list (or save it, when one is under way)", "enter", "start"));
+    table.push(Binding(SCOPE_REBASE_TODO, CMD_CLOSE, ["escape"], "cancel: nothing is changed", "esc", "cancel"));
+    table.push(Binding(SCOPE_PULL_ASK, CMD_YES, ["y"], "merge the fetched branch into this one", "y", "merge"));
+    table.push(Binding(SCOPE_PULL_ASK, CMD_REBASE, ["r"], "rebase this branch onto the fetched one", "r", "rebase"));
+    table.push(Binding(SCOPE_PULL_ASK, CMD_CLOSE, ["escape"], "any other key does nothing", "any", "no"));
     table.push(Binding(SCOPE_RESOLVE, CMD_OURS, ["a"], "keep ours (the current branch's side) for this conflict, or for the whole file when it has no markers", "a", "ours"));
     table.push(Binding(SCOPE_RESOLVE, CMD_THEIRS, ["b"], "keep theirs (the merged branch's side) for this conflict, or for the whole file", "b", "theirs"));
     table.push(Binding(SCOPE_RESOLVE, CMD_BOTH, ["B"], "keep both: ours, then theirs", "B", "both"));
@@ -877,6 +952,18 @@ pub str scope_title(str scope) {
     if (scope == SCOPE_SEQUENCE) {
         return "cherry-pick / revert under way (A or V)";
     }
+    if (scope == SCOPE_REBASE) {
+        return "rebase menu (r)";
+    }
+    if (scope == SCOPE_REBASE_BUSY) {
+        return "rebase under way (r)";
+    }
+    if (scope == SCOPE_REBASE_TODO) {
+        return "rebase todo list";
+    }
+    if (scope == SCOPE_PULL_ASK) {
+        return "diverged pull: merge or rebase (F, then p)";
+    }
     if (scope == SCOPE_RESOLVE) {
         return "conflict resolution (Enter on an unmerged path)";
     }
@@ -912,7 +999,7 @@ pub str scope_title(str scope) {
 
 /// Every scope, in the order the help overlay lists them.
 pub List<str> all_scopes() {
-    return [SCOPE_OUTLINE, SCOPE_DIFF, SCOPE_GLOBAL, SCOPE_COMMIT, SCOPE_BRANCH, SCOPE_PUSH, SCOPE_PULL, SCOPE_CONFIRM, SCOPE_LOG, SCOPE_HELP, SCOPE_SEARCH, SCOPE_PICKER, SCOPE_MERGE, SCOPE_MERGE_ASK, SCOPE_RESOLVE, SCOPE_STASH, SCOPE_STASH_LIST, SCOPE_STASH_PROMPT, SCOPE_BLAME, SCOPE_FILELOG, SCOPE_SHOW, SCOPE_UNDO, SCOPE_TAGS, SCOPE_PROMPT, SCOPE_PICK, SCOPE_REVERT, SCOPE_SEQUENCE];
+    return [SCOPE_OUTLINE, SCOPE_DIFF, SCOPE_GLOBAL, SCOPE_COMMIT, SCOPE_BRANCH, SCOPE_PUSH, SCOPE_PULL, SCOPE_CONFIRM, SCOPE_LOG, SCOPE_HELP, SCOPE_SEARCH, SCOPE_PICKER, SCOPE_MERGE, SCOPE_MERGE_ASK, SCOPE_RESOLVE, SCOPE_STASH, SCOPE_STASH_LIST, SCOPE_STASH_PROMPT, SCOPE_BLAME, SCOPE_FILELOG, SCOPE_SHOW, SCOPE_UNDO, SCOPE_TAGS, SCOPE_PROMPT, SCOPE_PICK, SCOPE_REVERT, SCOPE_SEQUENCE, SCOPE_REBASE, SCOPE_REBASE_BUSY, SCOPE_REBASE_TODO, SCOPE_PULL_ASK];
 }
 
 // --- the overlay stack and the command log -------------------------------------

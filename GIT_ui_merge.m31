@@ -170,12 +170,6 @@ pub str MergeLayer.current_branch_name() {
     return "";
 }
 
-/// `F` found `origin/<branch>` diverged: offer to merge it. `spec` names the
-/// fetched tip.
-pub void MergeLayer.offer_pull_merge(str spec) {
-    push_overlay(MergeAsk(this, spec + " has diverged from this branch: merge it?", "merge", spec));
-}
-
 /// Enter on an "Unmerged paths" row.
 pub void MergeLayer.open_resolve_current() {
     match (outline.current()) {

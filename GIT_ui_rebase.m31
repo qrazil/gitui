@@ -1,0 +1,864 @@
+// The rebase UI: `r` opens a menu over the outline; the work is `GIT_rebase`
+// (git's `.git/rebase-merge/` state, so `git rebase --continue` can finish
+// what this started and the other way round). This file asks, shows and
+// reports.
+//
+//   r r   rebase the current branch onto a branch you pick (its upstream first)
+//   r i   the same interactively: a todo list to edit before it starts
+//   r h   interactively from the commit under the cursor: it and all after it
+//   r o   --onto: pick the new base, then the branch whose commits are left out
+//   r s   toggle --autosquash (interactive only)     r a   toggle --autostash
+//
+// While a rebase is under way `r` opens another menu:
+//     c continue   s skip   a abort (asks first)   q quit   e edit the todo list
+//
+// The todo list is an overlay: j/k move, p r e s f d set the verb, J/K move the
+// line, Enter starts (or saves, mid-rebase), Esc cancels, E hands the whole
+// list to $EDITOR (which also allows `exec` and `break` lines).
+//
+// A reword or a squash needs a message: the rebase stops, $EDITOR opens on the
+// proposed text (the terminal handoff of `GIT_client.State.launch_editor`) and
+// the answer goes to `continue_rebase`. A cancelled editor leaves the rebase
+// stopped; `r c` asks again.
+//
+// A diverged `F` offers merge or rebase; `pull.rebase` / `branch.<n>.rebase`
+// = true rebases without asking. Not offered: label, reset, merge, update-ref,
+// quick fixup/squash/reword/drop of one commit from the outline.
+
+import fs;
+import GIT_config;
+import GIT_merge;
+import GIT_object;
+import GIT_rebase;
+import GIT_rebase_todo;
+import GIT_refs;
+import GIT_sequencer;
+import GIT_ui_core;
+import GIT_ui_merge;
+import GIT_ui_model;
+import GIT_ui_panel;
+import GIT_ui_picker;
+import GIT_ui_sequencer;
+import io;
+import os;
+import term;
+import tui.TUI_app;
+import tui.TUI_buffer;
+import tui.TUI_geometry;
+import tui.TUI_menu;
+import tui.TUI_style;
+import tui.TUI_text;
+
+const str TODO_FILE = "GITUI_REBASE_TODO";
+
+pub type RebaseLayer {
+    pub GIT_ui_merge.MergeLayer;
+    /// The menu's toggles: -1 follows `rebase.autoSquash` / `rebase.autoStash`.
+    pub int autosquash_pref = -1;
+    pub int autostash_pref = -1;
+    /// What `$EDITOR` is wanted for (`message` or `todo`) and on which file.
+    pub str rebase_edit_purpose = "";
+    pub str rebase_edit_path = "";
+    /// The todo text the editor left, for the todo overlay to take.
+    pub str edited_todo = "";
+    pub bool has_edited_todo = false;
+    /// `--onto`: the new base, while the second picker is open.
+    pub str onto_choice = "";
+}
+
+pub bool RebaseLayer.is_autosquash() {
+    if (autosquash_pref >= 0) {
+        return autosquash_pref == 1;
+    }
+    return GIT_rebase.default_autosquash(gitdir);
+}
+
+pub bool RebaseLayer.is_autostash() {
+    if (autostash_pref >= 0) {
+        return autostash_pref == 1;
+    }
+    return GIT_rebase.default_autostash(gitdir);
+}
+
+/// `r`: the menu for a new rebase, or the one for the rebase under way.
+pub void RebaseLayer.open_rebase() {
+    if (is_rebasing) {
+        push_overlay(BusyMenu(this));
+        return;
+    }
+    if (is_blocked_by_sequence("rebase")) {
+        return;
+    }
+    if (is_merging) {
+        message = "rebase is blocked while MERGING (m c continues, m a aborts)";
+        return;
+    }
+    push_overlay(RebaseMenu(this, GIT_ui_sequencer.commit_under_cursor(core())));
+}
+
+/// The branches a rebase can go onto: the upstream of the current branch,
+/// then the other local branches, then the remote-tracking ones.
+pub List<str> RebaseLayer.rebase_branch_items() {
+    List<str> items = [];
+    for (GIT_ui_model.BranchRow row in branch_rows) {
+        if (row.branch.is_current && row.upstream != "") {
+            items.push(row.upstream);
+        }
+    }
+    for (GIT_ui_model.BranchRow row in branch_rows) {
+        if (!row.branch.is_current && !items.contains(row.branch.name)) {
+            items.push(row.branch.name);
+        }
+    }
+    match (GIT_refs.all(gitdir)) {
+        case Ok(List<GIT_refs.Ref> refs): {
+            for (GIT_refs.Ref ref in refs) {
+                if (ref.name.starts_with("refs/remotes/") && !ref.name.ends_with("/HEAD")) {
+                    str short = ref.name.substr(13, ref.name.size());
+                    if (!items.contains(short)) {
+                        items.push(short);
+                    }
+                }
+            }
+        }
+        case Err(_): {
+        }
+    }
+    return items;
+}
+
+pub void RebaseLayer.open_rebase_picker(str purpose, str title) {
+    List<str> items = rebase_branch_items();
+    if (items.size() == 0) {
+        message = "rebase: there is no other branch to rebase onto";
+        return;
+    }
+    GIT_ui_picker.open(core(), purpose, title, items);
+}
+
+/// Act on a finished rebase picker; called from `State.settle`.
+pub void RebaseLayer.settle_rebase_picks() {
+    match (take_pick(GIT_ui_core.PICK_REBASE)) {
+        case Some(str spec): {
+            begin_rebase(GIT_rebase.PlanOpts(upstream: spec), "rebase " + spec);
+        }
+        case None: {
+        }
+    }
+    match (take_pick(GIT_ui_core.PICK_REBASE_INTERACTIVE)) {
+        case Some(str spec): {
+            begin_rebase(GIT_rebase.PlanOpts(upstream: spec, interactive: true, autosquash: is_autosquash()), "rebase -i " + spec);
+        }
+        case None: {
+        }
+    }
+    match (take_pick(GIT_ui_core.PICK_REBASE_ONTO)) {
+        case Some(str spec): {
+            onto_choice = spec;
+            open_rebase_picker(GIT_ui_core.PICK_REBASE_UPSTREAM, "rebase --onto " + spec + ": leave out the commits of");
+        }
+        case None: {
+        }
+    }
+    match (take_pick(GIT_ui_core.PICK_REBASE_UPSTREAM)) {
+        case Some(str spec): {
+            str onto = onto_choice;
+            onto_choice = "";
+            begin_rebase(GIT_rebase.PlanOpts(upstream: spec, onto: onto), "rebase --onto " + onto + " " + spec);
+        }
+        case None: {
+        }
+    }
+}
+
+/// `r h`: interactively from `spec` (a commit id or a branch name) on.
+pub void RebaseLayer.rebase_from(str spec) {
+    if (spec == "") {
+        message = "rebase: put the cursor on a commit";
+        return;
+    }
+    str id = "";
+    match (GIT_refs.rev_parse(gitdir, spec)) {
+        case Ok(str found): {
+            id = found;
+        }
+        case Err(_): {
+            message = "rebase: " + spec + " is not a commit";
+            return;
+        }
+    }
+    bool is_root = false;
+    match (GIT_merge.read_commit(gitdir, id)) {
+        case Ok(GIT_object.Commit commit): {
+            is_root = commit.parents.size() == 0;
+        }
+        case Err(_): {
+            message = "rebase: " + spec + " is not a commit";
+            return;
+        }
+    }
+    str line = "rebase -i " + GIT_ui_core.short_id(id) + "^";
+    if (is_root) {
+        begin_rebase(GIT_rebase.PlanOpts(root: true, interactive: true, autosquash: is_autosquash()), "rebase -i --root");
+        return;
+    }
+    begin_rebase(GIT_rebase.PlanOpts(upstream: id + "^", interactive: true, autosquash: is_autosquash()), line);
+}
+
+/// Plan a rebase; an interactive one opens the todo list, the rest start.
+pub void RebaseLayer.begin_rebase(GIT_rebase.PlanOpts popts, str line) {
+    if (is_blocked_by_sequence("rebase")) {
+        return;
+    }
+    if (is_merging) {
+        message = "rebase is blocked while MERGING (m c continues, m a aborts)";
+        return;
+    }
+    match (GIT_rebase.plan(gitdir, popts)) {
+        case Ok(GIT_rebase.Plan plan): {
+            GIT_rebase.StartOpts opts = GIT_rebase.StartOpts(interactive: popts.interactive, autostash: is_autostash());
+            if (popts.interactive) {
+                if (plan.commands.size() == 0) {
+                    message = "rebase -i: no commits to rebase";
+                    return;
+                }
+                str title = "rebase -i onto " + plan.onto_name + " (" + plan.commands.size().to_str() + " commits)";
+                push_overlay(TodoOverlay(this, plan.commands, Option<GIT_rebase.Plan>.Some(plan), opts, line, title));
+                return;
+            }
+            run_start(plan, plan.commands, opts, line);
+        }
+        case Err(GIT_sequencer.Error error): {
+            message = "rebase refused: " + error.to_str();
+        }
+    }
+}
+
+pub void RebaseLayer.run_start(GIT_rebase.Plan plan, List<GIT_rebase_todo.Command> cmds, GIT_rebase.StartOpts opts, str line) {
+    match (GIT_rebase.start(gitdir, worktree, plan, cmds, opts, GIT_rebase.Declining())) {
+        case Ok(GIT_rebase.Report report): {
+            log_command(line);
+            report_on(report);
+        }
+        case Err(GIT_sequencer.Error error): {
+            message = "rebase refused: " + error.to_str();
+        }
+    }
+    reload();
+}
+
+/// Say where a report left the rebase; true when it needs a message typed.
+pub bool RebaseLayer.describe(GIT_rebase.Report report) {
+    str notes = "";
+    if (report.messages.size() > 0) {
+        notes = " (" + report.messages.join("; ") + ")";
+    }
+    str at = GIT_ui_core.short_id(report.stopped);
+    if (report.ending.eq(GIT_rebase.Ending.Finished)) {
+        message = "rebase finished" + notes;
+    } else if (report.ending.eq(GIT_rebase.Ending.UpToDate)) {
+        message = "rebase: the current branch is up to date";
+    } else if (report.ending.eq(GIT_rebase.Ending.Conflicts)) {
+        message = "rebase stopped on " + at + ": " + report.conflicts.size().to_str() + " path(s) conflict -- Enter on one to resolve, then r c" + notes;
+    } else if (report.ending.eq(GIT_rebase.Ending.Empty)) {
+        message = "rebase stopped on " + at + ": nothing is left to commit -- r c keeps going, r s skips it";
+    } else if (report.ending.eq(GIT_rebase.Ending.Edit)) {
+        message = "rebase stopped at " + at + " to edit: change it, then r c";
+    } else if (report.ending.eq(GIT_rebase.Ending.Break)) {
+        message = "rebase: break -- r c goes on";
+    } else if (report.ending.eq(GIT_rebase.Ending.ExecFailed)) {
+        message = "rebase: exec '" + report.command + "' failed -- fix it, then r c; r a aborts";
+    } else if (report.ending.eq(GIT_rebase.Ending.ExecDirty)) {
+        message = "rebase: exec '" + report.command + "' left changes -- commit them, then r c";
+    } else {
+        message = "rebase stopped on " + at + ": a message is needed";
+        return true;
+    }
+    return false;
+}
+
+pub void RebaseLayer.report_on(GIT_rebase.Report report) {
+    if (describe(report)) {
+        want_message_editor();
+    }
+}
+
+/// The message the stopped step proposes, in `commit_message_path`.
+pub bool RebaseLayer.write_message_file() {
+    str text = "";
+    match (io.read(fs.join(GIT_rebase.state_dir(gitdir), "message"))) {
+        case Ok(str found): {
+            text = found;
+        }
+        case Err(_): {
+        }
+    }
+    match (io.write(commit_message_path, text + GIT_ui_model.commit_template())) {
+        case Ok(_): {
+            return true;
+        }
+        case Err(io.Error error): {
+            message = "cannot write " + commit_message_path + ": " + error.to_str();
+            return false;
+        }
+    }
+}
+
+pub void RebaseLayer.want_message_editor() {
+    if (!write_message_file()) {
+        return;
+    }
+    rebase_edit_purpose = "message";
+    rebase_edit_path = commit_message_path;
+    is_editor_wanted = true;
+    message = "launching editor...";
+}
+
+pub void RebaseLayer.want_todo_editor(str text) {
+    str path = fs.join(gitdir, TODO_FILE);
+    match (io.write(path, text)) {
+        case Ok(_): {
+            rebase_edit_purpose = "todo";
+            rebase_edit_path = path;
+            is_editor_wanted = true;
+            message = "launching editor...";
+        }
+        case Err(io.Error error): {
+            message = "cannot write " + path + ": " + error.to_str();
+        }
+    }
+}
+
+/// Run `$EDITOR` on `path`; false, with the reason in the status line, unless it exited 0.
+pub bool RebaseLayer.run_editor(str path) {
+    str editor = GIT_ui_model.editor_for(gitdir);
+    match (os.run([editor, path])) {
+        case Ok(os.ExitStatus exit_status): {
+            match (exit_status) {
+                case Exited(int code): {
+                    if (code == 0) {
+                        return true;
+                    }
+                    message = "editor '" + editor + "' exited " + code.to_str() + "; nothing changed";
+                }
+                case Signaled(int sig): {
+                    message = "editor '" + editor + "' was killed by signal " + sig.to_str();
+                }
+            }
+        }
+        case Err(io.Error error): {
+            message = "cannot launch '" + editor + "' (" + error.to_str() + ")";
+        }
+    }
+    return false;
+}
+
+/// The second half of the handoff, after `TUI_app.Loop.run` gave the terminal
+/// back. A message goes to `continue_rebase`; a later step that needs one too
+/// opens the editor again here, since the driver would not look twice.
+pub void RebaseLayer.launch_rebase_editor() {
+    str purpose = rebase_edit_purpose;
+    str path = rebase_edit_path;
+    rebase_edit_purpose = "";
+    rebase_edit_path = "";
+    if (purpose == "todo") {
+        if (run_editor(path)) {
+            match (io.read(path)) {
+                case Ok(str text): {
+                    edited_todo = text;
+                    has_edited_todo = true;
+                }
+                case Err(io.Error error): {
+                    message = "cannot read " + path + ": " + error.to_str();
+                }
+            }
+        }
+        remove_quietly(path);
+        return;
+    }
+    bool again = true;
+    while (again) {
+        again = false;
+        if (!run_editor(path)) {
+            message = message + " -- the rebase is stopped: r c asks again";
+            break;
+        }
+        match (io.read(path)) {
+            case Ok(str text): {
+                match (GIT_rebase.continue_rebase(gitdir, worktree, Option<str>.Some(text), GIT_rebase.Declining())) {
+                    case Ok(GIT_rebase.Report report): {
+                        log_command("rebase --continue");
+                        if (describe(report) && write_message_file()) {
+                            again = true;
+                        }
+                    }
+                    case Err(GIT_sequencer.Error error): {
+                        message = "rebase --continue refused: " + error.to_str() + " -- r c asks again";
+                    }
+                }
+            }
+            case Err(io.Error error): {
+                message = "cannot read " + path + ": " + error.to_str();
+            }
+        }
+    }
+    remove_quietly(path);
+    reload();
+}
+
+/// The todo overlay takes what the editor left (once).
+pub Option<str> RebaseLayer.take_edited_todo() {
+    if (!has_edited_todo) {
+        return Option<str>.None;
+    }
+    has_edited_todo = false;
+    return Option<str>.Some(edited_todo);
+}
+
+pub void RebaseLayer.continue_rebase_now(bool skip) {
+    str flag = "--continue";
+    if (skip) {
+        flag = "--skip";
+    }
+    Result<GIT_rebase.Report, GIT_sequencer.Error> result = GIT_rebase.continue_rebase(gitdir, worktree, Option<str>.None, GIT_rebase.Declining());
+    if (skip) {
+        result = GIT_rebase.skip(gitdir, worktree, GIT_rebase.Declining());
+    }
+    match (result) {
+        case Ok(GIT_rebase.Report report): {
+            log_command("rebase " + flag);
+            report_on(report);
+        }
+        case Err(GIT_sequencer.Error error): {
+            message = "rebase " + flag + " refused: " + error.to_str();
+        }
+    }
+    reload();
+}
+
+pub void RebaseLayer.abort_rebase() {
+    match (GIT_rebase.abort(gitdir, worktree)) {
+        case Ok(_): {
+            log_command("rebase --abort");
+            message = "rebase aborted: the branch and the files are back where they were";
+        }
+        case Err(GIT_sequencer.Error error): {
+            message = "rebase --abort refused: " + error.to_str();
+        }
+    }
+    reload();
+}
+
+pub void RebaseLayer.quit_rebase() {
+    match (GIT_rebase.quit(gitdir, worktree)) {
+        case Ok(_): {
+            log_command("rebase --quit");
+            message = "rebase forgotten; HEAD and the files stay as they are";
+        }
+        case Err(GIT_sequencer.Error error): {
+            message = "rebase --quit refused: " + error.to_str();
+        }
+    }
+    reload();
+}
+
+pub void RebaseLayer.open_todo() {
+    match (GIT_rebase.state(gitdir)) {
+        case Some(GIT_rebase.State found): {
+            if (found.upcoming.size() == 0) {
+                message = "rebase: nothing is left to do";
+                return;
+            }
+            GIT_rebase.StartOpts opts = GIT_rebase.StartOpts();
+            push_overlay(TodoOverlay(this, found.upcoming, Option<GIT_rebase.Plan>.None, opts, "rebase --edit-todo", "rebase todo list (what is left)"));
+        }
+        case None: {
+            message = "no rebase in progress";
+        }
+    }
+}
+
+pub void RebaseLayer.save_todo(List<GIT_rebase_todo.Command> cmds) {
+    match (GIT_rebase.edit_todo(gitdir, GIT_rebase_todo.full_text(cmds))) {
+        case Ok(_): {
+            log_command("rebase --edit-todo");
+            message = "todo list saved: " + cmds.size().to_str() + " left";
+        }
+        case Err(GIT_sequencer.Error error): {
+            message = "rebase --edit-todo refused: " + error.to_str();
+        }
+    }
+    reload();
+}
+
+/// `F` found `spec` diverged: rebase if the configuration says so, else ask.
+pub void RebaseLayer.offer_pull(str spec) {
+    str how = GIT_config.pull_rebase(gitdir, current_branch_name());
+    if (how == "true") {
+        begin_rebase(GIT_rebase.PlanOpts(upstream: spec), "rebase " + spec);
+        return;
+    }
+    if (how == "interactive") {
+        begin_rebase(GIT_rebase.PlanOpts(upstream: spec, interactive: true, autosquash: is_autosquash()), "rebase -i " + spec);
+        return;
+    }
+    push_overlay(PullAsk(this, spec));
+}
+
+str word_on_off(bool on) {
+    if (on) {
+        return "on";
+    }
+    return "off";
+}
+
+// --- opening ------------------------------------------------------------------------
+
+// --- starting -----------------------------------------------------------------------
+
+// --- the editor handoff ------------------------------------------------------------------
+
+void remove_quietly(str path) {
+    if (fs.exists(path)) {
+        match (fs.remove(path)) {
+            case Ok(_): {
+            }
+            case Err(_): {
+            }
+        }
+    }
+}
+
+// --- the rebase under way ------------------------------------------------------------------
+
+// --- pull -----------------------------------------------------------------------------------
+
+/// merge, or rebase onto the fetched tip.
+type PullAsk {
+    RebaseLayer host;
+    str spec;
+}
+
+pub TUI_app.Action PullAsk.handle_key(term.Code code) {
+    host.pop_overlay();
+    match (GIT_ui_core.lookup(GIT_ui_core.SCOPE_PULL_ASK, code)) {
+        case Some(str cmd): {
+            if (cmd == GIT_ui_core.CMD_YES) {
+                host.start_merge(spec, GIT_merge.FastForward.Allow);
+                return TUI_app.Action.Redraw;
+            }
+            if (cmd == GIT_ui_core.CMD_REBASE) {
+                host.begin_rebase(GIT_rebase.PlanOpts(upstream: spec), "rebase " + spec);
+                return TUI_app.Action.Redraw;
+            }
+        }
+        case None: {
+        }
+    }
+    host.say("cancelled");
+    return TUI_app.Action.Redraw;
+}
+
+pub void PullAsk.render(TUI_buffer.Buffer buffer, TUI_geometry.Rect area) {
+    TUI_menu.WhichKey which_key = TUI_menu.WhichKey(spec + " has diverged from this branch: merge it?", [TUI_menu.Item("y", "merge"), TUI_menu.Item("r", "rebase onto it instead"), TUI_menu.Item("any other key", "no")]);
+    which_key.render(buffer, area);
+}
+
+pub List<GIT_ui_core.Hint> PullAsk.hints() {
+    return GIT_ui_core.hints_for(GIT_ui_core.SCOPE_PULL_ASK);
+}
+
+// --- the menus ----------------------------------------------------------------------------------
+
+type RebaseMenu {
+    RebaseLayer host;
+    str target;
+}
+
+pub TUI_app.Action RebaseMenu.handle_key(term.Code code) {
+    match (GIT_ui_core.lookup(GIT_ui_core.SCOPE_REBASE, code)) {
+        case Some(str cmd): {
+            if (cmd == GIT_ui_core.CMD_AUTOSQUASH) {
+                host.autosquash_pref = 1;
+                if (host.is_autosquash() && host.autosquash_pref == 1) {
+                    host.autosquash_pref = 0;
+                }
+                return TUI_app.Action.Redraw;
+            }
+            if (cmd == GIT_ui_core.CMD_AUTOSTASH) {
+                host.autostash_pref = 1;
+                if (host.is_autostash() && host.autostash_pref == 1) {
+                    host.autostash_pref = 0;
+                }
+                return TUI_app.Action.Redraw;
+            }
+            host.pop_overlay();
+            if (cmd == GIT_ui_core.CMD_REBASE_BRANCH) {
+                host.open_rebase_picker(GIT_ui_core.PICK_REBASE, "rebase onto");
+            }
+            if (cmd == GIT_ui_core.CMD_REBASE_INTERACTIVE) {
+                host.open_rebase_picker(GIT_ui_core.PICK_REBASE_INTERACTIVE, "rebase -i onto");
+            }
+            if (cmd == GIT_ui_core.CMD_REBASE_ONTO) {
+                host.open_rebase_picker(GIT_ui_core.PICK_REBASE_ONTO, "rebase --onto: the new base");
+            }
+            if (cmd == GIT_ui_core.CMD_REBASE_HERE) {
+                host.rebase_from(target);
+            }
+            return TUI_app.Action.Redraw;
+        }
+        case None: {
+        }
+    }
+    return TUI_app.Action.Continue;
+}
+
+pub void RebaseMenu.render(TUI_buffer.Buffer buffer, TUI_geometry.Rect area) {
+    str title = "rebase  [autosquash " + word_on_off(host.is_autosquash()) + ", autostash " + word_on_off(host.is_autostash()) + "]";
+    TUI_menu.WhichKey which_key = TUI_menu.WhichKey(title, GIT_ui_sequencer.items_of(GIT_ui_core.SCOPE_REBASE));
+    which_key.render(buffer, area);
+}
+
+pub List<GIT_ui_core.Hint> RebaseMenu.hints() {
+    return GIT_ui_core.hints_for(GIT_ui_core.SCOPE_REBASE);
+}
+
+type BusyMenu {
+    RebaseLayer host;
+}
+
+pub TUI_app.Action BusyMenu.handle_key(term.Code code) {
+    match (GIT_ui_core.lookup(GIT_ui_core.SCOPE_REBASE_BUSY, code)) {
+        case Some(str cmd): {
+            host.pop_overlay();
+            if (cmd == GIT_ui_core.CMD_SEQUENCE_CONTINUE) {
+                host.continue_rebase_now(false);
+            }
+            if (cmd == GIT_ui_core.CMD_SEQUENCE_SKIP) {
+                host.continue_rebase_now(true);
+            }
+            if (cmd == GIT_ui_core.CMD_ABORT) {
+                host.push_overlay(AbortAsk(host));
+            }
+            if (cmd == GIT_ui_core.CMD_SEQUENCE_QUIT) {
+                host.quit_rebase();
+            }
+            if (cmd == GIT_ui_core.CMD_REBASE_EDIT_TODO) {
+                host.open_todo();
+            }
+            return TUI_app.Action.Redraw;
+        }
+        case None: {
+        }
+    }
+    return TUI_app.Action.Continue;
+}
+
+pub void BusyMenu.render(TUI_buffer.Buffer buffer, TUI_geometry.Rect area) {
+    TUI_menu.WhichKey which_key = TUI_menu.WhichKey(host.sequence_word, GIT_ui_sequencer.items_of(GIT_ui_core.SCOPE_REBASE_BUSY));
+    which_key.render(buffer, area);
+}
+
+pub List<GIT_ui_core.Hint> BusyMenu.hints() {
+    return GIT_ui_core.hints_for(GIT_ui_core.SCOPE_REBASE_BUSY);
+}
+
+/// `y` aborts; every other key keeps going.
+type AbortAsk {
+    RebaseLayer host;
+}
+
+pub TUI_app.Action AbortAsk.handle_key(term.Code code) {
+    host.pop_overlay();
+    match (GIT_ui_core.lookup(GIT_ui_core.SCOPE_MERGE_ASK, code)) {
+        case Some(str cmd): {
+            if (cmd == GIT_ui_core.CMD_YES) {
+                host.abort_rebase();
+                return TUI_app.Action.Redraw;
+            }
+        }
+        case None: {
+        }
+    }
+    host.say("abort cancelled");
+    return TUI_app.Action.Redraw;
+}
+
+pub void AbortAsk.render(TUI_buffer.Buffer buffer, TUI_geometry.Rect area) {
+    TUI_menu.WhichKey which_key = TUI_menu.WhichKey("abort the " + host.sequence_word + " and put everything back?", [TUI_menu.Item("y", "yes"), TUI_menu.Item("any other key", "no")]);
+    which_key.render(buffer, area);
+}
+
+pub List<GIT_ui_core.Hint> AbortAsk.hints() {
+    return GIT_ui_core.hints_for(GIT_ui_core.SCOPE_MERGE_ASK);
+}
+
+// --- the todo list ----------------------------------------------------------------------------------
+
+/// The list being edited. `plan` is set for a new rebase and `None` for the
+/// commands left in one under way.
+type TodoOverlay {
+    RebaseLayer host;
+    List<GIT_rebase_todo.Command> cmds;
+    Option<GIT_rebase.Plan> plan;
+    GIT_rebase.StartOpts opts;
+    str line;
+    str title;
+    int cursor = 0;
+    int offset = 0;
+}
+
+void TodoOverlay.take_edited() {
+    match (host.take_edited_todo()) {
+        case Some(str text): {
+            match (GIT_rebase_todo.parse(host.gitdir, text)) {
+                case Ok(List<GIT_rebase_todo.Command> found): {
+                    cmds = found;
+                    cursor = 0;
+                    offset = 0;
+                    host.say("todo list read back from the editor: " + found.size().to_str() + " command(s)");
+                }
+                case Err(GIT_sequencer.Error error): {
+                    host.say("todo list from the editor refused: " + error.to_str() + " -- the list is unchanged");
+                }
+            }
+        }
+        case None: {
+        }
+    }
+}
+
+void TodoOverlay.set_verb(GIT_rebase_todo.Verb verb) {
+    if (cursor >= cmds.size()) {
+        return;
+    }
+    GIT_rebase_todo.Command cmd = cmds[cursor];
+    if (!cmd.verb.has_commit()) {
+        host.say("an exec or break line has no verb to change");
+        return;
+    }
+    cmds[cursor] = GIT_rebase_todo.Command(verb, cmd.id, cmd.text);
+}
+
+void TodoOverlay.move_line(int delta) {
+    int to = cursor + delta;
+    if (to < 0 || to >= cmds.size()) {
+        return;
+    }
+    GIT_rebase_todo.Command held = cmds[cursor];
+    cmds[cursor] = cmds[to];
+    cmds[to] = held;
+    cursor = to;
+}
+
+void TodoOverlay.go() {
+    if (cmds.size() == 0) {
+        host.say("the list is empty: Esc cancels (a rebase with nothing in it is an abort)");
+        return;
+    }
+    match (GIT_rebase_todo.validate(cmds)) {
+        case Ok(_): {
+        }
+        case Err(GIT_sequencer.Error error): {
+            host.say("rebase: " + error.to_str());
+            return;
+        }
+    }
+    host.pop_overlay();
+    match (plan) {
+        case Some(GIT_rebase.Plan found): {
+            host.run_start(found, cmds, opts, line);
+        }
+        case None: {
+            host.save_todo(cmds);
+        }
+    }
+}
+
+pub TUI_app.Action TodoOverlay.handle_key(term.Code code) {
+    take_edited();
+    match (GIT_ui_core.lookup(GIT_ui_core.SCOPE_REBASE_TODO, code)) {
+        case Some(str cmd): {
+            if (cmd == GIT_ui_core.CMD_CLOSE) {
+                host.pop_overlay();
+            }
+            if (cmd == GIT_ui_core.CMD_DOWN && cursor < cmds.size() - 1) {
+                cursor = cursor + 1;
+            }
+            if (cmd == GIT_ui_core.CMD_UP && cursor > 0) {
+                cursor = cursor - 1;
+            }
+            if (cmd == GIT_ui_core.CMD_VERB_PICK) {
+                set_verb(GIT_rebase_todo.Verb.Pick);
+            }
+            if (cmd == GIT_ui_core.CMD_VERB_REWORD) {
+                set_verb(GIT_rebase_todo.Verb.Reword);
+            }
+            if (cmd == GIT_ui_core.CMD_VERB_EDIT) {
+                set_verb(GIT_rebase_todo.Verb.Edit);
+            }
+            if (cmd == GIT_ui_core.CMD_VERB_SQUASH) {
+                set_verb(GIT_rebase_todo.Verb.Squash);
+            }
+            if (cmd == GIT_ui_core.CMD_VERB_FIXUP) {
+                set_verb(GIT_rebase_todo.Verb.Fixup);
+            }
+            if (cmd == GIT_ui_core.CMD_VERB_DROP) {
+                set_verb(GIT_rebase_todo.Verb.Drop);
+            }
+            if (cmd == GIT_ui_core.CMD_MOVE_DOWN) {
+                move_line(1);
+            }
+            if (cmd == GIT_ui_core.CMD_MOVE_UP) {
+                move_line(-1);
+            }
+            if (cmd == GIT_ui_core.CMD_EXTERNAL) {
+                host.want_todo_editor(GIT_rebase_todo.editor_text(host.gitdir, cmds, "the commits", "the new base"));
+            }
+            if (cmd == GIT_ui_core.CMD_SUBMIT) {
+                go();
+            }
+            return TUI_app.Action.Redraw;
+        }
+        case None: {
+        }
+    }
+    return TUI_app.Action.Continue;
+}
+
+str TodoOverlay.row(GIT_rebase_todo.Command cmd) {
+    if (cmd.verb == GIT_rebase_todo.Verb.Break) {
+        return "break";
+    }
+    if (cmd.verb == GIT_rebase_todo.Verb.Exec) {
+        return "exec " + cmd.text;
+    }
+    return cmd.verb.word() + " " + GIT_ui_core.short_id(cmd.id) + " " + cmd.text;
+}
+
+pub void TodoOverlay.render(TUI_buffer.Buffer buffer, TUI_geometry.Rect area) {
+    take_edited();
+    TUI_geometry.Rect inner = GIT_ui_panel.frame(buffer, area, title);
+    if (inner.height < 3) {
+        return;
+    }
+    buffer.set_str(inner.x, inner.y, TUI_text.truncate("oldest first; the first line is replayed first", inner.width), TUI_style.Style(attrs: TUI_style.DIM), max: inner.width);
+    TUI_geometry.Rect list = TUI_geometry.Rect(inner.x, inner.y + 1, inner.width, inner.height - 2);
+    buffer.set_str(inner.x, inner.y + inner.height - 1, TUI_text.truncate(host.status_line(), inner.width), TUI_style.Style(attrs: TUI_style.DIM), max: inner.width);
+    List<str> rows = [];
+    for (GIT_rebase_todo.Command cmd in cmds) {
+        rows.push(row(cmd));
+    }
+    if (cursor < offset) {
+        offset = cursor;
+    }
+    if (cursor >= offset + list.height) {
+        offset = cursor - list.height + 1;
+    }
+    offset = GIT_ui_panel.clamp(offset, rows.size(), list.height);
+    GIT_ui_panel.draw_lines(buffer, list, rows, offset, cursor);
+}
+
+pub List<GIT_ui_core.Hint> TodoOverlay.hints() {
+    return GIT_ui_core.hints_for(GIT_ui_core.SCOPE_REBASE_TODO);
+}

@@ -7,7 +7,7 @@ import GIT_http_push;
 import GIT_pull;
 import GIT_refs;
 import GIT_ui_core;
-import GIT_ui_merge;
+import GIT_ui_rebase;
 import term;
 import tui.TUI_app;
 import tui.TUI_buffer;
@@ -15,7 +15,7 @@ import tui.TUI_geometry;
 import tui.TUI_menu;
 
 pub type RemoteLayer {
-    pub GIT_ui_merge.MergeLayer;
+    pub GIT_ui_rebase.RebaseLayer;
 }
 
 /// `P`: open the push overlay.
@@ -137,7 +137,7 @@ pub void RemoteLayer.pull_current() {
         case Err(GIT_pull.Error error): {
             message = "pull: " + error.to_str();
             if (error.is_diverged()) {
-                offer_pull_merge("origin/" + current_branch_name());
+                offer_pull("origin/" + current_branch_name());
             }
         }
     }
