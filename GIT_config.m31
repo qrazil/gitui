@@ -9,7 +9,7 @@
 //   Config.get_bool(section, sub, key)  -> Option<bool>
 //   Config.list()                       -> List<str>               `git config --list`
 //
-//   GIT_config.get(gitdir, "remote", "origin", "url")  -> Option<str>   (one key, local file)
+//   GIT_config.get(gitdir, "remote", "origin", "url")  -> Option<str>   (one key, all layers)
 //   GIT_config.find(text, section, sub, key)           -> Option<str>   (same, over text)
 //
 //   GIT_config.set(gitdir, section, sub, key, value)      -> Result<bool, Error>
