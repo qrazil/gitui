@@ -14,7 +14,7 @@
 
 rb_env() {
     export GIT_AUTHOR_NAME=T GIT_AUTHOR_EMAIL=t@example.com GIT_COMMITTER_NAME=T GIT_COMMITTER_EMAIL=t@example.com
-    export GIT_AUTHOR_DATE='1700000000 +0000' GIT_COMMITTER_DATE='1700000000 +0000' GIT_EDITOR=true
+    export GIT_AUTHOR_DATE='1700000000 +0000' GIT_COMMITTER_DATE='1700000000 +0000' GIT_EDITOR=${RB_ED:-true}
     export GIT_SEQUENCE_EDITOR="sh $WORK/rb_seded.sh" T_SCRATCH="$WORK"
 }
 
@@ -146,6 +146,67 @@ rb_compare() {
     note "rebase: $label (state, refs, reflogs and state files equal git's; rc=$grc; ours: $(echo "$oout" | head -1))"
 }
 
+
+cat >"$WORK/rb_ed.sh" <<'SH'
+#!/bin/sh
+{ printf 'edited line\n\n'; cat "$1"; } >"$1.new" && mv "$1.new" "$1"
+SH
+
+# rb_do <g|o> <repo> <args...>: the operation done by git or by us
+rb_do() {
+    local who=$1 r=$2; shift 2
+    if [ "$who" = g ]; then
+        if [ "$1" = start ]; then shift; rb_git -C "$r" rebase "$@"; else rb_git -C "$r" rebase "--$1" "${@:2}"; fi
+    else
+        rb_ours "$r" "$@"
+    fi
+}
+
+rb_resolve() {
+    printf 'a\nb\nRES\nd\ne\nf\ng\nH\n' >"$1/f"; rb_git -C "$1" add f
+}
+rb_stage_extra() {
+    echo extra >"$1/x"; rb_git -C "$1" add x
+}
+rb_edit_file() {
+    echo changed >"$1/k"
+}
+rb_nothing() { :; }
+rb_dirty_k() { echo dirty >"$1/k"; }
+rb_dirty_f() { printf 'a\nb\nDIRTY\nd\ne\nf\ng\nh\n' >"$1/f"; }
+rb_untracked() { echo u >"$1/untracked"; }
+
+# rb_flow <label> <branch> <start args> <mid fn> <ops...>: start by A, mid, ops by B; all four A/B pairings equal git/git
+rb_flow() {
+    local label=$1 branch=$2 args=$3 mid=$4; shift 4
+    rb_only "$label" || return 0
+    local pair ref="" got A B op bad_pair=""
+    for pair in gg go og oo; do
+        A=${pair:0:1}; B=${pair:1:1}
+        local r=$WORK/rb_f$pair
+        rb_twin "$WORK/rb_src" "$r"
+        rb_git -C "$r" checkout -q "$branch"
+        ${RB_PRE:-:} "$r"
+        rb_do $A "$r" start $args >/dev/null 2>&1
+        $mid "$r"
+        for op in "$@"; do
+            case $op in
+                resolve) rb_resolve "$r" ;;
+                stage) rb_stage_extra "$r" ;;
+                dirty) rb_edit_file "$r" ;;
+                *) rb_do $B "$r" $op >"$WORK/rb_f.out" 2>&1 ;;
+            esac
+        done
+        got=$(rb_state "$r")
+        if [ "$pair" = gg ]; then ref=$got; elif [ "$got" != "$ref" ]; then
+            bad "rebase: $label: $A starts, $B finishes: differs from git" "$(diff <(echo "$ref") <(echo "$got") | head -${RB_DIFF:-20})"
+            bad_pair=1
+        fi
+        rb_fsck "$r" "$label $pair" || bad_pair=1
+    done
+    [ -z "$bad_pair" ] && note "rebase: $label (git/ours start and finish in all four pairings, states equal)"
+}
+
 if build t_rebase; then
     rb_build "$WORK/rb_src" &&
     {
@@ -182,5 +243,40 @@ if build t_rebase; then
         rb_compare "empty commit kept, interactive" emp "-i main"
         rb_compare "commit that becomes empty is dropped" redund "main"
         rb_compare "commit that becomes empty stops, interactive" redund "-i main"
+
+        RB_ED="sh $WORK/rb_ed.sh" SEDSCRIPT='s/^pick \(.*\) t2$/reword \1 t2/' rb_compare "reword with a changed message" topic "-i main"
+        RB_ED="sh $WORK/rb_ed.sh" SEDSCRIPT='s/^pick \(.*\) t3$/squash \1 t3/;s/^pick \(.*\) t2$/squash \1 t2/' rb_compare "squash chain, message edited" topic "-i main"
+        RB_ED="sh $WORK/rb_ed.sh" SEDSCRIPT='s/^pick \(.*\) t2$/squash \1 t2/' rb_compare "squash, message edited" topic "-i main"
+        RB_ED="sh $WORK/rb_ed.sh" rb_compare "autosquash, message edited" fix "-i --autosquash main"
+        rb_compare "autostash, dirty tracked file" topic "--autostash main" rb_dirty_k
+        rb_compare "autostash, untracked file is left alone" topic "--autostash main" rb_untracked
+        rb_compare "autostash, clean tree" topic "--autostash main"
+        rb_compare "autostash, interactive" topic "-i --autostash main" rb_dirty_k
+        rb_compare "autostash whose pop conflicts" topic "--autostash main" rb_dirty_f
+        rb_compare "autostash with a conflicting pick" conf "--autostash main" rb_dirty_k
+        rb_compare "dirty tree without autostash is refused" topic "main" rb_dirty_k
+        RB_PRE=rb_dirty_k rb_flow "autostash, conflict, resolve, continue" conf "--autostash main" rb_resolve continue
+        RB_PRE=rb_dirty_k rb_flow "autostash, conflict, abort" conf "--autostash main" rb_nothing abort
+        RB_PRE=rb_dirty_k rb_flow "autostash, conflict, quit stores the stash" conf "--autostash main" rb_nothing quit
+        SEDSCRIPT='s/^pick \(.*\) t2$/edit \1 t2/' RB_PRE=rb_dirty_k rb_flow "autostash, edit, continue" topic "-i --autostash main" rb_nothing continue
+        rb_flow "conflict, resolve, continue" conf "main" rb_resolve continue
+        rb_flow "conflict, resolve, continue, interactive" conf "-i main" rb_resolve continue
+        rb_flow "conflict, skip" conf "main" rb_nothing skip
+        rb_flow "conflict, abort" conf "main" rb_nothing abort
+        rb_flow "conflict, quit" conf "main" rb_nothing quit
+        rb_flow "conflict, abort after resolving" conf "main" rb_resolve abort
+        rb_flow "conflict, continue with no resolution is refused" conf "main" rb_nothing continue
+        SEDSCRIPT='s/^pick \(.*\) t2$/edit \1 t2/' rb_flow "edit, continue" topic "-i main" rb_nothing continue
+        SEDSCRIPT='s/^pick \(.*\) t2$/edit \1 t2/' rb_flow "edit, stage a file, continue amends" topic "-i main" rb_stage_extra continue
+        SEDSCRIPT='s/^pick \(.*\) t2$/edit \1 t2/' rb_flow "edit, abort" topic "-i main" rb_nothing abort
+        SEDSCRIPT='s/^pick \(.*\) t2$/edit \1 t2/' rb_flow "edit, skip" topic "-i main" rb_nothing skip
+        SEDSCRIPT='2s/^/break\n/' rb_flow "break, continue" topic "-i main" rb_nothing continue
+        SEDSCRIPT='2s/^/exec echo hi; false\n/' rb_flow "failed exec, continue" topic "-i main" rb_nothing continue
+        SEDSCRIPT='2s/^/exec echo hi; false\n/' rb_flow "failed exec, abort" topic "-i main" rb_nothing abort
+        SEDSCRIPT='s/^pick \(.*\) c3$/squash \1 c3/' rb_flow "squash conflict, resolve, continue" conf "-i main" rb_resolve continue
+        SEDSCRIPT='s/^pick \(.*\) c3$/squash \1 c3/' rb_flow "squash conflict, skip" conf "-i main" rb_nothing skip
+        rb_flow "empty stop, continue" redund "-i main" rb_nothing continue
+        rb_flow "empty stop, skip" redund "-i main" rb_nothing skip
+        RB_PRE=rb_dirty_k rb_flow "dirty tree refuses a start" topic "main" rb_nothing abort
     }
 fi
