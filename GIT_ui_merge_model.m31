@@ -4,6 +4,8 @@
 // with conflict markers is laid out as lines.
 //
 //   MERGING (2 conflicts)            a banner, only while MERGE_HEAD exists
+//   CHERRY-PICKING (1 conflict)      the same for a cherry-pick or revert under
+//   REVERTING (no conflicts left)    way (CHERRY_PICK_HEAD, REVERT_HEAD, .git/sequencer)
 //   Unmerged paths (2)               only while some path is unmerged
 //     UU  src/main.m31                 Enter opens the resolution view
 //     UD  old.txt
@@ -18,6 +20,7 @@ import tui.TUI_outline;
 import tui.TUI_style;
 
 pub const str BANNER_ID = "merge:banner";
+pub const str SEQUENCE_BANNER_ID = "sequence:banner";
 pub const str SECTION_ID = "unmerged";
 pub const str ROW_PREFIX = "unmerged:";
 
@@ -32,15 +35,43 @@ pub str banner_text(int conflicts) {
     return "MERGING (" + conflicts.to_str() + " conflicts)";
 }
 
+/// The banner of a cherry-pick or revert under way: `word` is CHERRY-PICKING
+/// or REVERTING, `left` the steps after the stopped one.
+pub str sequence_banner_text(str word, int conflicts, int left) {
+    str more = "";
+    if (left == 1) {
+        more = ", 1 more step";
+    }
+    if (left > 1) {
+        more = ", " + left.to_str() + " more steps";
+    }
+    str key = "A";
+    if (word == "REVERTING") {
+        key = "V";
+    }
+    if (conflicts == 0) {
+        return word + " (no conflicts left: " + key + " c continues" + more + ")";
+    }
+    if (conflicts == 1) {
+        return word + " (1 conflict" + more + ")";
+    }
+    return word + " (" + conflicts.to_str() + " conflicts" + more + ")";
+}
+
 /// The rows to put before the ordinary sections. Each unmerged path's row id
 /// is `unmerged:<path>` and its raw path is recorded in `out_paths`, like the
 /// other path rows.
-pub List<TUI_outline.Node> merge_roots(GIT_status.Status status, bool is_merging, Map<str, bool> collapsed, Map<str, bytes> out_paths) {
+pub List<TUI_outline.Node> merge_roots(GIT_status.Status status, bool is_merging, Map<str, bool> collapsed, Map<str, bytes> out_paths, str sequence_word, int sequence_left) {
     List<TUI_outline.Node> roots = [];
     if (is_merging) {
         TUI_outline.Node banner = TUI_outline.Node.leaf(BANNER_ID, banner_text(status.unmerged.size()));
         banner.style = TUI_style.Style(foreground: TUI_style.Colour.Indexed(9), attrs: TUI_style.BOLD);
         roots.push(banner);
+    }
+    if (sequence_word != "") {
+        TUI_outline.Node sequence = TUI_outline.Node.leaf(SEQUENCE_BANNER_ID, sequence_banner_text(sequence_word, status.unmerged.size(), sequence_left));
+        sequence.style = TUI_style.Style(foreground: TUI_style.Colour.Indexed(9), attrs: TUI_style.BOLD);
+        roots.push(sequence);
     }
     if (status.unmerged.size() > 0) {
         List<TUI_outline.Node> children = [];

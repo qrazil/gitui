@@ -74,6 +74,9 @@ bool conflicted(GIT_ui_core.Core core, str verb, int n, GIT_stash.Error error) {
 
 /// `git stash apply` (and with `drop_after`, `pop`) of `stash@{n}`.
 pub void apply_stash(GIT_ui_core.Core core, int n, bool restore_index, bool drop_after) {
+    if (core.is_blocked_by_sequence("stash apply")) {
+        return;
+    }
     GIT_stash.Applied done = GIT_stash.Applied(0, 0, 0);
     if (drop_after) {
         match (GIT_stash.pop(core.gitdir, core.worktree, n, restore_index: restore_index)) {
@@ -138,6 +141,9 @@ pub void drop_stash(GIT_ui_core.Core core, int n) {
 
 /// `git stash branch <name> stash@{n}`.
 pub void branch_stash(GIT_ui_core.Core core, int n, str name) {
+    if (core.is_blocked_by_sequence("stash branch")) {
+        return;
+    }
     if (name == "") {
         core.say("no branch created (empty name)");
         return;

@@ -49,6 +49,7 @@ import GIT_log;
 import GIT_merge;
 import GIT_object;
 import GIT_refs;
+import GIT_sequencer;
 import GIT_stash;
 import GIT_status;
 import GIT_ui_merge_model;
@@ -85,6 +86,9 @@ pub const str SCOPE_SHOW = "show";
 pub const str SCOPE_UNDO = "undo";
 pub const str SCOPE_TAGS = "tags";
 pub const str SCOPE_PROMPT = "prompt";
+pub const str SCOPE_PICK = "pick";
+pub const str SCOPE_REVERT = "revert";
+pub const str SCOPE_SEQUENCE = "sequence";
 pub const str CMD_QUIT = "quit";
 pub const str CMD_DOWN = "down";
 pub const str CMD_UP = "up";
@@ -123,6 +127,19 @@ pub const str CMD_SUBMIT = "submit";
 pub const str CMD_ERASE = "erase";
 pub const str CMD_TOP = "top";
 pub const str CMD_BOTTOM = "bottom";
+pub const str CMD_PICK = "pick";
+pub const str CMD_REVERT = "revert";
+pub const str CMD_PICK_NOW = "pick-now";
+pub const str CMD_PICK_ORIGIN = "pick-origin";
+pub const str CMD_PICK_NO_COMMIT = "pick-no-commit";
+pub const str CMD_PICK_KEEP = "pick-keep";
+pub const str CMD_PICK_RANGE = "pick-range";
+pub const str CMD_PICK_RANGE_ORIGIN = "pick-range-origin";
+pub const str CMD_PICK_PARENT_1 = "pick-parent-1";
+pub const str CMD_PICK_PARENT_2 = "pick-parent-2";
+pub const str CMD_SEQUENCE_CONTINUE = "sequence-continue";
+pub const str CMD_SEQUENCE_SKIP = "sequence-skip";
+pub const str CMD_SEQUENCE_QUIT = "sequence-quit";
 pub const str CMD_MERGE = "merge";
 pub const str CMD_MERGE_NO_FF = "merge-no-ff";
 pub const str CMD_MERGE_FF_ONLY = "merge-ff-only";
@@ -273,6 +290,12 @@ pub type Core {
     pub str picked_item = "";
     /// A merge is under way (`MERGE_HEAD` exists); set by `refresh`.
     pub bool is_merging = false;
+    /// A cherry-pick or revert is under way; `sequence_word` is its banner
+    /// (`CHERRY-PICKING` or `REVERTING`) and `sequence_left` the steps after
+    /// the stopped one. Set by `refresh`.
+    pub bool is_sequencing = false;
+    pub str sequence_word = "";
+    pub int sequence_left = 0;
     /// The file the conflict-resolution view asked `$EDITOR` for, and whether
     /// the editor ran since the view last read it (see `GIT_ui_merge`).
     pub str resolve_edit_path = "";
@@ -348,6 +371,21 @@ pub void Core.refresh() {
         }
     }
     is_merging = GIT_merge.in_progress(gitdir);
+    is_sequencing = false;
+    sequence_word = "";
+    sequence_left = 0;
+    match (GIT_sequencer.state(gitdir)) {
+        case Some(GIT_sequencer.State found): {
+            is_sequencing = true;
+            sequence_word = GIT_sequencer.banner(gitdir);
+            sequence_left = found.todo.size();
+            if (found.stopped && sequence_left > 0) {
+                sequence_left = sequence_left - 1;
+            }
+        }
+        case None: {
+        }
+    }
     branch_rows = [];
     match (GIT_checkout.branches(gitdir)) {
         case Ok(List<GIT_checkout.Branch> branches): {
@@ -392,6 +430,19 @@ pub void Core.refresh() {
             branch_label = "?";
         }
     }
+    if (is_sequencing) {
+        branch_label = branch_label + "  " + sequence_word;
+    }
+}
+
+/// True, with a message, while a cherry-pick or revert is under way: `what`
+/// would change HEAD or the tree under it. The caller returns without acting.
+pub bool Core.is_blocked_by_sequence(str what) {
+    if (!is_sequencing) {
+        return false;
+    }
+    message = what + " is blocked while " + sequence_word + " (A or V: continue, skip or abort)";
+    return true;
 }
 
 // " [ahead 2, behind 1]" for the header, "" when level or without upstream.
@@ -447,7 +498,7 @@ pub void Core.reload() {
     }
     refresh();
     outline = GIT_ui_model.build_outline(last_status, log, commit_changes_cache, collapsed, paths, file_diffs, branch_rows, stashes: stash_labels);
-    List<TUI_outline.Node> merge_roots = GIT_ui_merge_model.merge_roots(last_status, is_merging, collapsed, paths);
+    List<TUI_outline.Node> merge_roots = GIT_ui_merge_model.merge_roots(last_status, is_merging, collapsed, paths, sequence_word, sequence_left);
     if (merge_roots.size() > 0) {
         for (TUI_outline.Node node in outline.roots) {
             merge_roots.push(node);
@@ -574,6 +625,8 @@ pub List<Binding> key_table() {
     table.push(Binding(SCOPE_OUTLINE, CMD_NEXT, ["n"], "next search match", "n/N", "next"));
     table.push(Binding(SCOPE_OUTLINE, CMD_PREV, ["N"], "previous search match", "", ""));
     table.push(Binding(SCOPE_OUTLINE, CMD_MERGE, ["m"], "merge: a branch into the current one, continue or abort a merge, resolve conflicts (Enter on an unmerged path)", "m", "merge"));
+    table.push(Binding(SCOPE_OUTLINE, CMD_PICK, ["A"], "cherry-pick the commit under the cursor (menu: now, -x, -n, a range); while one is under way: continue, skip, abort", "A", "pick"));
+    table.push(Binding(SCOPE_OUTLINE, CMD_REVERT, ["V"], "revert the commit under the cursor (menu: now, -n, a range); while one is under way: continue, skip, abort", "V", "revert"));
     table.push(Binding(SCOPE_OUTLINE, CMD_REFRESH, ["g", "R"], "re-read the repository", "g", "refresh"));
     table.push(Binding(SCOPE_OUTLINE, CMD_QUIT, ["q", "escape"], "quit", "q", "quit"));
     // The document: the diff view.
@@ -654,6 +707,26 @@ pub List<Binding> key_table() {
     table.push(Binding(SCOPE_MERGE, CMD_CLOSE, ["escape"], "close", "esc", "close"));
     table.push(Binding(SCOPE_MERGE_ASK, CMD_YES, ["y"], "yes", "y", "yes"));
     table.push(Binding(SCOPE_MERGE_ASK, CMD_CLOSE, ["escape"], "any other key says no", "any", "no"));
+    table.push(Binding(SCOPE_PICK, CMD_PICK_NOW, ["p"], "cherry-pick the commit and commit it", "p", "pick"));
+    table.push(Binding(SCOPE_PICK, CMD_PICK_ORIGIN, ["x"], "cherry-pick -x: add a '(cherry picked from commit ...)' line", "x", "-x"));
+    table.push(Binding(SCOPE_PICK, CMD_PICK_NO_COMMIT, ["n"], "cherry-pick -n: apply to the index and files, do not commit", "n", "-n"));
+    table.push(Binding(SCOPE_PICK, CMD_PICK_KEEP, ["k"], "cherry-pick keeping a commit that comes out empty (--keep-redundant-commits)", "", ""));
+    table.push(Binding(SCOPE_PICK, CMD_PICK_RANGE, ["r"], "cherry-pick what you type: A..B or commits, oldest first", "r", "range"));
+    table.push(Binding(SCOPE_PICK, CMD_PICK_RANGE_ORIGIN, ["R"], "the same, with -x", "", ""));
+    table.push(Binding(SCOPE_PICK, CMD_PICK_PARENT_1, ["1"], "cherry-pick a merge commit against its first parent (-m 1)", "", ""));
+    table.push(Binding(SCOPE_PICK, CMD_PICK_PARENT_2, ["2"], "cherry-pick a merge commit against its second parent (-m 2)", "", ""));
+    table.push(Binding(SCOPE_PICK, CMD_CLOSE, ["escape"], "close", "esc", "close"));
+    table.push(Binding(SCOPE_REVERT, CMD_PICK_NOW, ["p"], "revert the commit and commit the revert", "p", "revert"));
+    table.push(Binding(SCOPE_REVERT, CMD_PICK_NO_COMMIT, ["n"], "revert -n: apply to the index and files, do not commit", "n", "-n"));
+    table.push(Binding(SCOPE_REVERT, CMD_PICK_RANGE, ["r"], "revert what you type: A..B or commits, newest first", "r", "range"));
+    table.push(Binding(SCOPE_REVERT, CMD_PICK_PARENT_1, ["1"], "revert a merge commit against its first parent (-m 1)", "", ""));
+    table.push(Binding(SCOPE_REVERT, CMD_PICK_PARENT_2, ["2"], "revert a merge commit against its second parent (-m 2)", "", ""));
+    table.push(Binding(SCOPE_REVERT, CMD_CLOSE, ["escape"], "close", "esc", "close"));
+    table.push(Binding(SCOPE_SEQUENCE, CMD_SEQUENCE_CONTINUE, ["c"], "continue: commit the resolved step and go on with the rest", "c", "continue"));
+    table.push(Binding(SCOPE_SEQUENCE, CMD_SEQUENCE_SKIP, ["s"], "skip the stopped step: drop its changes and go on", "s", "skip"));
+    table.push(Binding(SCOPE_SEQUENCE, CMD_ABORT, ["a"], "abort: put HEAD and the files back where they were (asks first)", "a", "abort"));
+    table.push(Binding(SCOPE_SEQUENCE, CMD_SEQUENCE_QUIT, ["q"], "quit: forget the sequence, keeping HEAD and the files as they are", "q", "quit"));
+    table.push(Binding(SCOPE_SEQUENCE, CMD_CLOSE, ["escape"], "close", "esc", "close"));
     table.push(Binding(SCOPE_RESOLVE, CMD_OURS, ["a"], "keep ours (the current branch's side) for this conflict, or for the whole file when it has no markers", "a", "ours"));
     table.push(Binding(SCOPE_RESOLVE, CMD_THEIRS, ["b"], "keep theirs (the merged branch's side) for this conflict, or for the whole file", "b", "theirs"));
     table.push(Binding(SCOPE_RESOLVE, CMD_BOTH, ["B"], "keep both: ours, then theirs", "B", "both"));
@@ -793,7 +866,16 @@ pub str scope_title(str scope) {
         return "merge menu (m)";
     }
     if (scope == SCOPE_MERGE_ASK) {
-        return "merge question";
+        return "yes / no question (merge, abort a cherry-pick or revert)";
+    }
+    if (scope == SCOPE_PICK) {
+        return "cherry-pick menu (A)";
+    }
+    if (scope == SCOPE_REVERT) {
+        return "revert menu (V)";
+    }
+    if (scope == SCOPE_SEQUENCE) {
+        return "cherry-pick / revert under way (A or V)";
     }
     if (scope == SCOPE_RESOLVE) {
         return "conflict resolution (Enter on an unmerged path)";
@@ -830,7 +912,7 @@ pub str scope_title(str scope) {
 
 /// Every scope, in the order the help overlay lists them.
 pub List<str> all_scopes() {
-    return [SCOPE_OUTLINE, SCOPE_DIFF, SCOPE_GLOBAL, SCOPE_COMMIT, SCOPE_BRANCH, SCOPE_PUSH, SCOPE_PULL, SCOPE_CONFIRM, SCOPE_LOG, SCOPE_HELP, SCOPE_SEARCH, SCOPE_PICKER, SCOPE_MERGE, SCOPE_MERGE_ASK, SCOPE_RESOLVE, SCOPE_STASH, SCOPE_STASH_LIST, SCOPE_STASH_PROMPT, SCOPE_BLAME, SCOPE_FILELOG, SCOPE_SHOW, SCOPE_UNDO, SCOPE_TAGS, SCOPE_PROMPT];
+    return [SCOPE_OUTLINE, SCOPE_DIFF, SCOPE_GLOBAL, SCOPE_COMMIT, SCOPE_BRANCH, SCOPE_PUSH, SCOPE_PULL, SCOPE_CONFIRM, SCOPE_LOG, SCOPE_HELP, SCOPE_SEARCH, SCOPE_PICKER, SCOPE_MERGE, SCOPE_MERGE_ASK, SCOPE_RESOLVE, SCOPE_STASH, SCOPE_STASH_LIST, SCOPE_STASH_PROMPT, SCOPE_BLAME, SCOPE_FILELOG, SCOPE_SHOW, SCOPE_UNDO, SCOPE_TAGS, SCOPE_PROMPT, SCOPE_PICK, SCOPE_REVERT, SCOPE_SEQUENCE];
 }
 
 // --- the overlay stack and the command log -------------------------------------

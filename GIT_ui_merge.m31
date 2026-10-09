@@ -44,6 +44,9 @@ pub type MergeLayer {
 
 /// `m`: open the merge menu.
 pub void MergeLayer.open_merge() {
+    if (is_blocked_by_sequence("merge")) {
+        return;
+    }
     push_overlay(MergeMenu(this));
 }
 
@@ -419,7 +422,7 @@ bool ResolveOverlay.load() {
             content = found;
         }
         case Err(io.Error error): {
-            if (host.is_merging && !fs.exists(full())) {
+            if ((host.is_merging || host.is_sequencing) && !fs.exists(full())) {
                 content = [];
             } else {
                 host.say("cannot read " + path + ": " + error.to_str());

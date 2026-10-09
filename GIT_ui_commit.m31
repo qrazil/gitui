@@ -25,6 +25,9 @@ pub type CommitLayer {
 
 /// `c`: open the commit overlay.
 pub void CommitLayer.open_commit() {
+    if (is_blocked_by_sequence("commit")) {
+        return;
+    }
     is_amending = false;
     push_overlay(CommitOverlay(this));
 }

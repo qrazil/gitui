@@ -77,6 +77,7 @@
 // before the launch attempt, same as before), and the operator is told to
 // edit it externally and press `f`.
 
+import GIT_sequencer;
 import GIT_ui_blame;
 import GIT_ui_branch;
 import GIT_ui_commit;
@@ -92,6 +93,7 @@ import GIT_ui_model;
 import GIT_ui_outline;
 import GIT_ui_remote;
 import GIT_ui_search;
+import GIT_ui_sequencer;
 import GIT_ui_stash;
 import GIT_ui_tags;
 import GIT_ui_undo;
@@ -446,6 +448,12 @@ TUI_app.Action State.run_outline_command(str cmd, str name) {
     }
     if (cmd == GIT_ui_core.CMD_PREV) {
         GIT_ui_search.jump(core(), false, false);
+    }
+    if (cmd == GIT_ui_core.CMD_PICK) {
+        GIT_ui_sequencer.open(core(), GIT_sequencer.Verb.Pick);
+    }
+    if (cmd == GIT_ui_core.CMD_REVERT) {
+        GIT_ui_sequencer.open(core(), GIT_sequencer.Verb.Revert);
     }
     if (cmd == GIT_ui_core.CMD_REFRESH) {
         reload();

@@ -25,6 +25,9 @@ pub void RemoteLayer.open_push() {
 
 /// `F`: open the pull overlay.
 pub void RemoteLayer.open_pull() {
+    if (is_blocked_by_sequence("pull")) {
+        return;
+    }
     push_overlay(RemoteOverlay(this, false));
 }
 

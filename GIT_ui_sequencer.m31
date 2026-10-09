@@ -1,0 +1,412 @@
+// The cherry-pick and revert UI: `A` and `V` open a menu over the outline, on
+// the commit under the cursor. All the work is `GIT_sequencer`; this file is
+// the menus, the questions and the lines that go in the status line and the
+// `@` log.
+//
+//   A   the cherry-pick menu            V   the revert menu
+//     p  pick / revert now
+//     x  pick -x (record the origin)      n  -n: apply, do not commit
+//     k  keep a pick that comes out empty
+//     r  type a range or commits          R  the same with -x (pick only)
+//     1 2  a merge commit against its first or second parent (-m)
+//
+// While a sequence is under way the same keys open another menu instead:
+//     c continue   s skip   a abort (asks first)   q quit (keeps the files)
+//
+// A conflict leaves the paths under "Unmerged paths" with a CHERRY-PICKING or
+// REVERTING banner above them; Enter on a path opens the same resolution view
+// the merge uses, and `A c` / `V c` commits once nothing is unmerged.
+//
+// The commit comes from the outline row under the cursor: a Commits row, or a
+// Branches row for that branch's tip (the way to pick from another branch); a
+// range is typed (`A..B`, or several commits separated by spaces) because the
+// outline has no selection.
+
+import GIT_merge;
+import GIT_sequencer;
+import GIT_ui_core;
+import GIT_ui_prompt;
+import term;
+import tui.TUI_app;
+import tui.TUI_buffer;
+import tui.TUI_geometry;
+import tui.TUI_menu;
+import tui.TUI_outline;
+
+// --- the work ------------------------------------------------------------------------
+
+str key_of(GIT_sequencer.Verb verb) {
+    if (verb.eq(GIT_sequencer.Verb.Revert)) {
+        return "V";
+    }
+    return "A";
+}
+
+/// The commit under the outline cursor: its id on a Commits row, the branch
+/// name (its tip) on a Branches row, else `""`.
+pub str commit_under_cursor(GIT_ui_core.Core core) {
+    match (core.outline.current()) {
+        case Some(TUI_outline.Row row): {
+            str id = row.node.id;
+            if (id.starts_with("branch:")) {
+                return id.substr(7, id.size());
+            }
+            if (id.starts_with("commit:") && id.size() >= 47 && !id.contains(":file:")) {
+                return id.substr(7, 47);
+            }
+        }
+        case None: {
+        }
+    }
+    return "";
+}
+
+/// A commit id shortened, a branch name as it is.
+str label_of(str spec) {
+    if (spec.size() == 40) {
+        return GIT_ui_core.short_id(spec);
+    }
+    return spec;
+}
+
+str describe(GIT_sequencer.Report report) {
+    str noun = report.verb.noun();
+    if (report.ending.eq(GIT_sequencer.Ending.Finished)) {
+        int n = report.commits.size();
+        if (n == 0) {
+            return noun + ": changes applied to the index and files, not committed";
+        }
+        if (n == 1) {
+            return noun + ": committed " + GIT_ui_core.short_id(report.commits[0]);
+        }
+        return noun + ": committed " + n.to_str() + " commits, now at " + GIT_ui_core.short_id(report.commits[n - 1]);
+    }
+    str key = key_of(report.verb);
+    if (report.ending.eq(GIT_sequencer.Ending.Conflicts)) {
+        return noun + " stopped on " + GIT_ui_core.short_id(report.stopped) + ": " + report.conflicts.size().to_str() + " path(s) conflict -- Enter on one to resolve, then " + key + " c";
+    }
+    return noun + " stopped on " + GIT_ui_core.short_id(report.stopped) + ": nothing is left to commit -- " + key + " s skips it";
+}
+
+/// `git cherry-pick` / `git revert` of `specs`, as the options say.
+pub void run(GIT_ui_core.Core core, GIT_sequencer.Verb verb, List<str> specs, GIT_sequencer.Options opts, str line) {
+    if (core.is_sequencing) {
+        core.say(core.sequence_word + " is under way: " + key_of(verb) + " c continues it, " + key_of(verb) + " a aborts it");
+        return;
+    }
+    List<str> ids = [];
+    match (GIT_sequencer.expand(core.gitdir, verb, specs)) {
+        case Ok(List<str> found): {
+            ids = found;
+        }
+        case Err(GIT_sequencer.Error error): {
+            core.say(verb.noun() + " refused: " + error.to_str());
+            return;
+        }
+    }
+    match (GIT_sequencer.start(core.gitdir, core.worktree, verb, ids, opts)) {
+        case Ok(GIT_sequencer.Report report): {
+            core.log_command(line);
+            core.say(describe(report));
+        }
+        case Err(GIT_sequencer.Error error): {
+            core.say(verb.noun() + " refused: " + error.to_str());
+        }
+    }
+    core.reload();
+}
+
+GIT_sequencer.Options options(GIT_ui_core.Core core, bool no_commit, bool record_origin, int mainline, bool keep, bool as_range) {
+    return GIT_sequencer.Options(no_commit: no_commit, record_origin: record_origin, mainline: mainline, allow_empty: false, keep_redundant: keep, as_range: as_range, style: GIT_merge.configured_style(core.gitdir));
+}
+
+/// `continue`, `skip`: both answer with a report.
+void step_on(GIT_ui_core.Core core, bool skip) {
+    GIT_sequencer.Verb verb = GIT_sequencer.Verb.Pick;
+    match (GIT_sequencer.state(core.gitdir)) {
+        case Some(GIT_sequencer.State found): {
+            verb = found.verb;
+        }
+        case None: {
+            core.say("no cherry-pick or revert in progress");
+            return;
+        }
+    }
+    str flag = "--continue";
+    if (skip) {
+        flag = "--skip";
+    }
+    Result<GIT_sequencer.Report, GIT_sequencer.Error> result = GIT_sequencer.continue_sequence(core.gitdir, core.worktree);
+    if (skip) {
+        result = GIT_sequencer.skip(core.gitdir, core.worktree);
+    }
+    match (result) {
+        case Ok(GIT_sequencer.Report report): {
+            core.log_command(verb.noun() + " " + flag);
+            core.say(describe(report));
+        }
+        case Err(GIT_sequencer.Error error): {
+            core.say(verb.noun() + " " + flag + " refused: " + error.to_str());
+        }
+    }
+    core.reload();
+}
+
+void abort_now(GIT_ui_core.Core core) {
+    GIT_sequencer.Verb verb = GIT_sequencer.Verb.Pick;
+    match (GIT_sequencer.state(core.gitdir)) {
+        case Some(GIT_sequencer.State found): {
+            verb = found.verb;
+        }
+        case None: {
+            core.say("no cherry-pick or revert in progress");
+            return;
+        }
+    }
+    match (GIT_sequencer.abort(core.gitdir, core.worktree)) {
+        case Ok(GIT_sequencer.Aborted done): {
+            core.log_command(verb.noun() + " --abort");
+            if (done.eq(GIT_sequencer.Aborted.Rewound)) {
+                core.say(verb.noun() + " aborted: HEAD and the files are back where they were");
+            } else {
+                core.say(verb.noun() + " forgotten: HEAD had moved since, so nothing was reset");
+            }
+        }
+        case Err(GIT_sequencer.Error error): {
+            core.say(verb.noun() + " --abort refused: " + error.to_str());
+        }
+    }
+    core.reload();
+}
+
+void quit_now(GIT_ui_core.Core core) {
+    match (GIT_sequencer.quit(core.gitdir)) {
+        case Ok(_): {
+            core.log_command("cherry-pick --quit");
+            core.say("sequence forgotten; HEAD and the files stay as they are");
+        }
+        case Err(GIT_sequencer.Error error): {
+            core.say("--quit refused: " + error.to_str());
+        }
+    }
+    core.reload();
+}
+
+// --- the range prompt -----------------------------------------------------------------
+
+type RangeAsk {
+    GIT_ui_core.Core host;
+    GIT_sequencer.Verb verb;
+    bool record_origin;
+}
+
+/// The prompt's answer (`GIT_ui_prompt.Receiver`): specs split on spaces.
+pub void RangeAsk.received(str purpose, str text) {
+    List<str> specs = [];
+    bool is_range = false;
+    for (str word in text.split(" ")) {
+        if (word != "") {
+            specs.push(word);
+            if (word.contains("..")) {
+                is_range = true;
+            }
+        }
+    }
+    if (specs.size() == 0) {
+        host.say(verb.noun() + " cancelled");
+        return;
+    }
+    str line = verb.noun();
+    if (record_origin) {
+        line = line + " -x";
+    }
+    run(host, verb, specs, options(host, false, record_origin, 0, false, is_range), line + " " + specs.join(" "));
+}
+
+// --- the menu for one commit ----------------------------------------------------------
+
+type PickMenu {
+    GIT_ui_core.Core host;
+    GIT_sequencer.Verb verb;
+    str target;
+}
+
+str PickMenu.scope() {
+    if (verb.eq(GIT_sequencer.Verb.Revert)) {
+        return GIT_ui_core.SCOPE_REVERT;
+    }
+    return GIT_ui_core.SCOPE_PICK;
+}
+
+void PickMenu.ask_range(bool record_origin) {
+    str label = verb.noun() + " (A..B, or commits separated by spaces)";
+    GIT_ui_prompt.open(host, RangeAsk(host, verb, record_origin), "range", label);
+}
+
+void PickMenu.apply(str cmd) {
+    if (cmd == GIT_ui_core.CMD_PICK_RANGE) {
+        ask_range(false);
+        return;
+    }
+    if (cmd == GIT_ui_core.CMD_PICK_RANGE_ORIGIN) {
+        ask_range(true);
+        return;
+    }
+    if (cmd == GIT_ui_core.CMD_CLOSE) {
+        return;
+    }
+    if (target == "") {
+        host.say(verb.noun() + ": put the cursor on a commit (or r for a range)");
+        return;
+    }
+    bool no_commit = cmd == GIT_ui_core.CMD_PICK_NO_COMMIT;
+    bool record_origin = cmd == GIT_ui_core.CMD_PICK_ORIGIN;
+    bool keep = cmd == GIT_ui_core.CMD_PICK_KEEP;
+    int mainline = 0;
+    if (cmd == GIT_ui_core.CMD_PICK_PARENT_1) {
+        mainline = 1;
+    }
+    if (cmd == GIT_ui_core.CMD_PICK_PARENT_2) {
+        mainline = 2;
+    }
+    str line = verb.noun();
+    if (record_origin) {
+        line = line + " -x";
+    }
+    if (no_commit) {
+        line = line + " -n";
+    }
+    if (keep) {
+        line = line + " --keep-redundant-commits";
+    }
+    if (mainline > 0) {
+        line = line + " -m " + mainline.to_str();
+    }
+    run(host, verb, [target], options(host, no_commit, record_origin, mainline, keep, false), line + " " + label_of(target));
+}
+
+pub TUI_app.Action PickMenu.handle_key(term.Code code) {
+    match (GIT_ui_core.lookup(scope(), code)) {
+        case Some(str cmd): {
+            host.pop_overlay();
+            apply(cmd);
+            return TUI_app.Action.Redraw;
+        }
+        case None: {
+        }
+    }
+    return TUI_app.Action.Continue;
+}
+
+pub void PickMenu.render(TUI_buffer.Buffer buffer, TUI_geometry.Rect area) {
+    TUI_menu.WhichKey which_key = TUI_menu.WhichKey(verb.noun() + " " + short_or_none(target), items_of(scope()));
+    which_key.render(buffer, area);
+}
+
+pub List<GIT_ui_core.Hint> PickMenu.hints() {
+    return GIT_ui_core.hints_for(scope());
+}
+
+str short_or_none(str id) {
+    if (id == "") {
+        return "(no commit under the cursor)";
+    }
+    return label_of(id);
+}
+
+List<TUI_menu.Item> items_of(str scope) {
+    List<TUI_menu.Item> items = [];
+    for (GIT_ui_core.Binding binding in GIT_ui_core.bindings_in(scope)) {
+        str key = binding.keys[0];
+        if (key == "escape") {
+            key = "esc";
+        }
+        items.push(TUI_menu.Item(key, binding.help));
+    }
+    return items;
+}
+
+// --- the menu while one is under way ------------------------------------------------
+
+type BusyMenu {
+    GIT_ui_core.Core host;
+}
+
+pub TUI_app.Action BusyMenu.handle_key(term.Code code) {
+    match (GIT_ui_core.lookup(GIT_ui_core.SCOPE_SEQUENCE, code)) {
+        case Some(str cmd): {
+            host.pop_overlay();
+            if (cmd == GIT_ui_core.CMD_SEQUENCE_CONTINUE) {
+                step_on(host, false);
+            }
+            if (cmd == GIT_ui_core.CMD_SEQUENCE_SKIP) {
+                step_on(host, true);
+            }
+            if (cmd == GIT_ui_core.CMD_ABORT) {
+                host.push_overlay(AbortAsk(host));
+            }
+            if (cmd == GIT_ui_core.CMD_SEQUENCE_QUIT) {
+                quit_now(host);
+            }
+            return TUI_app.Action.Redraw;
+        }
+        case None: {
+        }
+    }
+    return TUI_app.Action.Continue;
+}
+
+pub void BusyMenu.render(TUI_buffer.Buffer buffer, TUI_geometry.Rect area) {
+    TUI_menu.WhichKey which_key = TUI_menu.WhichKey(host.sequence_word, items_of(GIT_ui_core.SCOPE_SEQUENCE));
+    which_key.render(buffer, area);
+}
+
+pub List<GIT_ui_core.Hint> BusyMenu.hints() {
+    return GIT_ui_core.hints_for(GIT_ui_core.SCOPE_SEQUENCE);
+}
+
+/// `y` aborts; every other key keeps going.
+type AbortAsk {
+    GIT_ui_core.Core host;
+}
+
+pub TUI_app.Action AbortAsk.handle_key(term.Code code) {
+    host.pop_overlay();
+    match (GIT_ui_core.lookup(GIT_ui_core.SCOPE_MERGE_ASK, code)) {
+        case Some(str cmd): {
+            if (cmd == GIT_ui_core.CMD_YES) {
+                abort_now(host);
+                return TUI_app.Action.Redraw;
+            }
+        }
+        case None: {
+        }
+    }
+    host.say("abort cancelled");
+    return TUI_app.Action.Redraw;
+}
+
+pub void AbortAsk.render(TUI_buffer.Buffer buffer, TUI_geometry.Rect area) {
+    TUI_menu.WhichKey which_key = TUI_menu.WhichKey("abort the " + host.sequence_word + " and put everything back?", [TUI_menu.Item("y", "yes"), TUI_menu.Item("any other key", "no")]);
+    which_key.render(buffer, area);
+}
+
+pub List<GIT_ui_core.Hint> AbortAsk.hints() {
+    return GIT_ui_core.hints_for(GIT_ui_core.SCOPE_MERGE_ASK);
+}
+
+// --- opening ---------------------------------------------------------------------------
+
+/// `A` or `V`: the menu for the commit under the cursor, or the one for the
+/// operation under way.
+pub void open(GIT_ui_core.Core core, GIT_sequencer.Verb verb) {
+    if (core.is_sequencing) {
+        core.push_overlay(BusyMenu(core));
+        return;
+    }
+    if (core.is_merging) {
+        core.say(verb.noun() + " is blocked while MERGING (m c continues, m a aborts)");
+        return;
+    }
+    core.push_overlay(PickMenu(core, verb, commit_under_cursor(core)));
+}
