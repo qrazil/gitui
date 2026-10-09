@@ -1,0 +1,1527 @@
+// `git rebase` -- the merge backend, `-i` included -- without git: the same
+// commits, the same reflog lines and the same `.git/rebase-merge/` state, so
+// real git can `--continue`, `--skip` or `--abort` what this started and this
+// can finish what git started.
+//
+// API
+// ---
+//   GIT_rebase.plan(gitdir, PlanOpts)              -> Result<Plan, Error>
+//       what a rebase would do: the commits to replay (already autosquashed
+//       when asked), `up_to_date` for the case git does nothing
+//   GIT_rebase.start(gitdir, worktree, Plan, todo, StartOpts, Editor)
+//                                                  -> Result<Report, Error>
+//   GIT_rebase.continue_rebase(gitdir, worktree, Option<str> message, Editor)
+//   GIT_rebase.skip(gitdir, worktree, Editor)
+//   GIT_rebase.abort(gitdir, worktree)             -> Result<List<str>, Error>
+//   GIT_rebase.quit(gitdir, worktree)              -> Result<List<str>, Error>
+//   GIT_rebase.edit_todo(gitdir, text)             -> Result<bool, Error>
+//   GIT_rebase.todo_text(gitdir)                   -> str  (what is left, for an editor)
+//   GIT_rebase.in_progress(gitdir)                 -> bool
+//   GIT_rebase.state(gitdir)                       -> Option<State>
+//   GIT_rebase.banner(gitdir)                      -> str  `REBASING 2/5` or ""
+//
+// Every call that can run steps answers with a `Report`: `Finished`, or the
+// step it stopped on (conflicts, an `edit`, an empty commit, a message that
+// needs a person, a `break`, an `exec` that failed).
+//
+// An `Editor` is how a message is edited. `edit(purpose, text)` answers the
+// new text, or `None` for "no editor here": the rebase then stops with
+// `Ending.Message` and git's own state for a failed editor, and the caller
+// asks a person and calls `continue_rebase` with the message. `purpose` is
+// `reword`, `squash` or `continue`.
+//
+// --- the state, as git writes it ---------------------------------------------------
+//
+// `.git/rebase-merge/`: head-name, onto, orig-head, end, msgnum, interactive,
+// git-rebase-todo (what is left) and its .backup, done (what has been started,
+// the stopped command last), rewritten-list, rewritten-pending, and for a stop
+// author-script, message, stopped-sha, amend, current-fixups, message-squash,
+// message-fixup; autostash, squash-onto, drop_redundant_commits. Next to it
+// REBASE_HEAD, MERGE_MSG, SQUASH_MSG, AUTO_MERGE and ORIG_HEAD.
+//
+// --- where this differs from git, on purpose -------------------------------------------
+//
+//   - Not written: `patch` (informational), the post-rewrite hook, notes
+//     copying. Not read: `label`, `reset`, `merge`, `update-ref`, `fixup -C`
+//     (refused when a todo has them), `amend!` (taken as a plain pick).
+//   - No rename detection, as `GIT_merge`. `<branch>` as a third argument is
+//     not taken: check the branch out first.
+//   - Commits that upstream already has are found by an equivalent of git's
+//     patch id and only among the first 1000 commits of `head..upstream`.
+//   - Merge commits in the range are left out (git's default).
+//   - `exec` runs through `sh -c` in the work tree with its output collected;
+//     it is not given a terminal.
+
+import fs;
+import GIT_checkout;
+import GIT_graph;
+import GIT_index;
+import GIT_merge;
+import GIT_object;
+import GIT_rebase_todo;
+import GIT_refs;
+import GIT_reflog;
+import GIT_sequencer;
+import GIT_stash;
+import GIT_status;
+import GIT_config;
+import io;
+import os;
+import random;
+
+pub interface Editor {
+    Option<str> edit(str purpose, str text);
+}
+
+/// An editor that leaves every message as it is.
+pub type Verbatim {
+    pub int calls = 0;
+}
+
+pub Option<str> Verbatim.edit(str purpose, str text) {
+    calls = calls + 1;
+    return Option<str>.Some(text);
+}
+
+/// No editor: every edit is left to a person.
+pub type Declining {
+    pub int calls = 0;
+}
+
+pub Option<str> Declining.edit(str purpose, str text) {
+    calls = calls + 1;
+    return Option<str>.None;
+}
+
+pub enum Ending {
+    Finished;
+    /// Nothing to do: git says `Current branch x is up to date.`
+    UpToDate;
+    Conflicts;
+    /// Stopped on a commit that became empty (interactive).
+    Empty;
+    /// Stopped after an `edit`.
+    Edit;
+    /// A message needs a person (reword, a squash, a continue).
+    Message;
+    Break;
+    ExecFailed;
+    /// An `exec` succeeded and left changes behind.
+    ExecDirty;
+}
+
+int Ending.code() {
+    match (this) {
+        case Finished: {
+            return 0;
+        }
+        case UpToDate: {
+            return 1;
+        }
+        case Conflicts: {
+            return 2;
+        }
+        case Empty: {
+            return 3;
+        }
+        case Edit: {
+            return 4;
+        }
+        case Message: {
+            return 5;
+        }
+        case Break: {
+            return 6;
+        }
+        case ExecFailed: {
+            return 7;
+        }
+        case ExecDirty: {
+            return 8;
+        }
+    }
+}
+
+pub bool Ending.eq(Ending other) {
+    return code() == other.code();
+}
+
+pub str Ending.word() {
+    match (this) {
+        case Finished: {
+            return "finished";
+        }
+        case UpToDate: {
+            return "up-to-date";
+        }
+        case Conflicts: {
+            return "conflicts";
+        }
+        case Empty: {
+            return "empty";
+        }
+        case Edit: {
+            return "edit";
+        }
+        case Message: {
+            return "message";
+        }
+        case Break: {
+            return "break";
+        }
+        case ExecFailed: {
+            return "exec-failed";
+        }
+        case ExecDirty: {
+            return "exec-dirty";
+        }
+    }
+}
+
+pub type Report {
+    pub Ending ending;
+    /// The original commit the stop is about, or `""`.
+    pub str stopped = "";
+    pub List<GIT_merge.Conflicted> conflicts = [];
+    /// What git prints on the way: merge notes, dropped commits, autostash.
+    pub List<str> messages = [];
+    /// The output of a failed `exec`.
+    pub str output = "";
+    /// The `exec` command, or the subject of the stopped commit.
+    pub str command = "";
+}
+
+pub type PlanOpts {
+    /// What to rebase onto, or what to take the commits after.
+    pub str upstream = "";
+    /// `--onto`: where the commits go; `""` for the upstream.
+    pub str onto = "";
+    pub bool root = false;
+    pub bool keep_base = false;
+    /// Order the list as `--autosquash` does (only for an interactive list).
+    pub bool interactive = false;
+    pub bool autosquash = false;
+}
+
+pub type Plan {
+    /// `refs/heads/x`, or `detached HEAD`.
+    pub str head_name;
+    pub str orig_head;
+    /// The commit the new ones go on; `""` for `--root` without `--onto`.
+    pub str onto;
+    /// How reflog and messages call it.
+    pub str onto_name;
+    pub str upstream;
+    pub bool root;
+    pub List<GIT_rebase_todo.Command> commands;
+    /// Commits left out because upstream has their change.
+    pub List<str> applied;
+    pub bool up_to_date;
+}
+
+pub type StartOpts {
+    pub bool interactive = false;
+    pub bool autostash = false;
+}
+
+pub type State {
+    pub int done;
+    pub int total;
+    pub bool interactive;
+    pub str head_name;
+    pub str onto;
+    pub str orig_head;
+    /// The commit the rebase is stopped on, or `""`.
+    pub str stopped;
+    pub List<GIT_rebase_todo.Command> finished;
+    pub List<GIT_rebase_todo.Command> upcoming;
+}
+
+// --- helpers -------------------------------------------------------------------------------
+
+pub str state_dir(str gitdir) {
+    return fs.join(gitdir, "rebase-merge");
+}
+
+pub bool in_progress(str gitdir) {
+    return fs.exists(state_dir(gitdir));
+}
+
+str rd(str gitdir, str name) {
+    return GIT_sequencer.read_text(fs.join(state_dir(gitdir), name));
+}
+
+str rd_line(str gitdir, str name) {
+    return rd(gitdir, name).trim();
+}
+
+Result<bool, GIT_sequencer.Error> wr(str gitdir, str name, str text) {
+    return GIT_sequencer.write_text(fs.join(state_dir(gitdir), name), text);
+}
+
+void rm(str gitdir, str name) {
+    GIT_sequencer.remove_file(fs.join(state_dir(gitdir), name));
+}
+
+bool has(str gitdir, str name) {
+    return fs.exists(fs.join(state_dir(gitdir), name));
+}
+
+void rm_git(str gitdir, str name) {
+    GIT_sequencer.remove_file(fs.join(gitdir, name));
+}
+
+Result<bool, GIT_sequencer.Error> wr_git(str gitdir, str name, str text) {
+    return GIT_sequencer.lift_bool(GIT_merge.write_state(gitdir, name, text));
+}
+
+pub type Where {
+    pub str ref;
+    pub str id;
+}
+
+Result<Where, GIT_sequencer.Error> where_head(str gitdir) {
+    match (GIT_refs.head(gitdir)) {
+        case Ok(GIT_refs.Head head): {
+            match (head) {
+                case Born(str name, str id): {
+                    return Result<Where, GIT_sequencer.Error>.Ok(Where(name, id));
+                }
+                case Detached(str id): {
+                    return Result<Where, GIT_sequencer.Error>.Ok(Where("HEAD", id));
+                }
+                case Unborn(_): {
+                    return Result<Where, GIT_sequencer.Error>.Err(GIT_sequencer.Error.Unborn);
+                }
+            }
+        }
+        case Err(GIT_refs.Error error): {
+            return Result<Where, GIT_sequencer.Error>.Err(GIT_sequencer.Error.Merge(GIT_merge.Error.Refs(error)));
+        }
+    }
+}
+
+GIT_sequencer.Error refused(str why) {
+    return GIT_sequencer.Error.Unsupported(why);
+}
+
+str first_line(str text) {
+    return text.split("\n")[0].trim();
+}
+
+str message_text(GIT_object.Commit commit) {
+    return commit.message.utf8().or("");
+}
+
+str strip_leading_blank(str text) {
+    int at = 0;
+    while (at < text.size() && text.byte_at(at) == '\n') {
+        at = at + 1;
+    }
+    return text.substr(at, text.size());
+}
+
+str commented(str body) {
+    List<str> lines = body.split("\n");
+    List<str> out = [];
+    for (int i in 0 .. lines.size()) {
+        if (i == lines.size() - 1 && lines[i] == "") {
+            out.push("");
+            continue;
+        }
+        if (lines[i] == "") {
+            out.push("#");
+        } else {
+            out.push("# " + lines[i]);
+        }
+    }
+    return out.join("\n");
+}
+
+str sq(str text) {
+    List<str> parts = text.split("'");
+    return "'" + parts.join("'\\''") + "'";
+}
+
+str unsq(str text) {
+    str trimmed = text.trim();
+    if (trimmed.size() >= 2 && trimmed.starts_with("'") && trimmed.ends_with("'")) {
+        trimmed = trimmed.substr(1, trimmed.size() - 1);
+    }
+    return trimmed.split("'\\''").join("'");
+}
+
+str author_script_of(GIT_object.Ident who) {
+    str name = who.name.utf8().or("");
+    str email = who.email.utf8().or("");
+    return "GIT_AUTHOR_NAME=" + sq(name) + "\nGIT_AUTHOR_EMAIL=" + sq(email) + "\nGIT_AUTHOR_DATE=" + sq("@" + who.when.to_str() + " " + who.zone) + "\n";
+}
+
+int zone_minutes(str zone) {
+    if (zone.size() != 5) {
+        return 0;
+    }
+    int hours = zone.substr(1, 3).parse_int().or(0);
+    int minutes = zone.substr(3, 5).parse_int().or(0);
+    int total = hours * 60 + minutes;
+    if (zone.byte_at(0) == '-') {
+        return 0 - total;
+    }
+    return total;
+}
+
+Option<GIT_object.Ident> parse_author_script(str text) {
+    str name = "";
+    str email = "";
+    str date = "";
+    for (str line in text.split("\n")) {
+        int equals = line.index_of("=").or(-1);
+        if (equals < 0) {
+            continue;
+        }
+        str key = line.substr(0, equals);
+        str value = unsq(line.substr(equals + 1, line.size()));
+        if (key == "GIT_AUTHOR_NAME") {
+            name = value;
+        } else if (key == "GIT_AUTHOR_EMAIL") {
+            email = value;
+        } else if (key == "GIT_AUTHOR_DATE") {
+            date = value;
+        }
+    }
+    List<str> parts = date.split(" ");
+    if (name == "" || parts.size() != 2 || !parts[0].starts_with("@")) {
+        return Option<GIT_object.Ident>.None;
+    }
+    match (parts[0].substr(1, parts[0].size()).parse_int()) {
+        case Some(int when): {
+            return Option<GIT_object.Ident>.Some(GIT_object.Ident(name.to_bytes(), email.to_bytes(), when, zone_minutes(parts[1]), parts[1]));
+        }
+        case None: {
+            return Option<GIT_object.Ident>.None;
+        }
+    }
+}
+
+Result<GIT_object.Commit, GIT_sequencer.Error> commit_of(str gitdir, str id) {
+    return GIT_sequencer.lift_commit(GIT_merge.read_commit(gitdir, id));
+}
+
+Result<str, GIT_sequencer.Error> tree_of(str gitdir, str id) {
+    return GIT_sequencer.lift_str(GIT_merge.tree_of(gitdir, id));
+}
+
+Result<GIT_index.Index, GIT_sequencer.Error> index_of(str gitdir) {
+    return GIT_sequencer.lift_index(GIT_merge.read_index(gitdir));
+}
+
+Result<bool, GIT_sequencer.Error> move_head(str gitdir, str old, str new_id, str msg) {
+    return GIT_sequencer.move_ref(gitdir, "HEAD", new_id, Option<str>.Some(old), msg);
+}
+
+/// A commit on top of HEAD (or replacing it with `amend`), HEAD moved to it.
+Result<str, GIT_sequencer.Error> commit_head(str gitdir, str tree, List<str> parents, GIT_object.Ident author, bytes message, str old, str reflog) {
+    GIT_object.Commit made = GIT_object.Commit(tree, parents, author, GIT_merge.ident(gitdir, "COMMITTER"), [], message);
+    str id = GIT_sequencer.lift_str(GIT_merge.write_commit(gitdir, made))?;
+    if (id != old) {
+        move_head(gitdir, old, id, reflog)?;
+    }
+    return Result<str, GIT_sequencer.Error>.Ok(id);
+}
+
+Result<str, GIT_sequencer.Error> amend_head(str gitdir, str tree, bytes message, str reflog) {
+    Where head = where_head(gitdir)?;
+    GIT_object.Commit previous = commit_of(gitdir, head.id)?;
+    return commit_head(gitdir, tree, previous.parents, previous.author, message, head.id, reflog);
+}
+
+Result<str, GIT_sequencer.Error> empty_tree(str gitdir) {
+    match (GIT_object.write_tree(gitdir, [])) {
+        case Ok(str id): {
+            return Result<str, GIT_sequencer.Error>.Ok(id);
+        }
+        case Err(GIT_object.Error error): {
+            return Result<str, GIT_sequencer.Error>.Err(GIT_sequencer.Error.Merge(GIT_merge.Error.Object(error)));
+        }
+    }
+}
+
+Result<bool, GIT_sequencer.Error> move_files(str gitdir, str worktree, str from_tree, str to_tree) {
+    if (from_tree == to_tree) {
+        return Result<bool, GIT_sequencer.Error>.Ok(true);
+    }
+    GIT_index.Index index = index_of(gitdir)?;
+    match (GIT_checkout.apply_tree_diff(gitdir, worktree, from_tree, to_tree, index)) {
+        case Ok(_): {
+            return Result<bool, GIT_sequencer.Error>.Ok(true);
+        }
+        case Err(GIT_checkout.Error error): {
+            return Result<bool, GIT_sequencer.Error>.Err(GIT_sequencer.Error.Merge(GIT_merge.Error.Checkout(error)));
+        }
+    }
+}
+
+/// Tracked changes in the index or the work tree.
+Result<GIT_status.Status, GIT_sequencer.Error> tracked_status(str gitdir, str worktree) {
+    match (GIT_merge.status_of(gitdir, worktree)) {
+        case Ok(GIT_status.Status status): {
+            return Result<GIT_status.Status, GIT_sequencer.Error>.Ok(status);
+        }
+        case Err(GIT_merge.Error error): {
+            return Result<GIT_status.Status, GIT_sequencer.Error>.Err(GIT_sequencer.Error.Merge(error));
+        }
+    }
+}
+
+pub bool default_autostash(str gitdir) {
+    return config_flag(gitdir, "autostash");
+}
+
+pub bool default_autosquash(str gitdir) {
+    return config_flag(gitdir, "autosquash");
+}
+
+bool config_flag(str gitdir, str key) {
+    match (GIT_config.load_all(gitdir)) {
+        case Ok(GIT_config.Config config): {
+            match (config.get_bool("rebase", "", key)) {
+                case Some(bool on): {
+                    return on;
+                }
+                case None: {
+                    return false;
+                }
+            }
+        }
+        case Err(_): {
+            return false;
+        }
+    }
+}
+
+// --- the plan ---------------------------------------------------------------------------------
+
+Result<str, GIT_sequencer.Error> commit_named(str gitdir, str spec) {
+    match (GIT_refs.rev_parse(gitdir, spec)) {
+        case Ok(str found): {
+            match (GIT_refs.peel(gitdir, spec, found)) {
+                case Ok(str commit): {
+                    return Result<str, GIT_sequencer.Error>.Ok(commit);
+                }
+                case Err(_): {
+                    return Result<str, GIT_sequencer.Error>.Err(GIT_sequencer.Error.NotACommit(spec));
+                }
+            }
+        }
+        case Err(_): {
+            return Result<str, GIT_sequencer.Error>.Err(GIT_sequencer.Error.NotACommit(spec));
+        }
+    }
+}
+
+List<str> bases_of(str gitdir, str a, str b) {
+    match (GIT_graph.merge_bases(gitdir, a, b)) {
+        case Ok(List<str> found): {
+            return found;
+        }
+        case Err(_): {
+            List<str> none = [];
+            return none;
+        }
+    }
+}
+
+/// What `git rebase` would do. Reads only.
+pub Result<Plan, GIT_sequencer.Error> plan(str gitdir, PlanOpts opts) {
+    Where head = where_head(gitdir)?;
+    str head_name = "detached HEAD";
+    if (head.ref != "HEAD") {
+        head_name = head.ref;
+    }
+    str upstream = "";
+    str onto = "";
+    str onto_name = opts.onto;
+    if (!opts.root) {
+        if (opts.upstream == "") {
+            return Result<Plan, GIT_sequencer.Error>.Err(refused("no upstream to rebase onto"));
+        }
+        upstream = commit_named(gitdir, opts.upstream)?;
+        onto_name = opts.upstream;
+        if (opts.onto != "") {
+            onto = commit_named(gitdir, opts.onto)?;
+            onto_name = opts.onto;
+        } else if (opts.keep_base) {
+            List<str> bases = bases_of(gitdir, upstream, head.id);
+            if (bases.size() == 0) {
+                return Result<Plan, GIT_sequencer.Error>.Err(refused("no common ancestor with " + opts.upstream));
+            }
+            onto = bases[0];
+        } else {
+            onto = upstream;
+        }
+    } else if (opts.onto != "") {
+        onto = commit_named(gitdir, opts.onto)?;
+    }
+    List<GIT_rebase_todo.Command> commands = [];
+    List<str> applied = [];
+    str excluded = upstream;
+    if (opts.root) {
+        excluded = onto;
+    }
+    GIT_rebase_todo.Picked picked = GIT_rebase_todo.pick_range(gitdir, head.id, excluded)?;
+    commands = picked.commands;
+    applied = picked.applied;
+    if (opts.interactive && opts.autosquash) {
+        commands = GIT_rebase_todo.autosquash(commands);
+    }
+    bool is_current = false;
+    if (!opts.root && !opts.interactive) {
+        List<str> bases = bases_of(gitdir, upstream, head.id);
+        List<str> onto_bases = bases_of(gitdir, onto, head.id);
+        if (bases.size() == 1 && bases[0] == onto && onto_bases.size() == 1 && onto_bases[0] == onto) {
+            is_current = true;
+        }
+    }
+    return Result<Plan, GIT_sequencer.Error>.Ok(Plan(head_name, head.id, onto, onto_name, upstream, opts.root, commands, applied, is_current));
+}
+
+// --- starting ------------------------------------------------------------------------------------
+
+Result<bool, GIT_sequencer.Error> refuse_if_busy(str gitdir) {
+    if (in_progress(gitdir)) {
+        return Result<bool, GIT_sequencer.Error>.Err(refused("a rebase is already in progress"));
+    }
+    if (GIT_sequencer.in_progress(gitdir) || GIT_merge.in_progress(gitdir)) {
+        return Result<bool, GIT_sequencer.Error>.Err(refused("a merge, cherry-pick or revert is in progress: finish or abort it first"));
+    }
+    return Result<bool, GIT_sequencer.Error>.Ok(true);
+}
+
+Result<bool, GIT_sequencer.Error> check_clean(str gitdir, str worktree) {
+    GIT_status.Status status = tracked_status(gitdir, worktree)?;
+    if (status.unmerged.size() > 0) {
+        return Result<bool, GIT_sequencer.Error>.Err(GIT_sequencer.Error.UnmergedPaths);
+    }
+    if (status.unstaged.size() > 0) {
+        return Result<bool, GIT_sequencer.Error>.Err(refused("cannot rebase: You have unstaged changes."));
+    }
+    if (status.staged.size() > 0) {
+        return Result<bool, GIT_sequencer.Error>.Err(refused("cannot rebase: Your index contains uncommitted changes."));
+    }
+    return Result<bool, GIT_sequencer.Error>.Ok(true);
+}
+
+bool is_dirty(str gitdir, str worktree) {
+    match (GIT_status.status(gitdir, worktree)) {
+        case Ok(GIT_status.Status status): {
+            return status.unstaged.size() > 0 || status.staged.size() > 0 || status.unmerged.size() > 0;
+        }
+        case Err(_): {
+            return false;
+        }
+    }
+}
+
+/// Start `plan` with the commands `todo` (the plan's, or what a person made of them).
+pub Result<Report, GIT_sequencer.Error> start(str gitdir, str worktree, Plan plan, List<GIT_rebase_todo.Command> todo, StartOpts opts, Editor editor) {
+    refuse_if_busy(gitdir)?;
+    Report none = Report(Ending.UpToDate);
+    if (plan.up_to_date && !opts.interactive) {
+        return Result<Report, GIT_sequencer.Error>.Ok(none);
+    }
+    GIT_rebase_todo.validate(todo)?;
+    List<str> notes = [];
+    for (str id in plan.applied) {
+        notes.push("warning: skipped previously applied commit " + GIT_sequencer.abbrev(gitdir, id));
+    }
+    str autostash = "";
+    if (opts.autostash && is_dirty(gitdir, worktree)) {
+        match (GIT_stash.push(gitdir, worktree, message: "autostash", store: false)) {
+            case Ok(GIT_stash.Saved saved): {
+                autostash = saved.commit;
+                notes.push("Created autostash: " + GIT_sequencer.abbrev(gitdir, saved.commit));
+            }
+            case Err(GIT_stash.Error error): {
+                return Result<Report, GIT_sequencer.Error>.Err(refused(error.to_str()));
+            }
+        }
+    } else {
+        check_clean(gitdir, worktree)?;
+    }
+    match (begin(gitdir, worktree, plan, todo, opts, autostash, notes)) {
+        case Ok(_): {
+        }
+        case Err(GIT_sequencer.Error error): {
+            if (autostash != "") {
+                give_back(gitdir, worktree, autostash);
+            }
+            if (in_progress(gitdir)) {
+                drop_state(gitdir);
+            }
+            return Result<Report, GIT_sequencer.Error>.Err(error);
+        }
+    }
+    return run(gitdir, worktree, editor, notes);
+}
+
+void log_head(str gitdir, str old, str new_id, str msg) {
+    match (GIT_reflog.append(gitdir, "HEAD", old, new_id, GIT_reflog.default_ident(gitdir), msg)) {
+        case Ok(_): {
+        }
+        case Err(_): {
+        }
+    }
+}
+
+void store_autostash(str gitdir, str autostash) {
+    match (GIT_stash.put_on_stack(gitdir, autostash, "autostash")) {
+        case Ok(_): {
+        }
+        case Err(_): {
+        }
+    }
+}
+
+void give_back(str gitdir, str worktree, str autostash) {
+    match (GIT_stash.apply(gitdir, worktree, autostash)) {
+        case Ok(_): {
+        }
+        case Err(_): {
+        }
+    }
+}
+
+Result<bool, GIT_sequencer.Error> begin(str gitdir, str worktree, Plan plan, List<GIT_rebase_todo.Command> todo, StartOpts opts, str autostash, List<str> notes) {
+    str onto = plan.onto;
+    str squash_onto = "";
+    if (plan.root && onto == "") {
+        str empty = empty_tree(gitdir)?;
+        GIT_object.Commit blank = GIT_object.Commit(empty, [], GIT_merge.ident(gitdir, "AUTHOR"), GIT_merge.ident(gitdir, "COMMITTER"), [], "".to_bytes());
+        squash_onto = GIT_sequencer.lift_str(GIT_merge.write_commit(gitdir, blank))?;
+        onto = squash_onto;
+    }
+    List<GIT_rebase_todo.Command> rest = clone(todo);
+    List<GIT_rebase_todo.Command> done = [];
+    str new_head = onto;
+    if (opts.interactive) {
+        str parent_ok = onto;
+        while (rest.size() > 0 && rest[0].verb == GIT_rebase_todo.Verb.Pick) {
+            GIT_object.Commit next = commit_of(gitdir, rest[0].id)?;
+            if (next.parents.size() != 1 || next.parents[0] != new_head) {
+                break;
+            }
+            new_head = rest[0].id;
+            done.push(rest[0]);
+            rest.remove_at(0);
+        }
+    }
+    str from_tree = tree_of(gitdir, plan.orig_head)?;
+    str to_tree = tree_of(gitdir, new_head)?;
+    move_files(gitdir, worktree, from_tree, to_tree)?;
+    match (fs.makedirs(state_dir(gitdir))) {
+        case Ok: {
+        }
+        case Err(_): {
+            return Result<bool, GIT_sequencer.Error>.Err(GIT_sequencer.io_error());
+        }
+    }
+    wr(gitdir, "head-name", plan.head_name + "\n")?;
+    wr(gitdir, "onto", onto + "\n")?;
+    wr(gitdir, "orig-head", plan.orig_head + "\n")?;
+    wr(gitdir, "interactive", "")?;
+    wr(gitdir, "no-reschedule-failed-exec", "")?;
+    if (!opts.interactive) {
+        wr(gitdir, "drop_redundant_commits", "")?;
+    }
+    if (squash_onto != "") {
+        wr(gitdir, "squash-onto", squash_onto + "\n")?;
+    }
+    if (autostash != "") {
+        wr(gitdir, "autostash", autostash + "\n")?;
+    }
+    wr(gitdir, "git-rebase-todo", GIT_rebase_todo.full_text(rest))?;
+    wr(gitdir, "git-rebase-todo.backup", GIT_rebase_todo.full_text(plan.commands))?;
+    wr(gitdir, "done", GIT_rebase_todo.full_text(done))?;
+    wr(gitdir, "end", todo.size().to_str() + "\n")?;
+    wr(gitdir, "msgnum", done.size().to_str() + "\n")?;
+    wr_git(gitdir, "ORIG_HEAD", plan.orig_head + "\n")?;
+    str shown = plan.onto_name;
+    if (shown == "") {
+        shown = onto;
+    }
+    move_head(gitdir, plan.orig_head, new_head, "rebase (start): checkout " + shown)?;
+    return Result<bool, GIT_sequencer.Error>.Ok(true);
+}
+
+void drop_state(str gitdir) {
+    str dir = state_dir(gitdir);
+    match (fs.listdir(dir)) {
+        case Ok(List<str> names): {
+            for (str name in names) {
+                GIT_sequencer.remove_file(fs.join(dir, name));
+            }
+        }
+        case Err(_): {
+        }
+    }
+    match (fs.rmdir(dir)) {
+        case Ok: {
+        }
+        case Err(_): {
+        }
+    }
+}
+
+// --- running ---------------------------------------------------------------------------------------
+
+List<GIT_rebase_todo.Command> remaining(str gitdir) {
+    match (GIT_rebase_todo.parse_unchecked(gitdir, rd(gitdir, "git-rebase-todo"))) {
+        case Ok(List<GIT_rebase_todo.Command> found): {
+            return found;
+        }
+        case Err(_): {
+            List<GIT_rebase_todo.Command> none = [];
+            return none;
+        }
+    }
+}
+
+Result<List<GIT_rebase_todo.Command>, GIT_sequencer.Error> remaining_checked(str gitdir) {
+    return GIT_rebase_todo.parse_unchecked(gitdir, rd(gitdir, "git-rebase-todo"));
+}
+
+bool next_is_fixup(str gitdir) {
+    List<GIT_rebase_todo.Command> rest = remaining(gitdir);
+    return rest.size() > 0 && rest[0].verb.is_fixup();
+}
+
+int line_count(str text) {
+    int n = 0;
+    for (str line in text.split("\n")) {
+        if (line.trim() != "") {
+            n = n + 1;
+        }
+    }
+    return n;
+}
+
+Result<bool, GIT_sequencer.Error> flush_rewritten(str gitdir) {
+    str pending = rd(gitdir, "rewritten-pending");
+    if (pending == "") {
+        return Result<bool, GIT_sequencer.Error>.Ok(true);
+    }
+    Where head = where_head(gitdir)?;
+    str list = rd(gitdir, "rewritten-list");
+    for (str line in pending.split("\n")) {
+        if (line.trim() != "") {
+            list = list + line.trim() + " " + head.id + "\n";
+        }
+    }
+    wr(gitdir, "rewritten-list", list)?;
+    rm(gitdir, "rewritten-pending");
+    return Result<bool, GIT_sequencer.Error>.Ok(true);
+}
+
+Result<bool, GIT_sequencer.Error> record_rewritten(str gitdir, str original) {
+    wr(gitdir, "rewritten-pending", rd(gitdir, "rewritten-pending") + original + "\n")?;
+    if (!next_is_fixup(gitdir)) {
+        flush_rewritten(gitdir)?;
+    }
+    return Result<bool, GIT_sequencer.Error>.Ok(true);
+}
+
+/// Run what is left of the todo list.
+Result<Report, GIT_sequencer.Error> run(str gitdir, str worktree, Editor editor, List<str> notes) {
+    while (true) {
+        List<GIT_rebase_todo.Command> todo = remaining_checked(gitdir)?;
+        if (todo.size() == 0) {
+            return finish(gitdir, worktree, notes);
+        }
+        GIT_rebase_todo.Command cmd = todo[0];
+        List<GIT_rebase_todo.Command> rest = clone(todo);
+        rest.remove_at(0);
+        wr(gitdir, "git-rebase-todo", GIT_rebase_todo.full_text(rest))?;
+        str done = rd(gitdir, "done") + GIT_rebase_todo.full_text([cmd]);
+        wr(gitdir, "done", done)?;
+        wr(gitdir, "msgnum", line_count(done).to_str() + "\n")?;
+        Option<Report> stop = step(gitdir, worktree, cmd, editor, notes)?;
+        match (stop) {
+            case Some(Report report): {
+                return Result<Report, GIT_sequencer.Error>.Ok(report);
+            }
+            case None: {
+            }
+        }
+    }
+}
+
+Result<Option<Report>, GIT_sequencer.Error> step(str gitdir, str worktree, GIT_rebase_todo.Command cmd, Editor editor, List<str> notes) {
+    match (cmd.verb) {
+        case Pick: {
+            return pick_like(gitdir, worktree, cmd, editor, notes);
+        }
+        case Reword: {
+            return pick_like(gitdir, worktree, cmd, editor, notes);
+        }
+        case Edit: {
+            return pick_like(gitdir, worktree, cmd, editor, notes);
+        }
+        case Squash: {
+            return fold(gitdir, worktree, cmd, editor, notes);
+        }
+        case Fixup: {
+            return fold(gitdir, worktree, cmd, editor, notes);
+        }
+        case Drop: {
+            return Result<Option<Report>, GIT_sequencer.Error>.Ok(Option<Report>.None);
+        }
+        case Exec: {
+            return run_exec(gitdir, worktree, cmd);
+        }
+        case Break: {
+            flush_rewritten(gitdir)?;
+            rm_git(gitdir, "AUTO_MERGE");
+            rm_git(gitdir, "REBASE_HEAD");
+            Where head = where_head(gitdir)?;
+            Report stop = Report(Ending.Break);
+            stop.command = GIT_sequencer.abbrev(gitdir, head.id) + " (" + GIT_rebase_todo.subject_of_commit(gitdir, head.id) + ")";
+            return Result<Option<Report>, GIT_sequencer.Error>.Ok(Option<Report>.Some(stop));
+        }
+    }
+}
+
+Result<Option<Report>, GIT_sequencer.Error> go_on() {
+    return Result<Option<Report>, GIT_sequencer.Error>.Ok(Option<Report>.None);
+}
+
+Result<Option<Report>, GIT_sequencer.Error> stop_with(Report report) {
+    return Result<Option<Report>, GIT_sequencer.Error>.Ok(Option<Report>.Some(report));
+}
+
+Result<bool, GIT_sequencer.Error> stop_files(str gitdir, str id, GIT_object.Commit commit, str message) {
+    wr(gitdir, "author-script", author_script_of(commit.author))?;
+    wr(gitdir, "message", message)?;
+    wr(gitdir, "stopped-sha", id + "\n")?;
+    wr_git(gitdir, "REBASE_HEAD", id + "\n")?;
+    return Result<bool, GIT_sequencer.Error>.Ok(true);
+}
+
+Result<bool, GIT_sequencer.Error> pick_message_check(GIT_object.Commit commit) {
+    GIT_sequencer.message_of(commit)?;
+    return Result<bool, GIT_sequencer.Error>.Ok(true);
+}
+
+str pick_word(GIT_rebase_todo.Verb verb) {
+    return "rebase (" + verb.word() + ")";
+}
+
+str merge_msg(str gitdir, GIT_object.Commit commit) {
+    str text = GIT_sequencer.read_text(fs.join(gitdir, "MERGE_MSG"));
+    if (text == "") {
+        return message_text(commit);
+    }
+    return text;
+}
+
+/// What a step that went through leaves behind: git removes these.
+void settled(str gitdir) {
+    rm_git(gitdir, "MERGE_MSG");
+    rm(gitdir, "author-script");
+}
+
+/// pick, reword, edit
+Result<Option<Report>, GIT_sequencer.Error> pick_like(str gitdir, str worktree, GIT_rebase_todo.Command cmd, Editor editor, List<str> notes) {
+    GIT_object.Commit commit = commit_of(gitdir, cmd.id)?;
+    GIT_sequencer.message_of(commit)?;
+    Where head = where_head(gitdir)?;
+    str parent = "";
+    if (commit.parents.size() > 0) {
+        parent = commit.parents[0];
+    } else if (has(gitdir, "squash-onto")) {
+        parent = rd_line(gitdir, "squash-onto");
+    }
+    wr(gitdir, "author-script", author_script_of(commit.author))?;
+    if (parent != "" && parent == head.id) {
+        str head_tree = tree_of(gitdir, head.id)?;
+        move_files(gitdir, worktree, head_tree, commit.tree)?;
+        move_head(gitdir, head.id, cmd.id, "rebase: fast-forward")?;
+        return after_pick(gitdir, worktree, cmd, commit, editor, notes);
+    }
+    GIT_sequencer.Options sopts = GIT_sequencer.Options(no_commit: true, style: GIT_merge.configured_style(gitdir));
+    GIT_sequencer.StepResult applied = GIT_sequencer.apply_step(gitdir, worktree, GIT_sequencer.Item(GIT_sequencer.Verb.Pick, cmd.id, cmd.text), sopts, "rebase")?;
+    for (str line in applied.messages) {
+        notes.push(line);
+    }
+    if (applied.landed == GIT_sequencer.Landed.Conflicted) {
+        stop_files(gitdir, cmd.id, commit, merge_msg(gitdir, commit))?;
+        Report report = Report(Ending.Conflicts);
+        report.stopped = cmd.id;
+        report.conflicts = applied.conflicts;
+        report.messages = clone(notes);
+        report.command = cmd.text;
+        return stop_with(report);
+    }
+    str tree = GIT_sequencer.index_tree_of(gitdir)?;
+    str head_tree = tree_of(gitdir, head.id)?;
+    if (tree == head_tree) {
+        str parent_tree = empty_tree(gitdir)?;
+        if (parent != "") {
+            parent_tree = tree_of(gitdir, parent)?;
+        }
+        if (commit.tree != parent_tree) {
+            if (has(gitdir, "drop_redundant_commits")) {
+                rm_git(gitdir, "MERGE_MSG");
+                notes.push("dropping " + cmd.id + " " + cmd.text + " -- patch contents already upstream");
+                return go_on();
+            }
+            stop_files(gitdir, cmd.id, commit, message_text(commit))?;
+            wr_git(gitdir, "MERGE_MSG", message_text(commit))?;
+            Report report = Report(Ending.Empty);
+            report.stopped = cmd.id;
+            report.messages = clone(notes);
+            report.command = cmd.text;
+            return stop_with(report);
+        }
+    }
+    commit_head(gitdir, tree, [head.id], commit.author, commit.message, head.id, pick_word(cmd.verb) + ": " + first_line(message_text(commit)))?;
+    return after_pick(gitdir, worktree, cmd, commit, editor, notes);
+}
+
+/// HEAD is the picked commit (or its copy): reword, stop to edit, or record it.
+Result<Option<Report>, GIT_sequencer.Error> after_pick(str gitdir, str worktree, GIT_rebase_todo.Command cmd, GIT_object.Commit commit, Editor editor, List<str> notes) {
+    Where head = where_head(gitdir)?;
+    rm_git(gitdir, "MERGE_MSG");
+    rm_git(gitdir, "REBASE_HEAD");
+    if (cmd.verb == GIT_rebase_todo.Verb.Reword) {
+        rm_git(gitdir, "AUTO_MERGE");
+    }
+    if (cmd.verb == GIT_rebase_todo.Verb.Edit) {
+        stop_files(gitdir, cmd.id, commit, message_text(commit))?;
+        wr(gitdir, "amend", head.id + "\n")?;
+        Report report = Report(Ending.Edit);
+        report.stopped = cmd.id;
+        report.messages = clone(notes);
+        report.command = cmd.text;
+        return stop_with(report);
+    }
+    if (cmd.verb == GIT_rebase_todo.Verb.Reword) {
+        GIT_object.Commit made = commit_of(gitdir, head.id)?;
+        match (editor.edit("reword", message_text(made))) {
+            case Some(str edited): {
+                str text = GIT_merge.clean_message(edited);
+                if (text == "") {
+                    return Result<Option<Report>, GIT_sequencer.Error>.Err(GIT_sequencer.Error.EmptyMessage);
+                }
+                str tree = tree_of(gitdir, head.id)?;
+                amend_head(gitdir, tree, text.to_bytes(), "rebase (reword): " + first_line(text))?;
+            }
+            case None: {
+                stop_files(gitdir, cmd.id, commit, message_text(commit))?;
+                Report report = Report(Ending.Message);
+                report.stopped = cmd.id;
+                report.messages = clone(notes);
+                report.command = cmd.text;
+                return stop_with(report);
+            }
+        }
+    }
+    rm(gitdir, "author-script");
+    record_rewritten(gitdir, cmd.id)?;
+    return go_on();
+}
+
+/// squash, fixup
+Result<Option<Report>, GIT_sequencer.Error> fold(str gitdir, str worktree, GIT_rebase_todo.Command cmd, Editor editor, List<str> notes) {
+    GIT_object.Commit commit = commit_of(gitdir, cmd.id)?;
+    GIT_sequencer.message_of(commit)?;
+    Where head = where_head(gitdir)?;
+    GIT_object.Commit previous = commit_of(gitdir, head.id)?;
+    wr(gitdir, "author-script", author_script_of(commit.author))?;
+    wr_git(gitdir, "REBASE_HEAD", cmd.id + "\n")?;
+    str body = strip_leading_blank(message_text(commit));
+    str fixups = rd(gitdir, "current-fixups");
+    int count = 0;
+    if (fixups != "") {
+        count = line_count(fixups);
+    }
+    str text = "";
+    if (count == 0) {
+        str earlier = strip_leading_blank(message_text(previous));
+        if (cmd.verb == GIT_rebase_todo.Verb.Fixup) {
+            wr(gitdir, "message-fixup", earlier)?;
+        }
+        text = "# This is a combination of 2 commits.\n# This is the 1st commit message:\n\n" + earlier;
+    } else {
+        str old = rd(gitdir, "message-squash");
+        List<str> lines = old.split("\n");
+        lines[0] = "# This is a combination of " + (count + 2).to_str() + " commits.";
+        text = lines.join("\n");
+    }
+    int number = count + 2;
+    if (cmd.verb == GIT_rebase_todo.Verb.Squash) {
+        rm(gitdir, "message-fixup");
+        text = text + "\n# This is the commit message #" + number.to_str() + ":\n\n" + body;
+    } else {
+        text = text + "\n# The commit message #" + number.to_str() + " will be skipped:\n\n" + commented(body);
+    }
+    wr(gitdir, "message-squash", text)?;
+    str line = cmd.verb.word() + " " + cmd.id;
+    if (fixups != "") {
+        line = fixups + "\n" + line;
+    }
+    wr(gitdir, "current-fixups", line)?;
+    GIT_sequencer.Options sopts = GIT_sequencer.Options(no_commit: true, style: GIT_merge.configured_style(gitdir));
+    GIT_sequencer.StepResult applied = GIT_sequencer.apply_step(gitdir, worktree, GIT_sequencer.Item(GIT_sequencer.Verb.Pick, cmd.id, cmd.text), sopts, "rebase")?;
+    for (str note in applied.messages) {
+        notes.push(note);
+    }
+    if (applied.landed == GIT_sequencer.Landed.Conflicted) {
+        stop_files(gitdir, cmd.id, commit, text)?;
+        wr(gitdir, "amend", head.id + "\n")?;
+        if (!next_is_fixup(gitdir)) {
+            wr_git(gitdir, "SQUASH_MSG", text)?;
+        }
+        wr_git(gitdir, "MERGE_MSG", text)?;
+        Report report = Report(Ending.Conflicts);
+        report.stopped = cmd.id;
+        report.conflicts = applied.conflicts;
+        report.messages = clone(notes);
+        report.command = cmd.text;
+        return stop_with(report);
+    }
+    return fold_commit(gitdir, worktree, cmd, commit, editor, notes, text);
+}
+
+/// The index holds the melded result: commit it over HEAD, or ask for the message.
+Result<Option<Report>, GIT_sequencer.Error> fold_commit(str gitdir, str worktree, GIT_rebase_todo.Command cmd, GIT_object.Commit commit, Editor editor, List<str> notes, str text) {
+    Where head = where_head(gitdir)?;
+    str tree = GIT_sequencer.index_tree_of(gitdir)?;
+    bool is_final = !next_is_fixup(gitdir);
+    str verb_word = pick_word(cmd.verb);
+    if (!is_final) {
+        amend_head(gitdir, tree, text.to_bytes(), verb_word + ": " + first_line(text))?;
+        settled(gitdir);
+        return fold_done(gitdir, cmd);
+    }
+    if (has(gitdir, "message-fixup")) {
+        str verbatim = rd(gitdir, "message-fixup");
+        amend_head(gitdir, tree, verbatim.to_bytes(), verb_word + ": " + first_line(verbatim))?;
+        settled(gitdir);
+        rm_git(gitdir, "REBASE_HEAD");
+        return fold_done(gitdir, cmd);
+    }
+    wr_git(gitdir, "SQUASH_MSG", text)?;
+    match (editor.edit("squash", text)) {
+        case Some(str edited): {
+            str cleaned = GIT_merge.clean_message(edited);
+            if (cleaned == "") {
+                return Result<Option<Report>, GIT_sequencer.Error>.Err(GIT_sequencer.Error.EmptyMessage);
+            }
+            amend_head(gitdir, tree, cleaned.to_bytes(), verb_word + ": " + first_line(cleaned))?;
+            settled(gitdir);
+            rm_git(gitdir, "AUTO_MERGE");
+            rm_git(gitdir, "SQUASH_MSG");
+            return fold_done(gitdir, cmd);
+        }
+        case None: {
+            stop_files(gitdir, cmd.id, commit, text)?;
+            wr(gitdir, "amend", head.id + "\n")?;
+            wr_git(gitdir, "MERGE_MSG", text)?;
+            Report report = Report(Ending.Message);
+            report.stopped = cmd.id;
+            report.messages = clone(notes);
+            report.command = cmd.text;
+            return stop_with(report);
+        }
+    }
+}
+
+Result<Option<Report>, GIT_sequencer.Error> fold_done(str gitdir, GIT_rebase_todo.Command cmd) {
+    record_rewritten(gitdir, cmd.id)?;
+    if (!next_is_fixup(gitdir)) {
+        rm(gitdir, "message-fixup");
+        rm(gitdir, "message-squash");
+        rm(gitdir, "current-fixups");
+    }
+    return go_on();
+}
+
+// --- exec ---------------------------------------------------------------------------------------------
+
+Result<Option<Report>, GIT_sequencer.Error> run_exec(str gitdir, str worktree, GIT_rebase_todo.Command cmd) {
+    flush_rewritten(gitdir)?;
+    rm_git(gitdir, "AUTO_MERGE");
+    rm_git(gitdir, "REBASE_HEAD");
+    str out = fs.join(state_dir(gitdir), "exec.out");
+    str script = "cd " + sq(worktree) + " && { " + cmd.text + "\n} >" + sq(out) + " 2>&1 </dev/null";
+    bool is_ok = false;
+    match (os.run(["sh", "-c", script])) {
+        case Ok(os.ExitStatus status): {
+            is_ok = status.success();
+        }
+        case Err(_): {
+            is_ok = false;
+        }
+    }
+    str output = GIT_sequencer.read_text(out);
+    GIT_sequencer.remove_file(out);
+    if (!is_ok) {
+        Report report = Report(Ending.ExecFailed);
+        report.output = output;
+        report.command = cmd.text;
+        return stop_with(report);
+    }
+    if (is_dirty(gitdir, worktree)) {
+        Report report = Report(Ending.ExecDirty);
+        report.output = output;
+        report.command = cmd.text;
+        return stop_with(report);
+    }
+    return go_on();
+}
+
+// --- finishing --------------------------------------------------------------------------------------
+
+Result<Report, GIT_sequencer.Error> finish(str gitdir, str worktree, List<str> notes) {
+    flush_rewritten(gitdir)?;
+    Where head = where_head(gitdir)?;
+    str head_name = rd_line(gitdir, "head-name");
+    str orig = rd_line(gitdir, "orig-head");
+    str onto = rd_line(gitdir, "onto");
+    str autostash = rd_line(gitdir, "autostash");
+    if (head_name.starts_with("refs/")) {
+        str current = "";
+        match (GIT_refs.resolve(gitdir, head_name)) {
+            case Ok(str found): {
+                current = found;
+            }
+            case Err(_): {
+            }
+        }
+        if (current != head.id) {
+            GIT_sequencer.move_ref(gitdir, head_name, head.id, Option<str>.Some(current), "rebase (finish): " + head_name + " onto " + onto)?;
+        }
+        GIT_sequencer.lift_bool(link_head(gitdir, head_name))?;
+        log_head(gitdir, head.id, head.id, "rebase (finish): returning to " + head_name);
+    }
+    drop_state(gitdir);
+    if (autostash != "") {
+        apply_autostash(gitdir, worktree, autostash, notes);
+    }
+    Report report = Report(Ending.Finished);
+    report.messages = clone(notes);
+    return Result<Report, GIT_sequencer.Error>.Ok(report);
+}
+
+Result<bool, GIT_merge.Error> link_head(str gitdir, str head_name) {
+    match (GIT_refs.update_symbolic(gitdir, "HEAD", head_name)) {
+        case Ok(_): {
+            return Result<bool, GIT_merge.Error>.Ok(true);
+        }
+        case Err(GIT_refs.Error error): {
+            return Result<bool, GIT_merge.Error>.Err(GIT_merge.Error.Refs(error));
+        }
+    }
+}
+
+void apply_autostash(str gitdir, str worktree, str autostash, List<str> notes) {
+    match (GIT_stash.apply(gitdir, worktree, autostash)) {
+        case Ok(_): {
+            notes.push("Applied autostash.");
+        }
+        case Err(GIT_stash.Error error): {
+            store_autostash(gitdir, autostash);
+            notes.push("Applying autostash resulted in conflicts.");
+            notes.push("Your changes are safe in the stash.");
+            notes.push("You can run \"git stash pop\" or \"git stash drop\" at any time.");
+        }
+    }
+}
+
+// --- continue, skip, abort, quit ---------------------------------------------------------------
+
+const str STAGED_ADVICE = "you have staged changes in your working tree: commit them first (git commit), then continue the rebase";
+
+/// Continue after a stop. `message` is the commit message a person gave for
+/// the stopped step; without one `editor` is asked.
+pub Result<Report, GIT_sequencer.Error> continue_rebase(str gitdir, str worktree, Option<str> message, Editor editor) {
+    if (!in_progress(gitdir)) {
+        return Result<Report, GIT_sequencer.Error>.Err(GIT_sequencer.Error.NoSequence);
+    }
+    List<str> notes = [];
+    Option<Report> stop = commit_staged(gitdir, worktree, message, editor, notes)?;
+    match (stop) {
+        case Some(Report report): {
+            return Result<Report, GIT_sequencer.Error>.Ok(report);
+        }
+        case None: {
+        }
+    }
+    forget_stop(gitdir);
+    return run(gitdir, worktree, editor, notes);
+}
+
+void forget_stop(str gitdir) {
+    rm(gitdir, "message");
+    rm(gitdir, "stopped-sha");
+    rm(gitdir, "amend");
+    rm_git(gitdir, "MERGE_MSG");
+    rm_git(gitdir, "REBASE_HEAD");
+    rm_git(gitdir, "CHERRY_PICK_HEAD");
+}
+
+Option<GIT_rebase_todo.Command> last_done(str gitdir) {
+    match (GIT_rebase_todo.parse_unchecked(gitdir, rd(gitdir, "done"))) {
+        case Ok(List<GIT_rebase_todo.Command> found): {
+            if (found.size() > 0) {
+                return Option<GIT_rebase_todo.Command>.Some(found[found.size() - 1]);
+            }
+        }
+        case Err(_): {
+        }
+    }
+    return Option<GIT_rebase_todo.Command>.None;
+}
+
+const str CONTINUE_WORD = "rebase (continue)";
+
+/// Commit what the person staged for the stopped step, as git's
+/// `commit_staged_changes`. `Some(report)` when a message is still needed.
+Result<Option<Report>, GIT_sequencer.Error> commit_staged(str gitdir, str worktree, Option<str> message, Editor editor, List<str> notes) {
+    GIT_status.Status status = tracked_status(gitdir, worktree)?;
+    if (status.unmerged.size() > 0) {
+        return Result<Option<Report>, GIT_sequencer.Error>.Err(GIT_sequencer.Error.UnmergedPaths);
+    }
+    if (status.unstaged.size() > 0) {
+        return Result<Option<Report>, GIT_sequencer.Error>.Err(refused("cannot rebase: You have unstaged changes."));
+    }
+    bool is_staged = status.staged.size() > 0;
+    bool has_amend = has(gitdir, "amend");
+    Where head = where_head(gitdir)?;
+    bool is_chain = false;
+    bool is_final = false;
+    GIT_rebase_todo.Verb word = GIT_rebase_todo.Verb.Pick;
+    match (last_done(gitdir)) {
+        case Some(GIT_rebase_todo.Command last): {
+            word = last.verb;
+            is_chain = last.verb.is_fixup() && has(gitdir, "current-fixups");
+            is_final = is_chain && !next_is_fixup(gitdir);
+        }
+        case None: {
+        }
+    }
+    if (is_staged && !has_amend && !has(gitdir, "message")) {
+        return Result<Option<Report>, GIT_sequencer.Error>.Err(refused(STAGED_ADVICE));
+    }
+    if (has_amend && is_staged && rd_line(gitdir, "amend") != head.id) {
+        return Result<Option<Report>, GIT_sequencer.Error>.Err(refused("You have uncommitted changes in your working tree. Please, commit them first and then run 'git rebase --continue' again."));
+    }
+    bool is_reword = word == GIT_rebase_todo.Verb.Reword && !has_amend && !is_staged && has(gitdir, "message");
+    if (is_reword && message.is_some()) {
+        str text = GIT_merge.clean_message(message.or(""));
+        if (text == "") {
+            return Result<Option<Report>, GIT_sequencer.Error>.Err(GIT_sequencer.Error.EmptyMessage);
+        }
+        str tree = tree_of(gitdir, head.id)?;
+        amend_head(gitdir, tree, text.to_bytes(), "rebase (reword): " + first_line(text))?;
+        return after_commit(gitdir, false);
+    }
+    if (!is_staged && !is_final) {
+        return Result<Option<Report>, GIT_sequencer.Error>.Ok(Option<Report>.None);
+    }
+    str tree = tree_of(gitdir, head.id)?;
+    if (is_staged) {
+        tree = GIT_sequencer.index_tree_of(gitdir)?;
+    }
+    if (has_amend || is_final) {
+        GIT_object.Commit previous = commit_of(gitdir, head.id)?;
+        str text = "";
+        if (is_final && has(gitdir, "message-fixup")) {
+            text = rd(gitdir, "message-fixup");
+        } else if (is_final || is_chain) {
+            str base = rd(gitdir, "message-squash");
+            if (is_chain && !is_final) {
+                text = base;
+            } else {
+                match (ask(editor, message, "squash", base)) {
+                    case Some(str edited): {
+                        text = GIT_merge.clean_message(edited);
+                    }
+                    case None: {
+                        return needs_message(gitdir, notes);
+                    }
+                }
+            }
+        } else {
+            match (ask(editor, message, "continue", message_text(previous))) {
+                case Some(str edited): {
+                    text = GIT_merge.clean_message(edited);
+                }
+                case None: {
+                    return needs_message(gitdir, notes);
+                }
+            }
+        }
+        if (text.trim() == "") {
+            return Result<Option<Report>, GIT_sequencer.Error>.Err(GIT_sequencer.Error.EmptyMessage);
+        }
+        amend_head(gitdir, tree, text.to_bytes(), CONTINUE_WORD + ": " + first_line(text))?;
+        return after_commit(gitdir, is_final);
+    }
+    GIT_object.Ident author = GIT_merge.ident(gitdir, "AUTHOR");
+    match (parse_author_script(rd(gitdir, "author-script"))) {
+        case Some(GIT_object.Ident found): {
+            author = found;
+        }
+        case None: {
+        }
+    }
+    str text = "";
+    match (ask(editor, message, "continue", rd(gitdir, "message"))) {
+        case Some(str edited): {
+            text = GIT_merge.clean_message(edited);
+        }
+        case None: {
+            return needs_message(gitdir, notes);
+        }
+    }
+    if (text.trim() == "") {
+        return Result<Option<Report>, GIT_sequencer.Error>.Err(GIT_sequencer.Error.EmptyMessage);
+    }
+    commit_head(gitdir, tree, [head.id], author, text.to_bytes(), head.id, CONTINUE_WORD + ": " + first_line(text))?;
+    return after_commit(gitdir, false);
+}
+
+Option<str> ask(Editor editor, Option<str> given, str purpose, str text) {
+    match (given) {
+        case Some(str chosen): {
+            return Option<str>.Some(chosen);
+        }
+        case None: {
+            return editor.edit(purpose, text);
+        }
+    }
+}
+
+Result<Option<Report>, GIT_sequencer.Error> needs_message(str gitdir, List<str> notes) {
+    Report report = Report(Ending.Message);
+    report.stopped = rd_line(gitdir, "stopped-sha");
+    report.messages = clone(notes);
+    return Result<Option<Report>, GIT_sequencer.Error>.Ok(Option<Report>.Some(report));
+}
+
+Result<Option<Report>, GIT_sequencer.Error> after_commit(str gitdir, bool is_final) {
+    str stopped = rd_line(gitdir, "stopped-sha");
+    if (is_final) {
+        rm(gitdir, "message-fixup");
+        rm(gitdir, "message-squash");
+        rm(gitdir, "current-fixups");
+        rm_git(gitdir, "SQUASH_MSG");
+    }
+    if (stopped != "") {
+        record_rewritten(gitdir, stopped)?;
+    }
+    return Result<Option<Report>, GIT_sequencer.Error>.Ok(Option<Report>.None);
+}
+
+/// `--skip`: drop what the stopped step did to the index and files, go on.
+pub Result<Report, GIT_sequencer.Error> skip(str gitdir, str worktree, Editor editor) {
+    if (!in_progress(gitdir)) {
+        return Result<Report, GIT_sequencer.Error>.Err(GIT_sequencer.Error.NoSequence);
+    }
+    Where head = where_head(gitdir)?;
+    GIT_sequencer.lift_bool(GIT_merge.reset_merge_paths(gitdir, worktree, head.id))?;
+    GIT_merge.clear_state(gitdir);
+    return continue_rebase(gitdir, worktree, Option<str>.None, editor);
+}
+
+/// `--abort`: HEAD back on the branch at its old commit, the files with it.
+pub Result<List<str>, GIT_sequencer.Error> abort(str gitdir, str worktree) {
+    if (!in_progress(gitdir)) {
+        return Result<List<str>, GIT_sequencer.Error>.Err(GIT_sequencer.Error.NoSequence);
+    }
+    str orig = rd_line(gitdir, "orig-head");
+    str head_name = rd_line(gitdir, "head-name");
+    str autostash = rd_line(gitdir, "autostash");
+    Where head = where_head(gitdir)?;
+    GIT_sequencer.lift_bool(GIT_merge.reset_merge_paths(gitdir, worktree, head.id))?;
+    move_files(gitdir, worktree, tree_of(gitdir, head.id)?, tree_of(gitdir, orig)?)?;
+    rm_git(gitdir, "MERGE_MSG");
+    rm_git(gitdir, "SQUASH_MSG");
+    rm_git(gitdir, "REBASE_HEAD");
+    rm_git(gitdir, "AUTO_MERGE");
+    rm_git(gitdir, "CHERRY_PICK_HEAD");
+    if (head_name.starts_with("refs/")) {
+        GIT_sequencer.lift_bool(link_head(gitdir, head_name))?;
+        log_head(gitdir, head.id, orig, "rebase (abort): returning to " + head_name);
+    } else {
+        move_head(gitdir, head.id, orig, "rebase (abort): returning to detached HEAD")?;
+    }
+    drop_state(gitdir);
+    List<str> notes = [];
+    if (autostash != "") {
+        apply_autostash(gitdir, worktree, autostash, notes);
+    }
+    return Result<List<str>, GIT_sequencer.Error>.Ok(notes);
+}
+
+/// `--quit`: forget the rebase, leaving HEAD, the index and the files as they are.
+pub Result<List<str>, GIT_sequencer.Error> quit(str gitdir, str worktree) {
+    if (!in_progress(gitdir)) {
+        return Result<List<str>, GIT_sequencer.Error>.Err(GIT_sequencer.Error.NoSequence);
+    }
+    str autostash = rd_line(gitdir, "autostash");
+    List<str> notes = [];
+    if (autostash != "") {
+        store_autostash(gitdir, autostash);
+        notes.push("Autostash exists; creating a new stash entry.");
+    }
+    rm_git(gitdir, "REBASE_HEAD");
+    drop_state(gitdir);
+    return Result<List<str>, GIT_sequencer.Error>.Ok(notes);
+}
+
+// --- the todo list while a rebase is going -----------------------------------------------------------
+
+/// What is left to do, as an editor shows it.
+pub str todo_text(str gitdir) {
+    return GIT_rebase_todo.short_text(gitdir, remaining(gitdir)) + "\n" + GIT_rebase_todo.HELP;
+}
+
+/// Replace what is left to do with `text`. Nothing left is not an abort here.
+pub Result<bool, GIT_sequencer.Error> edit_todo(str gitdir, str text) {
+    if (!in_progress(gitdir)) {
+        return Result<bool, GIT_sequencer.Error>.Err(GIT_sequencer.Error.NoSequence);
+    }
+    List<GIT_rebase_todo.Command> cmds = GIT_rebase_todo.parse(gitdir, text)?;
+    wr(gitdir, "git-rebase-todo", GIT_rebase_todo.full_text(cmds))?;
+    return Result<bool, GIT_sequencer.Error>.Ok(true);
+}
+
+pub Option<State> state(str gitdir) {
+    if (!in_progress(gitdir)) {
+        return Option<State>.None;
+    }
+    List<GIT_rebase_todo.Command> finished = [];
+    match (GIT_rebase_todo.parse_unchecked(gitdir, rd(gitdir, "done"))) {
+        case Ok(List<GIT_rebase_todo.Command> found): {
+            finished = found;
+        }
+        case Err(_): {
+        }
+    }
+    int total = rd_line(gitdir, "end").parse_int().or(0);
+    return Option<State>.Some(State(finished.size(), total, has(gitdir, "interactive"), rd_line(gitdir, "head-name"), rd_line(gitdir, "onto"), rd_line(gitdir, "orig-head"), rd_line(gitdir, "stopped-sha"), finished, remaining(gitdir)));
+}
+
+/// `REBASING 2/5`, or `""` outside a rebase.
+pub str banner(str gitdir) {
+    match (state(gitdir)) {
+        case Some(State found): {
+            return "REBASING " + found.done.to_str() + "/" + found.total.to_str();
+        }
+        case None: {
+            return "";
+        }
+    }
+}

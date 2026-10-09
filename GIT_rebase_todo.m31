@@ -1,0 +1,557 @@
+// The todo list of `git rebase`: what the commands are, how a list is read
+// and written, which commits go into a new one, and `--autosquash`.
+//
+// API
+// ---
+//   GIT_rebase_todo.parse(gitdir, text)        -> Result<List<Command>, Error>
+//   GIT_rebase_todo.full_text(cmds)            -> str   full ids, git's own files
+//   GIT_rebase_todo.short_text(gitdir, cmds)   -> str   abbreviated, for people
+//   GIT_rebase_todo.editor_text(gitdir, cmds, range, onto) -> str  the list and git's help comments
+//   GIT_rebase_todo.pick_range(gitdir, head, upstream)  -> Result<Picked, Error>
+//   GIT_rebase_todo.autosquash(cmds)           -> List<Command>
+//   GIT_rebase_todo.patch_id(gitdir, id)       -> str   "" for a merge, a root or an empty diff
+//
+// --- as git, and where not ----------------------------------------------------------
+//
+//   - A todo line is `<verb> <commit> [<subject>]`, `exec <command>` or
+//     `break`; the verbs have their one-letter forms; `#` lines and blank lines
+//     are skipped. `label`, `reset`, `merge`, `update-ref` and `fixup -C/-c`
+//     are refused with a plain message, not guessed at.
+//   - The commits of a new list are those of `upstream..head` without merges,
+//     oldest first, minus those whose patch id equals one of `head..upstream`
+//     (git's `--cherry-pick`). The patch id here is the normalised unified
+//     diff against the first parent, hashed: the same equivalence git's is
+//     meant to give, not its number.
+//   - `autosquash` follows git's `todo_list_rearrange_squash`: a subject that
+//     starts with `fixup! ` or `squash! ` names an earlier commit by subject,
+//     by commit name, or by a prefix of its subject. `amend! ` is not
+//     rearranged.
+
+import fs;
+import GIT_graph;
+import GIT_merge;
+import GIT_object;
+import GIT_refs;
+import GIT_sequencer;
+import GIT_udiff;
+
+pub enum Verb {
+    Pick;
+    Reword;
+    Edit;
+    Squash;
+    Fixup;
+    Drop;
+    Exec;
+    Break;
+}
+
+pub str Verb.word() {
+    match (this) {
+        case Pick: {
+            return "pick";
+        }
+        case Reword: {
+            return "reword";
+        }
+        case Edit: {
+            return "edit";
+        }
+        case Squash: {
+            return "squash";
+        }
+        case Fixup: {
+            return "fixup";
+        }
+        case Drop: {
+            return "drop";
+        }
+        case Exec: {
+            return "exec";
+        }
+        case Break: {
+            return "break";
+        }
+    }
+}
+
+pub str Verb.letter() {
+    return word().substr(0, 1);
+}
+
+pub bool Verb.eq(Verb other) {
+    return word() == other.word();
+}
+
+/// The verbs that name a commit.
+pub bool Verb.has_commit() {
+    return this != Verb.Exec && this != Verb.Break;
+}
+
+/// `squash` and `fixup`: they meld into the commit before.
+pub bool Verb.is_fixup() {
+    return this == Verb.Squash || this == Verb.Fixup;
+}
+
+/// One command. `id` is a full commit id (`""` for exec and break), `text`
+/// the subject, or the shell command of an exec.
+pub type Command {
+    pub Verb verb;
+    pub str id;
+    pub str text;
+}
+
+pub type Picked {
+    /// `pick` for each commit, oldest first.
+    pub List<Command> commands;
+    /// The commits left out because upstream already has them.
+    pub List<str> applied;
+}
+
+/// The first paragraph of a message on one line, as `%s`.
+pub str oneline(str message) {
+    List<str> parts = [];
+    for (str raw in message.split("\n")) {
+        str line = raw.trim();
+        if (line == "") {
+            if (parts.size() > 0) {
+                break;
+            }
+            continue;
+        }
+        parts.push(line);
+    }
+    return parts.join(" ");
+}
+
+pub str subject_of_commit(str gitdir, str id) {
+    match (GIT_merge.read_commit(gitdir, id)) {
+        case Ok(GIT_object.Commit commit): {
+            return oneline(commit.message.utf8().or(""));
+        }
+        case Err(_): {
+            return "";
+        }
+    }
+}
+
+// --- reading and writing ------------------------------------------------------------
+
+Option<Verb> word_verb(str word) {
+    if (word == "pick" || word == "p") {
+        return Option<Verb>.Some(Verb.Pick);
+    }
+    if (word == "reword" || word == "r") {
+        return Option<Verb>.Some(Verb.Reword);
+    }
+    if (word == "edit" || word == "e") {
+        return Option<Verb>.Some(Verb.Edit);
+    }
+    if (word == "squash" || word == "s") {
+        return Option<Verb>.Some(Verb.Squash);
+    }
+    if (word == "fixup" || word == "f") {
+        return Option<Verb>.Some(Verb.Fixup);
+    }
+    if (word == "drop" || word == "d") {
+        return Option<Verb>.Some(Verb.Drop);
+    }
+    if (word == "exec" || word == "x") {
+        return Option<Verb>.Some(Verb.Exec);
+    }
+    if (word == "break" || word == "b") {
+        return Option<Verb>.Some(Verb.Break);
+    }
+    return Option<Verb>.None;
+}
+
+Result<List<Command>, GIT_sequencer.Error> refuse(str why) {
+    return Result<List<Command>, GIT_sequencer.Error>.Err(GIT_sequencer.Error.Unsupported(why));
+}
+
+/// The commands of `text`; commit names are resolved to full ids.
+pub Result<List<Command>, GIT_sequencer.Error> parse(str gitdir, str text) {
+    List<Command> out = parse_unchecked(gitdir, text)?;
+    return validate(out);
+}
+
+/// `parse` without the check that a squash has something to meld into.
+pub Result<List<Command>, GIT_sequencer.Error> parse_unchecked(str gitdir, str text) {
+    List<Command> out = [];
+    for (str raw in text.split("\n")) {
+        str line = raw.trim();
+        if (line == "" || line.starts_with("#")) {
+            continue;
+        }
+        int space = line.index_of(" ").or(-1);
+        str word = line;
+        str rest = "";
+        if (space >= 0) {
+            word = line.substr(0, space);
+            rest = line.substr(space + 1, line.size()).trim();
+        }
+        if (word == "label" || word == "l" || word == "reset" || word == "t" || word == "merge" || word == "m" || word == "update-ref" || word == "u") {
+            return refuse("the todo command '" + word + "' is not supported");
+        }
+        Verb verb = Verb.Pick;
+        match (word_verb(word)) {
+            case Some(Verb found): {
+                verb = found;
+            }
+            case None: {
+                return refuse("unknown todo command '" + word + "'");
+            }
+        }
+        if (verb == Verb.Break) {
+            out.push(Command(Verb.Break, "", ""));
+            continue;
+        }
+        if (verb == Verb.Exec) {
+            if (rest == "") {
+                return refuse("exec without a command");
+            }
+            out.push(Command(Verb.Exec, "", rest));
+            continue;
+        }
+        if (verb == Verb.Fixup && (rest.starts_with("-C ") || rest.starts_with("-c ") || rest.starts_with("-C") && rest.size() == 2)) {
+            return refuse("fixup -C and -c are not supported");
+        }
+        int cut = rest.index_of(" ").or(-1);
+        str token = rest;
+        str subject = "";
+        if (cut >= 0) {
+            token = rest.substr(0, cut);
+            subject = rest.substr(cut + 1, rest.size()).trim();
+        }
+        if (token == "") {
+            return refuse("'" + word + "' needs a commit");
+        }
+        match (GIT_refs.rev_parse(gitdir, token)) {
+            case Ok(str found): {
+                match (GIT_merge.read_commit(gitdir, found)) {
+                    case Ok(GIT_object.Commit commit): {
+                        if (subject == "") {
+                            subject = oneline(commit.message.utf8().or(""));
+                        }
+                        out.push(Command(verb, found, subject));
+                    }
+                    case Err(_): {
+                        return refuse("'" + token + "' is not a commit");
+                    }
+                }
+            }
+            case Err(_): {
+                return refuse("'" + token + "' is not a commit");
+            }
+        }
+    }
+    return Result<List<Command>, GIT_sequencer.Error>.Ok(out);
+}
+
+/// A squash or fixup needs a commit before it.
+pub Result<List<Command>, GIT_sequencer.Error> validate(List<Command> cmds) {
+    bool is_ready = false;
+    for (Command cmd in cmds) {
+        if (cmd.verb.is_fixup() && !is_ready) {
+            return refuse("cannot '" + cmd.verb.word() + "' without a previous commit");
+        }
+        if (cmd.verb == Verb.Pick || cmd.verb == Verb.Reword || cmd.verb == Verb.Edit) {
+            is_ready = true;
+        }
+        if (cmd.verb == Verb.Drop) {
+            is_ready = false;
+        }
+    }
+    return Result<List<Command>, GIT_sequencer.Error>.Ok(cmds);
+}
+
+str line_of(Command cmd, str id_text) {
+    if (cmd.verb == Verb.Break) {
+        return "break";
+    }
+    if (cmd.verb == Verb.Exec) {
+        return "exec " + cmd.text;
+    }
+    return (cmd.verb.word() + " " + id_text + " " + cmd.text).trim();
+}
+
+/// The lines git keeps in its state files: full ids.
+pub str full_text(List<Command> cmds) {
+    str out = "";
+    for (Command cmd in cmds) {
+        out = out + line_of(cmd, cmd.id) + "\n";
+    }
+    return out;
+}
+
+/// The lines as a person reads them: abbreviated ids.
+pub str short_text(str gitdir, List<Command> cmds) {
+    str out = "";
+    for (Command cmd in cmds) {
+        str shown = "";
+        if (cmd.id != "") {
+            shown = GIT_sequencer.abbrev(gitdir, cmd.id);
+        }
+        out = out + line_of(cmd, shown) + "\n";
+    }
+    return out;
+}
+
+/// What the todo editor is given: the list, then git's help.
+pub str editor_text(str gitdir, List<Command> cmds, str range, str onto) {
+    str count = cmds.size().to_str() + " command";
+    if (cmds.size() != 1) {
+        count = count + "s";
+    }
+    str head = "\n# Rebase " + range + " onto " + onto + " (" + count + ")\n";
+    return short_text(gitdir, cmds) + head + HELP;
+}
+
+pub const str HELP = "#\n# Commands:\n# p, pick <commit> = use commit\n# r, reword <commit> = use commit, but edit the commit message\n# e, edit <commit> = use commit, but stop for amending\n# s, squash <commit> = use commit, but meld into previous commit\n# f, fixup <commit> = like \"squash\" but keep only the previous\n#                    commit's log message\n# x, exec <command> = run command (the rest of the line) using shell\n# b, break = stop here (continue rebase later with 'git rebase --continue')\n# d, drop <commit> = remove commit\n#\n# These lines can be re-ordered; they are executed from top to bottom.\n#\n# If you remove a line here THAT COMMIT WILL BE LOST.\n#\n# However, if you remove everything, the rebase will be aborted.\n#\n";
+
+// --- which commits ---------------------------------------------------------------------
+
+/// A key that is equal for two commits that make the same change.
+pub str patch_id(str gitdir, str id) {
+    match (GIT_merge.read_commit(gitdir, id)) {
+        case Ok(GIT_object.Commit commit): {
+            if (commit.parents.size() != 1) {
+                return "";
+            }
+            str from_tree = "";
+            match (GIT_merge.tree_of(gitdir, commit.parents[0])) {
+                case Ok(str found): {
+                    from_tree = found;
+                }
+                case Err(_): {
+                    return "";
+                }
+            }
+            if (from_tree == commit.tree) {
+                return "";
+            }
+            match (GIT_udiff.trees(gitdir, from_tree, commit.tree)) {
+                case Ok(bytes diff): {
+                    match (diff.utf8()) {
+                        case Some(str text): {
+                            return normalised(text);
+                        }
+                        case None: {
+                            return "";
+                        }
+                    }
+                }
+                case Err(_): {
+                    return "";
+                }
+            }
+        }
+        case Err(_): {
+            return "";
+        }
+    }
+}
+
+str normalised(str text) {
+    str out = "";
+    for (str line in text.split("\n")) {
+        if (line.starts_with("index ") || line.starts_with("@@")) {
+            continue;
+        }
+        List<str> kept = [];
+        for (int i in 0 .. line.size()) {
+            str c = line.substr(i, i + 1);
+            if (c != " " && c != "\t" && c != "\r") {
+                kept.push(c);
+            }
+        }
+        out = out + kept.join("") + "\n";
+    }
+    if (out == "") {
+        return "";
+    }
+    return GIT_object.blob_id(out.to_bytes());
+}
+
+/// The commits of `upstream..head` as `pick`s, oldest first, merges and
+/// commits upstream already has left out. `upstream` is `""` for a root rebase.
+pub Result<Picked, GIT_sequencer.Error> pick_range(str gitdir, str head, str upstream) {
+    List<str> exclude = [];
+    if (upstream != "") {
+        exclude.push(upstream);
+    }
+    List<str> newest = [];
+    match (GIT_graph.rev_list(gitdir, [head], exclude)) {
+        case Ok(List<str> found): {
+            newest = found;
+        }
+        case Err(GIT_graph.Error error): {
+            return Result<Picked, GIT_sequencer.Error>.Err(GIT_sequencer.Error.Unsupported(error.to_str()));
+        }
+    }
+    Map<str, bool> theirs = {};
+    bool is_theirs_read = false;
+    List<Command> commands = [];
+    List<str> applied = [];
+    int at = newest.size() - 1;
+    while (at >= 0) {
+        str id = newest[at];
+        at = at - 1;
+        GIT_object.Commit commit = GIT_sequencer.lift_commit(GIT_merge.read_commit(gitdir, id))?;
+        if (commit.parents.size() > 1) {
+            continue;
+        }
+        if (upstream != "") {
+            str key = patch_id(gitdir, id);
+            if (key != "") {
+                if (!is_theirs_read) {
+                    is_theirs_read = true;
+                    theirs = upstream_keys(gitdir, head, upstream);
+                }
+                if (theirs.contains(key)) {
+                    applied.push(id);
+                    continue;
+                }
+            }
+        }
+        commands.push(Command(Verb.Pick, id, oneline(commit.message.utf8().or(""))));
+    }
+    return Result<Picked, GIT_sequencer.Error>.Ok(Picked(commands, applied));
+}
+
+const int UPSTREAM_LOOKBACK = 1000;
+
+Map<str, bool> upstream_keys(str gitdir, str head, str upstream) {
+    Map<str, bool> keys = {};
+    match (GIT_graph.rev_list(gitdir, [upstream], [head])) {
+        case Ok(List<str> found): {
+            int seen = 0;
+            for (str id in found) {
+                if (seen >= UPSTREAM_LOOKBACK) {
+                    break;
+                }
+                seen = seen + 1;
+                str key = patch_id(gitdir, id);
+                if (key != "") {
+                    keys.set(key, true);
+                }
+            }
+        }
+        case Err(_): {
+        }
+    }
+    return keys;
+}
+
+// --- autosquash --------------------------------------------------------------------------
+
+Option<str> fixup_target(str subject) {
+    if (subject.starts_with("fixup! ")) {
+        return Option<str>.Some(subject.substr(7, subject.size()));
+    }
+    if (subject.starts_with("squash! ")) {
+        return Option<str>.Some(subject.substr(8, subject.size()));
+    }
+    return Option<str>.None;
+}
+
+/// The title a fixup names: every stacked `fixup! ` / `squash! ` taken off.
+str stripped_title(str subject) {
+    str current = subject;
+    while (true) {
+        match (fixup_target(current)) {
+            case Some(str inner): {
+                current = inner.trim();
+            }
+            case None: {
+                return current;
+            }
+        }
+    }
+}
+
+/// git's `--autosquash`: each `fixup! x` / `squash! x` moves under the
+/// commit `x` and becomes a fixup / squash.
+pub List<Command> autosquash(List<Command> cmds) {
+    int size = cmds.size();
+    Map<str, int> by_subject = {};
+    List<int> next = [];
+    List<int> tail = [];
+    List<int> target = [];
+    List<Verb> verbs = [];
+    for (int i in 0 .. size) {
+        next.push(-1);
+        tail.push(-1);
+        target.push(-1);
+        verbs.push(cmds[i].verb);
+    }
+    for (int i in 0 .. size) {
+        Command cmd = cmds[i];
+        if (cmd.verb != Verb.Pick) {
+            continue;
+        }
+        int found = -1;
+        match (fixup_target(cmd.text)) {
+            case Some(_): {
+                str title = stripped_title(cmd.text);
+                match (by_subject.get(title)) {
+                    case Some(int at): {
+                        found = at;
+                    }
+                    case None: {
+                        found = by_id_or_prefix(cmds, i, title);
+                    }
+                }
+            }
+            case None: {
+            }
+        }
+        if (found >= 0) {
+            target[i] = found;
+            if (cmd.text.starts_with("fixup! ")) {
+                verbs[i] = Verb.Fixup;
+            } else {
+                verbs[i] = Verb.Squash;
+            }
+            if (tail[found] < 0) {
+                next[i] = next[found];
+                next[found] = i;
+            } else {
+                next[i] = next[tail[found]];
+                next[tail[found]] = i;
+            }
+            tail[found] = i;
+        } else if (!by_subject.contains(cmd.text)) {
+            by_subject.set(cmd.text, i);
+        }
+    }
+    List<Command> out = [];
+    for (int i in 0 .. size) {
+        if (target[i] >= 0) {
+            continue;
+        }
+        int cur = i;
+        while (cur >= 0) {
+            Command cmd = cmds[cur];
+            out.push(Command(verbs[cur], cmd.id, cmd.text));
+            cur = next[cur];
+        }
+    }
+    return out;
+}
+
+int by_id_or_prefix(List<Command> cmds, int before, str title) {
+    if (title.index_of(" ").or(-1) < 0 && title.size() >= 4) {
+        for (int i in 0 .. before) {
+            if (cmds[i].id != "" && cmds[i].id.starts_with(title)) {
+                return i;
+            }
+        }
+    }
+    for (int i in 0 .. before) {
+        if (cmds[i].text.starts_with(title)) {
+            return i;
+        }
+    }
+    return -1;
+}
