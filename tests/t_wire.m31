@@ -34,7 +34,7 @@ import GIT_log;
 import GIT_object;
 import GIT_pack_write;
 import GIT_refs;
-import GIT_sha1;
+import sha1digest;
 import GIT_wire;
 import io;
 import net;
@@ -526,7 +526,7 @@ void check_bad_report(str name, List<str> lines) {
 bytes empty_pack() {
     bytes content = [80, 65, 67, 75, 0, 0, 0, 2, 0, 0, 0, 0];
     bytes out = clone(content);
-    out.extend(GIT_sha1.sum(content));
+    out.extend(sha1digest.sum(content));
     return out;
 }
 

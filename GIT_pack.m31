@@ -89,7 +89,7 @@
 import io;
 import fs;
 import GIT_repository;
-import GIT_sha1;
+import sha1digest;
 import GIT_zlib;
 
 /// Why an object could not be read out of a `.idx`/`.pack` pair. Payload-free
@@ -329,7 +329,7 @@ str object_name(str kind, bytes content) {
     framed.extend(content.size().to_str().to_bytes());
     framed.push(0);
     framed.extend(content);
-    return GIT_sha1.hex(framed);
+    return sha1digest.hex(framed);
 }
 
 /// Every object named by a `.idx` under `objects/pack/`, sorted and

@@ -9,7 +9,7 @@
 //
 // where `<type>` is `blob`, `tree`, `commit` or `tag` and `<size>` is the
 // decimal length of `<content>`. The object's NAME is the SHA-1 of that whole
-// plaintext, header included, which is why `GIT_sha1.m31` and `GIT_zlib.m31` had to
+// plaintext, header included, which is why `sha1digest.m31` and `GIT_zlib.m31` had to
 // come first. Reading an object here always recomputes it: an object store is
 // content-addressed or it is just a directory of files.
 //
@@ -91,7 +91,7 @@
 import io;
 import fs;
 import GIT_repository;
-import GIT_sha1;
+import sha1digest;
 import GIT_zlib;
 import GIT_pack;
 import random;
@@ -458,7 +458,7 @@ Result<bool, Error> flatten_tree_into(str gitdir, str id, str prefix, Map<str, s
 /// object's zlib stream holds. `id` is the name it is expected to have, and
 /// the content is hashed and checked against it.
 pub Result<Object, Error> parse(str id, bytes plain) {
-    str actual = GIT_sha1.hex(plain);
+    str actual = sha1digest.hex(plain);
     if (actual != id) {
         return Result<Object, Error>.Err(Error.HashMismatch);
     }
@@ -1035,7 +1035,7 @@ bytes fold_header(bytes line) {
 /// `<kind> <size>\0<content>` plaintext -- without writing anything. This is
 /// what `GIT_status.m31` compares a working-tree file against its index entry
 /// with: an index entry's `id` is a BLOB name, so hashing the file's bytes
-/// alone (`GIT_sha1.hex(content)`) can never match it, and did not -- every file
+/// alone (`sha1digest.hex(content)`) can never match it, and did not -- every file
 /// whose cached stat had gone stale (a `touch`, a `git read-tree`) was
 /// reported modified until something refreshed the index. `blob_id` is that
 /// comparison done right.
@@ -1046,7 +1046,7 @@ pub str object_id(str kind, bytes content) {
     header.extend(content.size().to_str().to_bytes());
     header.push(0);
     header.extend(content);
-    return GIT_sha1.hex(header);
+    return sha1digest.hex(header);
 }
 
 /// `object_id("blob", content)`.
@@ -1124,7 +1124,7 @@ bytes mode_octal(int mode) {
 }
 
 // 40 lowercase hex digits to the 20 octets they spell. Used only on strings
-// this module already trusts -- `GIT_sha1.hex`'s own output, or an `Entry.id`
+// this module already trusts -- `sha1digest.hex`'s own output, or an `Entry.id`
 // that came from `tree_entries` parsing 20 raw octets in the first place --
 // so an invalid digit cannot arise and is not checked for.
 bytes hex_decode(str hex_text) {

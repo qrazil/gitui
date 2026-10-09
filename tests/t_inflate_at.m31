@@ -13,7 +13,7 @@
 //   <kind> <index> <start> err
 
 import GIT_zlib;
-import GIT_sha1;
+import sha1digest;
 import io;
 import os;
 import fs;
@@ -49,7 +49,7 @@ int zoff = 0;
 while (zoff < zbuf.size()) {
     match (GIT_zlib.decompress_at(zbuf, zoff)) {
         case Ok(GIT_zlib.Decoded decoded): {
-            print("zlib " + zlib_index.to_str() + " " + zoff.to_str() + " ok " + decoded.used.to_str() + " " + GIT_sha1.hex(decoded.data));
+            print("zlib " + zlib_index.to_str() + " " + zoff.to_str() + " ok " + decoded.used.to_str() + " " + sha1digest.hex(decoded.data));
             if (decoded.used <= 0) {
                 // Refuse to spin forever on a bug that reports no progress.
                 io.eprint("zlib stream " + zlib_index.to_str() + " reported used <= 0");
@@ -70,7 +70,7 @@ int roff = 0;
 while (roff < rbuf.size()) {
     match (GIT_zlib.inflate_at(rbuf, roff)) {
         case Ok(GIT_zlib.Decoded decoded): {
-            print("raw " + raw_index.to_str() + " " + roff.to_str() + " ok " + decoded.used.to_str() + " " + GIT_sha1.hex(decoded.data));
+            print("raw " + raw_index.to_str() + " " + roff.to_str() + " ok " + decoded.used.to_str() + " " + sha1digest.hex(decoded.data));
             if (decoded.used <= 0) {
                 io.eprint("raw stream " + raw_index.to_str() + " reported used <= 0");
                 os.exit(2);

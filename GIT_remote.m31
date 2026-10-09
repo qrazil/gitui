@@ -66,7 +66,7 @@
 
 import base64;
 import GIT_config;
-import GIT_sha1;
+import sha1digest;
 import io;
 
 pub enum Error {
@@ -832,11 +832,11 @@ pub type HostKey {
     pub int line;
 }
 
-/// HMAC-SHA1 (RFC 2104) of `message` under `key`, built on `GIT_sha1.sum`.
+/// HMAC-SHA1 (RFC 2104) of `message` under `key`, built on `sha1digest.sum`.
 pub bytes hmac_sha1(bytes key, bytes message) {
     bytes block_key = clone(key);
     if (block_key.size() > 64) {
-        block_key = GIT_sha1.sum(block_key);
+        block_key = sha1digest.sum(block_key);
     }
     while (block_key.size() < 64) {
         block_key.push(0);
@@ -848,8 +848,8 @@ pub bytes hmac_sha1(bytes key, bytes message) {
         outer.push(block_key[i] ^ 0x5c);
     }
     inner.extend(message);
-    outer.extend(GIT_sha1.sum(inner));
-    return GIT_sha1.sum(outer);
+    outer.extend(sha1digest.sum(inner));
+    return sha1digest.sum(outer);
 }
 
 // The host as a known_hosts line spells it: lower-case, `[host]:port` when

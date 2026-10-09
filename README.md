@@ -28,7 +28,6 @@ bash scripts/build-gitui.sh -o ourgitui    # not build.sh -- it is the one with 
 
 | file | what it is |
 |---|---|
-| `GIT_sha1.m31` | SHA-1 (FIPS 180-4), incremental and one-shot |
 | `GIT_zlib.m31` | DEFLATE inflate (RFC 1951) and the zlib wrapper (RFC 1950), with Adler-32, from a mid-file offset as well as from the front |
 | `GIT_object.m31` | the object store: the header, the SHA-1 check, trees, commits, tags -- loose or, via `GIT_pack.m31`, packed, through the one `read` |
 | `GIT_pack.m31` | packfiles: `.idx` v2, the pack's own object encoding, `OBJ_OFS_DELTA`/`OBJ_REF_DELTA` delta-chain resolution |

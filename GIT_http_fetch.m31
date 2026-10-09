@@ -121,7 +121,7 @@ pub enum Error {
     /// A pkt-line's length prefix names more bytes than actually arrived --
     /// a message cut off in the middle.
     Truncated;
-    /// The server's object format is not SHA-1. See `GIT_sha1.m31`'s own note on
+    /// The server's object format is not SHA-1. See `sha1digest.m31`'s own note on
     /// why there is no second digest here.
     UnsupportedFormat;
     /// The ref advertisement does not offer `side-band-64k`, which this
