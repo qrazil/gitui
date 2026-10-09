@@ -1432,7 +1432,9 @@ pub Result<Report, GIT_sequencer.Error> skip(str gitdir, str worktree, Editor ed
     Where head = where_head(gitdir)?;
     GIT_sequencer.lift_bool(GIT_merge.reset_merge_paths(gitdir, worktree, head.id))?;
     GIT_merge.clear_state(gitdir);
-    return continue_rebase(gitdir, worktree, Option<str>.None, editor);
+    rm_git(gitdir, "SQUASH_MSG");
+    forget_stop(gitdir);
+    return run(gitdir, worktree, editor, []);
 }
 
 /// `--abort`: HEAD back on the branch at its old commit, the files with it.
@@ -1476,7 +1478,6 @@ pub Result<List<str>, GIT_sequencer.Error> quit(str gitdir, str worktree) {
         store_autostash(gitdir, autostash);
         notes.push("Autostash exists; creating a new stash entry.");
     }
-    rm_git(gitdir, "REBASE_HEAD");
     drop_state(gitdir);
     return Result<List<str>, GIT_sequencer.Error>.Ok(notes);
 }
