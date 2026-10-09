@@ -45,9 +45,11 @@
 import fs;
 import GIT_checkout;
 import GIT_log;
+import GIT_merge;
 import GIT_object;
 import GIT_refs;
 import GIT_status;
+import GIT_ui_merge_model;
 import GIT_ui_model;
 import term;
 import tui.TUI_app;
@@ -69,6 +71,9 @@ pub const str SCOPE_LOG = "log";
 pub const str SCOPE_HELP = "help";
 pub const str SCOPE_SEARCH = "search";
 pub const str SCOPE_PICKER = "picker";
+pub const str SCOPE_MERGE = "merge";
+pub const str SCOPE_MERGE_ASK = "merge-ask";
+pub const str SCOPE_RESOLVE = "resolve";
 pub const str CMD_QUIT = "quit";
 pub const str CMD_DOWN = "down";
 pub const str CMD_UP = "up";
@@ -107,8 +112,22 @@ pub const str CMD_SUBMIT = "submit";
 pub const str CMD_ERASE = "erase";
 pub const str CMD_TOP = "top";
 pub const str CMD_BOTTOM = "bottom";
+pub const str CMD_MERGE = "merge";
+pub const str CMD_MERGE_NO_FF = "merge-no-ff";
+pub const str CMD_MERGE_FF_ONLY = "merge-ff-only";
+pub const str CMD_MERGE_CONTINUE = "merge-continue";
+pub const str CMD_OURS = "ours";
+pub const str CMD_THEIRS = "theirs";
+pub const str CMD_BOTH = "both";
+pub const str CMD_BASE = "base";
+pub const str CMD_UNDO = "undo";
+pub const str CMD_STAGE_FILE = "stage-file";
 /// What `pick_purpose` says a finished `GIT_ui_picker` was for.
 pub const str PICK_CHECKOUT = "checkout";
+/// The merge menu's three pickers: the branch to merge, and how.
+pub const str PICK_MERGE = "merge";
+pub const str PICK_MERGE_NO_FF = "merge-no-ff";
+pub const str PICK_MERGE_FF_ONLY = "merge-ff-only";
 /// How many lines of the command log are kept; the oldest go first.
 pub const int COMMAND_LOG_CAPACITY = 500;
 
@@ -211,6 +230,12 @@ pub type Core {
     /// clears them after every key (`GIT_client.State.settle`).
     pub str picked_purpose = "";
     pub str picked_item = "";
+    /// A merge is under way (`MERGE_HEAD` exists); set by `refresh`.
+    pub bool is_merging = false;
+    /// The file the conflict-resolution view asked `$EDITOR` for, and whether
+    /// the editor ran since the view last read it (see `GIT_ui_merge`).
+    pub str resolve_edit_path = "";
+    pub bool is_resolve_dirty = false;
 }
 
 pub void Core.push_overlay(Overlay overlay) {
@@ -281,6 +306,7 @@ pub void Core.refresh() {
             log = [];
         }
     }
+    is_merging = GIT_merge.in_progress(gitdir);
     branch_rows = [];
     match (GIT_checkout.branches(gitdir)) {
         case Ok(List<GIT_checkout.Branch> branches): {
@@ -354,6 +380,13 @@ pub void Core.reload() {
     }
     refresh();
     outline = GIT_ui_model.build_outline(last_status, log, commit_changes_cache, collapsed, paths, file_diffs, branch_rows);
+    List<TUI_outline.Node> merge_roots = GIT_ui_merge_model.merge_roots(last_status, is_merging, collapsed, paths);
+    if (merge_roots.size() > 0) {
+        for (TUI_outline.Node node in outline.roots) {
+            merge_roots.push(node);
+        }
+        outline.roots = merge_roots;
+    }
     if (keep_id != "") {
         outline.did_select_id(keep_id);
     }
@@ -468,6 +501,7 @@ pub List<Binding> key_table() {
     table.push(Binding(SCOPE_OUTLINE, CMD_SEARCH, ["/"], "search the outline and the log (smart-case: lower case ignores case)", "/", "search"));
     table.push(Binding(SCOPE_OUTLINE, CMD_NEXT, ["n"], "next search match", "n/N", "next"));
     table.push(Binding(SCOPE_OUTLINE, CMD_PREV, ["N"], "previous search match", "", ""));
+    table.push(Binding(SCOPE_OUTLINE, CMD_MERGE, ["m"], "merge: a branch into the current one, continue or abort a merge, resolve conflicts (Enter on an unmerged path)", "m", "merge"));
     table.push(Binding(SCOPE_OUTLINE, CMD_REFRESH, ["g", "R"], "re-read the repository", "g", "refresh"));
     table.push(Binding(SCOPE_OUTLINE, CMD_QUIT, ["q", "escape"], "quit", "q", "quit"));
     // The document: the diff view.
@@ -511,6 +545,27 @@ pub List<Binding> key_table() {
     table.push(Binding(SCOPE_SEARCH, CMD_SUBMIT, ["enter"], "search for what is typed", "enter", "search"));
     table.push(Binding(SCOPE_SEARCH, CMD_CLOSE, ["escape"], "cancel", "esc", "cancel"));
     table.push(Binding(SCOPE_SEARCH, CMD_ERASE, ["backspace"], "erase the last character", "", ""));
+    // The merge menu, its yes/no question, and the conflict-resolution view.
+    table.push(Binding(SCOPE_MERGE, CMD_MERGE, ["f"], "merge a branch you pick: fast-forward when it can", "f", "ff"));
+    table.push(Binding(SCOPE_MERGE, CMD_MERGE_NO_FF, ["n"], "merge a branch you pick, always with a merge commit (--no-ff)", "n", "no-ff"));
+    table.push(Binding(SCOPE_MERGE, CMD_MERGE_FF_ONLY, ["o"], "merge a branch you pick only if it fast-forwards (--ff-only)", "o", "ff-only"));
+    table.push(Binding(SCOPE_MERGE, CMD_MERGE_CONTINUE, ["c"], "continue the merge: commit it once nothing is unmerged", "c", "continue"));
+    table.push(Binding(SCOPE_MERGE, CMD_ABORT, ["a"], "abort the merge under way (asks first)", "a", "abort"));
+    table.push(Binding(SCOPE_MERGE, CMD_CLOSE, ["escape"], "close", "esc", "close"));
+    table.push(Binding(SCOPE_MERGE_ASK, CMD_YES, ["y"], "yes", "y", "yes"));
+    table.push(Binding(SCOPE_MERGE_ASK, CMD_CLOSE, ["escape"], "any other key says no", "any", "no"));
+    table.push(Binding(SCOPE_RESOLVE, CMD_OURS, ["a"], "keep ours (the current branch's side) for this conflict, or for the whole file when it has no markers", "a", "ours"));
+    table.push(Binding(SCOPE_RESOLVE, CMD_THEIRS, ["b"], "keep theirs (the merged branch's side) for this conflict, or for the whole file", "b", "theirs"));
+    table.push(Binding(SCOPE_RESOLVE, CMD_BOTH, ["B"], "keep both: ours, then theirs", "B", "both"));
+    table.push(Binding(SCOPE_RESOLVE, CMD_BASE, ["z"], "keep the common ancestor's text (needs merge.conflictstyle=diff3)", "z", "base"));
+    table.push(Binding(SCOPE_RESOLVE, CMD_NEXT, ["j", "n"], "next conflict", "j/k", "conflict"));
+    table.push(Binding(SCOPE_RESOLVE, CMD_PREV, ["k", "p"], "previous conflict", "", ""));
+    table.push(Binding(SCOPE_RESOLVE, CMD_DOWN, ["down"], "scroll down a line", "", ""));
+    table.push(Binding(SCOPE_RESOLVE, CMD_UP, ["up"], "scroll up a line", "", ""));
+    table.push(Binding(SCOPE_RESOLVE, CMD_UNDO, ["u"], "undo the last choice", "u", "undo"));
+    table.push(Binding(SCOPE_RESOLVE, CMD_EDIT, ["e"], "edit the file in $EDITOR", "e", "edit"));
+    table.push(Binding(SCOPE_RESOLVE, CMD_STAGE_FILE, ["s"], "mark the file resolved as it is now and stage it", "s", "stage"));
+    table.push(Binding(SCOPE_RESOLVE, CMD_CLOSE, ["escape", "q"], "close the view (choices already made stay in the file)", "esc", "close"));
     // The fuzzy picker.
     table.push(Binding(SCOPE_PICKER, CMD_SUBMIT, ["enter"], "choose the highlighted item", "enter", "choose"));
     table.push(Binding(SCOPE_PICKER, CMD_DOWN, ["down", "tab"], "highlight the next item", "down", "next"));
@@ -603,12 +658,21 @@ pub str scope_title(str scope) {
     if (scope == SCOPE_PICKER) {
         return "branch picker";
     }
+    if (scope == SCOPE_MERGE) {
+        return "merge menu (m)";
+    }
+    if (scope == SCOPE_MERGE_ASK) {
+        return "merge question";
+    }
+    if (scope == SCOPE_RESOLVE) {
+        return "conflict resolution (Enter on an unmerged path)";
+    }
     return scope;
 }
 
 /// Every scope, in the order the help overlay lists them.
 pub List<str> all_scopes() {
-    return [SCOPE_OUTLINE, SCOPE_DIFF, SCOPE_GLOBAL, SCOPE_COMMIT, SCOPE_BRANCH, SCOPE_PUSH, SCOPE_PULL, SCOPE_CONFIRM, SCOPE_LOG, SCOPE_HELP, SCOPE_SEARCH, SCOPE_PICKER];
+    return [SCOPE_OUTLINE, SCOPE_DIFF, SCOPE_GLOBAL, SCOPE_COMMIT, SCOPE_BRANCH, SCOPE_PUSH, SCOPE_PULL, SCOPE_CONFIRM, SCOPE_LOG, SCOPE_HELP, SCOPE_SEARCH, SCOPE_PICKER, SCOPE_MERGE, SCOPE_MERGE_ASK, SCOPE_RESOLVE];
 }
 
 // --- the overlay stack and the command log -------------------------------------

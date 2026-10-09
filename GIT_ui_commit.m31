@@ -6,6 +6,7 @@
 
 import fs;
 import GIT_index;
+import GIT_merge;
 import GIT_object;
 import GIT_refs;
 import GIT_ui_core;
@@ -41,8 +42,17 @@ pub void CommitLayer.open_commit() {
 /// handoff that takes" -- so `launch_editor` below is where the actual
 /// launch happens, called back once the terminal is cooked again.
 pub void CommitLayer.edit_message() {
-    if (!fs.exists(commit_message_path)) {
-        match (io.write(commit_message_path, GIT_ui_model.commit_template())) {
+    bool is_merge = GIT_merge.in_progress(gitdir);
+    if (!fs.exists(commit_message_path) || (is_merge && !GIT_merge.message_file_is_current(gitdir, commit_message_path))) {
+        // A merge under way starts from its own message (`MERGE_MSG`).
+        str prefill = "";
+        if (is_merge) {
+            prefill = GIT_merge.merge_message_text(gitdir);
+            if (prefill != "" && !prefill.ends_with("\n")) {
+                prefill = prefill + "\n";
+            }
+        }
+        match (io.write(commit_message_path, prefill + GIT_ui_model.commit_template())) {
             case Ok: {
             }
             case Err(io.Error error): {
@@ -149,14 +159,23 @@ pub void CommitLayer.start_amend() {
 /// second writer racing this one is refused rather than silently overwritten
 /// (`GIT_refs.m31`'s own guarantee).
 pub void CommitLayer.finish_commit() {
+    bool is_merge = GIT_merge.in_progress(gitdir);
+    if (is_merge && is_amending) {
+        message = "cannot amend while a merge is under way";
+        return;
+    }
     str raw = "";
-    match (io.read(commit_message_path)) {
-        case Ok(str edited_text): {
-            raw = edited_text;
-        }
-        case Err(io.Error error): {
-            message = "cannot read " + commit_message_path + ": " + error.to_str();
-            return;
+    if (is_merge && !GIT_merge.message_file_is_current(gitdir, commit_message_path)) {
+        raw = GIT_merge.merge_message_text(gitdir);
+    } else {
+        match (io.read(commit_message_path)) {
+            case Ok(str edited_text): {
+                raw = edited_text;
+            }
+            case Err(io.Error error): {
+                message = "cannot read " + commit_message_path + ": " + error.to_str();
+                return;
+            }
         }
     }
     str commit_message = GIT_ui_model.strip_comment_lines(raw);
@@ -167,6 +186,14 @@ pub void CommitLayer.finish_commit() {
         return;
     }
     GIT_index.Index index = GIT_ui_model.read_index(gitdir);
+    if (is_merge) {
+        for (GIT_index.Entry entry in index.entries) {
+            if (entry.stage != 0) {
+                message = "cannot commit: unmerged paths remain (Enter on one under Unmerged paths)";
+                return;
+            }
+        }
+    }
     str tree_id = "";
     match (GIT_ui_model.build_tree(gitdir, index.entries)) {
         case Ok(str tree): {
@@ -209,6 +236,11 @@ pub void CommitLayer.finish_commit() {
         }
     }
     GIT_object.Ident author = GIT_ui_model.author_ident();
+    if (is_merge) {
+        for (str merge_parent in GIT_merge.merge_heads(gitdir)) {
+            parents.push(merge_parent);
+        }
+    }
     if (is_amending) {
         // `--amend`: the new commit takes HEAD's place, so it gets HEAD's own
         // parents and author (date and zone included -- real git keeps the
@@ -269,6 +301,9 @@ pub void CommitLayer.finish_commit() {
                 log_command("commit " + commit_id.substr(0, 7));
             }
             log_command("update-ref " + ref_name + " " + old_short + ".." + commit_id.substr(0, 7));
+            if (is_merge) {
+                GIT_merge.clear_state(gitdir);
+            }
         }
         case Err(GIT_refs.Error error): {
             message = "refs.update: " + error.to_str();

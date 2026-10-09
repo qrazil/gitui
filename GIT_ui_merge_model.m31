@@ -1,0 +1,161 @@
+// The merge parts of the outline and of the conflict-resolution view, with no
+// terminal and no I/O: what `GIT_ui_core.Core.reload` puts above the ordinary
+// sections while paths are unmerged or a merge is under way, and how a file
+// with conflict markers is laid out as lines.
+//
+//   MERGING (2 conflicts)            a banner, only while MERGE_HEAD exists
+//   Unmerged paths (2)               only while some path is unmerged
+//     UU  src/main.m31                 Enter opens the resolution view
+//     UD  old.txt
+//
+// Both are prepended, never inserted into `build_outline`, so an outline of a
+// repository with no merge is exactly what it was.
+
+import GIT_diff3;
+import GIT_status;
+import GIT_ui_model;
+import tui.TUI_outline;
+import tui.TUI_style;
+
+pub const str BANNER_ID = "merge:banner";
+pub const str SECTION_ID = "unmerged";
+pub const str ROW_PREFIX = "unmerged:";
+
+/// The banner text: how many paths still conflict.
+pub str banner_text(int conflicts) {
+    if (conflicts == 0) {
+        return "MERGING (no conflicts left: m c commits the merge)";
+    }
+    if (conflicts == 1) {
+        return "MERGING (1 conflict)";
+    }
+    return "MERGING (" + conflicts.to_str() + " conflicts)";
+}
+
+/// The rows to put before the ordinary sections. Each unmerged path's row id
+/// is `unmerged:<path>` and its raw path is recorded in `out_paths`, like the
+/// other path rows.
+pub List<TUI_outline.Node> merge_roots(GIT_status.Status status, bool is_merging, Map<str, bool> collapsed, Map<str, bytes> out_paths) {
+    List<TUI_outline.Node> roots = [];
+    if (is_merging) {
+        TUI_outline.Node banner = TUI_outline.Node.leaf(BANNER_ID, banner_text(status.unmerged.size()));
+        banner.style = TUI_style.Style(foreground: TUI_style.Colour.Indexed(9), attrs: TUI_style.BOLD);
+        roots.push(banner);
+    }
+    if (status.unmerged.size() > 0) {
+        List<TUI_outline.Node> children = [];
+        for (GIT_status.Unmerged each in status.unmerged) {
+            str path_text = each.path.utf8().or("<non-utf8 path>");
+            str id = ROW_PREFIX + path_text;
+            out_paths.set(id, each.path);
+            children.push(TUI_outline.Node.leaf(id, each.kind.code() + "  " + path_text));
+        }
+        roots.push(TUI_outline.Node.section(SECTION_ID, "Unmerged paths (" + children.size().to_str() + ")", children, is_expanded: GIT_ui_model.is_expanded_for(collapsed, SECTION_ID, true)));
+    }
+    return roots;
+}
+
+// --- the resolution view --------------------------------------------------------------
+
+/// What a displayed line is.
+pub enum LineKind {
+    Plain;
+    Marker;
+    Ours;
+    Base;
+    Theirs;
+}
+
+/// One displayed line. `conflict` is the index of the conflict it belongs to,
+/// counting conflicts only, or -1 for plain text.
+pub type Line {
+    pub str text;
+    pub LineKind kind;
+    pub int conflict;
+}
+
+/// A line for the screen: no trailing newline or carriage return, tabs as
+/// four spaces.
+pub str display(bytes raw) {
+    str shown = raw.utf8().or("<non-utf8 line>");
+    List<str> kept = [];
+    for (int c in shown.chars()) {
+        if (c == '\n' || c == '\r') {
+            continue;
+        }
+        if (c == '\t') {
+            kept.push(" ");
+            kept.push(" ");
+            kept.push(" ");
+            kept.push(" ");
+        } else {
+            kept.push(str.from_chars([c]));
+        }
+    }
+    return kept.join("");
+}
+
+void push_lines(List<Line> out, bytes text, LineKind kind, int conflict) {
+    if (text.size() == 0) {
+        return;
+    }
+    bytes current = [];
+    for (int i in 0 .. text.size()) {
+        current.push(text[i]);
+        if (text[i] == '\n') {
+            out.push(Line(display(current), kind, conflict));
+            current = [];
+        }
+    }
+    if (current.size() > 0) {
+        out.push(Line(display(current), kind, conflict));
+    }
+}
+
+/// `segments` as lines, in order: plain text, and each conflict as its
+/// marker lines and the lines between them.
+pub List<Line> layout(List<GIT_diff3.Segment> segments) {
+    List<Line> out = [];
+    int index = 0;
+    for (GIT_diff3.Segment segment in segments) {
+        match (segment) {
+            case Text(bytes text): {
+                push_lines(out, text, LineKind.Plain, -1);
+            }
+            case Conflict(GIT_diff3.Conflict c): {
+                push_lines(out, c.start_marker, LineKind.Marker, index);
+                push_lines(out, c.ours, LineKind.Ours, index);
+                if (c.has_base) {
+                    push_lines(out, c.base_marker, LineKind.Marker, index);
+                    push_lines(out, c.base, LineKind.Base, index);
+                }
+                push_lines(out, c.mid_marker, LineKind.Marker, index);
+                push_lines(out, c.theirs, LineKind.Theirs, index);
+                push_lines(out, c.end_marker, LineKind.Marker, index);
+                index = index + 1;
+            }
+        }
+    }
+    return out;
+}
+
+/// The first line of conflict `index` in `lines`, or -1.
+pub int first_line_of(List<Line> lines, int index) {
+    for (int i in 0 .. lines.size()) {
+        if (lines[i].conflict == index) {
+            return i;
+        }
+    }
+    return -1;
+}
+
+/// How many lines conflict `index` takes in `lines`.
+pub int length_of(List<Line> lines, int index) {
+    int n = 0;
+    for (Line line in lines) {
+        if (line.conflict == index) {
+            n = n + 1;
+        }
+    }
+    return n;
+}

@@ -6,6 +6,8 @@
 //   ./t_merge <gitdir> <worktree> merge <spec> [--no-ff|--ff-only|--unrelated] [diff3]
 //   ./t_merge <gitdir> <worktree> continue [message]
 //   ./t_merge <gitdir> <worktree> abort
+//   ./t_merge <gitdir> <worktree> resolve <path>        (git add / git rm of the worktree file)
+//   ./t_merge <gitdir> <worktree> take <path> ours|theirs|base   (check out a stage's content)
 //   ./t_merge <gitdir> <worktree> apply <base> <ours> <theirs> [diff3]
 
 import GIT_diff3;
@@ -124,6 +126,30 @@ if (command == "merge") {
     match (GIT_merge.abort_merge(gitdir, worktree)) {
         case Ok(_): {
             print("aborted");
+        }
+        case Err(GIT_merge.Error error): {
+            print("refused " + error.to_str());
+        }
+    }
+} else if (command == "resolve") {
+    match (GIT_merge.mark_resolved(gitdir, worktree, argv[4])) {
+        case Ok(_): {
+            print("resolved");
+        }
+        case Err(GIT_merge.Error error): {
+            print("refused " + error.to_str());
+        }
+    }
+} else if (command == "take") {
+    int stage = 2;
+    if (argv[5] == "theirs") {
+        stage = 3;
+    } else if (argv[5] == "base") {
+        stage = 1;
+    }
+    match (GIT_merge.take_side(gitdir, worktree, argv[4], stage)) {
+        case Ok(_): {
+            print("taken");
         }
         case Err(GIT_merge.Error error): {
             print("refused " + error.to_str());

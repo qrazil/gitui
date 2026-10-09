@@ -1934,3 +1934,101 @@ pub GIT_diff3.Style configured_style(str gitdir) {
     }
     return GIT_diff3.Style.Merge;
 }
+
+// --- resolving one path -----------------------------------------------------------------
+
+// The index with every entry of `path` (any stage) taken out, and `entry`, when
+// there is one, put in as the only one.
+Result<bool, Error> settle_path(str gitdir, str path, Option<GIT_index.Entry> entry) {
+    GIT_index.Index index = read_index(gitdir)?;
+    List<GIT_index.Entry> kept = [];
+    for (GIT_index.Entry each in index.entries) {
+        if (each.path.utf8().or("") != path) {
+            kept.push(each);
+        }
+    }
+    match (entry) {
+        case Some(GIT_index.Entry found): {
+            kept.push(found);
+        }
+        case None: {
+        }
+    }
+    kept.sort();
+    index.entries = kept;
+    return write_index(gitdir, index);
+}
+
+/// Mark `path` resolved the way `git add <path>` does: the working-tree file as
+/// it is now becomes the one stage-0 entry, replacing the stage 1/2/3 entries;
+/// a file that is not there any more removes them all (`git rm`). A symlink in
+/// the way is `Error.Unsupported` (the standard library cannot read a link's
+/// target): take a side instead.
+pub Result<bool, Error> mark_resolved(str gitdir, str worktree, str path) {
+    str full = fs.join(worktree, path);
+    if (fs.is_link(full)) {
+        return Result<bool, Error>.Err(Error.Unsupported("a symlink cannot be staged as it is; take ours or theirs"));
+    }
+    if (!fs.exists(full)) {
+        return settle_path(gitdir, path, Option<GIT_index.Entry>.None);
+    }
+    bytes content = [];
+    match (io.read_bytes(full)) {
+        case Ok(bytes found): {
+            content = found;
+        }
+        case Err(_): {
+            return Result<bool, Error>.Err(Error.Io);
+        }
+    }
+    str id = write_blob(gitdir, content)?;
+    match (fs.stat(full)) {
+        case Ok(fs.Stat stat): {
+            return settle_path(gitdir, path, Option<GIT_index.Entry>.Some(GIT_index.from_stat(path.to_bytes(), stat, false, id)));
+        }
+        case Err(_): {
+            return Result<bool, Error>.Err(Error.Io);
+        }
+    }
+}
+
+/// Resolve `path` by taking one side whole: `stage` 2 is ours, 3 theirs, 1 the
+/// merge base. The working-tree file becomes that side's blob (or goes away,
+/// when that side has no such file) and is staged, as `git checkout --ours
+/// <path>` then `git add <path>` (or `git rm`) would.
+pub Result<bool, Error> take_side(str gitdir, str worktree, str path, int stage) {
+    GIT_index.Index index = read_index(gitdir)?;
+    Side side = absent();
+    for (GIT_index.Entry each in index.entries) {
+        if (each.stage == stage && each.path.utf8().or("") == path) {
+            side = Side(each.mode, each.id);
+        }
+    }
+    if (side.mode == 0) {
+        drop_file(worktree, fs.join(worktree, path))?;
+        return settle_path(gitdir, path, Option<GIT_index.Entry>.None);
+    }
+    GIT_index.Entry entry = put_file(gitdir, worktree, path, side)?;
+    return settle_path(gitdir, path, Option<GIT_index.Entry>.Some(entry));
+}
+
+/// Is the file at `path` (the commit message file) newer than the merge's
+/// `MERGE_MSG`? `COMMIT_EDITMSG` outlives the commit that wrote it, so during a
+/// merge only a file written after the merge began is the person's own text.
+pub bool message_file_is_current(str gitdir, str path) {
+    match (fs.stat(path)) {
+        case Ok(fs.Stat mine): {
+            match (fs.stat(fs.join(gitdir, "MERGE_MSG"))) {
+                case Ok(fs.Stat merge_msg): {
+                    return mine.mtime_ns >= merge_msg.mtime_ns;
+                }
+                case Err(_): {
+                    return true;
+                }
+            }
+        }
+        case Err(_): {
+            return false;
+        }
+    }
+}

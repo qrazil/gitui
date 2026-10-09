@@ -89,6 +89,46 @@ pub str Error.to_str() {
     }
 }
 
+/// The branch has diverged from the remote's (neither tip is an ancestor of
+/// the other): the case a merge can settle.
+pub bool Error.is_diverged() {
+    match (this) {
+        case NonFastForward: {
+            return true;
+        }
+        case Detached: {
+            return false;
+        }
+        case Unborn: {
+            return false;
+        }
+        case Dirty: {
+            return false;
+        }
+        case Status: {
+            return false;
+        }
+        case NoRemoteBranch: {
+            return false;
+        }
+        case Fetch(GIT_http_fetch.Error _e): {
+            return false;
+        }
+        case Unpack(GIT_pack.Error _e): {
+            return false;
+        }
+        case Write: {
+            return false;
+        }
+        case Checkout(GIT_checkout.Error _e): {
+            return false;
+        }
+        case Refs(GIT_refs.Error _e): {
+            return false;
+        }
+    }
+}
+
 /// What a successful pull did.
 pub type Outcome {
     /// False when the branch already had the remote's tip (or more).
@@ -165,6 +205,8 @@ pub Result<Outcome, Error> pull(str gitdir, str worktree, GIT_http_push.Remote r
         return Result<Outcome, Error>.Ok(Outcome(false, old, old, objects));
     }
     if (!GIT_http_push.is_ancestor(gitdir, old, remote_tip)) {
+        // As `git fetch` would: remember the remote's tip, so it can be merged.
+        store_tracking(gitdir, refname, remote_tip);
         return Result<Outcome, Error>.Err(Error.NonFastForward);
     }
     match (GIT_checkout.checkout(gitdir, worktree, remote_tip, refname)) {
@@ -181,21 +223,26 @@ pub Result<Outcome, Error> pull(str gitdir, str worktree, GIT_http_push.Remote r
             return Result<Outcome, Error>.Err(Error.Refs(error));
         }
     }
-    if (refname.starts_with("refs/heads/")) {
-        // Best effort: the remote-tracking ref is bookkeeping, not the pull.
-        str tracking = "refs/remotes/origin/" + refname.substr(11, refname.size());
-        str tracking_message = "pull: storing head";
-        if (GIT_refs.has_ref(gitdir, tracking)) {
-            tracking_message = "pull: fast-forward";
+    store_tracking(gitdir, refname, remote_tip);
+    return Result<Outcome, Error>.Ok(Outcome(true, old, remote_tip, objects));
+}
+
+// Best effort: the remote-tracking ref is bookkeeping, not the pull.
+void store_tracking(str gitdir, str refname, str remote_tip) {
+    if (!refname.starts_with("refs/heads/")) {
+        return;
+    }
+    str tracking = "refs/remotes/origin/" + refname.substr(11, refname.size());
+    str tracking_message = "pull: storing head";
+    if (GIT_refs.has_ref(gitdir, tracking)) {
+        tracking_message = "pull: fast-forward";
+    }
+    match (GIT_refs.update(gitdir, tracking, remote_tip, Option<str>.None, msg: tracking_message)) {
+        case Ok(_): {
         }
-        match (GIT_refs.update(gitdir, tracking, remote_tip, Option<str>.None, msg: tracking_message)) {
-            case Ok(_): {
-            }
-            case Err(_): {
-            }
+        case Err(_): {
         }
     }
-    return Result<Outcome, Error>.Ok(Outcome(true, old, remote_tip, objects));
 }
 
 bool has_object(str gitdir, str id) {

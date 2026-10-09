@@ -83,6 +83,8 @@ import GIT_ui_core;
 import GIT_ui_diff;
 import GIT_ui_help;
 import GIT_ui_log;
+import GIT_ui_merge;
+import GIT_ui_merge_model;
 import GIT_ui_model;
 import GIT_ui_outline;
 import GIT_ui_remote;
@@ -110,7 +112,7 @@ pub type State {
 /// this constructor alone does no I/O, which is what makes it safe to build
 /// in a test that never touches a real repository.
 pub static State State.open(str gitdir, str worktree) {
-    State state = State(GIT_ui_remote.RemoteLayer(GIT_ui_branch.BranchLayer(GIT_ui_commit.CommitLayer(GIT_ui_diff.DiffLayer(GIT_ui_outline.OutlineLayer(GIT_ui_core.Core(gitdir, worktree)))))));
+    State state = State(GIT_ui_remote.RemoteLayer(GIT_ui_merge.MergeLayer(GIT_ui_branch.BranchLayer(GIT_ui_commit.CommitLayer(GIT_ui_diff.DiffLayer(GIT_ui_outline.OutlineLayer(GIT_ui_core.Core(gitdir, worktree))))))));
     state.set_editor_paths();
     return state;
 }
@@ -142,6 +144,11 @@ pub static State State.open(str gitdir, str worktree) {
 ///     `is_editor_wanted`), and the operator is told to edit it externally.
 pub void State.launch_editor() {
     is_editor_wanted = false;
+    if (resolve_edit_path != "") {
+        launch_resolve_editor();
+        settle();
+        return;
+    }
     if (is_editor_for_branch) {
         is_editor_for_branch = false;
         launch_branch_editor();
@@ -181,6 +188,7 @@ pub void State.settle() {
         is_overlay_done = false;
         pop_overlay();
     }
+    settle_merge_picks();
     match (take_pick(GIT_ui_core.PICK_CHECKOUT)) {
         case Some(str name): {
             checkout_branch(name);
@@ -388,6 +396,9 @@ TUI_app.Action State.run_outline_command(str cmd, str name) {
     if (cmd == GIT_ui_core.CMD_BRANCH) {
         open_branch();
     }
+    if (cmd == GIT_ui_core.CMD_MERGE) {
+        open_merge();
+    }
     if (cmd == GIT_ui_core.CMD_PUSH) {
         open_push();
     }
@@ -441,6 +452,10 @@ void State.handle_enter() {
         case Some(TUI_outline.Row row): {
             if (row.node.id.contains(":file:")) {
                 show_diff_current();
+                return;
+            }
+            if (row.node.id.starts_with(GIT_ui_merge_model.ROW_PREFIX)) {
+                open_resolve_current();
                 return;
             }
             if (row.node.id == GIT_ui_model.LOAD_MORE_ID) {

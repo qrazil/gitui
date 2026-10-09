@@ -1,0 +1,717 @@
+// The merge layer: the merge menu (`m`), the questions it asks, and the
+// conflict-resolution view opened by Enter on an "Unmerged paths" row.
+//
+//   m f   merge a branch picked from a fuzzy list: fast-forward when it can
+//   m n   the same, always with a merge commit (--no-ff)
+//   m o   the same, only if it fast-forwards (--ff-only)
+//   m c   continue: commit the merge once nothing is unmerged
+//   m a   abort the merge under way (asks first)
+//
+// The work is `GIT_merge` (the engine, no terminal in it); this module only
+// asks, shows and reports. Every operation that writes calls `log_command`
+// and leaves its outcome in the status line.
+//
+// The resolution view writes every choice to the file at once, so nothing is
+// lost if the client is closed, and stages the file the moment its last
+// conflict is settled. `e` hands the file to `$EDITOR` through the same
+// terminal handoff the commit message uses (`GIT_client.State.launch_editor`
+// calls `launch_resolve_editor`).
+
+import fs;
+import GIT_diff3;
+import GIT_merge;
+import GIT_status;
+import GIT_ui_branch;
+import GIT_ui_core;
+import GIT_ui_merge_model;
+import GIT_ui_model;
+import GIT_ui_panel;
+import GIT_ui_picker;
+import io;
+import os;
+import term;
+import tui.TUI_app;
+import tui.TUI_buffer;
+import tui.TUI_geometry;
+import tui.TUI_menu;
+import tui.TUI_outline;
+import tui.TUI_style;
+import tui.TUI_text;
+
+pub type MergeLayer {
+    pub GIT_ui_branch.BranchLayer;
+}
+
+/// `m`: open the merge menu.
+pub void MergeLayer.open_merge() {
+    push_overlay(MergeMenu(this));
+}
+
+/// Open the branch picker for a merge. The items are the local branches but
+/// the current one.
+pub void MergeLayer.open_merge_picker(str purpose, str title) {
+    if (is_merging) {
+        message = "a merge is already under way: m c continues it, m a aborts it";
+        return;
+    }
+    List<str> names = [];
+    for (GIT_ui_model.BranchRow branch_row in branch_rows) {
+        if (!branch_row.branch.is_current) {
+            names.push(branch_row.branch.name);
+        }
+    }
+    if (names.size() == 0) {
+        message = "merge: there is no other branch to merge";
+        return;
+    }
+    GIT_ui_picker.open(core(), purpose, title, names);
+}
+
+/// Act on a finished merge picker; called from `State.settle`.
+pub void MergeLayer.settle_merge_picks() {
+    match (take_pick(GIT_ui_core.PICK_MERGE)) {
+        case Some(str name): {
+            start_merge(name, GIT_merge.FastForward.Allow);
+        }
+        case None: {
+        }
+    }
+    match (take_pick(GIT_ui_core.PICK_MERGE_NO_FF)) {
+        case Some(str name): {
+            start_merge(name, GIT_merge.FastForward.Never);
+        }
+        case None: {
+        }
+    }
+    match (take_pick(GIT_ui_core.PICK_MERGE_FF_ONLY)) {
+        case Some(str name): {
+            start_merge(name, GIT_merge.FastForward.Only);
+        }
+        case None: {
+        }
+    }
+}
+
+/// `git merge [--no-ff | --ff-only] <spec>`: `spec` is a branch, `origin/main`,
+/// a tag or a commit id. The outcome is the status line.
+pub void MergeLayer.start_merge(str spec, GIT_merge.FastForward ff) {
+    GIT_merge.StartOpts opts = GIT_merge.StartOpts(ff: ff, style: GIT_merge.configured_style(gitdir));
+    str flag = "";
+    if (ff.eq(GIT_merge.FastForward.Never)) {
+        flag = " --no-ff";
+    }
+    if (ff.eq(GIT_merge.FastForward.Only)) {
+        flag = " --ff-only";
+    }
+    match (GIT_merge.start(gitdir, worktree, spec, opts)) {
+        case Ok(GIT_merge.Report report): {
+            log_command("merge" + flag + " " + spec);
+            message = describe(spec, report);
+        }
+        case Err(GIT_merge.Error error): {
+            message = "merge refused: " + error.to_str();
+        }
+    }
+    reload();
+}
+
+/// `m c` / `git merge --continue`: commit the merge under way with its
+/// `MERGE_MSG`.
+pub void MergeLayer.merge_continue() {
+    if (!is_merging) {
+        message = "no merge in progress";
+        return;
+    }
+    match (GIT_merge.continue_merge(gitdir, worktree, "")) {
+        case Ok(GIT_merge.Report report): {
+            log_command("merge --continue");
+            message = "merge committed: " + GIT_ui_core.short_id(report.commit);
+        }
+        case Err(GIT_merge.Error error): {
+            message = "merge --continue refused: " + error.to_str();
+        }
+    }
+    reload();
+}
+
+/// `m a`: ask, then abort.
+pub void MergeLayer.ask_abort() {
+    if (!is_merging) {
+        message = "no merge in progress";
+        return;
+    }
+    push_overlay(MergeAsk(this, "abort the merge and discard its changes?", "abort", ""));
+}
+
+/// The abort itself, once confirmed (`git merge --abort`).
+pub void MergeLayer.abort_now() {
+    match (GIT_merge.abort_merge(gitdir, worktree)) {
+        case Ok(_): {
+            log_command("merge --abort");
+            message = "merge aborted";
+        }
+        case Err(GIT_merge.Error error): {
+            message = "merge --abort refused: " + error.to_str();
+        }
+    }
+    reload();
+}
+
+/// The name of the branch HEAD is on, or "" when detached or unborn.
+pub str MergeLayer.current_branch_name() {
+    for (GIT_ui_model.BranchRow branch_row in branch_rows) {
+        if (branch_row.branch.is_current) {
+            return branch_row.branch.name;
+        }
+    }
+    return "";
+}
+
+/// `F` found `origin/<branch>` diverged: offer to merge it. `spec` names the
+/// fetched tip.
+pub void MergeLayer.offer_pull_merge(str spec) {
+    push_overlay(MergeAsk(this, spec + " has diverged from this branch: merge it?", "merge", spec));
+}
+
+/// Enter on an "Unmerged paths" row.
+pub void MergeLayer.open_resolve_current() {
+    match (outline.current()) {
+        case Some(TUI_outline.Row row): {
+            if (row.node.id.starts_with(GIT_ui_merge_model.ROW_PREFIX)) {
+                open_resolve(row.node.id.substr(GIT_ui_merge_model.ROW_PREFIX.size, row.node.id.size()));
+            }
+        }
+        case None: {
+        }
+    }
+}
+
+/// Open the resolution view on the unmerged `path`.
+pub void MergeLayer.open_resolve(str path) {
+    ResolveOverlay view = ResolveOverlay(this, path);
+    if (view.load()) {
+        push_overlay(view);
+    }
+}
+
+/// True once after the editor ran on the file the view shows.
+pub bool MergeLayer.take_dirty() {
+    bool was = is_resolve_dirty;
+    is_resolve_dirty = false;
+    return was;
+}
+
+/// `e` in the view: ask the driver to run `$EDITOR` on `path` once the
+/// terminal is back (see `launch_resolve_editor`).
+pub void MergeLayer.want_editor(str path) {
+    resolve_edit_path = path;
+    is_editor_wanted = true;
+    message = "launching editor...";
+}
+
+/// Stage `path` as it is: the resolution is complete.
+pub bool MergeLayer.stage_resolved(str path) {
+    match (GIT_merge.mark_resolved(gitdir, worktree, path)) {
+        case Ok(_): {
+            log_command("add " + path);
+            message = "resolved " + path;
+            reload();
+            return true;
+        }
+        case Err(GIT_merge.Error error): {
+            message = "cannot stage " + path + ": " + error.to_str();
+            return false;
+        }
+    }
+}
+
+/// Take one side of `path` whole (stage 2 ours, 3 theirs, 1 base).
+pub bool MergeLayer.take_whole(str path, int stage, str word) {
+    match (GIT_merge.take_side(gitdir, worktree, path, stage)) {
+        case Ok(_): {
+            log_command("checkout --" + word + " " + path);
+            log_command("add " + path);
+            message = "resolved " + path + " (" + word + ")";
+            reload();
+            return true;
+        }
+        case Err(GIT_merge.Error error): {
+            message = "cannot take " + word + " for " + path + ": " + error.to_str();
+            return false;
+        }
+    }
+}
+
+/// The second half of `e` in the resolution view, after `TUI_app.Loop.run` has
+/// given the terminal back: run `$EDITOR` on the file. A file that had
+/// conflict markers and has none now is staged and the view closed; any other
+/// result makes the view read the file again.
+pub void MergeLayer.launch_resolve_editor() {
+    str path = resolve_edit_path;
+    resolve_edit_path = "";
+    if (path == "") {
+        return;
+    }
+    str full = fs.join(worktree, path);
+    bool had_markers = markers_in(full) > 0;
+    str editor = GIT_ui_model.pick_editor(os.env("EDITOR"));
+    bool has_run = false;
+    match (os.run([editor, full])) {
+        case Ok(os.ExitStatus exit_status): {
+            match (exit_status) {
+                case Exited(int code): {
+                    if (code == 0) {
+                        has_run = true;
+                    } else {
+                        message = "editor '" + editor + "' exited " + code.to_str();
+                    }
+                }
+                case Signaled(int sig): {
+                    message = "editor '" + editor + "' was killed by signal " + sig.to_str();
+                }
+            }
+        }
+        case Err(io.Error error): {
+            message = "cannot launch '" + editor + "' (" + error.to_str() + ")";
+        }
+    }
+    is_resolve_dirty = true;
+    if (has_run && had_markers && markers_in(full) == 0) {
+        if (stage_resolved(path)) {
+            is_resolve_dirty = false;
+            pop_overlay();
+        }
+    }
+}
+
+str describe(str spec, GIT_merge.Report report) {
+    if (report.ending.eq(GIT_merge.Ending.UpToDate)) {
+        return "merge " + spec + ": already up to date";
+    }
+    if (report.ending.eq(GIT_merge.Ending.FastForwarded)) {
+        return "merged " + spec + ": fast-forward to " + GIT_ui_core.short_id(report.commit);
+    }
+    if (report.ending.eq(GIT_merge.Ending.Merged)) {
+        return "merged " + spec + ": " + GIT_ui_core.short_id(report.commit);
+    }
+    int n = report.conflicts.size();
+    return "merging " + spec + ": " + n.to_str() + " path(s) conflict -- Enter on one to resolve";
+}
+
+// --- the resolution view -----------------------------------------------------------
+
+/// How many conflicts the file at `full` holds, or -1 if it cannot be read.
+int markers_in(str full) {
+    match (io.read_bytes(full)) {
+        case Ok(bytes found): {
+            return GIT_diff3.count_conflicts(GIT_diff3.parse_conflicts(found));
+        }
+        case Err(_): {
+            return -1;
+        }
+    }
+}
+
+// --- the menu and the question ---------------------------------------------------------
+
+type MergeMenu {
+    MergeLayer host;
+}
+
+pub TUI_app.Action MergeMenu.handle_key(term.Code code) {
+    match (GIT_ui_core.lookup(GIT_ui_core.SCOPE_MERGE, code)) {
+        case Some(str cmd): {
+            host.pop_overlay();
+            if (cmd == GIT_ui_core.CMD_MERGE) {
+                host.open_merge_picker(GIT_ui_core.PICK_MERGE, "merge a branch into the current one");
+            }
+            if (cmd == GIT_ui_core.CMD_MERGE_NO_FF) {
+                host.open_merge_picker(GIT_ui_core.PICK_MERGE_NO_FF, "merge a branch (always a merge commit)");
+            }
+            if (cmd == GIT_ui_core.CMD_MERGE_FF_ONLY) {
+                host.open_merge_picker(GIT_ui_core.PICK_MERGE_FF_ONLY, "merge a branch (fast-forward only)");
+            }
+            if (cmd == GIT_ui_core.CMD_MERGE_CONTINUE) {
+                host.merge_continue();
+            }
+            if (cmd == GIT_ui_core.CMD_ABORT) {
+                host.ask_abort();
+            }
+            return TUI_app.Action.Redraw;
+        }
+        case None: {
+        }
+    }
+    return TUI_app.Action.Continue;
+}
+
+pub void MergeMenu.render(TUI_buffer.Buffer buffer, TUI_geometry.Rect area) {
+    TUI_menu.WhichKey which_key = TUI_menu.WhichKey("merge", [TUI_menu.Item("f", "merge a branch you pick (fast-forward when it can)"), TUI_menu.Item("n", "merge a branch you pick, always with a merge commit"), TUI_menu.Item("o", "merge a branch you pick only if it fast-forwards"), TUI_menu.Item("c", "continue the merge under way"), TUI_menu.Item("a", "abort the merge under way"), TUI_menu.Item("esc", "close")]);
+    which_key.render(buffer, area);
+}
+
+pub List<GIT_ui_core.Hint> MergeMenu.hints() {
+    return GIT_ui_core.hints_for(GIT_ui_core.SCOPE_MERGE);
+}
+
+/// A yes/no question; `y` does it and every other key declines.
+type MergeAsk {
+    MergeLayer host;
+    str question;
+    str action;
+    str spec;
+}
+
+pub TUI_app.Action MergeAsk.handle_key(term.Code code) {
+    host.pop_overlay();
+    match (GIT_ui_core.lookup(GIT_ui_core.SCOPE_MERGE_ASK, code)) {
+        case Some(str cmd): {
+            if (cmd == GIT_ui_core.CMD_YES) {
+                if (action == "abort") {
+                    host.abort_now();
+                }
+                if (action == "merge") {
+                    host.start_merge(spec, GIT_merge.FastForward.Allow);
+                }
+                return TUI_app.Action.Redraw;
+            }
+        }
+        case None: {
+        }
+    }
+    host.say("cancelled");
+    return TUI_app.Action.Redraw;
+}
+
+pub void MergeAsk.render(TUI_buffer.Buffer buffer, TUI_geometry.Rect area) {
+    TUI_menu.WhichKey which_key = TUI_menu.WhichKey(question, [TUI_menu.Item("y", "yes"), TUI_menu.Item("any other key", "no")]);
+    which_key.render(buffer, area);
+}
+
+pub List<GIT_ui_core.Hint> MergeAsk.hints() {
+    return GIT_ui_core.hints_for(GIT_ui_core.SCOPE_MERGE_ASK);
+}
+
+// --- the resolution overlay ------------------------------------------------------------
+
+/// One file's conflicts. `segments` is the file as parsed; every choice is
+/// written to disk at once and the previous bytes kept for `u`.
+type ResolveOverlay {
+    MergeLayer host;
+    str path;
+    List<GIT_diff3.Segment> segments = [];
+    List<GIT_ui_merge_model.Line> lines = [];
+    List<bytes> history = [];
+    bytes content = [];
+    int current = 0;
+    int offset = 0;
+    bool is_following = true;
+}
+
+str ResolveOverlay.full() {
+    return fs.join(host.worktree, path);
+}
+
+/// Read the file and lay it out. False (with a message) if it cannot be read.
+bool ResolveOverlay.load() {
+    match (io.read_bytes(full())) {
+        case Ok(bytes found): {
+            content = found;
+        }
+        case Err(io.Error error): {
+            if (host.is_merging && !fs.exists(full())) {
+                content = [];
+            } else {
+                host.say("cannot read " + path + ": " + error.to_str());
+                return false;
+            }
+        }
+    }
+    parse();
+    return true;
+}
+
+void ResolveOverlay.parse() {
+    segments = GIT_diff3.parse_conflicts(content);
+    lines = GIT_ui_merge_model.layout(segments);
+    int n = GIT_diff3.count_conflicts(segments);
+    if (current >= n) {
+        current = n - 1;
+    }
+    if (current < 0) {
+        current = 0;
+    }
+    is_following = true;
+}
+
+int ResolveOverlay.count() {
+    return GIT_diff3.count_conflicts(segments);
+}
+
+/// The file's entry in the status, for the whole-file choices.
+Option<GIT_status.Unmerged> ResolveOverlay.entry() {
+    for (GIT_status.Unmerged each in host.last_status.unmerged) {
+        if (each.path.utf8().or("") == path) {
+            return Option<GIT_status.Unmerged>.Some(each);
+        }
+    }
+    return Option<GIT_status.Unmerged>.None;
+}
+
+/// Write `bytes` to the file, remembering what was there.
+bool ResolveOverlay.write(bytes next) {
+    match (io.write_bytes(full(), next)) {
+        case Ok(_): {
+            history.push(content);
+            content = next;
+            return true;
+        }
+        case Err(io.Error error): {
+            host.say("cannot write " + path + ": " + error.to_str());
+            return false;
+        }
+    }
+}
+
+void ResolveOverlay.choose(GIT_diff3.Choice choice, str word) {
+    int n = count();
+    if (n == 0) {
+        choose_whole(word);
+        return;
+    }
+    if (word == "base") {
+        int seen = 0;
+        for (GIT_diff3.Segment segment in segments) {
+            match (segment) {
+                case Text(bytes _t): {
+                }
+                case Conflict(GIT_diff3.Conflict c): {
+                    if (seen == current && !c.has_base) {
+                        host.say("this file has no base text: set merge.conflictstyle=diff3 and merge again");
+                        return;
+                    }
+                    seen = seen + 1;
+                }
+            }
+        }
+    }
+    bytes next = GIT_diff3.render(GIT_diff3.resolve_at(segments, current, choice));
+    if (!write(next)) {
+        return;
+    }
+    parse();
+    if (count() == 0) {
+        if (host.stage_resolved(path)) {
+            host.pop_overlay();
+        }
+        return;
+    }
+    host.say(word + ": " + count().to_str() + " conflict(s) left in " + path);
+}
+
+// A file with no markers (modify/delete, binary, ...): the choice is a whole side.
+void ResolveOverlay.choose_whole(str word) {
+    int stage = 2;
+    if (word == "theirs") {
+        stage = 3;
+    }
+    if (word == "base") {
+        stage = 1;
+    }
+    if (word == "both") {
+        host.say("both: this file has no conflict markers to combine");
+        return;
+    }
+    match (entry()) {
+        case Some(GIT_status.Unmerged each): {
+            if (stage == 1 && each.base_mode == 0) {
+                host.say("this path has no common ancestor");
+                return;
+            }
+        }
+        case None: {
+            host.say(path + " is not unmerged any more");
+            return;
+        }
+    }
+    if (host.take_whole(path, stage, word)) {
+        host.pop_overlay();
+    }
+}
+
+void ResolveOverlay.undo() {
+    if (history.size() == 0) {
+        host.say("nothing to undo");
+        return;
+    }
+    bytes before = history.pop();
+    match (io.write_bytes(full(), before)) {
+        case Ok(_): {
+            content = before;
+            parse();
+            host.say("undone: " + count().to_str() + " conflict(s) in " + path);
+        }
+        case Err(io.Error error): {
+            host.say("cannot write " + path + ": " + error.to_str());
+        }
+    }
+}
+
+void ResolveOverlay.move(int delta) {
+    int n = count();
+    if (n == 0) {
+        return;
+    }
+    current = current + delta;
+    if (current >= n) {
+        current = 0;
+    }
+    if (current < 0) {
+        current = n - 1;
+    }
+    is_following = true;
+}
+
+pub TUI_app.Action ResolveOverlay.handle_key(term.Code code) {
+    if (host.take_dirty()) {
+        if (load()) {
+            history = [];
+        }
+    }
+    match (GIT_ui_core.lookup(GIT_ui_core.SCOPE_RESOLVE, code)) {
+        case Some(str cmd): {
+            if (cmd == GIT_ui_core.CMD_CLOSE) {
+                host.pop_overlay();
+            }
+            if (cmd == GIT_ui_core.CMD_OURS) {
+                choose(GIT_diff3.Choice.Ours, "ours");
+            }
+            if (cmd == GIT_ui_core.CMD_THEIRS) {
+                choose(GIT_diff3.Choice.Theirs, "theirs");
+            }
+            if (cmd == GIT_ui_core.CMD_BOTH) {
+                choose(GIT_diff3.Choice.Both, "both");
+            }
+            if (cmd == GIT_ui_core.CMD_BASE) {
+                choose(GIT_diff3.Choice.Base, "base");
+            }
+            if (cmd == GIT_ui_core.CMD_NEXT) {
+                move(1);
+            }
+            if (cmd == GIT_ui_core.CMD_PREV) {
+                move(-1);
+            }
+            if (cmd == GIT_ui_core.CMD_DOWN) {
+                offset = offset + 1;
+                is_following = false;
+            }
+            if (cmd == GIT_ui_core.CMD_UP) {
+                offset = offset - 1;
+                is_following = false;
+            }
+            if (cmd == GIT_ui_core.CMD_UNDO) {
+                undo();
+            }
+            if (cmd == GIT_ui_core.CMD_STAGE_FILE) {
+                stage_as_is();
+            }
+            if (cmd == GIT_ui_core.CMD_EDIT) {
+                host.want_editor(path);
+                return TUI_app.Action.Quit;
+            }
+            return TUI_app.Action.Redraw;
+        }
+        case None: {
+        }
+    }
+    return TUI_app.Action.Continue;
+}
+
+void ResolveOverlay.stage_as_is() {
+    if (count() > 0) {
+        host.say("conflict markers remain in " + path + ": resolve them, or e to edit");
+        return;
+    }
+    if (host.stage_resolved(path)) {
+        host.pop_overlay();
+    }
+}
+
+pub void ResolveOverlay.render(TUI_buffer.Buffer buffer, TUI_geometry.Rect area) {
+    if (host.take_dirty()) {
+        if (load()) {
+            history = [];
+        }
+    }
+    int n = count();
+    str title = "resolve " + path;
+    if (n > 0) {
+        title = title + "  (conflict " + (current + 1).to_str() + " of " + n.to_str() + ")";
+    }
+    TUI_geometry.Rect outer = GIT_ui_panel.frame(buffer, area, title);
+    if (outer.height < 3) {
+        return;
+    }
+    // The panel covers the status line, so the last row repeats the message.
+    TUI_geometry.Rect inner = TUI_geometry.Rect(outer.x, outer.y, outer.width, outer.height - 1);
+    buffer.set_str(outer.x, outer.y + outer.height - 1, TUI_text.truncate(host.status_line(), outer.width), TUI_style.Style(attrs: TUI_style.DIM), max: outer.width);
+    if (n == 0) {
+        List<str> info = ["This path has no conflict markers.", ""];
+        match (entry()) {
+            case Some(GIT_status.Unmerged each): {
+                info.push("status: " + each.kind.code());
+            }
+            case None: {
+            }
+        }
+        info.push("a  keep ours (the current branch's file, or its deletion)");
+        info.push("b  keep theirs");
+        info.push("z  keep the common ancestor's file");
+        info.push("e  edit in $EDITOR, then s to stage it as it is");
+        GIT_ui_panel.draw_lines(buffer, inner, info, 0, -1);
+        return;
+    }
+    if (is_following) {
+        int first = GIT_ui_merge_model.first_line_of(lines, current);
+        int span = GIT_ui_merge_model.length_of(lines, current);
+        if (first < offset || first + span > offset + inner.height) {
+            offset = first - 1;
+        }
+        is_following = false;
+    }
+    offset = GIT_ui_panel.clamp(offset, lines.size(), inner.height);
+    int row = 0;
+    while (row < inner.height && offset + row < lines.size()) {
+        GIT_ui_merge_model.Line line = lines[offset + row];
+        str gutter = "  ";
+        if (line.conflict == current) {
+            gutter = "> ";
+        }
+        buffer.set_str(inner.x, inner.y + row, TUI_text.truncate(gutter + line.text, inner.width), line_style(line.kind), max: inner.width);
+        row = row + 1;
+    }
+}
+
+pub List<GIT_ui_core.Hint> ResolveOverlay.hints() {
+    return GIT_ui_core.hints_for(GIT_ui_core.SCOPE_RESOLVE);
+}
+
+TUI_style.Style line_style(GIT_ui_merge_model.LineKind kind) {
+    match (kind) {
+        case Plain: {
+            return TUI_style.Style();
+        }
+        case Marker: {
+            return TUI_style.Style(attrs: TUI_style.BOLD);
+        }
+        case Ours: {
+            return TUI_style.Style(foreground: TUI_style.Colour.Indexed(2));
+        }
+        case Base: {
+            return TUI_style.Style(attrs: TUI_style.DIM);
+        }
+        case Theirs: {
+            return TUI_style.Style(foreground: TUI_style.Colour.Indexed(6));
+        }
+    }
+}

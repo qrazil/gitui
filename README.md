@@ -63,6 +63,8 @@ bash scripts/build-gitui.sh -o ourgitui    # not build.sh -- it is the one with 
 | `tests/oracles/oracle_*.py` | the oracles: `hashlib`, `zlib`, and a from-scratch format reader |
 | `tests/pty_e2e.py` | drives `ourgitui` under a real pty against disposable fixtures, real `git` as the oracle |
 | `scripts/compare.sh` | every command beside the real `git`, compared octet for octet |
+| `GIT_merge.m31` | `git merge` with conflicts: `start` (fast-forward, no-ff, ff-only, already up to date, unrelated histories), `merge_trees`/`merge_with_base` (per-path three-way merge, stages 1/2/3, rename-free like `merge.renames=false`), a virtual merge base when there are several (criss-cross, like git's recursive/ort), `continue_merge`, `abort_merge`, `mark_resolved` and `take_side` for the resolution view; writes MERGE_HEAD/MERGE_MSG/MERGE_MODE/ORIG_HEAD and reflogs as git does |
+| `GIT_ui_merge.m31`, `GIT_ui_merge_model.m31` | the merge layer: the `m` menu and branch picker, the abort prompt, the conflict-resolution view, the "Unmerged paths" outline section and the MERGING banner (the model is pure and unit-testable) |
 | `GIT_pull.m31` | fast-forward-only pull: fetches over smart HTTP (`GIT_http_fetch.m31`), unpacks the pack with `GIT_pack.read_pack`, refuses a dirty tree and anything but a fast-forward, then `GIT_checkout.m31` moves the working tree and the ref |
 | `tests/test.sh` | all of the above (sources the `tests/test_*.sh` files next to it) |
 | `docs/FRICTION.md` | **the other half of this**: what the language made hard, and what it made easy |
@@ -172,6 +174,12 @@ the top one takes every key.
 | `d` | outline | open the hunk-level diff of the row |
 | `c` | outline | commit overlay: `e` edit, `f` finish, `A` amend, `a` abort |
 | `b` | outline | branch overlay: `c` check out, `/` fuzzy-pick a branch, `n` new, `a` abort |
+| `m` | outline | merge overlay: `f` merge (fast-forward when possible), `n` always make a merge commit, `o` fast-forward only, each fuzzy-picking a branch; while merging `c` continue (commit), `a` abort (asks first) |
+| `Enter` | outline, on an unmerged path | open the resolution view |
+| `a` `b` `B` `z` | resolution view | take ours / theirs / both / the base for the conflict under the cursor (`z` undoes) |
+| `j` `k` / `n` `p` | resolution view | next / previous conflict |
+| `e` | resolution view | open the file in `$EDITOR`, then re-read it |
+| `s` | resolution view | stage the file as it is |
 | `P` / `F` | outline | push / pull which-key, `p` runs it |
 | `/` | outline (log included) | search; smart-case: all lower case ignores case, a capital matches exactly. `Enter` runs it, `Esc` cancels |
 | `n` / `N` | outline (log included) | next / previous match, wrapping |
@@ -416,8 +424,10 @@ REF deltas, and thin packs, whose missing bases come from the repository) and
 each object is written loose with `GIT_object.write`. The pull is then refused when
 the working tree or index is dirty, when HEAD is detached or unborn, when the
 remote has no such branch, and when the local tip is not an ancestor of the
-remote one (`not a fast-forward; merge/rebase not supported yet`). The fetched
-objects are kept in that last case.
+remote one (`not a fast-forward; merge/rebase not supported yet`); in `ourgitui`
+that last refusal offers to merge `origin/<branch>` instead (see Merge). The fetched
+objects are kept in that case, and `refs/remotes/origin/<branch>` is updated so
+there is something to merge.
 
 The order of the two writes matters: `GIT_checkout.checkout` diffs HEAD's tree
 against the target's, so it runs first, writing the files and index; only then
@@ -433,3 +443,33 @@ status`, `git ls-files -s`, a tree diff against the pushing clone and `git
 fsck`. The dirty-tree (staged and unstaged), diverged, ahead, detached,
 missing-branch and Basic-auth cases are covered, and `pty_e2e.py` presses `F`
 and `p` for real.
+
+## Merge (`GIT_merge.m31`, `GIT_ui_merge.m31`)
+
+`m` in `ourgitui` opens the merge overlay. `f` / `n` / `o` pick a local branch
+with the fuzzy picker and merge it (default, `--no-ff`, `--ff-only`); every
+write goes to the command log and to the reflogs in git's own wording, so a
+merge started here can be finished by `git merge --continue` and the other way
+round (the tests do both). A merge that conflicts leaves git's state: stages
+1/2/3 in the index, conflict markers in the files (merge or diff3 style, from
+`merge.conflictstyle`), MERGE_HEAD, MERGE_MSG, MERGE_MODE and ORIG_HEAD. The
+outline then shows a `MERGING (n conflicts)` banner and an "Unmerged paths"
+section; `Enter` on a path opens the resolution view, which shows the file with
+the current conflict marked `>` and writes the file after every key, so
+`$EDITOR` (`e`) and the view never disagree. The file is staged by itself as
+soon as no markers remain. Conflicts with no markers (modify/delete, symlinks, binary files) are
+resolved whole-file with `a` (ours) / `b` (theirs).
+`c` in the merge overlay finishes with the merge message (or the commit overlay,
+which uses MERGE_MSG, adds the second parent and refuses while paths are
+unmerged); `a` aborts like `git merge --abort`.
+
+When the history has several merge bases (a criss-cross), the engine merges
+the bases into a virtual base first, as git's recursive/ort strategy does, so
+the result equals git's on such histories (checked against `git merge`).
+
+Not done: rename detection (it merges as `-X no-renames`), octopus merges,
+and `merge.ff` / merge drivers; submodules conflict and keep ours.
+
+`test_merge.sh` runs every case on twin repositories, one merged by git and one
+by us, and compares HEAD, index, status, working tree, state files and reflogs;
+`pty_merge.py` drives the screens under a real pty.

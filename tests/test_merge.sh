@@ -450,3 +450,61 @@ if [ -f "$WORK/t_merge" ]; then
     mg_apply_case "conflicting pick" 'printf "a\nb\nc\nd\ne\nf\ng\nh\n" >f; echo k >k; git add -A; git commit -q -m c1; git checkout -q -b side; printf "a\nb\nTHEIRS\nd\ne\nf\ng\nh\n" >f; git commit -q -am t; git checkout -q main; printf "a\nb\nOURS\nd\ne\nf\ng\nh\n" >f; git commit -q -am o'
     mg_apply_case "delete in the pick, modify here" 'echo f >f; echo k >k; git add -A; git commit -q -m c1; git checkout -q -b side; git rm -q f; git commit -q -m t; git checkout -q main; echo changed >f; git commit -q -am o'
 fi
+
+# mark_resolved and take_side are what the resolution view calls: after the same conflicted
+# `git merge`, ours and git's `checkout --ours/--theirs` / `add` / `rm` must leave the same
+# index, working tree and status. mg_res_case <label> <build ours> <build theirs> <git cmds> <our args>
+mg_res_case() {
+    local label=$1 ours=$2 theirs=$3 gcmd=$4 oargs=$5
+    mg_build "$WORK/mg_src" merge "printf '$L' >f; echo k >k" "$ours" "$theirs" || return 1
+    mg_twin "$WORK/mg_src" "$WORK/mg_g"; mg_twin "$WORK/mg_src" "$WORK/mg_o"
+    mg_git -C "$WORK/mg_g" merge --no-edit side >/dev/null 2>&1
+    mg_git -C "$WORK/mg_o" merge --no-edit side >/dev/null 2>&1
+    (cd "$WORK/mg_g" && eval "$gcmd") >/dev/null 2>&1
+    local oout
+    oout=$(cd "$WORK/mg_o" && eval "$oargs" 2>&1)
+    local gs os
+    gs=$(mg_state "$WORK/mg_g"); os=$(mg_state "$WORK/mg_o")
+    if [ "$gs" != "$os" ]; then
+        bad "merge helpers: $label" "$(diff <(echo "$gs") <(echo "$os") | head -10)" "ours: $oout"
+        return 1
+    fi
+    mg_check_fsck "$WORK/mg_o" "$label" || return 1
+    note "merge helpers: $label (index, working tree and status equal git's; ours: $oout)"
+}
+
+if [ -f "$WORK/t_merge" ]; then
+    L=$'a\nb\nc\nd\ne\nf\ng\nh\n'
+    OF="printf 'a\nb\nOURS\nd\ne\nf\ng\nh\n' >f"; TF="printf 'a\nb\nTHEIRS\nd\ne\nf\ng\nh\n' >f"
+    T="$WORK/t_merge"; MR="$T .git . resolve f"
+    mg_res_case "take ours" "$OF" "$TF" "git checkout --ours f; git add f" "$T .git . take f ours"
+    mg_res_case "take theirs" "$OF" "$TF" "git checkout --theirs f; git add f" "$T .git . take f theirs"
+    mg_res_case "take the base" "$OF" "$TF" "git show :1:f >f; git add f" "$T .git . take f base"
+    mg_res_case "stage a hand-edited file" "$OF" "$TF" "printf 'BOTH\n' >f; git add f" "printf 'BOTH\n' >f; $MR"
+    mg_res_case "stage a file deleted by hand" "$OF" "$TF" "rm f; git rm -q f" "rm f; $MR"
+    mg_res_case "modify/delete: take the deletion" "echo changed >f" "rm f" "git rm -q f" "$T .git . take f theirs"
+    mg_res_case "modify/delete: keep ours" "echo changed >f" "rm f" "git add f" "$T .git . take f ours"
+    mg_res_case "delete/modify: take ours (the deletion)" "rm f" "echo changed >f" "git rm -q f" "$T .git . take f ours"
+    mg_res_case "delete/modify: take theirs" "rm f" "echo changed >f" "git checkout --theirs f; git add f" "$T .git . take f theirs"
+    mg_res_case "add/add: take theirs" "echo ours >n" "echo theirs >n" "git checkout --theirs n; git add n" "$T .git . take n theirs"
+    mg_res_case "a mode change survives take ours" "chmod +x f; echo o >>f" "echo t >>f" "git checkout --ours f; git add f" "$T .git . take f ours"
+fi
+
+# The merge screens under a real pty (`pty_merge.py`): the merge menu, the banner and the
+# "Unmerged paths" section, the resolution view, the editor hand-off, abort, and the
+# offer of a merge when a pull cannot fast-forward, each checked against real git.
+# It builds its own fixtures under `$WORK/pty_merge`.
+if [ -f "$WORK/gitui" ] || bash scripts/build-gitui.sh -o "$WORK/gitui_merge" >"$WORK/gitui_merge_build.log" 2>&1; then
+    [ -f "$WORK/gitui" ] && gm_bin="$WORK/gitui" || gm_bin="$WORK/gitui_merge"
+    if command -v python3 >/dev/null; then
+        if out=$(python3 tests/pty_merge.py "$gm_bin" "$WORK/pty_merge" 2>&1); then
+            note "merge pty: $(echo "$out" | grep -c '^ok') merge-screen checks passed under a real pty"
+        else
+            bad "merge pty" "$out"
+        fi
+    else
+        echo "merge pty: skipped, no python3" >&2
+    fi
+else
+    bad "merge pty: scripts/build-gitui.sh" "$(cat "$WORK/gitui_merge_build.log")"
+fi
