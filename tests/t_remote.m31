@@ -1,0 +1,222 @@
+// Drives `GIT_remote.m31` for `test_remote.sh`. Every command prints plain
+// lines the shell compares with what a real tool said.
+//
+//   ./t_remote parse <url>
+//       "ssh host=H port=P user=U path=PATH", or "error <Variant>".
+//   ./t_remote exec <url> <upload|receive>
+//       "dest=<[user@]host> port=<n> cmd=<the remote command>" or "error <Variant>".
+//   ./t_remote quote <text>
+//   ./t_remote rewrite <config-file> <url> <fetch|push>
+//   ./t_remote sshconfig <file> <host> <user> <port>
+//       "hostname=..", "user=..", "port=..", and "identity=.." per file.
+//   ./t_remote knownhosts <file> <host> <port>
+//       "<key-type> <base64-key> <marker> <line>" per matching line.
+//   ./t_remote hmac <hex-key> <hex-message>
+//       the HMAC-SHA1 in hex.
+//   ./t_remote unit
+//       "ok <name>" or "FAIL <name>: <detail>" per check.
+
+import GIT_remote;
+import hexcodec;
+import io;
+import os;
+
+List<str> argv = os.args();
+if (argv.size() < 2) {
+    usage();
+}
+str cmd = argv[1];
+if (cmd == "parse" && argv.size() == 3) {
+    do_parse(argv[2]);
+} else if (cmd == "exec" && argv.size() == 4) {
+    do_exec(argv[2], argv[3]);
+} else if (cmd == "quote" && argv.size() == 3) {
+    print(GIT_remote.sq_quote(argv[2]));
+} else if (cmd == "rewrite" && argv.size() == 5) {
+    do_rewrite(argv[2], argv[3], argv[4]);
+} else if (cmd == "sshconfig" && argv.size() == 6) {
+    do_ssh_config(argv[2], argv[3], argv[4], argv[5]);
+} else if (cmd == "knownhosts" && argv.size() == 5) {
+    do_known_hosts(argv[2], argv[3], argv[4]);
+} else if (cmd == "hmac" && argv.size() == 4) {
+    do_hmac(argv[2], argv[3]);
+} else if (cmd == "unit" && argv.size() == 2) {
+    run_unit();
+} else {
+    usage();
+}
+
+void usage() {
+    io.eprint("usage: t_remote parse <url>");
+    io.eprint("       t_remote exec <url> <upload|receive>");
+    io.eprint("       t_remote quote <text>");
+    io.eprint("       t_remote rewrite <config-file> <url> <fetch|push>");
+    io.eprint("       t_remote sshconfig <file> <host> <user> <port>");
+    io.eprint("       t_remote knownhosts <file> <host> <port>");
+    io.eprint("       t_remote hmac <hex-key> <hex-message>");
+    io.eprint("       t_remote unit");
+    os.exit(2);
+}
+
+void fail(str message) {
+    io.eprint("error: " + message);
+    os.exit(1);
+}
+
+str read_text(str path) {
+    match (io.read(path)) {
+        case Ok(str text): {
+            return text;
+        }
+        case Err(io.Error e): {
+            fail("cannot read " + path + ": " + e.to_str());
+        }
+    }
+    return "";
+}
+
+int number(str text) {
+    match (text.parse_int()) {
+        case Some(int value): {
+            return value;
+        }
+        case None: {
+            fail("not a number: " + text);
+        }
+    }
+    return 0;
+}
+
+bytes unhex(str text) {
+    if (text == "-") {
+        return [];
+    }
+    match (hexcodec.decode(text)) {
+        case Ok(bytes data): {
+            return data;
+        }
+        case Err: {
+            fail("not hex: " + text);
+        }
+    }
+    return [];
+}
+
+void do_parse(str url) {
+    match (GIT_remote.parse(url)) {
+        case Ok(GIT_remote.Remote remote): {
+            print(remote.transport.to_str() + " host=" + remote.host + " port=" + remote.port.to_str() + " user=" + remote.user + " path=" + remote.path);
+        }
+        case Err(GIT_remote.Error e): {
+            print("error " + e.to_str());
+        }
+    }
+}
+
+void do_exec(str url, str which) {
+    match (GIT_remote.parse(url)) {
+        case Ok(GIT_remote.Remote remote): {
+            str command = GIT_remote.upload_pack_command(remote);
+            if (which == "receive") {
+                command = GIT_remote.receive_pack_command(remote);
+            }
+            print("dest=" + GIT_remote.ssh_destination(remote) + " port=" + remote.port.to_str() + " cmd=" + command);
+        }
+        case Err(GIT_remote.Error e): {
+            print("error " + e.to_str());
+        }
+    }
+}
+
+void do_rewrite(str file, str url, str mode) {
+    print(GIT_remote.rewrite(read_text(file), url, mode == "push"));
+}
+
+void do_ssh_config(str file, str host, str user, str port) {
+    int wanted = 0;
+    if (port != "") {
+        wanted = number(port);
+    }
+    GIT_remote.SshTarget target = GIT_remote.ssh_config_resolve(read_text(file), host, user, wanted);
+    print("hostname=" + target.hostname);
+    print("user=" + target.user);
+    print("port=" + target.port.to_str());
+    for (str identity in target.identity_files) {
+        print("identity=" + identity);
+    }
+}
+
+void do_known_hosts(str file, str host, str port) {
+    int wanted = 0;
+    if (port != "") {
+        wanted = number(port);
+    }
+    for (GIT_remote.HostKey found in GIT_remote.known_hosts_find(read_text(file), host, wanted)) {
+        print(found.key_type + " " + found.key + " " + found.marker + " " + found.line.to_str());
+    }
+}
+
+void do_hmac(str key, str message) {
+    print(GIT_remote.hmac_sha1(unhex(key), unhex(message)).hex());
+}
+
+void check(str name, bool is_good, str detail) {
+    if (is_good) {
+        print("ok " + name);
+    } else {
+        print("FAIL " + name + ": " + detail);
+    }
+}
+
+// The field summary of a URL, or `error <Variant>`.
+str shape(str url) {
+    match (GIT_remote.parse(url)) {
+        case Ok(GIT_remote.Remote remote): {
+            return remote.transport.to_str() + " " + remote.user + "@" + remote.host + ":" + remote.port.to_str() + " " + remote.path;
+        }
+        case Err(GIT_remote.Error e): {
+            return "error " + e.to_str();
+        }
+    }
+}
+
+void check_shape(str url, str want) {
+    str got = shape(url);
+    check("remote: parse " + url, got == want, got + " != " + want);
+}
+
+void run_unit() {
+    check_shape("https://example.com/a/b.git", "https @example.com:0 /a/b.git");
+    check_shape("https://u:pw@example.com:8443/a?x=1#f", "https u@example.com:8443 /a?x=1#f");
+    check_shape("http://example.com", "http @example.com:0 /");
+    check_shape("https://[::1]:8443/r", "https @::1:8443 /r");
+    check_shape("ssh://git@host:2222/srv/r.git", "ssh git@host:2222 /srv/r.git");
+    check_shape("ssh://host/~me/r", "ssh @host:0 ~me/r");
+    check_shape("git+ssh://host/r", "ssh @host:0 /r");
+    check_shape("ssh://host/a%20b", "ssh @host:0 /a b");
+    check_shape("git@host:team/r.git", "ssh git@host:0 team/r.git");
+    check_shape("host:/abs", "ssh @host:0 /abs");
+    check_shape("[::1]:p", "ssh @::1:0 p");
+    check_shape("u@[h:22]:p", "ssh u@h:22 p");
+    check_shape("/srv/r", "local @:0 /srv/r");
+    check_shape("./a:b", "local @:0 ./a:b");
+    check_shape("file:///tmp/x", "local @:0 /tmp/x");
+    check_shape("file://h/p", "local @:0 /p");
+    check_shape("", "error " + GIT_remote.Error.Empty.to_str());
+    check_shape("ssh://host", "error " + GIT_remote.Error.NoPath.to_str());
+    check_shape("ssh://-oProxyCommand=x/p", "error " + GIT_remote.Error.BadHost.to_str());
+    check_shape("host:-x", "error " + GIT_remote.Error.BadPath.to_str());
+    check_shape("ssh://host:99999/p", "error " + GIT_remote.Error.BadPort.to_str());
+    check_shape("ssh://u:pw@host/p", "error " + GIT_remote.Error.BadUser.to_str());
+    check_shape("git://host/p", "error " + GIT_remote.Error.UnsupportedScheme.to_str());
+    check_shape("SSH://host/p", "error " + GIT_remote.Error.UnsupportedScheme.to_str());
+    check("remote: sq_quote", GIT_remote.sq_quote("/it's!") == "'/it'\\''s'\\!''", GIT_remote.sq_quote("/it's!"));
+    check("remote: sq_quote empty", GIT_remote.sq_quote("") == "''", GIT_remote.sq_quote(""));
+    str config = "[url \"ssh://git@h/\"]\n\tinsteadOf = gh:\n[url \"ssh://git@h/org/\"]\n\tinsteadOf = gh:org/\n\tpushInsteadOf = https://h/org/\n";
+    check("remote: insteadOf longest prefix", GIT_remote.rewrite(config, "gh:org/r", false) == "ssh://git@h/org/r", GIT_remote.rewrite(config, "gh:org/r", false));
+    check("remote: insteadOf shorter prefix", GIT_remote.rewrite(config, "gh:x/r", false) == "ssh://git@h/x/r", GIT_remote.rewrite(config, "gh:x/r", false));
+    check("remote: pushInsteadOf on push only", GIT_remote.rewrite(config, "https://h/org/r", true) == "ssh://git@h/org/r" && GIT_remote.rewrite(config, "https://h/org/r", false) == "https://h/org/r", GIT_remote.rewrite(config, "https://h/org/r", true));
+    check("remote: no rule leaves the url", GIT_remote.rewrite(config, "/srv/r", false) == "/srv/r", "changed");
+    check("remote: hmac rfc2202 case 2", GIT_remote.hmac_sha1("Jefe".to_bytes(), "what do ya want for nothing?".to_bytes()).hex() == "effcdf6ae5eb2fa2d27416d5f184df9c259a7c79", GIT_remote.hmac_sha1("Jefe".to_bytes(), "what do ya want for nothing?".to_bytes()).hex());
+    check("remote: glob", GIT_remote.glob_matches("*.example.com", "a.example.com") && !GIT_remote.glob_matches("*.example.com", "a.EXAMPLE.com") && !GIT_remote.glob_matches("a?c", "abbc"), "glob");
+}

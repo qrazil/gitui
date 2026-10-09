@@ -339,6 +339,20 @@ source tests/test_pull.sh
 
 source tests/test_https.sh
 
+# --- the transport-independent wire protocol, over a duplex stream -----------
+#
+# `test_wire.sh` starts a short-lived bridge to `git upload-pack` /
+# `git receive-pack` per phase and kills it by PID; it sets no trap.
+
+source tests/test_wire.sh
+
+# --- where a remote lives: URLs, insteadOf, ssh_config, known_hosts -----------
+#
+# `test_remote.sh` runs git, ssh and ssh-keygen only as oracles over mktemp
+# fixtures and starts no long-lived process.
+
+source tests/test_remote.sh
+
 echo
 if [ $fail -eq 0 ]; then
     printf '\033[32mall %d checks passed\033[0m\n' "$pass"

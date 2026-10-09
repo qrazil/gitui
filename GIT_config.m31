@@ -253,6 +253,47 @@ Option<bool> parse_bool(Entry entry) {
     }
 }
 
+/// Every assignment of `section.*.key` in `text`, in file order, whatever the
+/// subsection -- what a multi-valued key under many subsections needs
+/// (`url.<base>.insteadOf`), where `get` can only ask about one subsection.
+/// Text that does not parse has none.
+pub List<Entry> all(str text, str section, str key) {
+    List<Entry> out = [];
+    match (parse(text)) {
+        case Ok(Config config): {
+            str want_section = section.to_lower();
+            str want_key = key.to_lower();
+            for (Entry entry in config.entries) {
+                if (entry.section == want_section && entry.key == want_key) {
+                    out.push(entry);
+                }
+            }
+        }
+        case Err: {
+        }
+    }
+    return out;
+}
+
+/// `all`, over the repository's own config file (empty if it has none).
+pub List<Entry> all_in(str gitdir, str section, str key) {
+    List<Entry> out = [];
+    match (load(gitdir)) {
+        case Ok(Config config): {
+            str want_section = section.to_lower();
+            str want_key = key.to_lower();
+            for (Entry entry in config.entries) {
+                if (entry.section == want_section && entry.key == want_key) {
+                    out.push(entry);
+                }
+            }
+        }
+        case Err: {
+        }
+    }
+    return out;
+}
+
 // --- loading ---------------------------------------------------------------
 
 /// The repository's own `config` (the shared one, in a linked worktree).

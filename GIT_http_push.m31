@@ -1,7 +1,8 @@
 // Git's smart-HTTP protocol, the push half: `git-receive-pack` over
-// `lib/https.m31`, the sibling of `GIT_http_fetch.m31` (which has the fetch half
-// and whose pkt-line framing and advertisement parser this reuses rather
-// than repeats). See `docs/design.md`'s "Going remote" for where this
+// `lib/https.m31`, the sibling of `GIT_http_fetch.m31` (which has the fetch half).
+// The protocol itself -- pkt-line framing, the advertisement, the command and
+// the report-status parser -- is `GIT_wire.m31`'s, shared with ssh; this is
+// the HTTP adapter around it. See `docs/design.md`'s "Going remote" for where this
 // sits: a push is "compute what the remote lacks, pack it, send it with the
 // ref update, read the server's verdict", and each of those is its own
 // pure function here with one I/O-doing `push` tying them together.
@@ -64,6 +65,7 @@
 import base64;
 import http;
 import GIT_http_fetch;
+import GIT_wire;
 import GIT_object;
 import os;
 import GIT_pack_write;
@@ -342,16 +344,10 @@ pub Result<GIT_http_fetch.Advertisement, Error> discover(Remote remote) {
 
 /// One ref update and its pack: `<old> <new> <refname>\0report-status
 /// agent=...\n` as a pkt-line, a flush, then `pack` raw. Pure, so the exact
-/// bytes can be checked without a server.
+/// bytes can be checked without a server. (`GIT_wire.command_body`, with this
+/// adapter's agent string.)
 pub bytes command_body(str old, str new, str refname, bytes pack) {
-    bytes out = [];
-    bytes line = (old + " " + new + " " + refname).to_bytes();
-    line.push(0);
-    line.extend("report-status agent=m31-httppush/1\n".to_bytes());
-    out.extend(GIT_http_fetch.pkt_line(line));
-    out.extend(GIT_http_fetch.FLUSH_PKT);
-    out.extend(pack);
-    return out;
+    return GIT_wire.command_body(old, new, refname, pack, "m31-httppush/1");
 }
 
 // --- the server's verdict (Part 3) --------------------------------------------
@@ -367,87 +363,15 @@ pub type Report {
 }
 
 /// `report-status`'s plain pkt-lines: `unpack ok` or `unpack <why>`, then
-/// `ok <ref>` or `ng <ref> <why>` per command, then a flush. Pure.
+/// `ok <ref>` or `ng <ref> <why>` per command, then a flush. Pure
+/// (`GIT_wire.parse_report`, whose every failure is `BadReport` here).
 pub Result<Report, Error> parse_report(bytes body, str refname) {
-    int offset = 0;
-    bool is_unpacked = false;
-    str unpack_reason = "";
-    bool has_seen_unpack = false;
-    bool has_seen_ref = false;
-    bool is_accepted = false;
-    str reason = "";
-    while (offset < body.size()) {
-        GIT_http_fetch.Packet packet = read(body, offset)?;
-        offset = packet.next;
-        if (packet.is_flush) {
-            break;
-        }
-        str line = "";
-        match (packet.payload.utf8()) {
-            case Some(str text): {
-                line = text.trim();
-            }
-            case None: {
-                return Result<Report, Error>.Err(Error.BadReport);
-            }
-        }
-        if (!has_seen_unpack) {
-            if (!line.starts_with("unpack ")) {
-                return Result<Report, Error>.Err(Error.BadReport);
-            }
-            has_seen_unpack = true;
-            str rest = line.substr(7, line.size());
-            is_unpacked = rest == "ok";
-            if (!is_unpacked) {
-                unpack_reason = rest;
-            }
-            continue;
-        }
-        if (line.starts_with("ok ")) {
-            if (line.substr(3, line.size()) == refname) {
-                has_seen_ref = true;
-                is_accepted = true;
-            }
-        } else if (line.starts_with("ng ")) {
-            str rest = line.substr(3, line.size());
-            str name = rest;
-            str why = "";
-            match (rest.index_of(" ")) {
-                case Some(int space_index): {
-                    name = rest.substr(0, space_index);
-                    why = rest.substr(space_index + 1, rest.size());
-                }
-                case None: {
-                }
-            }
-            if (name == refname) {
-                has_seen_ref = true;
-                is_accepted = false;
-                reason = why;
-            }
-        } else {
-            return Result<Report, Error>.Err(Error.BadReport);
-        }
-    }
-    if (!has_seen_unpack) {
-        return Result<Report, Error>.Err(Error.BadReport);
-    }
-    if (!is_unpacked) {
-        return Result<Report, Error>.Ok(Report(false, false, refname, unpack_reason));
-    }
-    if (!has_seen_ref) {
-        return Result<Report, Error>.Err(Error.BadReport);
-    }
-    return Result<Report, Error>.Ok(Report(true, is_accepted, refname, reason));
-}
-
-Result<GIT_http_fetch.Packet, Error> read(bytes body, int offset) {
-    match (GIT_http_fetch.read_packet(body, offset)) {
-        case Ok(GIT_http_fetch.Packet packet): {
-            return Result<GIT_http_fetch.Packet, Error>.Ok(packet);
+    match (GIT_wire.parse_report(body, refname)) {
+        case Ok(GIT_wire.ReportStatus status): {
+            return Result<Report, Error>.Ok(Report(status.is_unpacked, status.is_ok, status.refname, status.reason));
         }
         case Err(_): {
-            return Result<GIT_http_fetch.Packet, Error>.Err(Error.BadReport);
+            return Result<Report, Error>.Err(Error.BadReport);
         }
     }
 }
@@ -507,7 +431,7 @@ pub Result<Report, Error> push(str gitdir, Remote remote, str refname, str new_i
         return Result<Report, Error>.Err(Error.BadName);
     }
     GIT_http_fetch.Advertisement advertisement = discover(remote)?;
-    if (!has_cap(advertisement.capabilities, "report-status")) {
+    if (!GIT_wire.has_cap(advertisement.capabilities, "report-status")) {
         return Result<Report, Error>.Err(Error.NoReportStatus);
     }
     str old = ZERO_ID;
@@ -602,15 +526,6 @@ Error error_of(http.Error error) {
             return Error.InsecureRedirect;
         }
     }
-}
-
-bool has_cap(List<str> caps, str name) {
-    for (str capability in caps) {
-        if (capability == name || capability.starts_with(name + "=")) {
-            return true;
-        }
-    }
-    return false;
 }
 
 str base_of(str url) {

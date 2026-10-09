@@ -1,0 +1,941 @@
+// Where a remote lives and how to reach it: URL parsing, `insteadOf`
+// rewriting, the command an ssh server is asked to run, and the two files
+// an ssh client reads before it connects -- `~/.ssh/config` and
+// `~/.ssh/known_hosts`. Everything here is a pure function over text; no
+// file is read except by `rewrite_gitdir`, no network is touched, and no
+// program is run. It is the groundwork for an ssh transport, not one.
+//
+//   GIT_remote.parse(url)                          -> Result<Remote, Error>
+//   GIT_remote.rewrite(config_text, url, is_push)  -> str
+//   GIT_remote.rewrite_gitdir(gitdir, url, is_push)-> str
+//   GIT_remote.sq_quote(text)                      -> str
+//   GIT_remote.upload_pack_command(remote)         -> str   git-upload-pack '<path>'
+//   GIT_remote.receive_pack_command(remote)        -> str   git-receive-pack '<path>'
+//   GIT_remote.ssh_destination(remote)             -> str   [user@]host
+//   GIT_remote.ssh_config_resolve(text, host, user, port) -> SshTarget
+//   GIT_remote.known_hosts_find(text, host, port)  -> List<HostKey>
+//   GIT_remote.hmac_sha1(key, message)             -> bytes
+//
+// **URLs** follow `git`'s own reading (connect.c), checked against it with
+// a recording `GIT_SSH_COMMAND` in `tests/test_remote.sh`:
+//
+//   https://[user[:password]@]host[:port]/path   -> Https   (the password is dropped)
+//   http://...                                  -> Http
+//   ssh://[user@]host[:port]/path               -> Ssh  (also git+ssh://, ssh+git://)
+//   [user@]host:path, [user@][host]:path        -> Ssh  (scp-like: a colon before any slash)
+//   /abs, ./rel, a/b:c, file:///abs            -> Local
+//
+// For ssh, `ssh://host/~user/x` names the path `~user/x` (the slash before
+// `~` goes), `ssh://` paths and hosts are percent-decoded, `[host:22]:path`
+// carries a port, and a bracketed host without a single colon inside
+// (`[::1]:path`) is a bare IPv6 address. Where git passes an oddity on to
+// ssh this refuses it instead: a host or path that begins with `-` (an
+// option, to ssh), a port that is not 1..65535, an empty path, a `:` in an
+// ssh user name (a password has no business in an argv), a scheme this
+// module does not speak (`git://`, `ftp://`; the scheme is case-sensitive).
+// `file://host/p` is the local path `/p`, as in git.
+//
+// **insteadOf**: `url.<base>.insteadOf = <prefix>` replaces a leading
+// `<prefix>` with `<base>`; the longest matching prefix wins, the first
+// of equals. For a push `url.<base>.pushInsteadOf` is tried first, on the
+// URL as written, and `insteadOf` is the fallback -- git's own order. An
+// empty prefix is ignored. Only the text handed in is read: a caller wanting
+// the user's global file too concatenates the texts.
+//
+// **ssh_config** is the subset that decides where to connect and as whom:
+// `Host` (patterns with `*` and `?`, `!` negation, several per line; case
+// is significant, as in OpenSSH), `HostName` (`%h` is the typed host,
+// lower-cased; with no `HostName` the target is that too), `User`, `Port`,
+// `IdentityFile`. The first value
+// obtained for `HostName`/`User`/`Port` wins, as in OpenSSH, and the
+// identity files of every matching block are collected in order. Options
+// before the first `Host` apply to every host. `Match` blocks are skipped
+// whole and `Include` and every other keyword are ignored, so a configuration
+// that depends on them resolves as if they were not there -- the caller
+// should say so. A `user` or `port` given by the caller (from the URL) beats
+// the file's, as `ssh user@host -p port` does.
+//
+// **known_hosts** lines are `[@marker] hosts keytype base64key [comment]`,
+// where hosts is a comma-separated list of patterns (`*`, `?`, `!` negation),
+// `[host]:port` for any port but 22, or a single hashed
+// `|1|salt|hash` -- HMAC-SHA1 of the host string under the salt. The
+// answer is every matching line's key type and base64 key, in file order,
+// each with its marker: **a caller must refuse a key whose marker is
+// `revoked`, and must not treat `cert-authority` as a host key**; this module
+// reports them rather than hiding them so that cannot be forgotten by omission.
+
+import base64;
+import GIT_config;
+import GIT_sha1;
+import io;
+
+pub enum Error {
+    /// The URL is empty.
+    Empty;
+    /// The URL has a control character, or is not shaped like any URL.
+    BadUrl;
+    /// A `scheme://` this module does not speak.
+    UnsupportedScheme;
+    /// No host, or one that cannot be a host name (empty, or beginning with `-`).
+    BadHost;
+    /// A port that is not 1..65535.
+    BadPort;
+    /// A user name that is empty, begins with `-`, or has a `:` in an ssh URL.
+    BadUser;
+    /// No path after the host.
+    NoPath;
+    /// A path that begins with `-`.
+    BadPath;
+}
+
+pub str Error.to_str() {
+    match (this) {
+        case Empty: {
+            return "the URL is empty";
+        }
+        case BadUrl: {
+            return "the URL is not well-formed";
+        }
+        case UnsupportedScheme: {
+            return "the URL's scheme is not one of https, http, ssh or a local path";
+        }
+        case BadHost: {
+            return "the URL's host is missing or not a host name";
+        }
+        case BadPort: {
+            return "the URL's port is not a number from 1 to 65535";
+        }
+        case BadUser: {
+            return "the URL's user name is not acceptable";
+        }
+        case NoPath: {
+            return "the URL names no path";
+        }
+        case BadPath: {
+            return "the URL's path begins with '-', which a remote command would take for an option";
+        }
+    }
+}
+
+/// Same variant? (`==` needs this.)
+pub bool Error.eq(Error other) {
+    return to_str() == other.to_str();
+}
+
+/// How the bytes get to the remote.
+pub enum Transport {
+    Https;
+    Http;
+    Ssh;
+    Local;
+}
+
+pub str Transport.to_str() {
+    match (this) {
+        case Https: {
+            return "https";
+        }
+        case Http: {
+            return "http";
+        }
+        case Ssh: {
+            return "ssh";
+        }
+        case Local: {
+            return "local";
+        }
+    }
+}
+
+pub bool Transport.eq(Transport other) {
+    return to_str() == other.to_str();
+}
+
+/// A parsed remote. `port` and `user` are `0` and `""` when the URL gave
+/// none; `host` is `""` for a local path. `path` is what the remote side is
+/// asked for: for http(s) everything from the first `/` (query and fragment
+/// kept, `/` if there was none), for ssh the repository path after the
+/// rules in the module note, for a local remote the path itself.
+pub type Remote {
+    pub Transport transport;
+    pub str host;
+    pub int port;
+    pub str user;
+    pub str path;
+}
+
+// --- parsing -------------------------------------------------------------------
+
+/// Read `url` as git would, or say why not. See the module note.
+pub Result<Remote, Error> parse(str url) {
+    if (url == "") {
+        return Result<Remote, Error>.Err(Error.Empty);
+    }
+    for (int character in url.chars()) {
+        if (character < 32 || character == 127) {
+            return Result<Remote, Error>.Err(Error.BadUrl);
+        }
+    }
+    match (url.index_of("://")) {
+        case Some(int at): {
+            str scheme = url.substr(0, at);
+            if (is_scheme(scheme)) {
+                str rest = url.substr(at + 3, url.size());
+                if (scheme == "https") {
+                    return parse_web(Transport.Https, rest);
+                }
+                if (scheme == "http") {
+                    return parse_web(Transport.Http, rest);
+                }
+                if (scheme == "ssh" || scheme == "git+ssh" || scheme == "ssh+git") {
+                    return parse_ssh_url(rest);
+                }
+                if (scheme == "file") {
+                    return parse_file_url(rest);
+                }
+                return Result<Remote, Error>.Err(Error.UnsupportedScheme);
+            }
+        }
+        case None: {
+        }
+    }
+    if (is_local(url)) {
+        return Result<Remote, Error>.Ok(Remote(Transport.Local, "", 0, "", url));
+    }
+    return parse_scp(url);
+}
+
+// RFC 3986's scheme alphabet, non-empty.
+bool is_scheme(str scheme) {
+    if (scheme.size() == 0) {
+        return false;
+    }
+    for (int character in scheme.chars()) {
+        bool is_letter = character >= 'a' && character <= 'z' || character >= 'A' && character <= 'Z';
+        bool is_digit = character >= '0' && character <= '9';
+        if (!is_letter && !is_digit && character != '+' && character != '-' && character != '.') {
+            return false;
+        }
+    }
+    return true;
+}
+
+// Git's rule: no colon at all, or a slash before the first colon.
+bool is_local(str url) {
+    match (url.index_of(":")) {
+        case None: {
+            return true;
+        }
+        case Some(int colon): {
+            match (url.index_of("/")) {
+                case Some(int slash): {
+                    return slash < colon;
+                }
+                case None: {
+                    return false;
+                }
+            }
+        }
+    }
+}
+
+// The first of `marks` at or after `from` in `text`, or the end.
+int first_of(str text, str marks, int from) {
+    int position = from;
+    while (position < text.size()) {
+        if (marks.contains(text.substr(position, position + 1))) {
+            return position;
+        }
+        position = position + 1;
+    }
+    return text.size();
+}
+
+// The characters of `text`, one per element.
+List<str> letters(str text) {
+    List<str> out = [];
+    int position = 0;
+    while (position < text.size()) {
+        out.push(text.substr(position, position + 1));
+        position = position + 1;
+    }
+    return out;
+}
+
+// The last index of `mark` in `text`, or -1.
+int last_index(str text, str mark) {
+    int position = text.size();
+    while (position > 0) {
+        position = position - 1;
+        if (text.substr(position, position + 1) == mark) {
+            return position;
+        }
+    }
+    return -1;
+}
+
+// `http(s)://` and the text after it: authority, then everything from the
+// first `/`, `?` or `#`.
+Result<Remote, Error> parse_web(Transport transport, str rest) {
+    int end = first_of(rest, "/?#", 0);
+    str authority = rest.substr(0, end);
+    str path = rest.substr(end, rest.size());
+    if (!path.starts_with("/")) {
+        path = "/" + path;
+    }
+    str user = "";
+    str hostport = authority;
+    int at = last_index(authority, "@");
+    if (at >= 0) {
+        str userinfo = authority.substr(0, at);
+        hostport = authority.substr(at + 1, authority.size());
+        user = userinfo;
+        match (userinfo.index_of(":")) {
+            case Some(int colon): {
+                user = userinfo.substr(0, colon);
+            }
+            case None: {
+            }
+        }
+        user = decode_percent(user);
+    }
+    HostPort hp = split_host_port(hostport)?;
+    return Result<Remote, Error>.Ok(Remote(transport, hp.host, hp.port, user, path));
+}
+
+// `ssh://` and the text after it.
+Result<Remote, Error> parse_ssh_url(str rest) {
+    int slash = first_of(rest, "/", 0);
+    str authority = rest.substr(0, slash);
+    str path = rest.substr(slash, rest.size());
+    str user = "";
+    str hostport = authority;
+    int at = last_index(authority, "@");
+    if (at >= 0) {
+        user = decode_percent(authority.substr(0, at));
+        hostport = authority.substr(at + 1, authority.size());
+        check_user(user)?;
+    }
+    HostPort hp = split_host_port(hostport)?;
+    if (path == "") {
+        return Result<Remote, Error>.Err(Error.NoPath);
+    }
+    path = decode_percent(path);
+    if (path.starts_with("/~")) {
+        path = path.substr(1, path.size());
+    }
+    check_path(path)?;
+    return Result<Remote, Error>.Ok(Remote(Transport.Ssh, hp.host, hp.port, user, path));
+}
+
+// `file://[host]/path`: the host is ignored, as git ignores it.
+Result<Remote, Error> parse_file_url(str rest) {
+    int slash = first_of(rest, "/", 0);
+    if (slash >= rest.size()) {
+        return Result<Remote, Error>.Err(Error.NoPath);
+    }
+    return Result<Remote, Error>.Ok(Remote(Transport.Local, "", 0, "", decode_percent(rest.substr(slash, rest.size()))));
+}
+
+// `[user@]host:path` and `[user@][host[:port]]:path`.
+Result<Remote, Error> parse_scp(str url) {
+    str user = "";
+    str hostspec = "";
+    str path = "";
+    int bracket_open = -1;
+    match (url.index_of("[")) {
+        case Some(int found): {
+            if (found == 0 || url.substr(found - 1, found) == "@") {
+                bracket_open = found;
+            }
+        }
+        case None: {
+        }
+    }
+    if (bracket_open >= 0) {
+        int bracket_close = first_of(url, "]", bracket_open);
+        if (bracket_close >= url.size() || bracket_close + 1 >= url.size() || url.substr(bracket_close + 1, bracket_close + 2) != ":") {
+            return Result<Remote, Error>.Err(Error.BadUrl);
+        }
+        hostspec = url.substr(bracket_open + 1, bracket_close);
+        path = url.substr(bracket_close + 2, url.size());
+        if (bracket_open > 0) {
+            user = url.substr(0, bracket_open - 1);
+        }
+    } else {
+        int colon = first_of(url, ":", 0);
+        str head = url.substr(0, colon);
+        path = url.substr(colon + 1, url.size());
+        hostspec = head;
+        int at = last_index(head, "@");
+        if (at >= 0) {
+            user = head.substr(0, at);
+            hostspec = head.substr(at + 1, head.size());
+        }
+    }
+    if (bracket_open >= 0 || user != "") {
+        // A user name given with `@` is checked; none given is not an error.
+        if (user != "") {
+            check_user(user)?;
+        }
+    }
+    HostPort hp = split_scp_host(hostspec, bracket_open >= 0)?;
+    if (path == "") {
+        return Result<Remote, Error>.Err(Error.NoPath);
+    }
+    check_path(path)?;
+    return Result<Remote, Error>.Ok(Remote(Transport.Ssh, hp.host, hp.port, user, path));
+}
+
+type HostPort {
+    str host;
+    int port;
+}
+
+// `host`, `host:port`, `[v6]`, `[v6]:port`. Percent escapes in the host are decoded.
+Result<HostPort, Error> split_host_port(str hostport) {
+    str host = hostport;
+    str port_text = "";
+    if (hostport.starts_with("[")) {
+        int bracket_close = first_of(hostport, "]", 0);
+        if (bracket_close >= hostport.size()) {
+            return Result<HostPort, Error>.Err(Error.BadHost);
+        }
+        host = hostport.substr(1, bracket_close);
+        str after = hostport.substr(bracket_close + 1, hostport.size());
+        if (after != "") {
+            if (!after.starts_with(":")) {
+                return Result<HostPort, Error>.Err(Error.BadHost);
+            }
+            port_text = after.substr(1, after.size());
+        }
+    } else {
+        int colon = last_index(hostport, ":");
+        if (colon >= 0) {
+            host = hostport.substr(0, colon);
+            port_text = hostport.substr(colon + 1, hostport.size());
+        }
+    }
+    return finish_host(decode_percent(host), port_text);
+}
+
+// The host part of an scp-like URL, where brackets (when `is_bracketed`)
+// held the whole of it: `h:22` is a host and a port, `::1` a bare address.
+Result<HostPort, Error> split_scp_host(str hostspec, bool is_bracketed) {
+    str host = hostspec;
+    str port_text = "";
+    if (is_bracketed) {
+        int colon = first_of(hostspec, ":", 0);
+        if (colon < hostspec.size() && last_index(hostspec, ":") == colon) {
+            host = hostspec.substr(0, colon);
+            port_text = hostspec.substr(colon + 1, hostspec.size());
+        }
+    }
+    return finish_host(host, port_text);
+}
+
+Result<HostPort, Error> finish_host(str host, str port_text) {
+    if (host == "" || host.starts_with("-")) {
+        return Result<HostPort, Error>.Err(Error.BadHost);
+    }
+    for (int character in host.chars()) {
+        if (character <= 32 || character == '/' || character == '\\' || character == '@') {
+            return Result<HostPort, Error>.Err(Error.BadHost);
+        }
+    }
+    int port = 0;
+    if (port_text != "") {
+        for (int character in port_text.chars()) {
+            if (character < '0' || character > '9') {
+                return Result<HostPort, Error>.Err(Error.BadPort);
+            }
+        }
+        if (port_text.size() > 5) {
+            return Result<HostPort, Error>.Err(Error.BadPort);
+        }
+        port = port_text.parse_int().or(0);
+        if (port < 1 || port > 65535) {
+            return Result<HostPort, Error>.Err(Error.BadPort);
+        }
+    }
+    return Result<HostPort, Error>.Ok(HostPort(host, port));
+}
+
+Result<bool, Error> check_user(str user) {
+    if (user == "" || user.starts_with("-") || user.contains(":")) {
+        return Result<bool, Error>.Err(Error.BadUser);
+    }
+    for (int character in user.chars()) {
+        if (character <= 32 || character == '/' || character == '\\') {
+            return Result<bool, Error>.Err(Error.BadUser);
+        }
+    }
+    return Result<bool, Error>.Ok(true);
+}
+
+Result<bool, Error> check_path(str path) {
+    if (path.starts_with("-")) {
+        return Result<bool, Error>.Err(Error.BadPath);
+    }
+    return Result<bool, Error>.Ok(true);
+}
+
+int hex_digit(int character) {
+    if (character >= '0' && character <= '9') {
+        return character - 48;
+    }
+    if (character >= 'a' && character <= 'f') {
+        return character - 87;
+    }
+    if (character >= 'A' && character <= 'F') {
+        return character - 55;
+    }
+    return -1;
+}
+
+// `%41` -> `A`; a `%` not followed by two hex digits stays as written, and
+// so does any escape that would decode to NUL or a control character.
+str decode_percent(str text) {
+    if (!text.contains("%")) {
+        return text;
+    }
+    bytes raw = text.to_bytes();
+    bytes out = [];
+    int position = 0;
+    while (position < raw.size()) {
+        int character = raw[position];
+        if (character == '%' && position + 2 < raw.size() + 0 && hex_digit(raw[position + 1]) >= 0 && hex_digit(raw[position + 2]) >= 0) {
+            int value = hex_digit(raw[position + 1]) * 16 + hex_digit(raw[position + 2]);
+            if (value >= 32 && value != 127) {
+                out.push(value);
+                position = position + 3;
+                continue;
+            }
+        }
+        out.push(character);
+        position = position + 1;
+    }
+    match (out.utf8()) {
+        case Some(str decoded): {
+            return decoded;
+        }
+        case None: {
+            return text;
+        }
+    }
+}
+
+// --- the remote command -----------------------------------------------------------
+
+/// `text` for a POSIX shell as one word, git's way (`sq_quote_buf`): in
+/// single quotes, every `'` and `!` closing the quote, escaped, and reopening
+/// it -- `it's!` is `'it'\''s'\!''`.
+pub str sq_quote(str text) {
+    List<str> parts = [];
+    str run = "";
+    for (str character in letters(text)) {
+        if (character == "'" || character == "!") {
+            parts.push(run);
+            parts.push("'\\" + character + "'");
+            run = "";
+        } else {
+            run = run + character;
+        }
+    }
+    parts.push(run);
+    return "'" + parts.join("") + "'";
+}
+
+/// The command line an ssh server is asked to run for `service`
+/// (`git-upload-pack`, `git-receive-pack`) on `path`.
+pub str service_command(str service, str path) {
+    return service + " " + sq_quote(path);
+}
+
+/// `git-upload-pack '<path>'`: what fetch and clone run on the far side.
+pub str upload_pack_command(Remote remote) {
+    return service_command("git-upload-pack", remote.path);
+}
+
+/// `git-receive-pack '<path>'`: what push runs on the far side.
+pub str receive_pack_command(Remote remote) {
+    return service_command("git-receive-pack", remote.path);
+}
+
+/// `[user@]host`: the one word an ssh client is given to name its target.
+/// A bare IPv6 address is given without brackets, as git does.
+pub str ssh_destination(Remote remote) {
+    if (remote.user == "") {
+        return remote.host;
+    }
+    return remote.user + "@" + remote.host;
+}
+
+// --- insteadOf ----------------------------------------------------------------------
+
+// The longest matching prefix among `entries` (a subsection is the base it
+// becomes, a value the prefix it replaces), applied; or `url` unchanged.
+// Sets `is_found` through the returned pair's first element.
+Option<str> apply_rules(List<GIT_config.Entry> entries, str url) {
+    int best = -1;
+    str result = url;
+    for (GIT_config.Entry entry in entries) {
+        if (entry.value == "" || !url.starts_with(entry.value)) {
+            continue;
+        }
+        if (entry.value.size() > best) {
+            best = entry.value.size();
+            result = entry.subsection + url.substr(entry.value.size(), url.size());
+        }
+    }
+    if (best < 0) {
+        return Option<str>.None;
+    }
+    return Option<str>.Some(result);
+}
+
+/// `url` after the `url.<base>.insteadOf` rules in `config_text` -- or, with
+/// `is_push`, after `url.<base>.pushInsteadOf` if one matches, and `insteadOf`
+/// otherwise. `url` itself if nothing matches.
+pub str rewrite(str config_text, str url, bool is_push) {
+    if (is_push) {
+        match (apply_rules(GIT_config.all(config_text, "url", "pushInsteadOf"), url)) {
+            case Some(str pushed): {
+                return pushed;
+            }
+            case None: {
+            }
+        }
+    }
+    return apply_rules(GIT_config.all(config_text, "url", "insteadOf"), url).or(url);
+}
+
+/// `rewrite`, reading the repository's own config file.
+pub str rewrite_gitdir(str gitdir, str url, bool is_push) {
+    if (is_push) {
+        match (apply_rules(GIT_config.all_in(gitdir, "url", "pushInsteadOf"), url)) {
+            case Some(str pushed): {
+                return pushed;
+            }
+            case None: {
+            }
+        }
+    }
+    return apply_rules(GIT_config.all_in(gitdir, "url", "insteadOf"), url).or(url);
+}
+
+// --- glob patterns -------------------------------------------------------------------
+
+/// Does `pattern` (`*` any run, `?` any one character, nothing else special)
+/// match all of `text`, byte for byte?
+pub bool glob_matches(str pattern, str text) {
+    List<int> p = pattern.chars();
+    List<int> t = text.chars();
+    int pi = 0;
+    int ti = 0;
+    int star = -1;
+    int mark = 0;
+    while (ti < t.size()) {
+        if (pi < p.size() && p[pi] == '*') {
+            star = pi;
+            mark = ti;
+            pi = pi + 1;
+        } else if (pi < p.size() && (p[pi] == '?' || p[pi] == t[ti])) {
+            pi = pi + 1;
+            ti = ti + 1;
+        } else if (star >= 0) {
+            pi = star + 1;
+            mark = mark + 1;
+            ti = mark;
+        } else {
+            return false;
+        }
+    }
+    while (pi < p.size() && p[pi] == '*') {
+        pi = pi + 1;
+    }
+    return pi == p.size();
+}
+
+// A pattern list (already split) against `text`: a hit on a `!pattern`
+// vetoes the lot, otherwise one plain hit is enough. `known_hosts` folds
+// case (host names do); `ssh_config` `Host` lines do not.
+bool list_matches(List<str> patterns, str text, bool is_folded) {
+    bool is_matched = false;
+    str subject = text;
+    if (is_folded) {
+        subject = text.to_lower();
+    }
+    for (str raw in patterns) {
+        str pattern = raw;
+        if (is_folded) {
+            pattern = raw.to_lower();
+        }
+        if (pattern.starts_with("!")) {
+            if (glob_matches(pattern.substr(1, pattern.size()), subject)) {
+                return false;
+            }
+        } else if (glob_matches(pattern, subject)) {
+            is_matched = true;
+        }
+    }
+    return is_matched;
+}
+
+// --- ssh_config ------------------------------------------------------------------------
+
+/// What `ssh_config_resolve` decided. `user` is `""` and `port` `0` when
+/// neither the caller nor the file said (the caller's default applies:
+/// the local user, 22). `hostname` is never empty.
+pub type SshTarget {
+    pub str hostname;
+    pub str user;
+    pub int port;
+    pub List<str> identity_files;
+}
+
+// A line's words: split on whitespace, a double-quoted run is one word
+// (quotes removed), and a `#` that starts a word ends the line.
+List<str> words_of(str line) {
+    List<str> words = [];
+    str current = "";
+    bool is_in_word = false;
+    bool is_quoted = false;
+    for (str character in letters(line)) {
+        if (is_quoted) {
+            if (character == "\"") {
+                is_quoted = false;
+            } else {
+                current = current + character;
+            }
+        } else if (character == "\"") {
+            is_quoted = true;
+            is_in_word = true;
+        } else if (character == " " || character == "\t" || character == "\r") {
+            if (is_in_word) {
+                words.push(current);
+                current = "";
+                is_in_word = false;
+            }
+        } else if (character == "#" && !is_in_word) {
+            return words;
+        } else {
+            current = current + character;
+            is_in_word = true;
+        }
+    }
+    if (is_in_word) {
+        words.push(current);
+    }
+    return words;
+}
+
+// A config line as keyword and arguments: `Key value`, `Key=value`,
+// `Key = value`. The keyword is lower-cased. `None` for blank and comment lines.
+Option<List<str>> split_option(str raw) {
+    str line = raw.trim();
+    if (line == "" || line.starts_with("#")) {
+        return Option<List<str>>.None;
+    }
+    int cut = first_of(line, " \t=", 0);
+    str keyword = line.substr(0, cut).to_lower();
+    str rest = line.substr(cut, line.size()).trim();
+    if (rest.starts_with("=")) {
+        rest = rest.substr(1, rest.size()).trim();
+    }
+    List<str> out = [keyword];
+    for (str word in words_of(rest)) {
+        out.push(word);
+    }
+    return Option<List<str>>.Some(out);
+}
+
+/// Resolve `host` (as typed, before any `HostName`) against the ssh_config
+/// `text`. `user` and `port`, when not `""`/`0`, are the caller's and win.
+/// See the module note for what is and is not understood.
+pub SshTarget ssh_config_resolve(str text, str host, str user, int port) {
+    str hostname = "";
+    str found_user = user;
+    int found_port = port;
+    List<str> identities = [];
+    bool is_applying = true;
+    for (str raw in text.split("\n")) {
+        match (split_option(raw)) {
+            case None: {
+                continue;
+            }
+            case Some(List<str> option): {
+                str keyword = option[0];
+                List<str> args = option.slice(1, option.size());
+                if (keyword == "host") {
+                    is_applying = list_matches(args, host, false);
+                } else if (keyword == "match") {
+                    is_applying = false;
+                } else if (is_applying && args.size() > 0) {
+                    if (keyword == "hostname" && hostname == "") {
+                        hostname = expand_host(args[0], host.to_lower());
+                    } else if (keyword == "user" && found_user == "") {
+                        found_user = args[0];
+                    } else if (keyword == "port" && found_port == 0) {
+                        found_port = args[0].parse_int().or(0);
+                        if (found_port < 1 || found_port > 65535) {
+                            found_port = 0;
+                        }
+                    } else if (keyword == "identityfile" && args[0] != "none" && !identities.contains(args[0])) {
+                        identities.push(args[0]);
+                    }
+                }
+            }
+        }
+    }
+    if (hostname == "") {
+        hostname = host.to_lower();
+    }
+    return SshTarget(hostname, found_user, found_port, identities);
+}
+
+// `%h` is the host as typed, `%%` a percent sign.
+str expand_host(str value, str host) {
+    if (!value.contains("%")) {
+        return value;
+    }
+    List<str> parts = [];
+    int position = 0;
+    while (position < value.size()) {
+        str character = value.substr(position, position + 1);
+        str next = "";
+        if (position + 1 < value.size()) {
+            next = value.substr(position + 1, position + 2);
+        }
+        if (character == "%" && next == "h") {
+            parts.push(host);
+            position = position + 2;
+        } else if (character == "%" && next == "%") {
+            parts.push("%");
+            position = position + 2;
+        } else {
+            parts.push(character);
+            position = position + 1;
+        }
+    }
+    return parts.join("");
+}
+
+// --- known_hosts -------------------------------------------------------------------------
+
+/// One matching `known_hosts` line. `marker` is `""`, `revoked` or
+/// `cert-authority` (the `@` removed); `line` counts from 1.
+pub type HostKey {
+    pub str key_type;
+    pub str key;
+    pub str marker;
+    pub int line;
+}
+
+/// HMAC-SHA1 (RFC 2104) of `message` under `key`, built on `GIT_sha1.sum`.
+pub bytes hmac_sha1(bytes key, bytes message) {
+    bytes block_key = clone(key);
+    if (block_key.size() > 64) {
+        block_key = GIT_sha1.sum(block_key);
+    }
+    while (block_key.size() < 64) {
+        block_key.push(0);
+    }
+    bytes inner = [];
+    bytes outer = [];
+    for (int i in 0 .. 64) {
+        inner.push(block_key[i] ^ 0x36);
+        outer.push(block_key[i] ^ 0x5c);
+    }
+    inner.extend(message);
+    outer.extend(GIT_sha1.sum(inner));
+    return GIT_sha1.sum(outer);
+}
+
+// The host as a known_hosts line spells it: lower-case, `[host]:port` when
+// the port is anything but the default.
+str host_string(str host, int port) {
+    str name = host.to_lower();
+    if (port != 0 && port != 22) {
+        return "[" + name + "]:" + port.to_str();
+    }
+    return name;
+}
+
+// Does the hashed entry `|1|salt|hash` name `subject`?
+bool hashed_matches(str entry, str subject) {
+    List<str> parts = entry.split("|");
+    if (parts.size() != 4 || parts[1] != "1") {
+        return false;
+    }
+    bytes salt = [];
+    bytes want = [];
+    match (base64.decode(parts[2])) {
+        case Ok(bytes decoded): {
+            salt = decoded;
+        }
+        case Err: {
+            return false;
+        }
+    }
+    match (base64.decode(parts[3])) {
+        case Ok(bytes decoded): {
+            want = decoded;
+        }
+        case Err: {
+            return false;
+        }
+    }
+    return hmac_sha1(salt, subject.to_bytes()) == want;
+}
+
+/// Every line of the known_hosts `text` that names `host` on `port` (`0`
+/// means the default, 22), as key type and base64 key, in file order. Lines
+/// that are blank, comments or not shaped like a host key line are skipped.
+pub List<HostKey> known_hosts_find(str text, str host, int port) {
+    str subject = host_string(host, port);
+    List<HostKey> out = [];
+    int number = 0;
+    for (str raw in text.split("\n")) {
+        number = number + 1;
+        str line = raw.trim();
+        if (line == "" || line.starts_with("#")) {
+            continue;
+        }
+        List<str> fields = [];
+        for (str field in line.split(" ")) {
+            if (field.trim() != "") {
+                fields.push(field.trim());
+            }
+        }
+        // Tabs separate fields as well as spaces.
+        if (line.contains("\t")) {
+            fields = [];
+            for (str chunk in line.split("\t")) {
+                for (str field in chunk.split(" ")) {
+                    if (field.trim() != "") {
+                        fields.push(field.trim());
+                    }
+                }
+            }
+        }
+        str marker = "";
+        if (fields.size() > 0 && fields[0].starts_with("@")) {
+            marker = fields[0].substr(1, fields[0].size());
+            fields = fields.slice(1, fields.size());
+        }
+        if (fields.size() < 3) {
+            continue;
+        }
+        bool is_matching = false;
+        if (fields[0].starts_with("|")) {
+            is_matching = hashed_matches(fields[0], subject);
+        } else {
+            is_matching = list_matches(fields[0].split(","), subject, true);
+        }
+        if (is_matching) {
+            out.push(HostKey(fields[1], fields[2], marker, number));
+        }
+    }
+    return out;
+}
