@@ -1,0 +1,76 @@
+// Drives `GIT_undo.m31` for `test_undo.sh`.
+//
+//   ./t_undo <gitdir> <worktree> plan        prints the plan, one line per half
+//   ./t_undo <gitdir> <worktree> undo|redo   applies it; prints `ok` or `refused: ...`
+//
+// `plan` prints `undo: <title> | <detail>` or `undo: - <why>`, the same for
+// `redo:`, and `busy: <why>` when something is in progress.
+
+import GIT_undo;
+import GIT_checkout;
+import io;
+import os;
+
+List<str> argv = os.args();
+if (argv.size() < 4) {
+    io.eprint("usage: t_undo <gitdir> <worktree> plan|undo|redo");
+    os.exit(2);
+}
+str gitdir = argv[1];
+str worktree = argv[2];
+str mode = argv[3];
+GIT_undo.Plan plan = GIT_undo.Plan(Option<GIT_undo.Action>.None, Option<GIT_undo.Action>.None, "", "", "");
+match (GIT_undo.plan(gitdir)) {
+    case Ok(GIT_undo.Plan found): {
+        plan = found;
+    }
+    case Err(GIT_undo.Error error): {
+        print("refused: " + error.to_str());
+        os.exit(1);
+    }
+}
+if (mode == "plan") {
+    if (plan.busy != "") {
+        print("busy: " + plan.busy);
+    }
+    match (plan.undo) {
+        case Some(GIT_undo.Action action): {
+            print("undo: " + action.title + " | " + action.detail);
+        }
+        case None: {
+            print("undo: - " + plan.undo_why);
+        }
+    }
+    match (plan.redo) {
+        case Some(GIT_undo.Action action): {
+            print("redo: " + action.title + " | " + action.detail);
+        }
+        case None: {
+            print("redo: - " + plan.redo_why);
+        }
+    }
+    os.exit(0);
+}
+Option<GIT_undo.Action> wanted = plan.undo;
+str why = plan.undo_why;
+if (mode == "redo") {
+    wanted = plan.redo;
+    why = plan.redo_why;
+}
+match (wanted) {
+    case Some(GIT_undo.Action action): {
+        match (GIT_undo.apply(gitdir, worktree, action)) {
+            case Ok(GIT_checkout.Summary summary): {
+                print("ok");
+            }
+            case Err(GIT_undo.Error error): {
+                print("refused: " + error.to_str());
+                os.exit(1);
+            }
+        }
+    }
+    case None: {
+        print("refused: " + why);
+        os.exit(1);
+    }
+}

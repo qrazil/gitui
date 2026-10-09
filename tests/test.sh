@@ -315,6 +315,7 @@ source tests/test_graph.sh
 source tests/test_unmerged.sh
 source tests/test_treediff.sh
 source tests/test_blame.sh
+source tests/test_undo.sh
 
 # --- smart-HTTP fetch/clone, against a real 'git http-backend' -------------
 #
