@@ -296,6 +296,10 @@ source tests/test_patch.sh
 
 source tests/test_gitui.sh
 
+# --- the overlay stack, key table and picker: unit-level ----------------------
+
+source tests/test_uikeys.sh
+
 # --- branch listing and checkout, against real git as the oracle ----------
 
 source tests/test_checkout.sh

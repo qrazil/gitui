@@ -161,7 +161,6 @@ if (operation == "stage") {
     // then `finish_commit` -- `c`, `A`, `f` with no edit in between, real
     // git's `--amend --no-edit`. A refusal leaves `start_amend`'s own
     // message to print.
-    state.is_commit_open = true;
     state.start_amend();
     if (state.is_amending) {
         state.finish_commit();

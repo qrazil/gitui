@@ -1,0 +1,74 @@
+// The `?` key-help overlay. It is generated from `GIT_ui_core.key_table()`,
+// the same table that drives key dispatch and the footer, so it cannot go
+// stale: bind a key there and it is listed here.
+
+import GIT_ui_core;
+import GIT_ui_panel;
+import term;
+import tui.TUI_app;
+import tui.TUI_buffer;
+import tui.TUI_geometry;
+import tui.TUI_text;
+
+type HelpOverlay {
+    GIT_ui_core.Core host;
+    int offset = 0;
+}
+
+pub TUI_app.Action HelpOverlay.handle_key(term.Code code) {
+    match (GIT_ui_core.lookup(GIT_ui_core.SCOPE_HELP, code)) {
+        case Some(str cmd): {
+            if (cmd == GIT_ui_core.CMD_CLOSE) {
+                host.pop_overlay();
+            }
+            if (cmd == GIT_ui_core.CMD_DOWN) {
+                offset = offset + 1;
+            }
+            if (cmd == GIT_ui_core.CMD_UP) {
+                offset = offset - 1;
+                if (offset < 0) {
+                    offset = 0;
+                }
+            }
+            return TUI_app.Action.Redraw;
+        }
+        case None: {
+        }
+    }
+    return TUI_app.Action.Continue;
+}
+
+pub void HelpOverlay.render(TUI_buffer.Buffer buffer, TUI_geometry.Rect area) {
+    TUI_geometry.Rect inner = GIT_ui_panel.frame(buffer, area, "keys");
+    if (inner.is_empty()) {
+        return;
+    }
+    List<str> text = lines();
+    offset = GIT_ui_panel.clamp(offset, text.size(), inner.height);
+    GIT_ui_panel.draw_lines(buffer, inner, text, offset, -1);
+}
+
+pub List<GIT_ui_core.Hint> HelpOverlay.hints() {
+    return GIT_ui_core.hints_for(GIT_ui_core.SCOPE_HELP);
+}
+
+/// `?`: open the help overlay.
+pub void open(GIT_ui_core.Core core) {
+    core.push_overlay(HelpOverlay(core));
+}
+
+/// The overlay's text: for each scope a heading, then one line per binding --
+/// its keys, then what it does. Public so a test can read it without a screen.
+pub List<str> lines() {
+    List<str> out = [];
+    for (str scope in GIT_ui_core.all_scopes()) {
+        if (out.size() > 0) {
+            out.push("");
+        }
+        out.push(GIT_ui_core.scope_title(scope));
+        for (GIT_ui_core.Binding binding in GIT_ui_core.bindings_in(scope)) {
+            out.push("  " + TUI_text.pad(binding.keys.join(" / "), 22, TUI_text.Align.Left) + binding.help);
+        }
+    }
+    return out;
+}

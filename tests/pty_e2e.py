@@ -67,10 +67,101 @@ CLIENT_ENV["GIT_COMMITTER_NAME"] = "Client"
 CLIENT_ENV["GIT_COMMITTER_EMAIL"] = "client@example.com"
 
 
+
+class Screen:
+    """A just-enough terminal emulator: the cursor-addressing subset the
+    client's renderer emits (cursor position, cursor forward/back, erase,
+    plain text), so a check can ask what is ON the screen rather than
+    grep a stream of cell updates -- the renderer writes only the cells
+    that changed, which splits a message across escape sequences."""
+
+    def __init__(self, rows=24, cols=80):
+        self.rows = rows
+        self.cols = cols
+        self.reset()
+
+    def reset(self):
+        self.cells = [[" "] * self.cols for _ in range(self.rows)]
+        self.row = 0
+        self.col = 0
+        self.pending = b""
+
+    def feed(self, data):
+        text = (self.pending + data).decode("utf-8", errors="replace")
+        self.pending = b""
+        i = 0
+        n = len(text)
+        while i < n:
+            ch = text[i]
+            if ch == "\x1b":
+                if i + 1 >= n:
+                    self.pending = text[i:].encode()
+                    return
+                if text[i + 1] != "[":
+                    i += 2
+                    continue
+                j = i + 2
+                while j < n and (text[j] in "0123456789;?<>=" or text[j] in " !\"#$%&'()*+,-./"):
+                    j += 1
+                if j >= n:
+                    self.pending = text[i:].encode()
+                    return
+                self.csi(text[i + 2 : j], text[j])
+                i = j + 1
+                continue
+            if ch == "\r":
+                self.col = 0
+            elif ch == "\n":
+                self.row = min(self.row + 1, self.rows - 1)
+            elif ch >= " ":
+                if 0 <= self.row < self.rows and 0 <= self.col < self.cols:
+                    self.cells[self.row][self.col] = ch
+                self.col += 1
+            i += 1
+
+    def csi(self, params, final):
+        if params.startswith("?"):
+            return
+        nums = [int(x) if x.isdigit() else 0 for x in params.split(";")] if params else []
+        first = nums[0] if nums and nums[0] > 0 else 1
+        if final in "Hf":
+            self.row = (nums[0] if len(nums) > 0 and nums[0] > 0 else 1) - 1
+            self.col = (nums[1] if len(nums) > 1 and nums[1] > 0 else 1) - 1
+        elif final == "C":
+            self.col += first
+        elif final == "D":
+            self.col = max(0, self.col - first)
+        elif final == "A":
+            self.row = max(0, self.row - first)
+        elif final == "B":
+            self.row = min(self.rows - 1, self.row + first)
+        elif final == "G":
+            self.col = first - 1
+        elif final == "K":
+            mode = nums[0] if nums else 0
+            if 0 <= self.row < self.rows:
+                lo, hi = (self.col, self.cols) if mode == 0 else ((0, self.col + 1) if mode == 1 else (0, self.cols))
+                for c in range(max(lo, 0), min(hi, self.cols)):
+                    self.cells[self.row][c] = " "
+        elif final == "J":
+            mode = nums[0] if nums else 0
+            if mode == 2 or mode == 3:
+                self.cells = [[" "] * self.cols for _ in range(self.rows)]
+            elif mode == 0:
+                for r in range(self.row, self.rows):
+                    for c in range(self.cols):
+                        if r > self.row or c >= self.col:
+                            self.cells[r][c] = " "
+
+    def text(self):
+        return "\n".join("".join(row).rstrip() for row in self.cells)
+
+
 class Session:
     """One `ourgitui` process on a pty, in one fixture directory."""
 
     def __init__(self, binpath, fixture, env=None):
+        self.screen = Screen()
         self.master, slave = pty.openpty()
         self.proc = subprocess.Popen(
             [binpath, fixture],
@@ -97,7 +188,12 @@ class Session:
             if not chunk:
                 break
             out += chunk
+            self.screen.feed(chunk)
         return out
+
+    def text(self):
+        """What is on the screen now."""
+        return self.screen.text()
 
     def send(self, keys):
         os.write(self.master, keys.encode())
@@ -960,6 +1056,228 @@ def main():
             fail("pull: a diverged branch is refused", "head=%r want=%r" % (now, local_head))
         sl2.quit()
         httpd.shutdown()
+
+    # --- overlays: the command log (@), key help (?), stage/unstage all (S, U),
+    # search (/ n N), refresh (g, R) and the fuzzy branch picker. These check
+    # `Session.text()`, the emulated screen, rather than the byte stream: the
+    # renderer writes only changed cells, which splits a message in pieces. ---
+
+    def commit_file(fx, name, text, message):
+        with open(os.path.join(fx, name), "w") as f:
+            f.write(text)
+        git(fx, "add", "-A", env=GIT_ENV)
+        git(fx, "commit", "-q", "-m", message, env=GIT_ENV)
+
+    def check(name, condition, detail=""):
+        if condition:
+            ok(name)
+        else:
+            fail(name, detail)
+
+    # S stages everything, U unstages everything; git is the oracle both ways.
+    fx20 = make_fixture(root, "stage-all")
+    commit_file(fx20, "a.txt", "one\n", "first")
+    commit_file(fx20, "gone.txt", "bye\n", "second")
+    with open(os.path.join(fx20, "a.txt"), "a") as f:
+        f.write("changed\n")
+    os.remove(os.path.join(fx20, "gone.txt"))
+    with open(os.path.join(fx20, "new.txt"), "w") as f:
+        f.write("brand new\n")
+    s20 = Session(binpath, fx20)
+    s20.send("S")
+    got, _, _ = git(fx20, "status", "--short")
+    fsck_out, _, _ = git(fx20, "fsck", "--strict")
+    check(
+        "stage-all: S stages the modified, deleted and untracked files (git status --short agrees, fsck clean)",
+        got == "M  a.txt\nD  gone.txt\nA  new.txt" and "error" not in fsck_out,
+        "status=%r fsck=%r" % (got, fsck_out),
+    )
+    s20.send("@")
+    check("command log: S is logged as one 'stage-all' line", "stage-all" in s20.text(), s20.text())
+    s20.send("\x1b")
+    s20.send("U")
+    got, _, _ = git(fx20, "status", "--short")
+    fsck_out, _, _ = git(fx20, "fsck", "--strict")
+    check(
+        "unstage-all: U unstages everything (git status --short agrees, fsck clean)",
+        got == " M a.txt\n D gone.txt\n?? new.txt" and "error" not in fsck_out,
+        "status=%r fsck=%r" % (got, fsck_out),
+    )
+    s20.send("@")
+    check("command log: U is logged as one 'unstage-all' line, after the stage-all line", "unstage-all" in s20.text(), s20.text())
+    s20.quit()
+
+    # @ shows one line per write operation, newest last; empty at first.
+    fx21 = make_fixture(root, "command-log")
+    commit_file(fx21, "a.txt", "one\n", "first")
+    with open(os.path.join(fx21, "a.txt"), "a") as f:
+        f.write("more\n")
+    editor_log = os.path.join(root, "editor-log.sh")
+    write_editor_script(editor_log, "logged commit")
+    s21 = Session(binpath, fx21, env=env_with_editor(editor_log))
+    s21.send("@")
+    check("command log: @ opens the log, empty before any write operation", "no write operations yet" in s21.text() and "command log" in s21.text(), s21.text())
+    s21.send("\x1b")
+    s21.send("jj")  # untracked(0) unstaged(1) a.txt(2)
+    s21.send("s")
+    s21.send("@")
+    check("command log: staging a file logs 'stage a.txt'", "stage a.txt" in s21.text(), s21.text())
+    s21.send("\x1b")
+    s21.send("c")
+    s21.send("e")
+    time.sleep(0.3)
+    s21.drain()
+    s21.send("@")
+    head_short, _, _ = git(fx21, "rev-parse", "--short=7", "HEAD")
+    text = s21.text()
+    check(
+        "command log: a commit logs 'update-ref refs/heads/main <old>..<new>' ending at the new HEAD",
+        "update-ref refs/heads/main" in text and ".." + head_short in text and "stage a.txt" in text,
+        "head=%s text=%s" % (head_short, text),
+    )
+    s21.send("k")
+    s21.send("g")
+    s21.send("G")
+    check("command log: k, g and G scroll without leaving the overlay", "command log" in s21.text(), s21.text())
+    s21.send("\x1b")
+    check("command log: Escape closes it", "command log" not in s21.text(), s21.text())
+    rc = s21.quit()
+    check("command log: after Escape, q quits the client", rc == 0, "rc=%r" % rc)
+
+    # ? lists the key table; Escape closes it.
+    fx22 = make_fixture(root, "key-help")
+    commit_file(fx22, "a.txt", "one\n", "first")
+    s22 = Session(binpath, fx22)
+    check("key help: the footer advertises '?' and '@'", "? help" in s22.text() and "@ log" in s22.text(), s22.text())
+    s22.send("?")
+    text = s22.text()
+    check(
+        "key help: ? lists the bindings, generated from the key table",
+        "keys" in text and "outline" in text and "stage everything" in text,
+        text,
+    )
+    check("key help: the footer shows the overlay's own keys while it is open", "scroll" in text.splitlines()[-2] and "close" in text.splitlines()[-2], text)
+    s22.send("j")
+    s22.send("j")
+    s22.send("k")
+    s22.send("\x1b")
+    check("key help: Escape closes it", "stage everything" not in s22.text(), s22.text())
+    rc = s22.quit()
+    check("key help: after Escape, q quits the client", rc == 0, "rc=%r" % rc)
+    s22b = Session(binpath, fx22)
+    s22b.send("?")
+    s22b.send("q")  # q closes the help overlay rather than quitting the client
+    still_running = s22b.proc.poll() is None
+    rc = s22b.quit()
+    check("key help: q closes the overlay first; a second q quits", still_running and rc == 0, "running=%r rc=%r" % (still_running, rc))
+
+    # / search with n / N, case-smart, in the log (commit rows) and the outline.
+    fx23 = make_fixture(root, "search")
+    commit_file(fx23, "a.txt", "1\n", "needle one")
+    commit_file(fx23, "b.txt", "2\n", "Needle two")
+    commit_file(fx23, "c.txt", "3\n", "other thing")
+    s23 = Session(binpath, fx23)
+
+    s23.send("/")
+    check("search: / opens a prompt on the bottom row of the body", "/_" in s23.text(), s23.text())
+    s23.send("needle")
+    s23.send("\r")
+    check("search: a lower-case query ignores case; two matches, the first is the newer commit", "/needle: match 1 of 2" in s23.text(), s23.text())
+    s23.send("n")
+    check("search: n moves to the next match", "/needle: match 2 of 2" in s23.text(), s23.text())
+    s23.send("n")
+    check("search: n wraps round from the last match to the first", "/needle: match 1 of 2" in s23.text(), s23.text())
+    s23.send("N")
+    check("search: N moves back, wrapping", "/needle: match 2 of 2" in s23.text(), s23.text())
+    s23.send("N")
+    check("search: N then steps back to the first match", "/needle: match 1 of 2" in s23.text(), s23.text())
+    s23.send("/")
+    s23.send("Needle")
+    s23.send("\r")
+    check("search: a capital in the query makes it case-sensitive", "/Needle: match 1 of 1" in s23.text(), s23.text())
+    s23.send("/")
+    s23.send("zzz")
+    s23.send("\r")
+    check("search: a query with no match says so", "/zzz: no match" in s23.text(), s23.text())
+    s23.send("/")
+    s23.send("abc")
+    s23.send("\x7f\x7f\x7f")
+    s23.send("two")
+    s23.send("\r")
+    check("search: backspace erases typed characters", "/two: match 1 of 1" in s23.text(), s23.text())
+    s23.quit()
+    s23b = Session(binpath, fx23)
+    s23b.send("/")
+    s23b.send("zzz")
+    s23b.send("\x1b")
+    check("search: Escape closes the prompt", "/zzz_" not in s23b.text(), s23b.text())
+    s23b.send("n")
+    check("search: Escape did not remember the query", "press / and type" in s23b.text(), s23b.text())
+    s23b.quit()
+
+    # g and R refresh; r is no longer bound.
+    fx24 = make_fixture(root, "refresh")
+    commit_file(fx24, "a.txt", "one\n", "first")
+    s24 = Session(binpath, fx24)
+    with open(os.path.join(fx24, "via_g.txt"), "w") as f:
+        f.write("x\n")
+    s24.send("g")
+    check("refresh: g re-reads the repository and shows a file created behind its back", "via_g.txt" in s24.text(), s24.text())
+    with open(os.path.join(fx24, "via_R.txt"), "w") as f:
+        f.write("x\n")
+    s24.send("R")
+    check("refresh: R still refreshes", "via_R.txt" in s24.text(), s24.text())
+    with open(os.path.join(fx24, "via_r.txt"), "w") as f:
+        f.write("x\n")
+    s24.send("r")
+    check("refresh: r is no longer bound (the file is not picked up)", "via_r.txt" not in s24.text(), s24.text())
+    s24.send("g")
+    check("refresh: g then picks it up", "via_r.txt" in s24.text(), s24.text())
+    s24.quit()
+
+    # The generic fuzzy picker, through the branch overlay's `/`.
+    fx25 = make_fixture(root, "picker")
+    commit_file(fx25, "a.txt", "one\n", "first")
+    git(fx25, "branch", "feature/login")
+    git(fx25, "branch", "feature/logout")
+    git(fx25, "checkout", "-q", "feature/login")
+    s25 = Session(binpath, fx25)
+    s25.send("b")
+    s25.send("/")
+    text = s25.text()
+    check(
+        "picker: b then / opens the fuzzy picker listing every branch",
+        "check out a branch" in text and "> _" in text and "feature/logout" in text and " main" in text,
+        text,
+    )
+    s25.send("zzz")
+    check("picker: a filter nothing matches shows so", "(nothing matches)" in s25.text(), s25.text())
+    s25.send("\r")
+    head, _, _ = git(fx25, "symbolic-ref", "--short", "HEAD")
+    check("picker: enter with nothing matching chooses nothing and keeps the picker open", head == "feature/login" and "> zzz_" in s25.text(), "head=%r" % head)
+    s25.send("\x7f\x7f\x7f")
+    s25.send("lgou")
+    text = s25.text()
+    check("picker: typing a subsequence ('lgou') narrows the list to feature/logout", "> lgou_" in text and "(nothing matches)" not in text, text)
+    s25.send("\r")
+    head, _, _ = git(fx25, "symbolic-ref", "--short", "HEAD")
+    status_out, _, _ = git(fx25, "status", "--short")
+    fsck_out, _, _ = git(fx25, "fsck", "--strict")
+    check(
+        "picker: enter checks out the picked branch (git: HEAD on feature/logout, clean, fsck clean)",
+        head == "feature/logout" and status_out == "" and "error" not in fsck_out,
+        "head=%r status=%r fsck=%r" % (head, status_out, fsck_out),
+    )
+    s25.send("@")
+    check("command log: a checkout logs 'checkout feature/logout'", "checkout feature/logout" in s25.text(), s25.text())
+    s25.send("\x1b")
+    s25.send("b")
+    s25.send("/")
+    s25.send("\x1b")
+    check("picker: Escape closes the picker", "check out a branch" not in s25.text(), s25.text())
+    head2, _, _ = git(fx25, "symbolic-ref", "--short", "HEAD")
+    rc = s25.quit()
+    check("picker: Escape cancels and changes nothing; the stack is empty so q quits", head2 == "feature/logout" and rc == 0, "head=%r rc=%r" % (head2, rc))
 
     return failures
 

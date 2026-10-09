@@ -1,0 +1,206 @@
+// Unit tests for the overlay machinery and the key table: `GIT_ui_core`'s
+// table (no key bound twice, `?` help and the footer drawn from the same
+// rows), the overlay stack, the command-log ring buffer, the picker's fuzzy
+// filter and the search's smart-case match. No repository, no terminal.
+//
+//   ./t_uikeys
+//
+// Prints one `<case> ok` or `<case> FAIL ...` line per check, like
+// `t_gitclient.m31`.
+
+import GIT_ui_core;
+import GIT_ui_help;
+import GIT_ui_log;
+import GIT_ui_picker;
+import GIT_ui_search;
+import term;
+
+type Counter {
+    int checks = 0;
+    int failed = 0;
+}
+
+void Counter.check(str name, bool is_ok, str detail) {
+    checks = checks + 1;
+    if (is_ok) {
+        print(name + " ok");
+    } else {
+        failed = failed + 1;
+        print(name + " FAIL " + detail);
+    }
+}
+
+Counter counter = Counter();
+
+str joined(List<str> items) {
+    return items.join("|");
+}
+
+// --- the key table ------------------------------------------------------------
+
+bool is_unique = true;
+str clash = "";
+for (str scope in GIT_ui_core.all_scopes()) {
+    List<str> seen = [];
+    for (GIT_ui_core.Binding binding in GIT_ui_core.bindings_in(scope)) {
+        for (str key in binding.keys) {
+            if (seen.contains(key)) {
+                is_unique = false;
+                clash = scope + ":" + key;
+            }
+            seen.push(key);
+        }
+    }
+}
+counter.check("key table: no key is bound twice within one scope", is_unique, clash);
+List<str> views = [GIT_ui_core.SCOPE_OUTLINE, GIT_ui_core.SCOPE_DIFF];
+bool is_global_clear = true;
+str global_clash = "";
+for (GIT_ui_core.Binding global in GIT_ui_core.bindings_in(GIT_ui_core.SCOPE_GLOBAL)) {
+    for (str key in global.keys) {
+        for (str view in views) {
+            for (GIT_ui_core.Binding binding in GIT_ui_core.bindings_in(view)) {
+                if (binding.keys.contains(key)) {
+                    is_global_clear = false;
+                    global_clash = view + ":" + key;
+                }
+            }
+        }
+    }
+}
+counter.check("key table: the everywhere keys do not shadow a view's keys", is_global_clear, global_clash);
+counter.check("key table: g and R refresh", GIT_ui_core.lookup(GIT_ui_core.SCOPE_OUTLINE, term.Code.Char('g')).or("") == GIT_ui_core.CMD_REFRESH && GIT_ui_core.lookup(GIT_ui_core.SCOPE_OUTLINE, term.Code.Char('R')).or("") == GIT_ui_core.CMD_REFRESH, "g/R");
+counter.check("key table: r is unbound", !GIT_ui_core.lookup(GIT_ui_core.SCOPE_OUTLINE, term.Code.Char('r')).is_some(), "r");
+counter.check("key table: S and U are stage-all and unstage-all", GIT_ui_core.lookup(GIT_ui_core.SCOPE_OUTLINE, term.Code.Char('S')).or("") == GIT_ui_core.CMD_STAGE_ALL && GIT_ui_core.lookup(GIT_ui_core.SCOPE_OUTLINE, term.Code.Char('U')).or("") == GIT_ui_core.CMD_UNSTAGE_ALL, "S/U");
+counter.check("key table: @ and ? are everywhere keys", GIT_ui_core.lookup(GIT_ui_core.SCOPE_GLOBAL, term.Code.Char('@')).or("") == GIT_ui_core.CMD_LOG && GIT_ui_core.lookup(GIT_ui_core.SCOPE_GLOBAL, term.Code.Char('?')).or("") == GIT_ui_core.CMD_HELP, "@/?");
+counter.check("key table: Escape and Enter resolve by name", GIT_ui_core.lookup(GIT_ui_core.SCOPE_OUTLINE, term.Code.Escape).or("") == GIT_ui_core.CMD_QUIT && GIT_ui_core.lookup(GIT_ui_core.SCOPE_OUTLINE, term.Code.Enter).or("") == GIT_ui_core.CMD_TOGGLE, "esc/enter");
+// The footer and the help are two views of the same rows.
+bool is_footer_in_table = true;
+for (str scope in GIT_ui_core.all_scopes()) {
+    List<str> footer_keys = [];
+    for (GIT_ui_core.Binding binding in GIT_ui_core.bindings_in(scope)) {
+        if (binding.footer_keys != "") {
+            footer_keys.push(binding.footer_keys);
+        }
+    }
+    List<GIT_ui_core.Hint> hints = GIT_ui_core.hints_for(scope);
+    if (hints.size() != footer_keys.size()) {
+        is_footer_in_table = false;
+    }
+    int at = 0;
+    for (GIT_ui_core.Hint hint in hints) {
+        if (hint.keys != footer_keys[at]) {
+            is_footer_in_table = false;
+        }
+        at = at + 1;
+    }
+}
+counter.check("footer: hints_for(scope) is exactly the table rows that carry footer text", is_footer_in_table, "mismatch");
+List<str> help_lines = GIT_ui_help.lines();
+bool is_help_complete = true;
+str missing = "";
+for (str scope in GIT_ui_core.all_scopes()) {
+    bool is_titled = false;
+    for (str line in help_lines) {
+        if (line == GIT_ui_core.scope_title(scope)) {
+            is_titled = true;
+        }
+    }
+    if (!is_titled) {
+        is_help_complete = false;
+        missing = scope;
+    }
+    for (GIT_ui_core.Binding binding in GIT_ui_core.bindings_in(scope)) {
+        bool is_listed = false;
+        for (str line in help_lines) {
+            if (line.ends_with(binding.help) && line.contains(binding.keys.join(" / "))) {
+                is_listed = true;
+            }
+        }
+        if (!is_listed) {
+            is_help_complete = false;
+            missing = scope + ":" + binding.cmd;
+        }
+    }
+}
+counter.check("help: every scope has a heading and every binding a line, from the same table", is_help_complete, missing);
+
+// --- the active footer ----------------------------------------------------------
+
+GIT_ui_core.Core core = GIT_ui_core.Core("", "");
+List<GIT_ui_core.Hint> base_hints = core.active_hints();
+counter.check("footer: with no overlay the everywhere keys come first, then the outline's", base_hints.size() > 2 && base_hints[0].keys == "@" && base_hints[1].keys == "?", "first=" + base_hints[0].keys);
+core.is_diff_open = true;
+bool is_stage_hunk = false;
+for (GIT_ui_core.Hint hint in core.active_hints()) {
+    if (hint.label == "stage hunk") {
+        is_stage_hunk = true;
+    }
+}
+counter.check("footer: in the diff view it offers 'stage hunk'", is_stage_hunk, "no stage hunk");
+core.is_diff_open = false;
+
+// --- the overlay stack ----------------------------------------------------------
+
+counter.check("overlays: none open at first", !core.has_overlay(), "open");
+GIT_ui_help.open(core);
+counter.check("overlays: open pushes", core.has_overlay() && core.overlays.size() == 1, core.overlays.size().to_str());
+GIT_ui_log.open(core);
+counter.check("overlays: they stack", core.overlays.size() == 2, core.overlays.size().to_str());
+List<GIT_ui_core.Hint> log_hints = core.active_hints();
+counter.check("overlays: the footer follows the top one", log_hints.size() > 0 && log_hints[log_hints.size() - 1].label == "close", "hints=" + log_hints.size().to_str());
+core.overlays[1].handle_key(term.Code.Escape);
+counter.check("overlays: Escape pops the top, the one under it stays", core.overlays.size() == 1, core.overlays.size().to_str());
+core.overlays[0].handle_key(term.Code.Char('?'));
+counter.check("overlays: the help closes on ?", !core.has_overlay(), core.overlays.size().to_str());
+core.pop_overlay();
+counter.check("overlays: popping an empty stack is a no-op", !core.has_overlay(), "popped");
+
+// --- the command log ring buffer -------------------------------------------------
+
+core.log_command("stage a.txt");
+core.log_command("commit abc1234");
+counter.check("command log: lines are kept in order", joined(core.command_log) == "stage a.txt|commit abc1234", joined(core.command_log));
+int number = 0;
+while (number < 600) {
+    core.log_command("line " + number.to_str());
+    number = number + 1;
+}
+counter.check("command log: a ring buffer keeps the newest " + GIT_ui_core.COMMAND_LOG_CAPACITY.to_str, core.command_log.size() == GIT_ui_core.COMMAND_LOG_CAPACITY && core.command_log[0] == "line 100" && core.command_log[499] == "line 599", "size=" + core.command_log.size().to_str() + " first=" + core.command_log[0]);
+
+// --- the picker ----------------------------------------------------------------
+
+counter.check("picker: a subsequence matches", GIT_ui_picker.is_subsequence("feature/logout", "lgou"), "lgou");
+counter.check("picker: out of order does not", !GIT_ui_picker.is_subsequence("feature/logout", "gol"), "gol");
+counter.check("picker: a lower-case query ignores case", GIT_ui_picker.is_subsequence("Feature/Login", "fl"), "fl");
+counter.check("picker: a capital makes it exact", !GIT_ui_picker.is_subsequence("feature/login", "F"), "F");
+counter.check("picker: an empty query matches everything", GIT_ui_picker.is_subsequence("x", ""), "empty");
+List<str> branches = ["feature/login", "feature/logout", "main", "fix-login"];
+counter.check("picker: filter keeps the caller's order", joined(GIT_ui_picker.filter(branches, "")) == "feature/login|feature/logout|main|fix-login", joined(GIT_ui_picker.filter(branches, "")));
+counter.check("picker: filter puts contiguous matches before scattered ones", joined(GIT_ui_picker.filter(branches, "login")) == "feature/login|fix-login", joined(GIT_ui_picker.filter(branches, "login")));
+counter.check("picker: filter 'fgn' finds the scattered ones", joined(GIT_ui_picker.filter(branches, "fgn")) == "feature/login|fix-login", joined(GIT_ui_picker.filter(branches, "fgn")));
+counter.check("picker: nothing matching is empty", GIT_ui_picker.filter(branches, "zzz").size() == 0, "zzz");
+GIT_ui_picker.open(core, GIT_ui_core.PICK_CHECKOUT, "pick", branches);
+core.overlays[0].handle_key(term.Code.Char('m'));
+core.overlays[0].handle_key(term.Code.Char('a'));
+core.overlays[0].handle_key(term.Code.Enter);
+counter.check("picker: typing and enter leaves the choice in the Core and closes", !core.has_overlay() && core.take_pick(GIT_ui_core.PICK_CHECKOUT).or("") == "main", "overlays=" + core.overlays.size().to_str());
+counter.check("picker: the choice is taken once", !core.take_pick(GIT_ui_core.PICK_CHECKOUT).is_some(), "taken twice");
+GIT_ui_picker.open(core, GIT_ui_core.PICK_CHECKOUT, "pick", branches);
+core.overlays[0].handle_key(term.Code.Char('l'));
+core.overlays[0].handle_key(term.Code.Down);
+core.overlays[0].handle_key(term.Code.Enter);
+counter.check("picker: down moves the highlight (second match of 'l' is feature/logout)", core.take_pick(GIT_ui_core.PICK_CHECKOUT).or("") == "feature/logout", "down");
+GIT_ui_picker.open(core, GIT_ui_core.PICK_CHECKOUT, "pick", branches);
+core.overlays[0].handle_key(term.Code.Char('x'));
+core.overlays[0].handle_key(term.Code.Backspace);
+core.overlays[0].handle_key(term.Code.Escape);
+counter.check("picker: Escape cancels with no choice", !core.has_overlay() && !core.take_pick(GIT_ui_core.PICK_CHECKOUT).is_some(), "cancel");
+
+// --- search matching -------------------------------------------------------------
+
+counter.check("search: smart-case, lower-case query ignores case", GIT_ui_search.is_match("Fix the Bug", "bug"), "bug");
+counter.check("search: a capital makes it exact", !GIT_ui_search.is_match("fix the bug", "Bug") && GIT_ui_search.is_match("Fix the Bug", "Bug"), "Bug");
+counter.check("search: has_capital", GIT_ui_search.has_capital("abC") && !GIT_ui_search.has_capital("abc1-"), "has_capital");
+print("");
+print(counter.checks.to_str() + " checks, " + counter.failed.to_str() + " failed");

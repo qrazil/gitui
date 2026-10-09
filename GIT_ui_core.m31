@@ -1,0 +1,688 @@
+// The interactive client's state, the overlay stack and the key table.
+//
+// This is the bottom layer of the client. `GIT_client.m31` used to be one
+// 3000-line module with one `State` type; m31 allows a method only in the
+// module that declares its type and refuses import cycles, so the client is
+// now a tower of layers, each one an embedding of the one below it:
+//
+//   GIT_ui_core     Core            state, overlay stack, key table, command log
+//   GIT_ui_outline  OutlineLayer    outline cursor, stage / unstage / discard
+//   GIT_ui_diff     DiffLayer       the hunk-level diff view
+//   GIT_ui_commit   CommitLayer     the commit overlay, amend
+//   GIT_ui_branch   BranchLayer     the branch overlay, check out, new branch
+//   GIT_ui_remote   RemoteLayer     the push and pull overlays
+//   GIT_client      State           the whole client: draw, key dispatch, $EDITOR
+//
+// Embedding promotes fields and methods, and every layer holds the SAME `Core`
+// (a struct is a reference), so a method in `DiffLayer` reads `message` or
+// calls `reload()` exactly as it did when it was a method of one big `State`,
+// and an overlay that holds a layer reference can drive everything below it.
+// `GIT_ui_help`, `GIT_ui_log`, `GIT_ui_search` and `GIT_ui_picker` are
+// overlays that need only `Core`.
+//
+// --- overlays ---------------------------------------------------------------
+//
+// An `Overlay` is a modal thing drawn over the document: it takes every key
+// while it is on top of `Core.overlays`, draws itself, and says which keys it
+// answers to so the footer can show them. There used to be five booleans
+// (`is_commit_open` and friends) and an if-chain of five handlers; now
+// opening an overlay is `push_overlay`, closing it is `pop_overlay`, and
+// stacking them (the help overlay over the commit overlay) just works.
+//
+// --- the key table ----------------------------------------------------------
+//
+// `key_table()` is the one place a key is bound. Dispatch (`lookup`), the
+// footer (`hints_for`) and the `?` help overlay (`bindings_in`) all read it,
+// so the footer cannot advertise a key that does nothing, and a new binding
+// shows up in the help overlay without anyone remembering to add it there.
+//
+// --- the command log --------------------------------------------------------
+//
+// Every operation that WRITES to the repository calls `log_command` with one
+// line ("stage a.txt", "commit 1a2b3c4", "update-ref refs/heads/x old..new").
+// The `@` overlay shows the ring buffer.
+
+import fs;
+import GIT_checkout;
+import GIT_log;
+import GIT_object;
+import GIT_refs;
+import GIT_status;
+import GIT_ui_model;
+import term;
+import tui.TUI_app;
+import tui.TUI_buffer;
+import tui.TUI_diff_view;
+import tui.TUI_geometry;
+import tui.TUI_jump_list;
+import tui.TUI_outline;
+
+pub const str SCOPE_OUTLINE = "outline";
+pub const str SCOPE_DIFF = "diff";
+pub const str SCOPE_GLOBAL = "global";
+pub const str SCOPE_COMMIT = "commit";
+pub const str SCOPE_BRANCH = "branch";
+pub const str SCOPE_PUSH = "push";
+pub const str SCOPE_PULL = "pull";
+pub const str SCOPE_CONFIRM = "confirm";
+pub const str SCOPE_LOG = "log";
+pub const str SCOPE_HELP = "help";
+pub const str SCOPE_SEARCH = "search";
+pub const str SCOPE_PICKER = "picker";
+pub const str CMD_QUIT = "quit";
+pub const str CMD_DOWN = "down";
+pub const str CMD_UP = "up";
+pub const str CMD_LEFT = "left";
+pub const str CMD_RIGHT = "right";
+pub const str CMD_TOGGLE = "toggle";
+pub const str CMD_STAGE = "stage";
+pub const str CMD_UNSTAGE = "unstage";
+pub const str CMD_STAGE_ALL = "stage-all";
+pub const str CMD_UNSTAGE_ALL = "unstage-all";
+pub const str CMD_DIFF = "diff";
+pub const str CMD_DISCARD = "discard";
+pub const str CMD_BACK = "back";
+pub const str CMD_COMMIT = "commit";
+pub const str CMD_BRANCH = "branch";
+pub const str CMD_PUSH = "push";
+pub const str CMD_PULL = "pull";
+pub const str CMD_JUMP = "jump";
+pub const str CMD_FOCUS = "focus";
+pub const str CMD_REFRESH = "refresh";
+pub const str CMD_SEARCH = "search";
+pub const str CMD_NEXT = "next";
+pub const str CMD_PREV = "prev";
+pub const str CMD_LOG = "log";
+pub const str CMD_HELP = "help";
+pub const str CMD_EDIT = "edit";
+pub const str CMD_FINISH = "finish";
+pub const str CMD_AMEND = "amend";
+pub const str CMD_ABORT = "abort";
+pub const str CMD_CHECKOUT = "checkout";
+pub const str CMD_NEW_BRANCH = "new-branch";
+pub const str CMD_PICK_BRANCH = "pick-branch";
+pub const str CMD_YES = "yes";
+pub const str CMD_CLOSE = "close";
+pub const str CMD_SUBMIT = "submit";
+pub const str CMD_ERASE = "erase";
+pub const str CMD_TOP = "top";
+pub const str CMD_BOTTOM = "bottom";
+/// What `pick_purpose` says a finished `GIT_ui_picker` was for.
+pub const str PICK_CHECKOUT = "checkout";
+/// How many lines of the command log are kept; the oldest go first.
+pub const int COMMAND_LOG_CAPACITY = 500;
+
+/// One key, as the footer and the help overlay show it.
+pub type Hint {
+    pub str keys;
+    pub str label;
+}
+
+/// One row of the key table. `keys` are `term.Code.to_str()` names ("j",
+/// "enter", "escape", "S"); `help` is the sentence the help overlay shows;
+/// `footer_keys`/`footer_label` are what the one-line footer shows, with
+/// `footer_keys == ""` meaning "help overlay only".
+pub type Binding {
+    pub str scope;
+    pub str cmd;
+    pub List<str> keys;
+    pub str help;
+    pub str footer_keys;
+    pub str footer_label;
+}
+
+/// A modal layer over the document. Whichever overlay is last in
+/// `Core.overlays` gets every key, and all of them draw, bottom to top.
+pub interface Overlay {
+    /// One decoded key. The overlay closes itself with `pop_overlay`.
+    TUI_app.Action handle_key(term.Code code);
+    /// Draw over `area` (the whole frame body).
+    void render(TUI_buffer.Buffer buffer, TUI_geometry.Rect area);
+    /// The keys this overlay answers to, for the footer.
+    List<Hint> hints();
+}
+
+/// Everything the interactive client is showing and doing right now. One
+/// value, shared by every layer above it and by every overlay.
+pub type Core {
+    pub str gitdir;
+    pub str worktree;
+    pub TUI_outline.Outline outline = TUI_outline.Outline([]);
+    pub TUI_jump_list.JumpList jump = TUI_jump_list.JumpList.empty;
+    pub bool is_jump_shown = false;
+    pub bool is_jump_focused = false;
+    /// Set by an operation that finished the job the top overlay was opened
+    /// for (`abort_commit`, `finish_commit`): the client pops that overlay
+    /// when it next settles (`GIT_client.State.settle`). An operation that
+    /// failed leaves it false, so the overlay stays open for a retry.
+    pub bool is_overlay_done = false;
+    /// The overlay stack: last is on top. Empty means the document has the keys.
+    pub List<Overlay> overlays = [];
+    /// `c` then `A`: the commit overlay is replacing HEAD rather than adding a
+    /// child to it. `start_amend` sets this (and prefills the message file
+    /// with HEAD's own message); `finish_commit` reads it to pick HEAD's
+    /// parents and author instead of HEAD-as-parent and a fresh author.
+    /// Reset whenever the overlay is opened fresh or aborted.
+    pub bool is_amending = false;
+    /// Where `n` (new branch) asks for the name: a file `$EDITOR` is launched
+    /// on, exactly like `commit_message_path`, since there is no text-input
+    /// widget to type into -- see `new_branch`.
+    pub str branch_name_path = "";
+    /// Which file the pending `$EDITOR` launch is for -- `launch_editor`
+    /// serves both the commit message and the new-branch name.
+    pub bool is_editor_for_branch = false;
+    pub List<GIT_ui_model.BranchRow> branch_rows = [];
+    /// Set by `edit_message` and read by `gitui.m31`'s own top-level driver
+    /// after `TUI_app.Loop.run` returns: true means the loop stopped so
+    /// `$EDITOR` could have the terminal, not because the operator pressed
+    /// `q`. See `GIT_client.m31`'s header, "launching `$EDITOR`".
+    pub bool is_editor_wanted = false;
+    pub str commit_message_path = "";
+    pub str branch_label = "";
+    pub str message = "";
+    /// Whether the primary document is currently showing a hunk-level diff
+    /// instead of the outline -- see `show_diff_current`/`close_diff`.
+    pub bool is_diff_open = false;
+    /// Set instead of populating `diff_view`, when `GIT_hunks.hunks` reported
+    /// `Binary` for the pair being compared.
+    pub bool is_diff_binary = false;
+    /// The row label the diff view's border is drawn with.
+    pub str diff_title = "";
+    pub TUI_diff_view.DiffView diff_view = TUI_diff_view.DiffView([]);
+    /// Which comparison `diff_view` shows -- "untracked", "unstaged",
+    /// "staged" or "commit" -- and for which path. Empty while closed.
+    pub str diff_section = "";
+    pub bytes diff_path = [];
+    pub Map<str, bool> collapsed = {};
+    pub Map<str, bytes> paths = {};
+    pub Map<str, GIT_ui_model.CommitFileDiff> file_diffs = {};
+    /// `commit_changes`'s result per commit id, filled on demand the first
+    /// time that commit is unfolded and never again: a commit is immutable.
+    pub Map<str, List<GIT_ui_model.CommitFileDiff>> commit_changes_cache = {};
+    /// How many commits `refresh` asks `GIT_log.walk` for.
+    pub int log_limit = GIT_ui_model.LOG_PAGE;
+    pub GIT_status.Status last_status = GIT_status.Status([], [], []);
+    pub List<GIT_log.Entry> log = [];
+    /// The `@` ring buffer: one line per write operation, oldest first.
+    pub List<str> command_log = [];
+    /// The last `/` query, for `n`/`N`.
+    pub str search_query = "";
+    /// What a finished picker was for and what it picked; the client reads and
+    /// clears them after every key (`GIT_client.State.settle`).
+    pub str picked_purpose = "";
+    pub str picked_item = "";
+}
+
+pub void Core.push_overlay(Overlay overlay) {
+    overlays.push(overlay);
+}
+
+/// Close the top overlay. A no-op with none open.
+pub void Core.pop_overlay() {
+    if (overlays.size() > 0) {
+        overlays.pop();
+    }
+}
+
+pub bool Core.has_overlay() {
+    return overlays.size() > 0;
+}
+
+/// The keys the footer should show right now: the top overlay's, else the
+/// everywhere keys (`?` help, `@` log) and then the current view's. The
+/// everywhere keys come first because the footer is one row: on a narrow
+/// terminal it is the end that is cut off, and `?` is how a user finds the
+/// rest.
+pub List<Hint> Core.active_hints() {
+    if (overlays.size() > 0) {
+        return overlays[overlays.size() - 1].hints();
+    }
+    List<Hint> out = hints_for(SCOPE_GLOBAL);
+    List<Hint> view = hints_for(SCOPE_OUTLINE);
+    if (is_diff_open) {
+        view = hints_for(SCOPE_DIFF);
+    }
+    for (Hint hint in view) {
+        out.push(hint);
+    }
+    return out;
+}
+
+/// The logging hook: record one write operation, one line. Called by the ops
+/// that change the repository (`stage_path`, `finish_commit`, ...) right after
+/// the engine call succeeded.
+pub void Core.log_command(str line) {
+    command_log.push(line);
+    while (command_log.size() > COMMAND_LOG_CAPACITY) {
+        command_log.remove_at(0);
+    }
+}
+
+/// Re-read the repository: `GIT_status.status` for the three change lists,
+/// `GIT_log.walk` for the commit history, and HEAD for the branch label the
+/// status line shows. An unborn branch's `GIT_log.walk` failure is not an
+/// error here -- it is exactly what "nothing committed yet" looks like --
+/// so it becomes an empty history rather than a message.
+pub void Core.refresh() {
+    match (GIT_status.status(gitdir, worktree)) {
+        case Ok(GIT_status.Status status): {
+            last_status = status;
+        }
+        case Err(GIT_status.Error error): {
+            last_status = GIT_status.Status([], [], []);
+            message = "status: " + error.to_str();
+        }
+    }
+    match (GIT_log.walk(gitdir, "HEAD", log_limit)) {
+        case Ok(List<GIT_log.Entry> entries): {
+            log = entries;
+        }
+        case Err: {
+            log = [];
+        }
+    }
+    branch_rows = [];
+    match (GIT_checkout.branches(gitdir)) {
+        case Ok(List<GIT_checkout.Branch> branches): {
+            for (GIT_checkout.Branch branch in branches) {
+                branch_rows.push(GIT_ui_model.BranchRow(branch, tip_subject(branch.id)));
+            }
+        }
+        case Err: {
+        }
+    }
+    match (GIT_refs.head(gitdir)) {
+        case Ok(GIT_refs.Head head): {
+            match (head) {
+                case Born(str name, str id): {
+                    branch_label = "on " + GIT_ui_model.branch_name(name) + " @ " + id.substr(0, 7);
+                }
+                case Unborn(str name): {
+                    branch_label = "on " + GIT_ui_model.branch_name(name) + " (no commits yet)";
+                }
+                case Detached(str id): {
+                    branch_label = "detached @ " + id.substr(0, 7);
+                }
+            }
+        }
+        case Err(_): {
+            branch_label = "?";
+        }
+    }
+}
+
+/// Make sure `commit_changes_cache` has an entry for commit `id` -- computed
+/// now if it is the first time this commit is unfolded, a no-op afterwards.
+/// A commit whose tree or parent's tree cannot be read (a truncated history,
+/// a shallow clone's boundary) gets an empty file list rather than failing
+/// the unfold. Answers whether anything new was computed, so the caller knows
+/// the outline it is looking at was built without this commit's files and
+/// needs rebuilding.
+pub bool Core.did_compute_commit_changes(str id) {
+    if (commit_changes_cache.contains(id)) {
+        return false;
+    }
+    for (GIT_log.Entry entry in log) {
+        if (entry.id == id) {
+            match (GIT_ui_model.commit_changes(gitdir, entry.commit)) {
+                case Ok(List<GIT_ui_model.CommitFileDiff> changes): {
+                    commit_changes_cache.set(id, changes);
+                }
+                case Err: {
+                    commit_changes_cache.set(id, []);
+                }
+            }
+            return true;
+        }
+    }
+    return false;
+}
+
+/// Refresh and rebuild the outline, keeping the cursor on the row it was on
+/// (by id, not by position -- `TUI_outline.m31`'s own reason) and the jump
+/// list in step with it. Called after every action that changes what the
+/// repository looks like: staging, unstaging, committing, and the manual
+/// refresh key.
+pub void Core.reload() {
+    str keep_id = "";
+    match (outline.current()) {
+        case Some(TUI_outline.Row row): {
+            keep_id = row.node.id;
+        }
+        case None: {
+        }
+    }
+    refresh();
+    outline = GIT_ui_model.build_outline(last_status, log, commit_changes_cache, collapsed, paths, file_diffs, branch_rows);
+    if (keep_id != "") {
+        outline.did_select_id(keep_id);
+    }
+    jump.sync_from(outline);
+    jump.follow(outline);
+}
+
+/// `tip`'s first message line, for a branch row's label -- `""` if the commit
+/// cannot be read (a ref pointing at something this cannot parse is shown by
+/// name and id alone rather than hidden).
+pub str Core.tip_subject(str tip) {
+    match (GIT_object.read(gitdir, tip)) {
+        case Ok(GIT_object.Object object): {
+            match (object.body) {
+                case Commit(GIT_object.Commit commit): {
+                    return GIT_ui_model.first_line(commit.message);
+                }
+                case Blob: {
+                    return "";
+                }
+                case Tree(_): {
+                    return "";
+                }
+                case Tag: {
+                    return "";
+                }
+            }
+        }
+        case Err: {
+            return "";
+        }
+    }
+}
+
+/// What the status line shows: the last message, else the branch label.
+pub str Core.status_line() {
+    if (message != "") {
+        return message;
+    }
+    return branch_label;
+}
+
+/// Set the status-line message. For overlays, which hold a layer and cannot
+/// assign a promoted field from outside the type.
+pub void Core.say(str text) {
+    message = text;
+}
+
+/// The `Core` itself, for passing to an overlay that holds only a `Core`
+/// (the embedded value is not reachable as a field).
+pub Core Core.core() {
+    return this;
+}
+
+/// Remember the search query (`/` and `n` / `N` read it back).
+pub void Core.set_search(str query) {
+    search_query = query;
+}
+
+/// The picker's answer: what the pick was for and the item chosen. The top
+/// module's `settle` reads it and does the work (`PICK_CHECKOUT` checks the
+/// branch out), so the picker stays ignorant of what it is picking for.
+pub void Core.finish_pick(str purpose, str item) {
+    picked_purpose = purpose;
+    picked_item = item;
+}
+
+/// Take the picker's answer, leaving none behind.
+pub Option<str> Core.take_pick(str purpose) {
+    if (picked_purpose == purpose && picked_item != "") {
+        str item = picked_item;
+        picked_purpose = "";
+        picked_item = "";
+        return Option<str>.Some(item);
+    }
+    return Option<str>.None;
+}
+
+/// Point the two `$EDITOR` files at their places in the git directory: the
+/// commit message (`COMMIT_EDITMSG`, git's own name) and the new branch's name.
+pub void Core.set_editor_paths() {
+    commit_message_path = fs.join(gitdir, "COMMIT_EDITMSG");
+    branch_name_path = fs.join(gitdir, "GITUI_BRANCH_NAME");
+}
+
+// --- the key table ------------------------------------------------------------
+
+/// The table. Order matters: it is the order of the footer and of the help
+/// overlay. A function, not a module-level value, because m31 has no
+/// module-level mutable state and building 60 small values per keypress is
+/// nothing.
+pub List<Binding> key_table() {
+    List<Binding> table = [];
+    // The document: the outline.
+    table.push(Binding(SCOPE_OUTLINE, CMD_DOWN, ["j", "down"], "move the cursor down (steps the jump list when it has focus)", "j/k", "move"));
+    table.push(Binding(SCOPE_OUTLINE, CMD_UP, ["k", "up"], "move the cursor up", "", ""));
+    table.push(Binding(SCOPE_OUTLINE, CMD_RIGHT, ["l", "right"], "scroll the outline right", "h/l", "scroll"));
+    table.push(Binding(SCOPE_OUTLINE, CMD_LEFT, ["h", "left"], "scroll the outline left", "", ""));
+    table.push(Binding(SCOPE_OUTLINE, CMD_TOGGLE, ["enter"], "fold or unfold the row; open a commit's file diff; load more commits", "enter", "toggle"));
+    table.push(Binding(SCOPE_OUTLINE, CMD_STAGE, ["s"], "stage the file under the cursor", "s", "stage"));
+    table.push(Binding(SCOPE_OUTLINE, CMD_UNSTAGE, ["u"], "unstage the file under the cursor", "u", "unstage"));
+    table.push(Binding(SCOPE_OUTLINE, CMD_STAGE_ALL, ["S"], "stage everything: every unstaged and untracked file", "S", "stage all"));
+    table.push(Binding(SCOPE_OUTLINE, CMD_UNSTAGE_ALL, ["U"], "unstage everything", "U", "unstage all"));
+    table.push(Binding(SCOPE_OUTLINE, CMD_DIFF, ["d"], "open the hunk-level diff of the row", "d", "diff"));
+    table.push(Binding(SCOPE_OUTLINE, CMD_DISCARD, ["x"], "discard the changes to the file under the cursor (asks first)", "x", "discard"));
+    table.push(Binding(SCOPE_OUTLINE, CMD_COMMIT, ["c"], "commit: the commit overlay (edit message, finish, amend)", "c", "commit"));
+    table.push(Binding(SCOPE_OUTLINE, CMD_BRANCH, ["b"], "branch: check out, new branch", "b", "branch"));
+    table.push(Binding(SCOPE_OUTLINE, CMD_PUSH, ["P"], "push the current branch to origin (fast-forward only)", "P", "push"));
+    table.push(Binding(SCOPE_OUTLINE, CMD_PULL, ["F"], "pull the current branch from origin (fast-forward only)", "F", "pull"));
+    table.push(Binding(SCOPE_OUTLINE, CMD_JUMP, ["J"], "show or hide the jump list", "", ""));
+    table.push(Binding(SCOPE_OUTLINE, CMD_FOCUS, ["w"], "give the jump list the keys, or take them back", "", ""));
+    table.push(Binding(SCOPE_OUTLINE, CMD_SEARCH, ["/"], "search the outline and the log (smart-case: lower case ignores case)", "/", "search"));
+    table.push(Binding(SCOPE_OUTLINE, CMD_NEXT, ["n"], "next search match", "n/N", "next"));
+    table.push(Binding(SCOPE_OUTLINE, CMD_PREV, ["N"], "previous search match", "", ""));
+    table.push(Binding(SCOPE_OUTLINE, CMD_REFRESH, ["g", "R"], "re-read the repository", "g", "refresh"));
+    table.push(Binding(SCOPE_OUTLINE, CMD_QUIT, ["q", "escape"], "quit", "q", "quit"));
+    // The document: the diff view.
+    table.push(Binding(SCOPE_DIFF, CMD_DOWN, ["j", "down"], "move the diff cursor down", "j/k", "move"));
+    table.push(Binding(SCOPE_DIFF, CMD_UP, ["k", "up"], "move the diff cursor up", "", ""));
+    table.push(Binding(SCOPE_DIFF, CMD_STAGE, ["s"], "stage the hunk under the cursor", "s", "stage hunk"));
+    table.push(Binding(SCOPE_DIFF, CMD_UNSTAGE, ["u"], "unstage the hunk under the cursor", "u", "unstage hunk"));
+    table.push(Binding(SCOPE_DIFF, CMD_BACK, ["q", "escape", "backspace"], "back to the outline", "q/esc/backspace", "back"));
+    // In every view.
+    table.push(Binding(SCOPE_GLOBAL, CMD_LOG, ["@"], "the command log: one line per write operation", "@", "log"));
+    table.push(Binding(SCOPE_GLOBAL, CMD_HELP, ["?"], "this key help", "?", "help"));
+    // The commit overlay.
+    table.push(Binding(SCOPE_COMMIT, CMD_EDIT, ["e"], "edit the message in $EDITOR", "e", "edit"));
+    table.push(Binding(SCOPE_COMMIT, CMD_FINISH, ["f"], "finish: write the commit", "f", "finish"));
+    table.push(Binding(SCOPE_COMMIT, CMD_AMEND, ["A"], "amend HEAD: its message prefilled, its parents and author kept", "A", "amend"));
+    table.push(Binding(SCOPE_COMMIT, CMD_ABORT, ["a", "escape"], "abort", "a", "abort"));
+    // The branch overlay.
+    table.push(Binding(SCOPE_BRANCH, CMD_CHECKOUT, ["c"], "check out the branch under the cursor", "c", "checkout"));
+    table.push(Binding(SCOPE_BRANCH, CMD_PICK_BRANCH, ["/"], "check out a branch picked by typing part of its name", "/", "pick"));
+    table.push(Binding(SCOPE_BRANCH, CMD_NEW_BRANCH, ["n"], "new branch from HEAD: name it in $EDITOR, then switch to it", "n", "new"));
+    table.push(Binding(SCOPE_BRANCH, CMD_ABORT, ["a", "escape"], "abort", "a", "abort"));
+    // The push and pull overlays.
+    table.push(Binding(SCOPE_PUSH, CMD_PUSH, ["p"], "push the current branch to origin", "p", "push"));
+    table.push(Binding(SCOPE_PUSH, CMD_CLOSE, ["escape"], "close", "esc", "close"));
+    table.push(Binding(SCOPE_PULL, CMD_PULL, ["p"], "pull the current branch from origin", "p", "pull"));
+    table.push(Binding(SCOPE_PULL, CMD_CLOSE, ["escape"], "close", "esc", "close"));
+    // The discard confirmation: "y" and anything else.
+    table.push(Binding(SCOPE_CONFIRM, CMD_YES, ["y"], "yes, discard", "y", "discard"));
+    table.push(Binding(SCOPE_CONFIRM, CMD_CLOSE, ["escape"], "any other key keeps the file", "any", "keep"));
+    // The command log overlay.
+    table.push(Binding(SCOPE_LOG, CMD_DOWN, ["j", "down"], "scroll down", "j/k", "scroll"));
+    table.push(Binding(SCOPE_LOG, CMD_UP, ["k", "up"], "scroll up", "", ""));
+    table.push(Binding(SCOPE_LOG, CMD_TOP, ["g", "home"], "jump to the oldest line", "g/G", "top/bottom"));
+    table.push(Binding(SCOPE_LOG, CMD_BOTTOM, ["G", "end"], "jump to the newest line", "", ""));
+    table.push(Binding(SCOPE_LOG, CMD_CLOSE, ["escape", "q", "@"], "close", "esc", "close"));
+    // The help overlay.
+    table.push(Binding(SCOPE_HELP, CMD_DOWN, ["j", "down"], "scroll down", "j/k", "scroll"));
+    table.push(Binding(SCOPE_HELP, CMD_UP, ["k", "up"], "scroll up", "", ""));
+    table.push(Binding(SCOPE_HELP, CMD_CLOSE, ["escape", "q", "?"], "close", "esc", "close"));
+    // The search prompt.
+    table.push(Binding(SCOPE_SEARCH, CMD_SUBMIT, ["enter"], "search for what is typed", "enter", "search"));
+    table.push(Binding(SCOPE_SEARCH, CMD_CLOSE, ["escape"], "cancel", "esc", "cancel"));
+    table.push(Binding(SCOPE_SEARCH, CMD_ERASE, ["backspace"], "erase the last character", "", ""));
+    // The fuzzy picker.
+    table.push(Binding(SCOPE_PICKER, CMD_SUBMIT, ["enter"], "choose the highlighted item", "enter", "choose"));
+    table.push(Binding(SCOPE_PICKER, CMD_DOWN, ["down", "tab"], "highlight the next item", "down", "next"));
+    table.push(Binding(SCOPE_PICKER, CMD_UP, ["up", "back-tab"], "highlight the previous item", "up", "prev"));
+    table.push(Binding(SCOPE_PICKER, CMD_ERASE, ["backspace"], "erase the last character of the filter", "", ""));
+    table.push(Binding(SCOPE_PICKER, CMD_CLOSE, ["escape"], "cancel", "esc", "cancel"));
+    return table;
+}
+
+/// The first seven characters of an object id, for a status line or a log
+/// line; an empty id (no old value: an unborn branch) is seven zeros.
+pub str short_id(str id) {
+    if (id == "") {
+        return "0000000";
+    }
+    if (id.size() <= 7) {
+        return id;
+    }
+    return id.substr(0, 7);
+}
+
+/// The command `code` is bound to in `scope`, if any.
+pub Option<str> lookup(str scope, term.Code code) {
+    str name = code.to_str();
+    for (Binding binding in key_table()) {
+        if (binding.scope == scope && binding.keys.contains(name)) {
+            return Option<str>.Some(binding.cmd);
+        }
+    }
+    return Option<str>.None;
+}
+
+/// Every binding of `scope`, in table order.
+pub List<Binding> bindings_in(str scope) {
+    List<Binding> out = [];
+    for (Binding binding in key_table()) {
+        if (binding.scope == scope) {
+            out.push(binding);
+        }
+    }
+    return out;
+}
+
+/// What the footer shows for `scope`: the bindings that have footer text.
+pub List<Hint> hints_for(str scope) {
+    List<Hint> out = [];
+    for (Binding binding in bindings_in(scope)) {
+        if (binding.footer_keys != "") {
+            out.push(Hint(binding.footer_keys, binding.footer_label));
+        }
+    }
+    return out;
+}
+
+/// A heading for `scope` in the help overlay.
+pub str scope_title(str scope) {
+    if (scope == SCOPE_OUTLINE) {
+        return "outline";
+    }
+    if (scope == SCOPE_DIFF) {
+        return "diff view";
+    }
+    if (scope == SCOPE_GLOBAL) {
+        return "everywhere";
+    }
+    if (scope == SCOPE_COMMIT) {
+        return "commit overlay (c)";
+    }
+    if (scope == SCOPE_BRANCH) {
+        return "branch overlay (b)";
+    }
+    if (scope == SCOPE_PUSH) {
+        return "push overlay (P)";
+    }
+    if (scope == SCOPE_PULL) {
+        return "pull overlay (F)";
+    }
+    if (scope == SCOPE_CONFIRM) {
+        return "discard confirmation (x)";
+    }
+    if (scope == SCOPE_LOG) {
+        return "command log (@)";
+    }
+    if (scope == SCOPE_HELP) {
+        return "this help (?)";
+    }
+    if (scope == SCOPE_SEARCH) {
+        return "search prompt (/)";
+    }
+    if (scope == SCOPE_PICKER) {
+        return "branch picker";
+    }
+    return scope;
+}
+
+/// Every scope, in the order the help overlay lists them.
+pub List<str> all_scopes() {
+    return [SCOPE_OUTLINE, SCOPE_DIFF, SCOPE_GLOBAL, SCOPE_COMMIT, SCOPE_BRANCH, SCOPE_PUSH, SCOPE_PULL, SCOPE_CONFIRM, SCOPE_LOG, SCOPE_HELP, SCOPE_SEARCH, SCOPE_PICKER];
+}
+
+// --- the overlay stack and the command log -------------------------------------
+
+// --- reading the repository ----------------------------------------------------
+
+/// The character `code` types, if it types one: a printable key gives itself
+/// and the space bar gives " "; Enter, Escape, the arrows and the rest give
+/// nothing. For the overlays with a text field (search, picker).
+pub Option<str> typed(term.Code code) {
+    match (code) {
+        case Char(int character): {
+            if (character < 32 || character == 127) {
+                return Option<str>.None;
+            }
+            return Option<str>.Some(str.from_chars([character]));
+        }
+        case Enter: {
+            return Option<str>.None;
+        }
+        case Tab: {
+            return Option<str>.None;
+        }
+        case BackTab: {
+            return Option<str>.None;
+        }
+        case Backspace: {
+            return Option<str>.None;
+        }
+        case Escape: {
+            return Option<str>.None;
+        }
+        case Up: {
+            return Option<str>.None;
+        }
+        case Down: {
+            return Option<str>.None;
+        }
+        case Right: {
+            return Option<str>.None;
+        }
+        case Left: {
+            return Option<str>.None;
+        }
+        case Home: {
+            return Option<str>.None;
+        }
+        case End: {
+            return Option<str>.None;
+        }
+        case PageUp: {
+            return Option<str>.None;
+        }
+        case PageDown: {
+            return Option<str>.None;
+        }
+        case Insert: {
+            return Option<str>.None;
+        }
+        case Delete: {
+            return Option<str>.None;
+        }
+        case F(_): {
+            return Option<str>.None;
+        }
+    }
+}
+
+/// `text` without its last character (an empty string stays empty).
+pub str drop_last(str text) {
+    List<int> characters = text.chars();
+    if (characters.size() == 0) {
+        return "";
+    }
+    characters.pop();
+    return str.from_chars(characters);
+}

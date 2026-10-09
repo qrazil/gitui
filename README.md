@@ -41,7 +41,11 @@ bash scripts/build-gitui.sh -o ourgitui    # not build.sh -- it is the one with 
 | `GIT_hunks.m31` | `lib/diff.m31`'s edit script, grouped into qrazil/tui's `TUI_diff_view.Hunk`/`Line` with context; `spans` is the one definition of where each hunk starts and ends |
 | `GIT_patch.m31` | apply or revert exactly one hunk of a diff, byte for byte -- what the diff view's `s`/`u` stage and unstage with |
 | `GIT_log.m31` | the commit-history walk, shared by `git.m31 -log` and `gitui.m31` |
-| `GIT_client.m31` | the interactive client's state and logic (no top-level statements, so it is importable and testable) |
+| `GIT_client.m31` | the interactive client's top: `State` (the layer tower's last floor), key dispatch, drawing the overlay stack over the body, the `$EDITOR` handoff (no top-level statements, so it is importable and testable) |
+| `GIT_ui_core.m31` | the shared `Core`, the `Overlay` interface (`handle_key`, `render`, `hints`), **the key table** that drives dispatch, the footer and `?` alike, and the command-log ring buffer |
+| `GIT_ui_model.m31` | the pure model: outline rows, commit-file diffs, commit template, editor choice |
+| `GIT_ui_outline.m31`, `GIT_ui_diff.m31`, `GIT_ui_commit.m31`, `GIT_ui_branch.m31`, `GIT_ui_remote.m31` | one layer per concern (stage/unstage/discard/stage-all, hunk staging, commit and amend, branches, push and pull), each embedding the one below it, plus that concern's overlays |
+| `GIT_ui_help.m31`, `GIT_ui_log.m31`, `GIT_ui_search.m31`, `GIT_ui_picker.m31`, `GIT_ui_panel.m31` | the `?` key help, the `@` command log, `/` search, the reusable fuzzy-filter picker, and the shared frame/clamp drawing helpers |
 | `gitui.m31` | the interactive client's thin driver: parses a path, runs `TUI_app.Loop` |
 | `GIT_http_fetch.m31` | git's smart-HTTP protocol, v0 fetch/clone only: pkt-line framing, the ref advertisement, want/have negotiation, side-band-64k demultiplexing, and pack checksum verification, over `lib/https.m31` (`http://` and `https://`) |
 | `GIT_pack_write.m31` | writes packfiles (whole objects, stored-zlib) and computes the object set a push must send, like `git rev-list --objects tips ^known` |
@@ -144,6 +148,37 @@ with the commit, so the review flow is `Enter` on a commit, `Enter` on a
 file, read, and `q`/`Esc`/`Backspace` back to where you were -- inside a
 diff, `q` closes the diff; only the outline's `q` quits. When the log is a
 full page long, a final `… load 200 more commits` row extends it on `Enter`.
+
+## Keys
+
+One table (`GIT_ui_core.key_table`) is the source for key dispatch, the
+footer and the `?` overlay, so they cannot disagree. Overlays form a stack;
+the top one takes every key.
+
+| key | where | does |
+|---|---|---|
+| `j` `k` / arrows | outline, diff | move the cursor |
+| `h` `l` | outline | scroll sideways |
+| `Enter` | outline | fold or unfold; on a commit's file, open its diff; on the last row, load more commits |
+| `s` / `u` | outline, diff | stage / unstage the file, or the hunk in a diff |
+| `S` / `U` | outline | stage everything / unstage everything |
+| `x` | outline | discard the path under the cursor (asks first) |
+| `d` | outline | open the hunk-level diff of the row |
+| `c` | outline | commit overlay: `e` edit, `f` finish, `A` amend, `a` abort |
+| `b` | outline | branch overlay: `c` check out, `/` fuzzy-pick a branch, `n` new, `a` abort |
+| `P` / `F` | outline | push / pull which-key, `p` runs it |
+| `/` | outline (log included) | search; smart-case: all lower case ignores case, a capital matches exactly. `Enter` runs it, `Esc` cancels |
+| `n` / `N` | outline (log included) | next / previous match, wrapping |
+| `g` / `R` | outline | re-read the repository (`r` is no longer bound) |
+| `J` / `w` | outline | show the jump list / give it the keys |
+| `@` | everywhere | command log: every write the client made (`add`, `update-ref`, `checkout`, ...), newest at the bottom; `j`/`k`/`g`/`G` scroll |
+| `?` | everywhere | key help for every scope, generated from the key table |
+| `q` / `Esc` | outline | quit (in a diff or overlay: close it) |
+
+The branch picker (`GIT_ui_picker.open(core, purpose, title, items)`) is
+generic: type to filter (contiguous matches rank before scattered
+subsequences), `Down`/`Tab` and `Up` to move, `Enter` picks, `Esc` cancels.
+Merge, rebase and cherry-pick can reuse it by adding a `PICK_*` purpose.
 
 Everything is checked against something that is not this program:
 

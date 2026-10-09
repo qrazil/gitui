@@ -1,0 +1,694 @@
+// The outline layer: moving the cursor, folding, and the operations on the
+// working tree and index that the outline's rows stand for -- stage, unstage,
+// stage all, unstage all and discard -- plus the discard confirmation, the one
+// overlay these need.
+//
+// `OutlineLayer` embeds `GIT_ui_core.Core`, so everything in `Core` (the
+// outline, `message`, `reload()`, `log_command()`) reads as if it were a field
+// or method of this type. The layers above it (`GIT_ui_diff`, `GIT_ui_commit`,
+// ...) embed this one in turn.
+
+import fs;
+import GIT_index;
+import GIT_object;
+import GIT_status;
+import GIT_ui_core;
+import GIT_ui_model;
+import io;
+import term;
+import tui.TUI_app;
+import tui.TUI_buffer;
+import tui.TUI_geometry;
+import tui.TUI_menu;
+import tui.TUI_outline;
+
+pub type OutlineLayer {
+    pub GIT_ui_core.Core;
+}
+
+/// Fold or unfold the row under the cursor, remembering the choice so the
+/// next `reload()` (which rebuilds the outline from nothing) respects it.
+///
+/// Unfolding a commit (or its "Files changed" subsection) is also the moment
+/// its file list is first computed -- `did_compute_commit_changes` -- and when
+/// that actually computed something, the outline is rebuilt in place from
+/// the now-filled cache (the one on screen was built with an empty list for
+/// this commit) with the cursor kept on the same row by id, the same way
+/// `reload` keeps it. No I/O happens for a fold, or for a commit already
+/// unfolded once.
+pub void OutlineLayer.toggle_current() {
+    outline.toggle();
+    str keep_id = "";
+    bool is_rebuilding = false;
+    match (outline.current()) {
+        case Some(TUI_outline.Row row): {
+            collapsed.set(row.node.id, !row.node.is_expanded);
+            keep_id = row.node.id;
+            if (row.node.is_expanded) {
+                match (GIT_ui_model.commit_id_of_unfoldable(row.node.id)) {
+                    case Some(str cid): {
+                        is_rebuilding = did_compute_commit_changes(cid);
+                    }
+                    case None: {
+                    }
+                }
+            }
+        }
+        case None: {
+        }
+    }
+    if (is_rebuilding) {
+        outline = GIT_ui_model.build_outline(last_status, log, commit_changes_cache, collapsed, paths, file_diffs, branch_rows);
+        outline.did_select_id(keep_id);
+    }
+    jump.sync_from(outline);
+    jump.follow(outline);
+}
+
+pub void OutlineLayer.move_cursor(int delta) {
+    outline.move(delta);
+    jump.follow(outline);
+}
+
+/// Stage the file under the cursor, if it is an untracked or an unstaged row
+/// -- a no-op on anything else (a staged row, a section heading, a commit).
+/// This is `git add <path>` for exactly one path: read it, `write_blob`,
+/// build an entry with `GIT_index.from_stat`, and put it in the index, replacing
+/// whatever entry that path already had.
+pub void OutlineLayer.stage_current() {
+    match (outline.current()) {
+        case Some(TUI_outline.Row row): {
+            if (row.node.id.starts_with("untracked:") || row.node.id.starts_with("unstaged:")) {
+                match (paths.get(row.node.id)) {
+                    case Some(bytes path): {
+                        stage_path(path);
+                    }
+                    case None: {
+                    }
+                }
+            }
+        }
+        case None: {
+        }
+    }
+}
+
+pub void OutlineLayer.stage_path(bytes relative_path) {
+    str full = fs.join(worktree, relative_path.utf8().or(""));
+    bytes content = [];
+    match (io.read_bytes(full)) {
+        case Ok(bytes contents): {
+            content = contents;
+        }
+        case Err(io.Error error): {
+            message = "cannot read " + relative_path.utf8().or("<non-utf8>") + ": " + error.to_str();
+            return;
+        }
+    }
+    str blob_id = "";
+    match (GIT_object.write_blob(gitdir, content)) {
+        case Ok(str id): {
+            blob_id = id;
+        }
+        case Err(GIT_object.Error error): {
+            message = "write_blob: " + error.to_str();
+            return;
+        }
+    }
+    fs.Stat file_stat = fs.Stat(0, 0, 0);
+    match (fs.stat(full)) {
+        case Ok(fs.Stat fetched): {
+            file_stat = fetched;
+        }
+        case Err(io.Error error): {
+            message = "stat: " + error.to_str();
+            return;
+        }
+    }
+    GIT_index.Entry entry = GIT_index.from_stat(relative_path, file_stat, fs.is_link(full), blob_id);
+    GIT_index.Index index = GIT_ui_model.read_index(gitdir);
+    GIT_ui_model.replace_entry(index, entry);
+    match (GIT_index.write(gitdir, index)) {
+        case Ok: {
+            message = "staged " + relative_path.utf8().or("<non-utf8>");
+            log_command("stage " + relative_path.utf8().or("<non-utf8>"));
+        }
+        case Err(GIT_index.Error error): {
+            message = "index write: " + error.to_str();
+            return;
+        }
+    }
+    reload();
+}
+
+/// Unstage the file under the cursor, if it is a staged row -- a no-op on
+/// anything else. This is `git reset HEAD -- <path>`: if HEAD's tree already
+/// has this path, the index entry goes back to exactly what HEAD says (mode
+/// and blob), with its stat fields forced to never match a real file so the
+/// next `status` re-hashes it rather than trusting stale numbers
+/// (`GIT_index.m31`'s own rule: a mismatch only ever costs a re-hash, never
+/// wrong). If HEAD has no such path -- the file was newly added -- there is
+/// nothing to go back to, so the entry is dropped from the index outright,
+/// which is what `git reset` does to a new file too (it becomes untracked
+/// again, not deleted from disk).
+pub void OutlineLayer.unstage_current() {
+    match (outline.current()) {
+        case Some(TUI_outline.Row row): {
+            if (row.node.id.starts_with("staged:")) {
+                match (paths.get(row.node.id)) {
+                    case Some(bytes path): {
+                        unstage_path(path);
+                    }
+                    case None: {
+                    }
+                }
+            }
+        }
+        case None: {
+        }
+    }
+}
+
+pub void OutlineLayer.unstage_path(bytes relative_path) {
+    GIT_index.Index index = GIT_ui_model.read_index(gitdir);
+    Option<str> tree = GIT_ui_model.head_tree_id(gitdir);
+    match (tree) {
+        case Some(str tid): {
+            match (GIT_ui_model.find_in_tree(gitdir, tid, relative_path)) {
+                case Some(GIT_object.Entry entry): {
+                    // size: -1 can never equal a real `fs.stat` size (always
+                    // >= 0), so `GIT_status.status`'s mtime/size shortcut always
+                    // re-hashes this entry instead of trusting a snapshot
+                    // that was never actually taken.
+                    GIT_index.Entry restored = GIT_index.Entry(0, 0, 0, 0, 0, 0, entry.mode, 0, 0, -1, entry.id, 0, false, relative_path);
+                    GIT_ui_model.replace_entry(index, restored);
+                }
+                case None: {
+                    GIT_ui_model.remove_entry(index, relative_path);
+                }
+            }
+        }
+        case None: {
+            GIT_ui_model.remove_entry(index, relative_path);
+        }
+    }
+    match (GIT_index.write(gitdir, index)) {
+        case Ok: {
+            message = "unstaged " + relative_path.utf8().or("<non-utf8>");
+            log_command("unstage " + relative_path.utf8().or("<non-utf8>"));
+        }
+        case Err(GIT_index.Error error): {
+            message = "index write: " + error.to_str();
+            return;
+        }
+    }
+    reload();
+}
+
+/// `x`: ask before discarding the changes to the path under the cursor.
+/// Only a path row in one of the three working-tree sections can be
+/// discarded; a commit, a commit's file row (history is not something this
+/// client rewrites from here) or a section heading just gets a message.
+/// Nothing is touched until `handle_confirm_key` sees `y`.
+pub void OutlineLayer.discard_current() {
+    match (outline.current()) {
+        case Some(TUI_outline.Row row): {
+            str kind = "";
+            if (row.node.id.starts_with("untracked:")) {
+                kind = "untracked";
+            } else if (row.node.id.starts_with("unstaged:")) {
+                kind = "unstaged";
+            } else if (row.node.id.starts_with("staged:")) {
+                kind = "staged";
+            }
+            if (kind == "") {
+                message = "discard: nothing to discard here";
+                return;
+            }
+            match (paths.get(row.node.id)) {
+                case Some(bytes path): {
+                    message = "";
+                    push_overlay(ConfirmOverlay(this, kind, path));
+                }
+                case None: {
+                    message = "discard: nothing to discard here";
+                }
+            }
+        }
+        case None: {
+        }
+    }
+}
+
+/// Throw away the working-tree (and, for a staged row, index) changes to
+/// `relative_path`, by section -- each the exact effect of the real git command named,
+/// on that one path and nothing else:
+///
+///   - **untracked** -- `git clean -f -- <path>`: the file is removed, and
+///     so is each parent directory that is left empty by that, up to (never
+///     including) the working tree's root, which is what `git clean` leaves
+///     behind too.
+///   - **unstaged** -- `git checkout -- <path>`: the index's blob for the
+///     path is written back over whatever is on disk (recreated, if it was
+///     deleted), a symlink entry as a symlink. The index entry itself is
+///     left alone: it already names exactly this content, and a stale stat
+///     only ever costs `GIT_status.status` one re-hash (`GIT_index.m31`'s own rule).
+///   - **staged** -- `git checkout HEAD -- <path>`: both the index entry and
+///     the file go back to HEAD's blob and mode (`unstage_path`'s own
+///     restored-entry shape, with the rewritten file's real stat). A path HEAD does not
+///     have -- a newly added file, staged -- has nothing to go back to, so
+///     the entry is dropped and the file removed: `git checkout HEAD --` on
+///     such a path is an error in real git, and "discard this new file
+///     entirely" is the only meaning the operator can have intended.
+///
+/// A regular file recreated from scratch gets the process's default mode:
+/// there is no `chmod` in `lib/fs.m31` yet, so a deleted-then-discarded
+/// executable comes back without its executable bit (one that still exists
+/// is rewritten in place and keeps it). `pub`, like `stage_path`, so
+/// `t_gitclient_ops.m31` can drive each case against real git.
+pub void OutlineLayer.discard_path(str kind, bytes relative_path) {
+    str shown = relative_path.utf8().or("<non-utf8>");
+    str full = fs.join(worktree, relative_path.utf8().or(""));
+    if (kind == "untracked") {
+        match (fs.remove(full)) {
+            case Ok: {
+            }
+            case Err(io.Error error): {
+                message = "cannot remove " + shown + ": " + error.to_str();
+                return;
+            }
+        }
+        prune_empty_parents(relative_path);
+        message = "discarded " + shown + " (removed)";
+        log_command("discard untracked " + shown);
+        reload();
+        return;
+    }
+    if (kind == "unstaged") {
+        GIT_index.Index index = GIT_ui_model.read_index(gitdir);
+        match (GIT_ui_model.find_index_entry(index, relative_path)) {
+            case Some(GIT_index.Entry entry): {
+                if (!did_write_worktree(relative_path, entry.mode, read_blob(entry.id))) {
+                    return;
+                }
+                message = "discarded changes to " + shown;
+                log_command("discard unstaged " + shown);
+                reload();
+            }
+            case None: {
+                message = "discard: " + shown + " is not in the index";
+            }
+        }
+        return;
+    }
+    if (kind == "staged") {
+        GIT_index.Index index = GIT_ui_model.read_index(gitdir);
+        Option<GIT_object.Entry> in_head = Option<GIT_object.Entry>.None;
+        match (GIT_ui_model.head_tree_id(gitdir)) {
+            case Some(str tid): {
+                in_head = GIT_ui_model.find_in_tree(gitdir, tid, relative_path);
+            }
+            case None: {
+            }
+        }
+        match (in_head) {
+            case Some(GIT_object.Entry entry): {
+                if (!did_write_worktree(relative_path, entry.mode, read_blob(entry.id))) {
+                    return;
+                }
+                // The file was just rewritten, so its real stat goes in the
+                // entry (as `stage_path` records it): a zeroed stat makes real
+                // git report the path modified until something refreshes it.
+                fs.Stat file_stat = fs.Stat(0, 0, 0);
+                match (fs.stat(full)) {
+                    case Ok(fs.Stat fetched): {
+                        file_stat = fetched;
+                    }
+                    case Err(io.Error error): {
+                        message = "stat: " + error.to_str();
+                        return;
+                    }
+                }
+                GIT_index.Entry fresh = GIT_index.from_stat(relative_path, file_stat, fs.is_link(full), entry.id);
+                GIT_index.Entry restored = GIT_index.Entry(fresh.ctime_s, fresh.ctime_ns, fresh.mtime_s, fresh.mtime_ns, 0, 0, entry.mode, 0, 0, fresh.size, entry.id, 0, false, relative_path);
+                GIT_ui_model.replace_entry(index, restored);
+            }
+            case None: {
+                GIT_ui_model.remove_entry(index, relative_path);
+                if (fs.exists(full) || fs.is_link(full)) {
+                    match (fs.remove(full)) {
+                        case Ok: {
+                        }
+                        case Err(io.Error error): {
+                            message = "cannot remove " + shown + ": " + error.to_str();
+                            return;
+                        }
+                    }
+                    prune_empty_parents(relative_path);
+                }
+            }
+        }
+        match (GIT_index.write(gitdir, index)) {
+            case Ok: {
+                message = "discarded staged changes to " + shown;
+                log_command("discard staged " + shown);
+            }
+            case Err(GIT_index.Error error): {
+                message = "index write: " + error.to_str();
+                return;
+            }
+        }
+        reload();
+        return;
+    }
+    message = "discard: unknown section " + kind;
+}
+
+/// Put `content` at `relative_path` in the working tree as a blob of `mode` would be
+/// checked out: a symlink (0o120000) whose target is the content, otherwise
+/// a regular file, its parent directories created as needed. A symlink
+/// already there is removed first (`fs.symlink` never replaces). False, with
+/// `message` set, on any failure.
+pub bool OutlineLayer.did_write_worktree(bytes relative_path, int mode, bytes content) {
+    str shown = relative_path.utf8().or("<non-utf8>");
+    str full = fs.join(worktree, relative_path.utf8().or(""));
+    str directory = GIT_ui_model.directory_of(full);
+    if (directory != "." && !fs.is_dir(directory)) {
+        match (fs.makedirs(directory)) {
+            case Ok: {
+            }
+            case Err(io.Error error): {
+                message = "cannot create " + directory + ": " + error.to_str();
+                return false;
+            }
+        }
+    }
+    if (mode == 0o120000) {
+        if (fs.exists(full) || fs.is_link(full)) {
+            match (fs.remove(full)) {
+                case Ok: {
+                }
+                case Err(io.Error error): {
+                    message = "cannot replace " + shown + ": " + error.to_str();
+                    return false;
+                }
+            }
+        }
+        match (fs.symlink(content.utf8().or(""), full)) {
+            case Ok: {
+                return true;
+            }
+            case Err(io.Error error): {
+                message = "cannot link " + shown + ": " + error.to_str();
+                return false;
+            }
+        }
+    }
+    if (fs.is_link(full)) {
+        // A regular blob over what is currently a symlink: writing through
+        // the link would overwrite its target instead of replacing the link.
+        match (fs.remove(full)) {
+            case Ok: {
+            }
+            case Err(io.Error error): {
+                message = "cannot replace " + shown + ": " + error.to_str();
+                return false;
+            }
+        }
+    }
+    match (io.write_bytes(full, content)) {
+        case Ok: {
+            return true;
+        }
+        case Err(io.Error error): {
+            message = "cannot write " + shown + ": " + error.to_str();
+            return false;
+        }
+    }
+}
+
+/// After removing `relative_path`, remove each of its parent directories that is now
+/// empty, deepest first, stopping at the first that is not (or at the
+/// working tree's own root, which is never touched) -- `git clean`'s own
+/// tidying of a directory it emptied.
+pub void OutlineLayer.prune_empty_parents(bytes relative_path) {
+    str parent_path = GIT_ui_model.directory_of(relative_path.utf8().or(""));
+    while (parent_path != "." && parent_path != "") {
+        match (fs.rmdir(fs.join(worktree, parent_path))) {
+            case Ok: {
+            }
+            case Err: {
+                return;
+            }
+        }
+        parent_path = GIT_ui_model.directory_of(parent_path);
+    }
+}
+
+/// `relative_path`'s content on disk right now, or empty if it cannot be read (missing,
+/// a permissions error) -- the same "missing reads as empty" the unstaged
+/// comparison's deleted-on-disk case needs.
+pub bytes OutlineLayer.read_worktree(bytes relative_path) {
+    str full = fs.join(worktree, relative_path.utf8().or(""));
+    match (io.read_bytes(full)) {
+        case Ok(bytes contents): {
+            return contents;
+        }
+        case Err: {
+            return [];
+        }
+    }
+}
+
+/// `relative_path`'s blob content as the current index has it, or empty if the index
+/// has no entry for it -- the staged comparison's "no longer in the index"
+/// case, and a defensive default the unstaged comparison should never
+/// actually hit (every unstaged row's path is, by construction, in the
+/// index).
+pub bytes OutlineLayer.index_blob(bytes relative_path) {
+    GIT_index.Index index = GIT_ui_model.read_index(gitdir);
+    match (GIT_ui_model.find_index_entry(index, relative_path)) {
+        case Some(GIT_index.Entry entry): {
+            return read_blob(entry.id);
+        }
+        case None: {
+            return [];
+        }
+    }
+}
+
+/// `relative_path`'s blob content as HEAD's tree has it, or empty if HEAD has no entry
+/// there (an unborn branch, or a path newly staged with nothing committed
+/// yet) -- the staged comparison's "old" side.
+pub bytes OutlineLayer.head_blob(bytes relative_path) {
+    match (GIT_ui_model.head_tree_id(gitdir)) {
+        case Some(str tid): {
+            match (GIT_ui_model.find_in_tree(gitdir, tid, relative_path)) {
+                case Some(GIT_object.Entry entry): {
+                    return read_blob(entry.id);
+                }
+                case None: {
+                    return [];
+                }
+            }
+        }
+        case None: {
+            return [];
+        }
+    }
+}
+
+pub bytes OutlineLayer.read_blob(str id) {
+    match (GIT_object.read(gitdir, id)) {
+        case Ok(GIT_object.Object object): {
+            return object.raw;
+        }
+        case Err(GIT_object.Error error): {
+            message = "object read: " + error.to_str();
+            return [];
+        }
+    }
+}
+
+/// `S`: stage every unstaged and untracked file in one index write. A deleted
+/// file's entry is dropped from the index, exactly as `git add -A` does. All
+/// or nothing: a file that cannot be read stops the whole operation before
+/// the index is touched, and says which one.
+pub void OutlineLayer.stage_all() {
+    GIT_index.Index index = GIT_ui_model.read_index(gitdir);
+    int count = 0;
+    for (GIT_status.Delta delta in last_status.unstaged) {
+        bool is_deleted = false;
+        match (delta.kind) {
+            case Deleted: {
+                is_deleted = true;
+            }
+            case Added: {
+            }
+            case Modified: {
+            }
+        }
+        if (is_deleted) {
+            GIT_ui_model.remove_entry(index, delta.path);
+        } else if (!did_stage_into(index, delta.path)) {
+            return;
+        }
+        count = count + 1;
+    }
+    for (bytes path in last_status.untracked) {
+        if (!did_stage_into(index, path)) {
+            return;
+        }
+        count = count + 1;
+    }
+    if (count == 0) {
+        message = "stage all: nothing to stage";
+        return;
+    }
+    match (GIT_index.write(gitdir, index)) {
+        case Ok: {
+            message = "staged " + count.to_str() + " files";
+            log_command("stage-all " + count.to_str() + " files");
+        }
+        case Err(GIT_index.Error error): {
+            message = "index write: " + error.to_str();
+            return;
+        }
+    }
+    reload();
+}
+
+/// Put `relative_path`'s working-tree content into `index` as a fresh entry,
+/// without writing the index. False, with `message` set, if it cannot be read
+/// or stat'd.
+pub bool OutlineLayer.did_stage_into(GIT_index.Index index, bytes relative_path) {
+    str full = fs.join(worktree, relative_path.utf8().or(""));
+    bytes content = [];
+    match (io.read_bytes(full)) {
+        case Ok(bytes contents): {
+            content = contents;
+        }
+        case Err(io.Error error): {
+            message = "cannot read " + relative_path.utf8().or("<non-utf8>") + ": " + error.to_str();
+            return false;
+        }
+    }
+    str blob_id = "";
+    match (GIT_object.write_blob(gitdir, content)) {
+        case Ok(str id): {
+            blob_id = id;
+        }
+        case Err(GIT_object.Error error): {
+            message = "write_blob: " + error.to_str();
+            return false;
+        }
+    }
+    fs.Stat file_stat = fs.Stat(0, 0, 0);
+    match (fs.stat(full)) {
+        case Ok(fs.Stat fetched): {
+            file_stat = fetched;
+        }
+        case Err(io.Error error): {
+            message = "stat: " + error.to_str();
+            return false;
+        }
+    }
+    GIT_ui_model.replace_entry(index, GIT_index.from_stat(relative_path, file_stat, fs.is_link(full), blob_id));
+    return true;
+}
+
+/// `U`: unstage everything in one index write -- every staged path goes back
+/// to what HEAD has (or out of the index, for a newly added file), as `git
+/// reset` does.
+pub void OutlineLayer.unstage_all() {
+    if (last_status.staged.size() == 0) {
+        message = "unstage all: nothing is staged";
+        return;
+    }
+    GIT_index.Index index = GIT_ui_model.read_index(gitdir);
+    Option<str> tree = GIT_ui_model.head_tree_id(gitdir);
+    int count = 0;
+    for (GIT_status.Delta delta in last_status.staged) {
+        bool is_restored = false;
+        match (tree) {
+            case Some(str tid): {
+                match (GIT_ui_model.find_in_tree(gitdir, tid, delta.path)) {
+                    case Some(GIT_object.Entry entry): {
+                        // size: -1 can never equal a real `fs.stat` size, so the
+                        // next `status` re-hashes this entry (see `unstage_path`).
+                        GIT_ui_model.replace_entry(index, GIT_index.Entry(0, 0, 0, 0, 0, 0, entry.mode, 0, 0, -1, entry.id, 0, false, delta.path));
+                        is_restored = true;
+                    }
+                    case None: {
+                    }
+                }
+            }
+            case None: {
+            }
+        }
+        if (!is_restored) {
+            GIT_ui_model.remove_entry(index, delta.path);
+        }
+        count = count + 1;
+    }
+    match (GIT_index.write(gitdir, index)) {
+        case Ok: {
+            message = "unstaged " + count.to_str() + " files";
+            log_command("unstage-all " + count.to_str() + " files");
+        }
+        case Err(GIT_index.Error error): {
+            message = "index write: " + error.to_str();
+            return;
+        }
+    }
+    reload();
+}
+
+// --- the discard confirmation ---------------------------------------------------
+
+/// The `x` confirmation: discarding is the one destructive thing this client
+/// does to a working tree, so it never happens on a single keypress --
+/// `discard_current` records what `x` was pressed on here and pushes this
+/// overlay, and only `y` actually calls `discard_path`. `kind` is the row's
+/// section (`untracked`, `unstaged`, `staged`), which decides what "discard"
+/// restores from.
+type ConfirmOverlay {
+    OutlineLayer host;
+    str kind;
+    bytes path;
+}
+
+/// `y` discards what `discard_current` recorded, and every other key -- any
+/// character, Escape, Enter, an arrow -- cancels. Deliberately not "n to
+/// cancel": a prompt that only acts on one exact key cannot be fallen into
+/// by a keystroke meant for the outline underneath.
+pub TUI_app.Action ConfirmOverlay.handle_key(term.Code code) {
+    host.pop_overlay();
+    match (GIT_ui_core.lookup(GIT_ui_core.SCOPE_CONFIRM, code)) {
+        case Some(str cmd): {
+            if (cmd == GIT_ui_core.CMD_YES) {
+                host.discard_path(kind, path);
+                return TUI_app.Action.Redraw;
+            }
+        }
+        case None: {
+        }
+    }
+    host.say("discard cancelled");
+    return TUI_app.Action.Redraw;
+}
+
+pub void ConfirmOverlay.render(TUI_buffer.Buffer buffer, TUI_geometry.Rect area) {
+    str what = "changes to " + path.utf8().or("<non-utf8>");
+    if (kind == "untracked") {
+        what = "untracked file " + path.utf8().or("<non-utf8>") + " (it will be removed)";
+    } else if (kind == "staged") {
+        what = "staged changes to " + path.utf8().or("<non-utf8>") + " (index and working tree)";
+    }
+    TUI_menu.WhichKey which_key = TUI_menu.WhichKey("discard " + what + "?", [TUI_menu.Item("y", "yes, discard"), TUI_menu.Item("any other key", "no, keep it")]);
+    which_key.render(buffer, area);
+}
+
+pub List<GIT_ui_core.Hint> ConfirmOverlay.hints() {
+    return GIT_ui_core.hints_for(GIT_ui_core.SCOPE_CONFIRM);
+}
