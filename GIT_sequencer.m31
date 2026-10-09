@@ -1123,7 +1123,11 @@ Result<Report, Error> run(str gitdir, str worktree, List<Item> items, Options op
     }
     List<GIT_merge.Conflicted> none = [];
     List<str> no_messages = [];
-    return Result<Report, Error>.Ok(Report(Ending.Finished, made, "", Verb.Pick, none, no_messages));
+    Verb last = Verb.Pick;
+    if (items.size() > 0) {
+        last = items[items.size() - 1].verb;
+    }
+    return Result<Report, Error>.Ok(Report(Ending.Finished, made, "", last, none, no_messages));
 }
 
 Result<bool, Error> refuse_if_busy(str gitdir) {
@@ -1186,13 +1190,13 @@ Result<bool, Error> write_text_in(str dir, str name, str text) {
 }
 
 // Carry on with `rest` after a step is done or skipped.
-Result<Report, Error> carry_on(str gitdir, str worktree, List<Item> rest, Options opts, List<str> made) {
+Result<Report, Error> carry_on(str gitdir, str worktree, List<Item> rest, Options opts, List<str> made, Verb verb) {
     str dir = sequencer_dir(gitdir);
     if (rest.size() == 0) {
         remove_dir(dir);
         List<GIT_merge.Conflicted> none = [];
         List<str> no_messages = [];
-        return Result<Report, Error>.Ok(Report(Ending.Finished, made, "", Verb.Pick, none, no_messages));
+        return Result<Report, Error>.Ok(Report(Ending.Finished, made, "", verb, none, no_messages));
     }
     Report report = run(gitdir, worktree, rest, opts, true)?;
     List<str> all = clone(made);
@@ -1221,8 +1225,13 @@ pub Result<Report, Error> continue_sequence(str gitdir, str worktree) {
     if (sequence) {
         todo = read_todo(gitdir, dir)?;
     }
+    Verb verb = Verb.Pick;
+    if (todo.size() > 0) {
+        verb = todo[0].verb;
+    }
     match (stopped) {
         case Some(Pending found): {
+            verb = found.verb;
             StepResult step = finish_step(gitdir, worktree, found, opts, commit_log(found.verb))?;
             if (step.landed == Landed.Empty) {
                 List<GIT_merge.Conflicted> none = [];
@@ -1249,13 +1258,13 @@ pub Result<Report, Error> continue_sequence(str gitdir, str worktree) {
     if (!sequence) {
         List<GIT_merge.Conflicted> none = [];
         List<str> no_messages = [];
-        return Result<Report, Error>.Ok(Report(Ending.Finished, made, "", Verb.Pick, none, no_messages));
+        return Result<Report, Error>.Ok(Report(Ending.Finished, made, "", verb, none, no_messages));
     }
     List<Item> rest = [];
     for (int i in 1 .. todo.size()) {
         rest.push(todo[i]);
     }
-    return carry_on(gitdir, worktree, rest, opts, made);
+    return carry_on(gitdir, worktree, rest, opts, made, verb);
 }
 
 str commit_log(Verb verb) {
@@ -1322,18 +1331,30 @@ pub Result<Report, Error> skip(str gitdir, str worktree) {
     if (sequence) {
         todo = read_todo(gitdir, dir)?;
     }
+    Verb verb = Verb.Pick;
+    if (todo.size() > 0) {
+        verb = todo[0].verb;
+    } else {
+        match (pending(gitdir)) {
+            case Some(Pending found): {
+                verb = found.verb;
+            }
+            case None: {
+            }
+        }
+    }
     reset_to(gitdir, worktree, head.id, "reset: moving to " + head.id)?;
     List<str> made = [];
     if (!sequence) {
         List<GIT_merge.Conflicted> none = [];
         List<str> no_messages = [];
-        return Result<Report, Error>.Ok(Report(Ending.Finished, made, "", Verb.Pick, none, no_messages));
+        return Result<Report, Error>.Ok(Report(Ending.Finished, made, "", verb, none, no_messages));
     }
     List<Item> rest = [];
     for (int i in 1 .. todo.size()) {
         rest.push(todo[i]);
     }
-    return carry_on(gitdir, worktree, rest, opts, made);
+    return carry_on(gitdir, worktree, rest, opts, made, verb);
 }
 
 /// `--abort`: back to where the sequence began (`.git/sequencer/head`), the
