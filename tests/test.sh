@@ -293,6 +293,7 @@ source tests/test_patch.sh
 
 source tests/test_xdiff.sh
 source tests/test_diff3.sh
+source tests/test_lines.sh
 
 # --- the interactive client: unit, oracle and pty-driven end-to-end --------
 #

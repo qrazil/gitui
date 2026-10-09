@@ -97,6 +97,39 @@ open(sys.argv[2], "w").write("\n".join(new) + "\n")
 PY
     oracle_case "a larger file with scattered changes" "$hdir/rand_a.txt" "$hdir/rand_b.txt"
 
+    # Hunks are cut from `GIT_xdiff`'s edit script, which is git's: so, unlike
+    # GNU diff, which breaks ties between equally long scripts its own way, the
+    # body must equal `git diff --no-indent-heuristic -U3` on files whose lines
+    # repeat (where the choice of script matters most).
+    python3 - "$hdir" <<'PY'
+import random, sys
+rng = random.Random(7)
+for n in range(80):
+    pool = ["", "}", "{", "x", "y", "return", "a", "b"][: rng.randint(2, 8)]
+    old = [rng.choice(pool) for _ in range(rng.randint(0, 60))]
+    new = list(old)
+    for _ in range(rng.randint(0, 8)):
+        i = rng.randint(0, len(new))
+        if new and rng.random() < 0.4:
+            del new[min(i, len(new) - 1)]
+        else:
+            new.insert(i, rng.choice(pool))
+    for name, ls in (("old", old), ("new", new)):
+        open("%s/gd%02d.%s" % (sys.argv[1], n, name), "w").write("".join(l + "\n" for l in ls))
+PY
+    gd_bad=0 gd_n=0
+    for gd in "$hdir"/gd*.old; do
+        gd_stem=${gd%.old}
+        gd_n=$((gd_n + 1))
+        gd_got=$("$t_hunks" "$gd_stem.old" "$gd_stem.new" | sed 's/^@@ -\([0-9]*\),1 /@@ -\1 /; s/^\(@@ [^+]*+[0-9]*\),1 @@/\1 @@/')
+        gd_want=$(git diff --no-index --no-indent-heuristic -U3 "$gd_stem.old" "$gd_stem.new" | sed -n '/^@@ /,$p' | sed 's/^\(@@ [^@]*@@\).*/\1/')  # git leaves out a count of 1 and adds a function name
+        if [ "$gd_got" != "$gd_want" ]; then
+            gd_bad=$((gd_bad + 1))
+            [ $gd_bad -le 2 ] && bad "hunks vs git diff: $(basename "$gd_stem")" "$(diff <(echo "$gd_got") <(echo "$gd_want") | head -10)"
+        fi
+    done
+    [ $gd_bad -eq 0 ] && note "hunks vs git diff --no-indent-heuristic: $gd_n repetitive-line pairs identical"
+
     # --- binary detection, against real `git diff` ---------------------------
     #
     # A disposable fixture repository, built and torn down with everything

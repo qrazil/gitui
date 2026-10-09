@@ -29,6 +29,7 @@
 //   GIT_xdiff.diff_lines(a, b)       -> Diff          which lines of a / b changed
 //   GIT_xdiff.edits(diff)            -> List<Edit>    the change script, in order
 //   GIT_xdiff.ops(a, b)              -> List<diff.Op> the same script as `lib/diff`'s ops
+//   GIT_xdiff.diff_text(old, new)         -> diff.Diff     `diff.diff`, but with git's choices
 //
 // A line is a run of bytes up to and including its `\n`; the last line of a
 // buffer has none if the buffer does not end in one, and "a" is a different
@@ -763,4 +764,15 @@ pub List<diff.Op> ops(List<bytes> a, List<bytes> b) {
         }
     }
     return out;
+}
+
+/// `diff.diff`, with the script xdiff picks instead of Myers' first shortest one:
+/// `Binary` if either buffer looks binary (`diff.is_binary`), else `Lines` of
+/// `ops` over their lines. This is what the diff view shows and what hunk
+/// and line staging edit, so the hunks on screen are the ones `git diff` prints.
+pub diff.Diff diff_text(bytes old, bytes new) {
+    if (diff.is_binary(old) || diff.is_binary(new)) {
+        return diff.Diff.Binary;
+    }
+    return diff.Diff.Lines(ops(split_lines(old), split_lines(new)));
 }
