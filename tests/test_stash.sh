@@ -239,3 +239,16 @@ if build t_stash; then
     else bad "stash branch" "git rc=$r1 ours rc=$r2 $out"; fi
     out=$(st_ours "$stx/branch-ours" branch topic 0 2>&1); [ $? -ne 0 ] && note "stash branch: an existing branch name is refused" || bad "stash branch: existing name"
 fi
+
+# --- the stash UI under a pty (z menu, Stashes section, list overlay) -----------------
+if [ ! -x "$WORK/gitui" ]; then
+    bash scripts/build-gitui.sh -o "$WORK/gitui" >"$WORK/stash_build.log" 2>&1 \
+        || bad "stash ui: scripts/build-gitui.sh" "$(cat "$WORK/stash_build.log")"
+fi
+if [ -x "$WORK/gitui" ] && command -v python3 >/dev/null; then
+    if out=$(python3 tests/pty_stash.py "$WORK/gitui" "$WORK/ptystash" 2>&1); then
+        note "gitui stash pty: $(echo "$out" | grep -c '^ok') checks agree with git stash"
+    else
+        bad "gitui stash pty" "$(echo "$out" | grep -v '^ok' | head -30)"
+    fi
+fi

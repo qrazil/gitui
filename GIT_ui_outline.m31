@@ -58,7 +58,7 @@ pub void OutlineLayer.toggle_current() {
         }
     }
     if (is_rebuilding) {
-        outline = GIT_ui_model.build_outline(last_status, log, commit_changes_cache, collapsed, paths, file_diffs, branch_rows);
+        outline = GIT_ui_model.build_outline(last_status, log, commit_changes_cache, collapsed, paths, file_diffs, branch_rows, stashes: stash_labels);
         outline.did_select_id(keep_id);
     }
     jump.sync_from(outline);

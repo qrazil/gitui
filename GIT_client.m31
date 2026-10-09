@@ -88,6 +88,7 @@ import GIT_ui_model;
 import GIT_ui_outline;
 import GIT_ui_remote;
 import GIT_ui_search;
+import GIT_ui_stash;
 import io;
 import os;
 import term;
@@ -413,6 +414,9 @@ TUI_app.Action State.run_outline_command(str cmd, str name) {
     if (cmd == GIT_ui_core.CMD_FOCUS) {
         is_jump_focused = !is_jump_focused;
     }
+    if (cmd == GIT_ui_core.CMD_STASH) {
+        GIT_ui_stash.open(core());
+    }
     if (cmd == GIT_ui_core.CMD_SEARCH) {
         GIT_ui_search.open(core());
     }
@@ -454,6 +458,10 @@ void State.handle_enter() {
         case Some(TUI_outline.Row row): {
             if (row.node.id.contains(":file:")) {
                 show_diff_current();
+                return;
+            }
+            if (row.node.id.starts_with("stash:")) {
+                GIT_ui_stash.open_list(core(), GIT_ui_stash.target(core()));
                 return;
             }
             if (row.node.id == GIT_ui_model.LOAD_MORE_ID) {

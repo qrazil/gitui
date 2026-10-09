@@ -155,6 +155,37 @@ file, read, and `q`/`Esc`/`Backspace` back to where you were -- inside a
 diff, `q` closes the diff; only the outline's `q` quits. When the log is a
 full page long, a final `… load 200 more commits` row extends it on `Enter`.
 
+Line-level staging: in a diff, `v` starts a visual range and `j`/`k` extend
+it; `Space` stages the changed lines in the range (in the staged view it
+unstages them), `x` discards them from the working tree after a `y`. With no
+range, `Space` acts on the line under the cursor, or on the whole hunk when
+the cursor is on its header. The selection becomes a patch (`GIT_patch.m31`,
+`GIT_ui_lines.m31`) applied to the index blob or the working file; an
+untracked file works too, and a binary file or symlink is refused. Checked
+against `git apply --cached` (`-R` to unstage and to discard) over 300+
+selections in `pty_lines.py`.
+
+Stashes (`GIT_stash.m31`, `GIT_udiff.m31`, `GIT_ui_stash.m31`): `push`
+(`-u` untracked, `-k` keep the index, `-m` message), `list`, `show` (the
+unified diff, `-u` included), `drop`, `pop` and `apply` (optionally
+restoring the index), `branch`. Stash commits are built the way git builds
+them (a work-tree commit with the HEAD, index and optional untracked-files
+parents), so the ids are identical to `git stash create` under a fixed
+identity and date, and each direction -- ours then git's, git's then ours --
+reads the other's stack and `refs/stash` reflog. The outline has a
+"Stashes" section (`Enter` opens the list), and `z` opens the stash overlay;
+the list overlay previews the highlighted stash's diff. Every write goes to
+the command log (`stash push -u`, `stash pop stash@{0}`, ...) and writes
+git-style reflog lines. `apply` and `pop` refuse, writing nothing, when a
+local change or an untracked file is in the way. Limits: when the stash and
+the working tree changed the same file differently (including `-k` followed
+by `pop`), a real three-way merge is needed; `GIT_stash.stash_apply_merge` is
+the hook for it and returns `NeedsMerge(path)` until `GIT_merge` is wired in.
+Untracked symlinks are skipped by `push -u` (the stdlib has no `readlink`),
+`show` does no rename detection and submodules are stashed as the index has
+them. Checked against real git in `test_stash.sh` (byte-for-byte `show`,
+identical commit ids, `fsck --strict`) and `pty_stash.py` (the UI).
+
 ## Keys
 
 One table (`GIT_ui_core.key_table`) is the source for key dispatch, the
@@ -170,6 +201,11 @@ the top one takes every key.
 | `S` / `U` | outline | stage everything / unstage everything |
 | `x` | outline | discard the path under the cursor (asks first) |
 | `d` | outline | open the hunk-level diff of the row |
+| `v` | diff | start a visual range of lines; `j`/`k` extend it, `v` or `Esc` cancels |
+| `Space` / `Enter` | diff | stage the selected lines (unstage them in the staged view); with no range, the line under the cursor, or the whole hunk on its header |
+| `x` | diff | discard the selected lines from the working tree (asks first, `y` confirms) |
+| `z` | outline | stash overlay: `z` push, `u` push with untracked, `k` keep the index, `m` type a message, `p` pop, `a` apply, `A` apply with `--index`, `d` drop (asks first), `b` branch from the stash, `l` list, `Esc` close |
+| `j` `k` `J` `K` / `p` `a` `d` | stash list | move / page; pop, apply, drop the highlighted stash |
 | `c` | outline | commit overlay: `e` edit, `f` finish, `A` amend, `a` abort |
 | `b` | outline | branch overlay: `c` check out, `/` fuzzy-pick a branch, `n` new, `a` abort |
 | `P` / `F` | outline | push / pull which-key, `p` runs it |
