@@ -15,7 +15,7 @@
 // `t_object.m31` compares real objects octet for octet.
 
 import GIT_zlib;
-import GIT_sha1;
+import sha1digest;
 import io;
 import os;
 import fs;
@@ -58,7 +58,7 @@ for (str name in names) {
             match (GIT_zlib.decompress(stream)) {
                 case Ok(bytes out): {
                     int elapsed_nanoseconds = date.now_ns() - start_nanoseconds;
-                    print(name + " ok " + out.size().to_str() + " " + GIT_sha1.hex(out));
+                    print(name + " ok " + out.size().to_str() + " " + sha1digest.hex(out));
                     if (out.size() > slowest_bytes) {
                         slowest_bytes = out.size();
                         slowest = elapsed_nanoseconds;

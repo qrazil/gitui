@@ -109,7 +109,7 @@ pub void BranchLayer.new_branch() {
 /// The second half of `new_branch`, after `$EDITOR` has run: the first
 /// non-comment line is the name; `GIT_checkout.create_branch` does the rest.
 pub void BranchLayer.launch_branch_editor() {
-    str editor = GIT_ui_model.pick_editor(os.env("EDITOR"));
+    str editor = GIT_ui_model.editor_for(gitdir);
     bool has_run = false;
     match (os.run([editor, branch_name_path])) {
         case Ok(os.ExitStatus exit_status): {

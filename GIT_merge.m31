@@ -81,6 +81,7 @@ import GIT_checkout;
 import GIT_config;
 import GIT_diff3;
 import GIT_graph;
+import GIT_ident;
 import GIT_index;
 import GIT_object;
 import GIT_refs;
@@ -1095,23 +1096,11 @@ pub void clear_state(str gitdir) {
 
 // --- identities and messages -----------------------------------------------------------
 
-// `GIT_<prefix>_NAME/EMAIL/DATE`, then `user.name` / `user.email`, then the
-// login name; a date that is not git's raw `<seconds> <+zone>` is ignored.
+// `GIT_ident`'s name and email for `prefix`, and `GIT_<prefix>_DATE`; a date
+// that is not git's raw `<seconds> <+zone>` is ignored.
 pub GIT_object.Ident ident(str gitdir, str prefix) {
-    str who = os.env("GIT_" + prefix + "_NAME").or("");
-    if (who == "") {
-        who = GIT_config.get(gitdir, "user", "", "name").or("");
-    }
-    if (who == "") {
-        who = os.env("USER").or("unknown");
-    }
-    str mail = os.env("GIT_" + prefix + "_EMAIL").or("");
-    if (mail == "") {
-        mail = GIT_config.get(gitdir, "user", "", "email").or("");
-    }
-    if (mail == "") {
-        mail = who + "@localhost";
-    }
+    str who = GIT_ident.name(gitdir, prefix);
+    str mail = GIT_ident.email(gitdir, prefix, who);
     int when = date.now();
     str zone = "+0000";
     List<str> parts = os.env("GIT_" + prefix + "_DATE").or("").trim().split(" ");
@@ -1570,6 +1559,7 @@ pub Result<Report, Error> start_commit(str gitdir, str worktree, str theirs, str
     if (opts.ff == FastForward.Only) {
         return Result<Report, Error>.Err(Error.NotFastForward);
     }
+    refuse_signing(gitdir)?;
     List<str> found = bases(gitdir, ours, theirs)?;
     if (found.size() == 0 && !opts.allow_unrelated) {
         return Result<Report, Error>.Err(Error.Unrelated);
@@ -1603,6 +1593,15 @@ pub Result<Report, Error> start_commit(str gitdir, str worktree, str theirs, str
     return Result<Report, Error>.Ok(Report(Ending.Conflicts, "", applied.tree, applied.conflicts, applied.messages));
 }
 
+// A merge commit would be signed by git when `commit.gpgsign` is true; this
+// client cannot, so it stops before it changes anything.
+Result<bool, Error> refuse_signing(str gitdir) {
+    if (GIT_config.commit_gpgsign(gitdir)) {
+        return Result<bool, Error>.Err(Error.Unsupported(GIT_config.GPGSIGN_REFUSAL));
+    }
+    return Result<bool, Error>.Ok(true);
+}
+
 // --- finishing a merge -------------------------------------------------------------------
 
 /// Commit a merge under way, as `git commit` / `git merge --continue` do: the
@@ -1622,6 +1621,7 @@ pub Result<Report, Error> continue_merge(str gitdir, str worktree, str message) 
             return Result<Report, Error>.Err(Error.UnmergedPaths);
         }
     }
+    refuse_signing(gitdir)?;
     GIT_refs.Head head = GIT_refs.Head.Unborn("");
     match (GIT_refs.head(gitdir)) {
         case Ok(GIT_refs.Head found): {

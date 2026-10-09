@@ -257,7 +257,7 @@ pub void MergeLayer.launch_resolve_editor() {
     }
     str full = fs.join(worktree, path);
     bool had_markers = markers_in(full) > 0;
-    str editor = GIT_ui_model.pick_editor(os.env("EDITOR"));
+    str editor = GIT_ui_model.editor_for(gitdir);
     bool has_run = false;
     match (os.run([editor, full])) {
         case Ok(os.ExitStatus exit_status): {

@@ -32,7 +32,7 @@
 // before this is ever asked.
 
 import GIT_object;
-import GIT_sha1;
+import sha1digest;
 import GIT_zlib;
 
 /// Why a pack could not be built or an object set computed. Payload-free
@@ -120,7 +120,7 @@ pub Result<bytes, Error> build(str gitdir, List<str> ids) {
             }
         }
     }
-    bytes trailer = GIT_sha1.sum(out);
+    bytes trailer = sha1digest.sum(out);
     out.extend(trailer);
     return Result<bytes, Error>.Ok(out);
 }

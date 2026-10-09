@@ -341,7 +341,12 @@ counter.check("open_diff: an untracked file (empty old) is one all-added hunk", 
 
 // --- pick_editor ---------------------------------------------------------------
 
-counter.check("pick_editor: $EDITOR set is used as-is", GIT_ui_model.pick_editor(Option<str>.Some("emacs -nw")) == "emacs -nw", GIT_ui_model.pick_editor(Option<str>.Some("emacs -nw")));
-counter.check("pick_editor: $EDITOR unset falls back to vi, real git's own default", GIT_ui_model.pick_editor(Option<str>.None) == "vi", GIT_ui_model.pick_editor(Option<str>.None));
+Option<str> unset_editor = Option<str>.None;
+counter.check("pick_editor: $EDITOR set is used as-is", GIT_ui_model.pick_editor(unset_editor, unset_editor, unset_editor, Option<str>.Some("emacs -nw")) == "emacs -nw", GIT_ui_model.pick_editor(unset_editor, unset_editor, unset_editor, Option<str>.Some("emacs -nw")));
+counter.check("pick_editor: nothing set falls back to vi, real git's own default", GIT_ui_model.pick_editor(unset_editor, unset_editor, unset_editor, unset_editor) == "vi", GIT_ui_model.pick_editor(unset_editor, unset_editor, unset_editor, unset_editor));
+counter.check("pick_editor: $GIT_EDITOR beats core.editor, $VISUAL and $EDITOR", GIT_ui_model.pick_editor(Option<str>.Some("a"), Option<str>.Some("b"), Option<str>.Some("c"), Option<str>.Some("d")) == "a", "");
+counter.check("pick_editor: core.editor beats $VISUAL and $EDITOR", GIT_ui_model.pick_editor(unset_editor, Option<str>.Some("b"), Option<str>.Some("c"), Option<str>.Some("d")) == "b", "");
+counter.check("pick_editor: $VISUAL beats $EDITOR", GIT_ui_model.pick_editor(unset_editor, unset_editor, Option<str>.Some("c"), Option<str>.Some("d")) == "c", "");
+counter.check("pick_editor: an empty source counts as unset", GIT_ui_model.pick_editor(Option<str>.Some(""), unset_editor, Option<str>.Some(""), Option<str>.Some("d")) == "d", "");
 print("");
 print(counter.checks.to_str() + " checks, " + counter.failed.to_str() + " failed");

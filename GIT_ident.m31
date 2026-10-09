@@ -1,0 +1,47 @@
+// Who a commit or a reflog line is by, from the places git looks.
+//
+//   GIT_ident.name(gitdir, "AUTHOR")            -> str
+//   GIT_ident.email(gitdir, "COMMITTER", who)   -> str
+//
+// The name is `GIT_<ROLE>_NAME`, then `<role>.name`, then `user.name`, then
+// the login name (`$USER`, else `unknown`). The email is `GIT_<ROLE>_EMAIL`,
+// then `<role>.email`, then `user.email`, then `$EMAIL`, then
+// `<who>@localhost`. `<role>` is `author` or `committer`; the config is what
+// `GIT_config.effective` sees, so a `user.name` in `~/.gitconfig` counts. The
+// date and zone are not here: callers read `GIT_<ROLE>_DATE` themselves.
+
+import GIT_config;
+import os;
+
+/// `role` is `"AUTHOR"` or `"COMMITTER"`.
+pub str name(str gitdir, str role) {
+    str value = os.env("GIT_" + role + "_NAME").or("");
+    if (value == "") {
+        value = GIT_config.get(gitdir, role.to_lower(), "", "name").or("");
+    }
+    if (value == "") {
+        value = GIT_config.get(gitdir, "user", "", "name").or("");
+    }
+    if (value == "") {
+        value = os.env("USER").or("unknown");
+    }
+    return value;
+}
+
+/// `who` is the name already chosen, which the last fallback is built from.
+pub str email(str gitdir, str role, str who) {
+    str value = os.env("GIT_" + role + "_EMAIL").or("");
+    if (value == "") {
+        value = GIT_config.get(gitdir, role.to_lower(), "", "email").or("");
+    }
+    if (value == "") {
+        value = GIT_config.get(gitdir, "user", "", "email").or("");
+    }
+    if (value == "") {
+        value = os.env("EMAIL").or("");
+    }
+    if (value == "") {
+        value = who + "@localhost";
+    }
+    return value;
+}

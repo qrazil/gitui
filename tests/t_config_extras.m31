@@ -1,0 +1,47 @@
+// Drives the layered config reads for test_config_extras.sh.
+//
+//   ./t_config_extras <gitdir> list                what `git config --list` prints, includes followed
+//   ./t_config_extras <gitdir> get <name>          the last value, or `<unset>`
+//   ./t_config_extras <gitdir> ident AUTHOR|COMMITTER      `Name <email>`
+//   ./t_config_extras <gitdir> editor              the editor a commit message is edited with
+//   ./t_config_extras <gitdir> settings <branch>   gpgsign, pull_rebase, push_default, autosetup, init_branch, rerere
+
+import GIT_config;
+import GIT_ident;
+import GIT_ui_model;
+import io;
+import os;
+
+List<str> argv = os.args();
+if (argv.size() < 3) {
+    io.eprint("usage: t_config_extras <gitdir> list|get|ident|editor|settings ...");
+    os.exit(2);
+}
+str gitdir = argv[1];
+str command = argv[2];
+if (command == "list") {
+    for (str line in GIT_config.effective(gitdir).list()) {
+        print(line);
+    }
+} else if (command == "get") {
+    match (GIT_config.split_name(argv[3])) {
+        case Ok(GIT_config.Name name): {
+            print(GIT_config.get(gitdir, name.section, name.subsection, name.key).or("<unset>"));
+        }
+        case Err(GIT_config.Error error): {
+            print("refused: " + error.to_str());
+        }
+    }
+} else if (command == "ident") {
+    str who = GIT_ident.name(gitdir, argv[3]);
+    print(who + " <" + GIT_ident.email(gitdir, argv[3], who) + ">");
+} else if (command == "editor") {
+    print(GIT_ui_model.editor_for(gitdir));
+} else if (command == "settings") {
+    print("gpgsign " + GIT_config.commit_gpgsign(gitdir).to_str());
+    print("pull_rebase " + GIT_config.pull_rebase(gitdir, argv[3]));
+    print("push_default " + GIT_config.push_default(gitdir));
+    print("autosetup " + GIT_config.push_auto_setup_remote(gitdir).to_str());
+    print("init_branch " + GIT_config.init_default_branch(gitdir));
+    print("rerere " + GIT_config.rerere_enabled(gitdir).to_str());
+}

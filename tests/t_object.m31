@@ -20,7 +20,7 @@ import GIT_object;
 import io;
 import os;
 import fs;
-import GIT_sha1;
+import sha1digest;
 import date;
 
 List<str> argv = os.args();
@@ -61,7 +61,7 @@ void show(GIT_object.Object object) {
     str id = object.id;
     match (object.body) {
         case Blob: {
-            print(id + " blob " + object.raw.size().to_str() + " " + GIT_sha1.hex(object.raw));
+            print(id + " blob " + object.raw.size().to_str() + " " + sha1digest.hex(object.raw));
         }
         case Tree(List<GIT_object.Entry> entries): {
             print(id + " tree " + object.raw.size().to_str() + " " + entries.size().to_str());
@@ -70,7 +70,7 @@ void show(GIT_object.Object object) {
             }
         }
         case Commit(GIT_object.Commit commit): {
-            print(id + " commit " + object.raw.size().to_str() + " tree=" + commit.tree + " parents=" + joined(commit.parents) + " author=" + ident(commit.author) + " committer=" + ident(commit.committer) + " extra=" + commit.extra.size().to_str() + "/" + GIT_sha1.hex(commit.extra.join(newline_bytes())) + " msg=" + commit.message.size().to_str() + "/" + GIT_sha1.hex(commit.message));
+            print(id + " commit " + object.raw.size().to_str() + " tree=" + commit.tree + " parents=" + joined(commit.parents) + " author=" + ident(commit.author) + " committer=" + ident(commit.committer) + " extra=" + commit.extra.size().to_str() + "/" + sha1digest.hex(commit.extra.join(newline_bytes())) + " msg=" + commit.message.size().to_str() + "/" + sha1digest.hex(commit.message));
         }
         case Tag(GIT_object.Tag tag): {
             str tagger = "-";
@@ -81,7 +81,7 @@ void show(GIT_object.Object object) {
                 case None: {
                 }
             }
-            print(id + " tag " + object.raw.size().to_str() + " object=" + tag.object + " type=" + tag.kind + " name=" + hex_or_dash(tag.name) + " tagger=" + tagger + " extra=" + tag.extra.size().to_str() + "/" + GIT_sha1.hex(tag.extra.join(newline_bytes())) + " msg=" + tag.message.size().to_str() + "/" + GIT_sha1.hex(tag.message));
+            print(id + " tag " + object.raw.size().to_str() + " object=" + tag.object + " type=" + tag.kind + " name=" + hex_or_dash(tag.name) + " tagger=" + tagger + " extra=" + tag.extra.size().to_str() + "/" + sha1digest.hex(tag.extra.join(newline_bytes())) + " msg=" + tag.message.size().to_str() + "/" + sha1digest.hex(tag.message));
         }
     }
 }

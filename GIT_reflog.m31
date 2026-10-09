@@ -41,11 +41,12 @@
 // Whitespace runs in a message become one space and the ends are trimmed
 // (`copy_reflog_msg`), so a message can never contain the tab or newline that
 // delimit the line. Who is recorded comes from `default_ident`:
-// `GIT_COMMITTER_NAME`/`_EMAIL`, then `user.name`/`user.email` in the config,
-// then `$USER`. `GIT_COMMITTER_DATE` in git's raw form (`1700000000 +0000`)
+// `GIT_ident.name`/`email` for the committer (`GIT_COMMITTER_*`, then the
+// config, then `$USER`). `GIT_COMMITTER_DATE` in git's raw form (`1700000000 +0000`)
 // sets the time; otherwise it is now, in UTC.
 
 import GIT_config;
+import GIT_ident;
 import GIT_object;
 import GIT_repository;
 import date;
@@ -154,20 +155,8 @@ pub bool should_log(str gitdir, str ref) {
 
 /// The identity a reflog line records. See the header.
 pub GIT_object.Ident default_ident(str gitdir) {
-    str who = os.env("GIT_COMMITTER_NAME").or("");
-    if (who == "") {
-        who = GIT_config.get(gitdir, "user", "", "name").or("");
-    }
-    if (who == "") {
-        who = os.env("USER").or("unknown");
-    }
-    str mail = os.env("GIT_COMMITTER_EMAIL").or("");
-    if (mail == "") {
-        mail = GIT_config.get(gitdir, "user", "", "email").or("");
-    }
-    if (mail == "") {
-        mail = who + "@localhost";
-    }
+    str who = GIT_ident.name(gitdir, "COMMITTER");
+    str mail = GIT_ident.email(gitdir, "COMMITTER", who);
     int when = date.now();
     str zone = "+0000";
     match (parse_raw_date(os.env("GIT_COMMITTER_DATE").or(""))) {

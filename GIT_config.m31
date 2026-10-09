@@ -9,7 +9,7 @@
 //   Config.get_bool(section, sub, key)  -> Option<bool>
 //   Config.list()                       -> List<str>               `git config --list`
 //
-//   GIT_config.get(gitdir, "remote", "origin", "url")  -> Option<str>   (one key, local file)
+//   GIT_config.get(gitdir, "remote", "origin", "url")  -> Option<str>   (one key, all layers)
 //   GIT_config.find(text, section, sub, key)           -> Option<str>   (same, over text)
 //
 //   GIT_config.set(gitdir, section, sub, key, value)      -> Result<bool, Error>
@@ -32,9 +32,16 @@
 // key are folded to lower case while the subsection is kept exactly -- except
 // in the deprecated `[section.sub]` header, which git folds whole.
 //
-// **`[include]` and `[includeIf]` are not followed.** They are read as the
-// ordinary sections they are, and their `path` keys are visible in the list,
-// but nothing is loaded through them.
+// `parse`, `load` and `load_file` read one file and do not follow
+// `[include]` or `[includeIf]`: they are the ordinary sections they are, and
+// their `path` keys are in the list. `load_all`, and so `get` and `effective`,
+// follow them the way `git config --list` does -- the included file's entries
+// come right after the `path` line, a relative path is relative to the file
+// that names it, `~/` is the home directory, a missing file is skipped and
+// nesting stops at git's depth of 10. `includeIf` conditions: `gitdir:`,
+// `gitdir/i:` (the glob has `*`, `?` and `**` but no `[...]`; the path is made
+// absolute with `$PWD`, not by resolving symlinks) and `onbranch:`. A
+// `hasconfig:` condition never holds.
 //
 // `parse` is strict where git is strict: a line that is none of the above is
 // `Error.Syntax`, so a file this module could not understand is never edited
@@ -69,6 +76,7 @@ import fs;
 import io;
 import os;
 import random;
+import GIT_ignore;
 import GIT_repository;
 
 /// Why a config could not be read, parsed or changed. Payload-free
@@ -337,17 +345,15 @@ pub Result<Config, Error> parse(str body) {
 /// file (`/etc/gitconfig`, unless `GIT_CONFIG_NOSYSTEM` is set), the user's
 /// (`$XDG_CONFIG_HOME/git/config` or `~/.config/git/config`, then
 /// `~/.gitconfig`; `GIT_CONFIG_GLOBAL` replaces both), then the repository's
-/// own. A later file's value wins, as in git.
+/// own, each with its includes followed. A later file's value wins, as in git.
 pub Result<Config, Error> load_all(str gitdir) {
     List<Entry> out = [];
     if (os.env("GIT_CONFIG_NOSYSTEM").or("") == "") {
-        Config system = load_file("/etc/gitconfig", "system")?;
-        append_all(out, system.entries);
+        load_followed("/etc/gitconfig", "system", gitdir, 0, out)?;
     }
     match (os.env("GIT_CONFIG_GLOBAL")) {
         case Some(str path): {
-            Config global = load_file(path, "global")?;
-            append_all(out, global.entries);
+            load_followed(path, "global", gitdir, 0, out)?;
         }
         case None: {
             str home = os.env("HOME").or("");
@@ -356,32 +362,35 @@ pub Result<Config, Error> load_all(str gitdir) {
                 xdg = fs.join(home, ".config");
             }
             if (xdg != "") {
-                Config user_xdg = load_file(fs.join(xdg, "git/config"), "global")?;
-                append_all(out, user_xdg.entries);
+                load_followed(fs.join(xdg, "git/config"), "global", gitdir, 0, out)?;
             }
             if (home != "") {
-                Config user_home = load_file(fs.join(home, ".gitconfig"), "global")?;
-                append_all(out, user_home.entries);
+                load_followed(fs.join(home, ".gitconfig"), "global", gitdir, 0, out)?;
             }
         }
     }
-    Config local = load(gitdir)?;
-    append_all(out, local.entries);
+    load_followed(fs.join(GIT_repository.common(gitdir), "config"), "local", gitdir, 0, out)?;
     return Result<Config, Error>.Ok(Config(out));
 }
 
-/// `key`'s value under `[section "subsection"]` (`subsection` may be `""`
-/// for a bare `[section]`) in the repository's own config, or `None` if the
-/// file, the section or the key is not there, or the file does not parse.
-pub Option<str> get(str gitdir, str section, str subsection, str key) {
-    match (load(gitdir)) {
+/// What a command run in this repository sees, or nothing at all when a file
+/// does not parse -- the lenient reading `get` has always had.
+pub Config effective(str gitdir) {
+    match (load_all(gitdir)) {
         case Ok(Config config): {
-            return config.get(section, subsection, key);
+            return config;
         }
         case Err: {
-            return Option<str>.None;
+            return Config([]);
         }
     }
+}
+
+/// `key`'s value under `[section "subsection"]` (`subsection` may be `""`
+/// for a bare `[section]`) in what `effective` sees, or `None` if the section
+/// or the key is not there, or a file does not parse.
+pub Option<str> get(str gitdir, str section, str subsection, str key) {
+    return effective(gitdir).get(section, subsection, key);
 }
 
 /// `get`, over config text already in memory -- the parser on its own, for a
@@ -395,6 +404,211 @@ pub Option<str> find(str body, str section, str subsection, str key) {
             return Option<str>.None;
         }
     }
+}
+
+// --- includes ---------------------------------------------------------------
+
+const int MAX_INCLUDE_DEPTH = 10;
+
+// One file's entries appended to `out`, each `include.path` (and each
+// `includeIf.<condition>.path` whose condition holds) followed by what it
+// names.
+Result<bool, Error> load_followed(str path, str origin, str gitdir, int depth, List<Entry> out) {
+    Config file = load_file(path, origin)?;
+    for (Entry entry in file.entries) {
+        out.push(entry);
+        if (entry.key == "path" && depth < MAX_INCLUDE_DEPTH && is_include(entry, gitdir, path)) {
+            str target = include_target(entry.value, path);
+            if (target != "" && fs.is_file(target)) {
+                load_followed(target, origin, gitdir, depth + 1, out)?;
+            }
+        }
+    }
+    return Result<bool, Error>.Ok(true);
+}
+
+bool is_include(Entry entry, str gitdir, str file) {
+    if (entry.section == "include" && entry.subsection == "") {
+        return true;
+    }
+    if (entry.section != "includeif") {
+        return false;
+    }
+    str condition = entry.subsection;
+    if (condition.starts_with("gitdir:")) {
+        return gitdir_matches(condition.substr(7, condition.size()), gitdir, file, false);
+    }
+    if (condition.starts_with("gitdir/i:")) {
+        return gitdir_matches(condition.substr(9, condition.size()), gitdir, file, true);
+    }
+    if (condition.starts_with("onbranch:")) {
+        return GIT_ignore.path_glob(trailing_wildcard(condition.substr(9, condition.size())), head_branch(gitdir));
+    }
+    return false;
+}
+
+str include_target(str value, str file) {
+    if (value.starts_with("~/")) {
+        return fs.join(os.env("HOME").or(""), value.substr(2, value.size()));
+    }
+    if (value.starts_with("/")) {
+        return value;
+    }
+    return fs.join(dirname(file), value);
+}
+
+bool gitdir_matches(str raw, str gitdir, str file, bool fold) {
+    str pattern = raw;
+    if (pattern.starts_with("~/")) {
+        pattern = os.env("HOME").or("") + pattern.substr(1, pattern.size());
+    } else if (pattern.starts_with("./")) {
+        pattern = dirname(file) + pattern.substr(1, pattern.size());
+    } else if (!pattern.starts_with("/")) {
+        pattern = "**/" + pattern;
+    }
+    pattern = trailing_wildcard(pattern);
+    str target = absolute(gitdir);
+    if (fold) {
+        return GIT_ignore.path_glob(pattern.to_lower(), target.to_lower());
+    }
+    return GIT_ignore.path_glob(pattern, target);
+}
+
+str trailing_wildcard(str pattern) {
+    if (pattern.ends_with("/")) {
+        return pattern + "**";
+    }
+    return pattern;
+}
+
+// The branch HEAD names, or `""` when it is detached or unreadable.
+str head_branch(str gitdir) {
+    match (io.read(fs.join(gitdir, "HEAD"))) {
+        case Ok(str body): {
+            str prefix = "ref: refs/heads/";
+            if (body.starts_with(prefix)) {
+                return body.substr(prefix.size(), body.size()).trim();
+            }
+            return "";
+        }
+        case Err: {
+            return "";
+        }
+    }
+}
+
+str dirname(str path) {
+    int cut = path.size();
+    while (cut > 0 && path.byte_at(cut - 1) != '/') {
+        cut = cut - 1;
+    }
+    if (cut == 0) {
+        return ".";
+    }
+    if (cut == 1) {
+        return "/";
+    }
+    return path.substr(0, cut - 1);
+}
+
+// `path` against `$PWD` when it is relative, with `.`, `..` and empty
+// segments folded away. There is no `realpath`, so a symlinked directory is
+// compared by the name it was reached through.
+str absolute(str path) {
+    str full = path;
+    if (!full.starts_with("/")) {
+        full = fs.join(os.env("PWD").or("/"), full);
+    }
+    List<str> kept = [];
+    for (str part in full.split("/")) {
+        if (part == "" || part == ".") {
+            continue;
+        }
+        if (part == "..") {
+            if (kept.size() > 0) {
+                kept.remove_at(kept.size() - 1);
+            }
+            continue;
+        }
+        kept.push(part);
+    }
+    return "/" + kept.join("/");
+}
+
+// --- settings with their defaults --------------------------------------------
+
+/// `commit.gpgsign`: this client does not sign, so a `true` here is a reason
+/// to refuse to commit, not to commit unsigned.
+pub bool commit_gpgsign(str gitdir) {
+    return effective(gitdir).get_bool("commit", "", "gpgsign").or(false);
+}
+
+/// The message a refusal for `commit_gpgsign` carries.
+pub const str GPGSIGN_REFUSAL = "commit.gpgsign is true and this client does not sign commits; run `git config commit.gpgsign false`, or commit with git itself";
+
+/// `branch.<name>.rebase` over `pull.rebase`, as `git pull` reads them:
+/// `"true"`, `"false"`, `"merges"` or `"interactive"`. Unset, or a value git
+/// would not accept, is `"false"`.
+pub str pull_rebase(str gitdir, str branch) {
+    Config config = effective(gitdir);
+    str section = "branch";
+    str subsection = branch;
+    if (config.get(section, subsection, "rebase").is_none()) {
+        section = "pull";
+        subsection = "";
+    }
+    str lower = config.get(section, subsection, "rebase").or("false").to_lower();
+    if (lower == "merges" || lower == "m") {
+        return "merges";
+    }
+    if (lower == "interactive" || lower == "i") {
+        return "interactive";
+    }
+    return bool_word(config.get_bool(section, subsection, "rebase"));
+}
+
+str bool_word(Option<bool> value) {
+    if (value.or(false)) {
+        return "true";
+    }
+    return "false";
+}
+
+/// `push.default`: `nothing`, `current`, `upstream` (`tracking` is the same),
+/// `simple` or `matching`; `simple` when unset or unrecognised.
+pub str push_default(str gitdir) {
+    str value = get(gitdir, "push", "", "default").or("simple").to_lower();
+    if (value == "tracking") {
+        return "upstream";
+    }
+    if (value == "nothing" || value == "current" || value == "upstream" || value == "matching") {
+        return value;
+    }
+    return "simple";
+}
+
+/// `push.autoSetupRemote`, false when unset.
+pub bool push_auto_setup_remote(str gitdir) {
+    return effective(gitdir).get_bool("push", "", "autosetupremote").or(false);
+}
+
+/// `init.defaultBranch`, `master` when unset or empty.
+pub str init_default_branch(str gitdir) {
+    str value = get(gitdir, "init", "", "defaultbranch").or("");
+    if (value == "") {
+        return "master";
+    }
+    return value;
+}
+
+/// `rerere.enabled`; when it is not set at all, git turns rerere on exactly
+/// when `rr-cache` exists in the repository.
+pub bool rerere_enabled(str gitdir) {
+    Config config = effective(gitdir);
+    if (config.has("rerere", "", "enabled")) {
+        return config.get_bool("rerere", "", "enabled").or(false);
+    }
+    return fs.is_dir(fs.join(GIT_repository.common(gitdir), "rr-cache"));
 }
 
 Result<str, Error> read_text(str path) {

@@ -9,6 +9,8 @@
 // can call it with hand-built values and no repository at all.
 
 import GIT_checkout;
+import GIT_config;
+import GIT_ident;
 import date;
 import GIT_log;
 import GIT_index;
@@ -771,14 +773,23 @@ pub Option<GIT_index.Entry> find_index_entry(GIT_index.Index index, bytes path) 
     return Option<GIT_index.Entry>.None;
 }
 
-/// Which command real git's own editor flow would launch: `$EDITOR` if it is
-/// set, `vi` otherwise -- git's own fallback (`core.editor` and `$VISUAL`
-/// come before `vi` in real git's own chain, but both come from
-/// `.git/config`, which this client already does not read, `GIT_object.m31`'s
-/// own README names that gap). Pure and total, so `t_gitclient.m31` can
-/// check it with no environment and no process at all.
-pub str pick_editor(Option<str> env_editor) {
-    return env_editor.or("vi");
+/// The editor git would launch, from its four sources in git's order:
+/// `$GIT_EDITOR`, `core.editor`, `$VISUAL`, `$EDITOR`, then `vi`. An empty
+/// source counts as unset. The value is one program name: it is run as
+/// `[editor, path]`, not through a shell, so one with arguments does not work.
+pub str pick_editor(Option<str> git_editor, Option<str> core_editor, Option<str> visual, Option<str> editor) {
+    List<Option<str>> sources = [git_editor, core_editor, visual, editor];
+    for (Option<str> source in sources) {
+        if (source.or("") != "") {
+            return source.or("");
+        }
+    }
+    return "vi";
+}
+
+/// `pick_editor` over the environment and the repository's configuration.
+pub str editor_for(str gitdir) {
+    return pick_editor(os.env("GIT_EDITOR"), GIT_config.get(gitdir, "core", "", "editor"), os.env("VISUAL"), os.env("EDITOR"));
 }
 
 pub str branch_name(str full) {
@@ -827,20 +838,17 @@ pub void remove_entry(GIT_index.Index index, bytes path) {
 
 // --- committing ---------------------------------------------------------------
 
-// No `.git/config` is read anywhere in this program (`GIT_object.m31`'s own
-// README names this gap); `GIT_AUTHOR_*`/`GIT_COMMITTER_*` are the one
-// identity source this client has, the same environment variables real git
-// itself honours over its config. `date.now()` is UTC-only
-// (`lib/date.m31`'s own header), so every commit this client writes is
-// timestamped `+0000`.
-pub GIT_object.Ident author_ident() {
-    str who = os.env("GIT_AUTHOR_NAME").or(os.env("USER").or("unknown"));
-    str mail = os.env("GIT_AUTHOR_EMAIL").or(who + "@localhost");
+// Who is recorded comes from `GIT_ident` (`GIT_AUTHOR_*` / `GIT_COMMITTER_*`,
+// then the config). `date.now()` is UTC-only (`lib/date.m31`'s own header), so
+// every commit this client writes is timestamped `+0000`.
+pub GIT_object.Ident author_ident(str gitdir) {
+    str who = GIT_ident.name(gitdir, "AUTHOR");
+    str mail = GIT_ident.email(gitdir, "AUTHOR", who);
     return GIT_object.Ident(who.to_bytes(), mail.to_bytes(), date.now(), 0, "+0000");
 }
 
-pub GIT_object.Ident committer_ident() {
-    str who = os.env("GIT_COMMITTER_NAME").or(os.env("USER").or("unknown"));
-    str mail = os.env("GIT_COMMITTER_EMAIL").or(who + "@localhost");
+pub GIT_object.Ident committer_ident(str gitdir) {
+    str who = GIT_ident.name(gitdir, "COMMITTER");
+    str mail = GIT_ident.email(gitdir, "COMMITTER", who);
     return GIT_object.Ident(who.to_bytes(), mail.to_bytes(), date.now(), 0, "+0000");
 }

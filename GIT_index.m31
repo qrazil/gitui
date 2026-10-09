@@ -64,7 +64,7 @@
 import io;
 import fs;
 import GIT_repository;
-import GIT_sha1;
+import sha1digest;
 import random;
 
 /// Why an index could not be read or believed. Payload-free
@@ -211,7 +211,7 @@ pub Result<Index, Error> parse(bytes data) {
     }
     bytes body = data.substr(0, end);
     bytes want = data.substr(end, data.size());
-    if (GIT_sha1.sum(body).hex() != want.hex()) {
+    if (sha1digest.sum(body).hex() != want.hex()) {
         return Result<Index, Error>.Err(Error.Checksum);
     }
     List<Entry> entries = [];
@@ -349,7 +349,7 @@ pub bytes encode(Index index) {
     for (Entry entry in sorted) {
         encode_entry(out, entry);
     }
-    bytes sum = GIT_sha1.sum(out);
+    bytes sum = sha1digest.sum(out);
     out.extend(sum);
     return out;
 }

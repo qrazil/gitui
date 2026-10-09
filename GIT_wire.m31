@@ -74,7 +74,7 @@
 // repositories, and any socket, TLS, HTTP or ssh code.
 
 import GIT_object;
-import GIT_sha1;
+import sha1digest;
 import fs;
 import io;
 import random;
@@ -765,7 +765,7 @@ pub Result<int, Error> check_pack(bytes pack) {
     int count = be32(pack, 8);
     bytes content = pack.substr(0, pack.size() - 20);
     bytes trailer = pack.substr(pack.size() - 20, pack.size());
-    if (GIT_sha1.sum(content) != trailer) {
+    if (sha1digest.sum(content) != trailer) {
         return Result<int, Error>.Err(Error.ChecksumMismatch);
     }
     return Result<int, Error>.Ok(count);
