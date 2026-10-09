@@ -299,6 +299,7 @@ source tests/test_gitui.sh
 # --- branch listing and checkout, against real git as the oracle ----------
 
 source tests/test_checkout.sh
+source tests/test_config.sh
 
 # --- smart-HTTP fetch/clone, against a real 'git http-backend' -------------
 #

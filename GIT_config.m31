@@ -1,42 +1,341 @@
-// The one thing this program reads out of `.git/config`: a remote's URL.
+// git's configuration files: read every section, subsection and key, and
+// change one value without disturbing anything else in the file.
 //
-//   GIT_config.get(gitdir, "remote", "origin", "url")  -> Option<str>
+//   GIT_config.load(gitdir)             -> Result<Config, Error>   .git/config
+//   GIT_config.load_all(gitdir)         -> Result<Config, Error>   system, global, local
+//   GIT_config.parse(text)              -> Result<Config, Error>   no I/O
+//   Config.get(section, sub, key)       -> Option<str>             the last value
+//   Config.get_all(section, sub, key)   -> List<str>               every value, in file order
+//   Config.get_bool(section, sub, key)  -> Option<bool>
+//   Config.list()                       -> List<str>               `git config --list`
 //
-// Nothing else in this program reads the config file at all (`GIT_object.m31`'s
-// own header, `GIT_client.m31`'s identity note) -- author identity comes from
-// the environment exactly as real git's own `GIT_AUTHOR_*` override does,
-// and the object store needs nothing from it. `push` is the first feature
-// that genuinely cannot do without it: where `origin` lives is written
-// nowhere else. So this is the smallest reader that answers that one
-// question honestly, not a general config library:
+//   GIT_config.get(gitdir, "remote", "origin", "url")  -> Option<str>   (one key, local file)
+//   GIT_config.find(text, section, sub, key)           -> Option<str>   (same, over text)
 //
-//   - `[section "subsection"]` and the deprecated `[section.subsection]`
-//     header shapes both resolve; the section and key names compare
-//     case-insensitively and the subsection case-sensitively, which is
-//     git-config(1)'s own rule;
-//   - `key = value`, trimmed, with a surrounding pair of double quotes
-//     removed and `\"`/`\\` inside them unescaped;
-//   - `#`/`;` comment lines and blank lines are skipped. A comment *after*
-//     a value on the same line is not stripped -- a URL is the only value
-//     asked for and none contains ` #` or ` ;`, and getting quoted-versus-
-//     unquoted comment rules right is a config parser, which this is not.
+//   GIT_config.set(gitdir, section, sub, key, value)      -> Result<bool, Error>
+//   GIT_config.add(gitdir, section, sub, key, value)      -> Result<bool, Error>
+//   GIT_config.unset(gitdir, section, sub, key)           -> Result<bool, Error>
+//   GIT_config.unset_all(gitdir, section, sub, key)       -> Result<bool, Error>
+//   GIT_config.edit_set / edit_add / edit_unset / edit_unset_all  -- the same over text
 //
-// The last assignment wins, as in git. Includes (`[include]`,
-// `[includeIf]`) are not followed; a remote configured only through one
-// reads as absent, and the message the client shows says exactly that.
+// --- reading ---------------------------------------------------------------
+//
+// The grammar is git's own (`config.c`): `[section]`, `[section "Sub"]` and
+// the deprecated `[section.sub]`; a key and its value on the line after the
+// header or after it on the same line; `key` alone, which is a null value
+// (`Entry.has_value` is false, `value` is `""`, and `get_bool` reads it as
+// true); `key =` with nothing after it, which is the empty string; quoted
+// parts with `\"`, `\\`, `\n`, `\t` and `\b`; a backslash at the end of a line
+// continuing the value on the next; `#` and `;` starting a comment anywhere
+// outside quotes. Whitespace inside an unquoted value is kept as it is
+// written, trailing whitespace is dropped, and a leading section name and
+// key are folded to lower case while the subsection is kept exactly -- except
+// in the deprecated `[section.sub]` header, which git folds whole.
+//
+// **`[include]` and `[includeIf]` are not followed.** They are read as the
+// ordinary sections they are, and their `path` keys are visible in the list,
+// but nothing is loaded through them.
+//
+// `parse` is strict where git is strict: a line that is none of the above is
+// `Error.Syntax`, so a file this module could not understand is never edited
+// by it. `get`/`find`, the original one-question readers, stay lenient and
+// answer `None` for a file that does not parse.
+//
+// --- writing ---------------------------------------------------------------
+//
+// The edit functions work on the file's text and change only the lines they
+// have to, the way `git config` does: the other content, comments and blank
+// lines included, is byte-for-byte what it was.
+//
+//   - `set` replaces the key's one line; a key with several values is
+//     `Error.MultipleValues` (use `add` or `unset_all`); a key that is not
+//     there is added after the last line of the last section of that name,
+//     or in a new section at the end of the file;
+//   - `add` always adds a new line, the same place;
+//   - `unset` removes the key's line, and the section header with it when
+//     that was the section's last entry and no comment sits near it, as git
+//     (2.18 and later) does; `unset` of a key that is not there is
+//     `Error.NotFound`, which `git config --unset` also reports;
+//   - `unset_all` removes every line of the key.
+//
+// The key is written as the caller spelled it (`core.fileMode` writes
+// `fileMode = ...`), matched case-insensitively against what is in the file.
+// A value is quoted when it begins or ends with a space or holds `#` or `;`,
+// and `\n`, `\t`, `"` and `\` are written as escapes. The file is replaced
+// by writing a temporary file beside it and renaming it over, so a crash
+// mid-write leaves the old config.
 
 import fs;
 import io;
+import os;
+import random;
 import GIT_repository;
 
+/// Why a config could not be read, parsed or changed. Payload-free
+/// (docs/errors-decision.md §4).
+pub enum Error {
+    /// The file could not be read or written.
+    Io;
+    /// The file holds a line that is not a section header, a comment or a
+    /// `key = value` (or is not UTF-8). Nothing is edited in such a file.
+    Syntax;
+    /// A name that is not `section.key` or `section.subsection.key`.
+    BadKey;
+    /// The key has more than one value, and the call changes exactly one.
+    MultipleValues;
+    /// `unset` of a key that is not in the file.
+    NotFound;
+}
+
+pub str Error.to_str() {
+    match (this) {
+        case Io: {
+            return "the config file could not be read or written";
+        }
+        case Syntax: {
+            return "the config file has a line that is not a section, a comment or a key";
+        }
+        case BadKey: {
+            return "not a config key: section.key or section.subsection.key";
+        }
+        case MultipleValues: {
+            return "the key has multiple values; a single value cannot replace them";
+        }
+        case NotFound: {
+            return "no such key in the config file";
+        }
+    }
+}
+
+/// One `key = value` line. `section` and `key` are lower case; `subsection`
+/// is as written (`""` for none).
+pub type Entry {
+    pub str section;
+    pub str subsection;
+    pub str key;
+    pub str value;
+    /// False for a bare `key` with no `=`: git's null value, which reads as
+    /// true for a boolean.
+    pub bool has_value;
+    /// 1-based line the entry starts on.
+    pub int line;
+    /// Which file it came from: `"system"`, `"global"`, `"local"`, or `""`
+    /// for text parsed with no file.
+    pub str origin = "";
+}
+
+/// `section.subsection.key`, the name `git config --list` prints.
+pub str Entry.name() {
+    if (subsection == "") {
+        return section + "." + key;
+    }
+    return section + "." + subsection + "." + key;
+}
+
+/// Every entry of one or more files, in the order read.
+pub type Config {
+    pub List<Entry> entries;
+}
+
+/// The last value of the key, or `None`.
+pub Option<str> Config.get(str section, str subsection, str key) {
+    Option<str> found = Option<str>.None;
+    for (Entry entry in entries) {
+        if (is_match(entry, section, subsection, key)) {
+            found = Option<str>.Some(entry.value);
+        }
+    }
+    return found;
+}
+
+/// Every value of the key, in file order.
+pub List<str> Config.get_all(str section, str subsection, str key) {
+    List<str> out = [];
+    for (Entry entry in entries) {
+        if (is_match(entry, section, subsection, key)) {
+            out.push(entry.value);
+        }
+    }
+    return out;
+}
+
+/// Is the key there at all, with or without a value?
+pub bool Config.has(str section, str subsection, str key) {
+    for (Entry entry in entries) {
+        if (is_match(entry, section, subsection, key)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+/// The last value read as git reads a boolean: `true`, `yes`, `on`, `1` and a
+/// bare key are true; `false`, `no`, `off`, `0` and the empty string are
+/// false; anything else is `None`.
+pub Option<bool> Config.get_bool(str section, str subsection, str key) {
+    Option<bool> out = Option<bool>.None;
+    for (Entry entry in entries) {
+        if (is_match(entry, section, subsection, key)) {
+            out = parse_bool(entry);
+        }
+    }
+    return out;
+}
+
+/// `git config --list`: one `name=value` per entry (`name` alone for a null
+/// value), in the order read.
+pub List<str> Config.list() {
+    List<str> out = [];
+    for (Entry entry in entries) {
+        if (entry.has_value) {
+            out.push(entry.name() + "=" + entry.value);
+        } else {
+            out.push(entry.name());
+        }
+    }
+    return out;
+}
+
+/// The distinct `(section, subsection)` pairs that hold at least one key, as
+/// `section` or `section.subsection` names, first appearance first.
+pub List<str> Config.sections() {
+    List<str> out = [];
+    Map<str, bool> seen = {};
+    for (Entry entry in entries) {
+        str name = entry.section;
+        if (entry.subsection != "") {
+            name = entry.section + "." + entry.subsection;
+        }
+        if (!seen.contains(name)) {
+            seen.set(name, true);
+            out.push(name);
+        }
+    }
+    return out;
+}
+
+/// The key names (lower case, no duplicates) under one section.
+pub List<str> Config.keys_of(str section, str subsection) {
+    List<str> out = [];
+    Map<str, bool> seen = {};
+    str want = section.to_lower();
+    for (Entry entry in entries) {
+        if (entry.section == want && entry.subsection == subsection && !seen.contains(entry.key)) {
+            seen.set(entry.key, true);
+            out.push(entry.key);
+        }
+    }
+    return out;
+}
+
+bool is_match(Entry entry, str section, str subsection, str key) {
+    return entry.section == section.to_lower() && entry.subsection == subsection && entry.key == key.to_lower();
+}
+
+Option<bool> parse_bool(Entry entry) {
+    if (!entry.has_value) {
+        return Option<bool>.Some(true);
+    }
+    str lower = entry.value.to_lower();
+    if (lower == "true" || lower == "yes" || lower == "on" || lower == "1") {
+        return Option<bool>.Some(true);
+    }
+    if (lower == "false" || lower == "no" || lower == "off" || lower == "0" || lower == "") {
+        return Option<bool>.Some(false);
+    }
+    match (lower.parse_int()) {
+        case Some(int number): {
+            return Option<bool>.Some(number != 0);
+        }
+        case None: {
+            return Option<bool>.None;
+        }
+    }
+}
+
+// --- loading ---------------------------------------------------------------
+
+/// The repository's own `config` (the shared one, in a linked worktree).
+/// A repository with no config file is an empty `Config`.
+pub Result<Config, Error> load(str gitdir) {
+    return load_file(fs.join(GIT_repository.common(gitdir), "config"), "local");
+}
+
+/// One config file, its entries marked with `origin`. A missing file is an
+/// empty `Config`, as it is for git.
+pub Result<Config, Error> load_file(str path, str origin) {
+    if (!fs.exists(path)) {
+        return Result<Config, Error>.Ok(Config([]));
+    }
+    str body = read_text(path)?;
+    List<Event> events = scan(body)?;
+    List<Entry> out = [];
+    for (Event event in events) {
+        if (event.kind == KIND_ENTRY) {
+            Entry entry = clone(event.entry);
+            entry.origin = origin;
+            out.push(entry);
+        }
+    }
+    return Result<Config, Error>.Ok(Config(out));
+}
+
+/// Text already in memory, with no I/O.
+pub Result<Config, Error> parse(str body) {
+    List<Event> events = scan(body)?;
+    List<Entry> out = [];
+    for (Event event in events) {
+        if (event.kind == KIND_ENTRY) {
+            out.push(event.entry);
+        }
+    }
+    return Result<Config, Error>.Ok(Config(out));
+}
+
+/// What `git config --list` sees outside a worktree-specific file: the system
+/// file (`/etc/gitconfig`, unless `GIT_CONFIG_NOSYSTEM` is set), the user's
+/// (`$XDG_CONFIG_HOME/git/config` or `~/.config/git/config`, then
+/// `~/.gitconfig`; `GIT_CONFIG_GLOBAL` replaces both), then the repository's
+/// own. A later file's value wins, as in git.
+pub Result<Config, Error> load_all(str gitdir) {
+    List<Entry> out = [];
+    if (os.env("GIT_CONFIG_NOSYSTEM").or("") == "") {
+        Config system = load_file("/etc/gitconfig", "system")?;
+        append_all(out, system.entries);
+    }
+    match (os.env("GIT_CONFIG_GLOBAL")) {
+        case Some(str path): {
+            Config global = load_file(path, "global")?;
+            append_all(out, global.entries);
+        }
+        case None: {
+            str home = os.env("HOME").or("");
+            str xdg = os.env("XDG_CONFIG_HOME").or("");
+            if (xdg == "" && home != "") {
+                xdg = fs.join(home, ".config");
+            }
+            if (xdg != "") {
+                Config user_xdg = load_file(fs.join(xdg, "git/config"), "global")?;
+                append_all(out, user_xdg.entries);
+            }
+            if (home != "") {
+                Config user_home = load_file(fs.join(home, ".gitconfig"), "global")?;
+                append_all(out, user_home.entries);
+            }
+        }
+    }
+    Config local = load(gitdir)?;
+    append_all(out, local.entries);
+    return Result<Config, Error>.Ok(Config(out));
+}
+
 /// `key`'s value under `[section "subsection"]` (`subsection` may be `""`
-/// for a bare `[section]`), or `None` if the config file, the section or the
-/// key is not there.
+/// for a bare `[section]`) in the repository's own config, or `None` if the
+/// file, the section or the key is not there, or the file does not parse.
 pub Option<str> get(str gitdir, str section, str subsection, str key) {
-    str path = fs.join(GIT_repository.common(gitdir), "config");
-    match (io.read(path)) {
-        case Ok(str text): {
-            return find(text, section, subsection, key);
+    match (load(gitdir)) {
+        case Ok(Config config): {
+            return config.get(section, subsection, key);
         }
         case Err: {
             return Option<str>.None;
@@ -46,130 +345,779 @@ pub Option<str> get(str gitdir, str section, str subsection, str key) {
 
 /// `get`, over config text already in memory -- the parser on its own, for a
 /// test with no repository.
-pub Option<str> find(str text, str section, str subsection, str key) {
-    str want_section = section.to_lower();
-    str want_key = key.to_lower();
+pub Option<str> find(str body, str section, str subsection, str key) {
+    match (parse(body)) {
+        case Ok(Config config): {
+            return config.get(section, subsection, key);
+        }
+        case Err: {
+            return Option<str>.None;
+        }
+    }
+}
+
+Result<str, Error> read_text(str path) {
+    match (io.read(path)) {
+        case Ok(str body): {
+            return Result<str, Error>.Ok(body);
+        }
+        case Err(io.Error error): {
+            match (error) {
+                case InvalidUtf8: {
+                    return Result<str, Error>.Err(Error.Syntax);
+                }
+                case NotFound: {
+                    return Result<str, Error>.Err(Error.Io);
+                }
+                case PermissionDenied: {
+                    return Result<str, Error>.Err(Error.Io);
+                }
+                case AlreadyExists: {
+                    return Result<str, Error>.Err(Error.Io);
+                }
+                case IsDirectory: {
+                    return Result<str, Error>.Err(Error.Io);
+                }
+                case NotADirectory: {
+                    return Result<str, Error>.Err(Error.Io);
+                }
+                case NotEmpty: {
+                    return Result<str, Error>.Err(Error.Io);
+                }
+                case Other(_): {
+                    return Result<str, Error>.Err(Error.Io);
+                }
+            }
+        }
+    }
+}
+
+// --- the scanner -----------------------------------------------------------
+
+const int KIND_BLANK = 0;
+const int KIND_COMMENT = 1;
+const int KIND_SECTION = 2;
+const int KIND_ENTRY = 3;
+
+// One thing in the file, with the byte range it occupies (`end` exclusive and
+// past its newline). A header followed by a key on its own line is two
+// events; a comment after a header or a value belongs to the line's event
+// (after a header it is an event of its own, as git sees it).
+type Event {
+    int kind;
+    int begin;
+    int end;
+    // A header's section/subsection; an entry's own are in `entry`.
+    str section;
+    str subsection;
+    // An entry's key exactly as written, for rewriting it.
+    str spelled;
+    Entry entry;
+}
+
+Event blank_event(int kind, int begin, int end) {
+    return Event(kind, begin, end, "", "", "", Entry("", "", "", "", false, 0));
+}
+
+bool is_blank_char(int c) {
+    return c == ' ' || c == '\t' || c == '\r' || c == 11 || c == 12;
+}
+
+bool is_alnum_char(int c) {
+    return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9');
+}
+
+int line_end(str body, int from) {
+    int position = from;
+    while (position < body.size() && body.byte_at(position) != '\n') {
+        position = position + 1;
+    }
+    if (position < body.size()) {
+        position = position + 1;
+    }
+    return position;
+}
+
+int line_number(str body, int offset) {
+    int count = 1;
+    for (int i in 0 .. offset) {
+        if (body.byte_at(i) == '\n') {
+            count = count + 1;
+        }
+    }
+    return count;
+}
+
+// Tokenise the whole file; `Syntax` on the first line git would reject.
+Result<List<Event>, Error> scan(str body) {
+    List<Event> events = [];
+    int position = 0;
+    str section = "";
+    str subsection = "";
     bool is_in_section = false;
-    Option<str> found = Option<str>.None;
-    for (str raw in text.split("\n")) {
-        str line = raw.trim();
-        if (line == "" || line.starts_with("#") || line.starts_with(";")) {
+    int line_start = 0;
+    bool is_fresh_line = true;
+    while (position < body.size()) {
+        if (is_fresh_line) {
+            line_start = position;
+        }
+        is_fresh_line = true;
+        int c = body.byte_at(position);
+        if (is_blank_char(c)) {
+            position = position + 1;
+            is_fresh_line = false;
             continue;
         }
-        if (line.starts_with("[")) {
-            is_in_section = is_matching_header(close_header(line), want_section, subsection);
+        if (c == '\n') {
+            position = position + 1;
+            events.push(blank_event(KIND_BLANK, line_start, position));
+            continue;
+        }
+        if (c == '#' || c == ';') {
+            position = line_end(body, position);
+            events.push(blank_event(KIND_COMMENT, line_start, position));
+            continue;
+        }
+        if (c == '[') {
+            Header header = parse_header(body, position)?;
+            section = header.section;
+            subsection = header.subsection;
+            is_in_section = true;
+            position = header.next;
+            Event event = blank_event(KIND_SECTION, line_start, position);
+            event.section = section;
+            event.subsection = subsection;
+            // The rest of the header's line: nothing, a comment, or a key.
+            int rest = position;
+            while (rest < body.size() && is_blank_char(body.byte_at(rest))) {
+                rest = rest + 1;
+            }
+            if (rest >= body.size()) {
+                event.end = body.size();
+                events.push(event);
+                position = body.size();
+                continue;
+            }
+            int after = body.byte_at(rest);
+            if (after == '\n') {
+                event.end = rest + 1;
+                events.push(event);
+                position = rest + 1;
+                continue;
+            }
+            events.push(event);
+            if (after == '#' || after == ';') {
+                position = line_end(body, rest);
+                events.push(blank_event(KIND_COMMENT, rest, position));
+                continue;
+            }
+            // A key on the header's line: the entry starts at the key.
+            line_start = rest;
+            position = rest;
+            is_fresh_line = false;
             continue;
         }
         if (!is_in_section) {
-            continue;
+            return Result<List<Event>, Error>.Err(Error.Syntax);
         }
-        match (line.index_of("=")) {
-            case Some(int equals_index): {
-                str line_key = line.substr(0, equals_index).trim().to_lower();
-                if (line_key == want_key) {
-                    found = Option<str>.Some(unquote(strip_comment(line.substr(equals_index + 1, line.size()).trim())));
-                }
+        // A key.
+        if (!((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z'))) {
+            return Result<List<Event>, Error>.Err(Error.Syntax);
+        }
+        int key_start = position;
+        while (position < body.size() && (is_alnum_char(body.byte_at(position)) || body.byte_at(position) == '-')) {
+            position = position + 1;
+        }
+        str spelled = body.substr(key_start, position);
+        while (position < body.size() && is_blank_char(body.byte_at(position))) {
+            position = position + 1;
+        }
+        Entry entry = Entry(section, subsection, spelled.to_lower(), "", false, line_number(body, key_start));
+        if (position < body.size() && body.byte_at(position) == '=') {
+            position = position + 1;
+            Value value = parse_value(body, position)?;
+            entry.value = value.text;
+            entry.has_value = true;
+            position = value.next;
+        } else if (position >= body.size() || body.byte_at(position) == '\n') {
+            if (position < body.size()) {
+                position = position + 1;
+            }
+        } else if (body.byte_at(position) == '#' || body.byte_at(position) == ';') {
+            position = line_end(body, position);
+        } else {
+            return Result<List<Event>, Error>.Err(Error.Syntax);
+        }
+        Event event = blank_event(KIND_ENTRY, line_start, position);
+        event.section = section;
+        event.subsection = subsection;
+        event.spelled = spelled;
+        event.entry = entry;
+        events.push(event);
+    }
+    return Result<List<Event>, Error>.Ok(events);
+}
+
+type Header {
+    str section;
+    str subsection;
+    int next;
+}
+
+// `[`-header at `start`; `next` is just past its `]`.
+Result<Header, Error> parse_header(str body, int start) {
+    int position = start + 1;
+    int name_start = position;
+    while (position < body.size() && (is_alnum_char(body.byte_at(position)) || body.byte_at(position) == '-' || body.byte_at(position) == '.')) {
+        position = position + 1;
+    }
+    str name = body.substr(name_start, position);
+    if (name == "" || position >= body.size()) {
+        return Result<Header, Error>.Err(Error.Syntax);
+    }
+    int c = body.byte_at(position);
+    if (c == ']') {
+        // `[section]`, or the deprecated `[section.sub]`, folded whole.
+        str lower = name.to_lower();
+        match (lower.index_of(".")) {
+            case Some(int dot): {
+                return Result<Header, Error>.Ok(Header(lower.substr(0, dot), lower.substr(dot + 1, lower.size()), position + 1));
             }
             case None: {
-                // `key` alone means `key = true`; nothing this reader asks
-                // for is boolean, so the line is simply not a match.
+                return Result<Header, Error>.Ok(Header(lower, "", position + 1));
             }
         }
     }
-    return found;
-}
-
-// A header line up to and including its last `]`, dropping a trailing
-// comment (`[remote "x"] ; note`).
-str close_header(str line) {
-    int position = line.size();
-    while (position > 0) {
-        position = position - 1;
-        if (line.substr(position, position + 1) == "]") {
-            return line.substr(0, position + 1);
-        }
+    if (c != ' ' && c != '\t') {
+        return Result<Header, Error>.Err(Error.Syntax);
     }
-    return line;
-}
-
-// A value without a trailing `#`/`;` comment that sits outside double quotes.
-str strip_comment(str value) {
-    bool is_quoted = false;
-    int position = 0;
-    while (position < value.size()) {
-        str character = value.substr(position, position + 1);
-        if (character == "\\") {
-            position = position + 2;
-            continue;
-        }
-        if (character == "\"") {
-            is_quoted = !is_quoted;
-        } else if (!is_quoted && (character == "#" || character == ";")) {
-            return value.substr(0, position).trim();
-        }
+    while (position < body.size() && (body.byte_at(position) == ' ' || body.byte_at(position) == '\t')) {
         position = position + 1;
     }
-    return value;
+    if (position >= body.size() || body.byte_at(position) != '"') {
+        return Result<Header, Error>.Err(Error.Syntax);
+    }
+    position = position + 1;
+    bytes sub = [];
+    while (true) {
+        if (position >= body.size()) {
+            return Result<Header, Error>.Err(Error.Syntax);
+        }
+        int d = body.byte_at(position);
+        if (d == '\n') {
+            return Result<Header, Error>.Err(Error.Syntax);
+        }
+        if (d == '"') {
+            position = position + 1;
+            break;
+        }
+        if (d == '\\') {
+            position = position + 1;
+            if (position >= body.size() || body.byte_at(position) == '\n') {
+                return Result<Header, Error>.Err(Error.Syntax);
+            }
+            d = body.byte_at(position);
+        }
+        sub.push(d);
+        position = position + 1;
+    }
+    if (position >= body.size() || body.byte_at(position) != ']') {
+        return Result<Header, Error>.Err(Error.Syntax);
+    }
+    return Result<Header, Error>.Ok(Header(name.to_lower(), sub.utf8().or(""), position + 1));
 }
 
-// Does a `[...]` header line name `section`/`subsection`?
-bool is_matching_header(str line, str want_section, str want_sub) {
-    if (!line.ends_with("]")) {
-        return false;
-    }
-    str inner = line.substr(1, line.size() - 1).trim();
-    str name = inner;
-    str sub = "";
-    match (inner.index_of("\"")) {
-        case Some(int quote_index): {
-            name = inner.substr(0, quote_index).trim();
-            str quoted = inner.substr(quote_index, inner.size());
-            if (quoted.size() >= 2 && quoted.ends_with("\"")) {
-                sub = unescape(quoted.substr(1, quoted.size() - 1));
-            } else {
-                return false;
+type Value {
+    str text;
+    int next;
+}
+
+// The value after `=`, up to and including its newline: git's `parse_value`.
+Result<Value, Error> parse_value(str body, int start) {
+    bytes out = [];
+    bool is_quoted = false;
+    bool is_comment = false;
+    int spaces = 0;
+    int position = start;
+    while (true) {
+        if (position >= body.size()) {
+            if (is_quoted) {
+                return Result<Value, Error>.Err(Error.Syntax);
             }
+            break;
+        }
+        int c = body.byte_at(position);
+        position = position + 1;
+        if (c == '\r' && position < body.size() && body.byte_at(position) == '\n') {
+            continue;
+        }
+        if (c == '\n') {
+            if (is_quoted) {
+                return Result<Value, Error>.Err(Error.Syntax);
+            }
+            break;
+        }
+        if (is_comment) {
+            continue;
+        }
+        if ((c == ' ' || c == '\t' || c == '\r' || c == 11 || c == 12) && !is_quoted) {
+            if (out.size() > 0) {
+                spaces = spaces + 1;
+            }
+            continue;
+        }
+        if (!is_quoted && (c == ';' || c == '#')) {
+            is_comment = true;
+            continue;
+        }
+        while (spaces > 0) {
+            out.push(' ');
+            spaces = spaces - 1;
+        }
+        if (c == '\\') {
+            if (position >= body.size()) {
+                return Result<Value, Error>.Err(Error.Syntax);
+            }
+            int e = body.byte_at(position);
+            position = position + 1;
+            if (e == '\r' && position < body.size() && body.byte_at(position) == '\n') {
+                position = position + 1;
+                continue;
+            }
+            if (e == '\n') {
+                continue;
+            }
+            if (e == 'n') {
+                out.push('\n');
+            } else if (e == 't') {
+                out.push('\t');
+            } else if (e == 'b') {
+                out.push(8);
+            } else if (e == '"' || e == '\\') {
+                out.push(e);
+            } else {
+                return Result<Value, Error>.Err(Error.Syntax);
+            }
+            continue;
+        }
+        if (c == '"') {
+            is_quoted = !is_quoted;
+            continue;
+        }
+        out.push(c);
+    }
+    match (out.utf8()) {
+        case Some(str text): {
+            return Result<Value, Error>.Ok(Value(text, position));
         }
         case None: {
-            match (inner.index_of(".")) {
-                case Some(int dot): {
-                    name = inner.substr(0, dot);
-                    sub = inner.substr(dot + 1, inner.size());
-                }
-                case None: {
-                }
+            return Result<Value, Error>.Err(Error.Syntax);
+        }
+    }
+}
+
+// --- writing: text in, text out --------------------------------------------
+
+/// A name split into the pieces a write needs. The pieces keep the caller's
+/// spelling.
+pub type Name {
+    pub str section;
+    pub str subsection;
+    pub str key;
+}
+
+/// `section.key` or `section.subsection.key` (the subsection may itself hold
+/// dots: the section is up to the first, the key after the last).
+pub Result<Name, Error> split_name(str full) {
+    int first = -1;
+    int last = -1;
+    for (int i in 0 .. full.size()) {
+        if (full.byte_at(i) == '.') {
+            if (first < 0) {
+                first = i;
             }
+            last = i;
         }
     }
-    return name.to_lower() == want_section && sub == want_sub;
+    if (first <= 0 || last == full.size() - 1) {
+        return Result<Name, Error>.Err(Error.BadKey);
+    }
+    if (first == last) {
+        return Result<Name, Error>.Ok(Name(full.substr(0, first), "", full.substr(first + 1, full.size())));
+    }
+    return Result<Name, Error>.Ok(Name(full.substr(0, first), full.substr(first + 1, last), full.substr(last + 1, full.size())));
 }
 
-// A value with its surrounding double quotes removed and unescaped, or
-// itself if it is not quoted.
-str unquote(str value) {
-    if (value.size() >= 2 && value.starts_with("\"") && value.ends_with("\"")) {
-        return unescape(value.substr(1, value.size() - 1));
+Result<bool, Error> check_name(str section, str subsection, str key) {
+    if (section == "" || key == "") {
+        return Result<bool, Error>.Err(Error.BadKey);
     }
-    return value;
+    for (int i in 0 .. section.size()) {
+        int c = section.byte_at(i);
+        if (!(is_alnum_char(c) || c == '-')) {
+            return Result<bool, Error>.Err(Error.BadKey);
+        }
+    }
+    int first = key.byte_at(0);
+    if (!((first >= 'a' && first <= 'z') || (first >= 'A' && first <= 'Z'))) {
+        return Result<bool, Error>.Err(Error.BadKey);
+    }
+    for (int i in 0 .. key.size()) {
+        int c = key.byte_at(i);
+        if (!(is_alnum_char(c) || c == '-')) {
+            return Result<bool, Error>.Err(Error.BadKey);
+        }
+    }
+    if (subsection.contains("\n")) {
+        return Result<bool, Error>.Err(Error.BadKey);
+    }
+    return Result<bool, Error>.Ok(true);
 }
 
-// `\"` -> `"`, `\\` -> `\`; any other escape is left as written.
-str unescape(str text) {
-    if (!text.contains("\\")) {
-        return text;
-    }
+str escape_subsection(str sub) {
     List<int> out = [];
-    List<int> characters = text.chars();
-    int position = 0;
-    while (position < characters.size()) {
-        int character = characters[position];
-        if (character == '\\' && position + 1 < characters.size() && (characters[position + 1] == '"' || characters[position + 1] == '\\')) {
-            out.push(characters[position + 1]);
-            position = position + 2;
-            continue;
+    for (int c in sub.chars()) {
+        if (c == '"' || c == '\\') {
+            out.push('\\');
         }
-        out.push(character);
-        position = position + 1;
+        out.push(c);
     }
     return str.from_chars(out);
+}
+
+// `\tkey = value\n`, quoted and escaped as `git config` writes it.
+str format_pair(str key, str value) {
+    str quote = "";
+    if (value.starts_with(" ") || value.ends_with(" ") || value.contains(";") || value.contains("#")) {
+        quote = "\"";
+    }
+    List<int> out = [];
+    for (int c in value.chars()) {
+        if (c == '\n') {
+            out.push('\\');
+            out.push('n');
+        } else if (c == '\t') {
+            out.push('\\');
+            out.push('t');
+        } else {
+            if (c == '"' || c == '\\') {
+                out.push('\\');
+            }
+            out.push(c);
+        }
+    }
+    return "\t" + key + " = " + quote + str.from_chars(out) + quote + "\n";
+}
+
+str format_header(str section, str subsection) {
+    if (subsection == "") {
+        return "[" + section + "]\n";
+    }
+    return "[" + section + " \"" + escape_subsection(subsection) + "\"]\n";
+}
+
+// Does this event belong to the section the key lives in?
+bool is_keys_section(Event event, str section, str subsection) {
+    return event.section == section.to_lower() && event.subsection == subsection;
+}
+
+bool is_keys_entry(Event event, str section, str subsection, str key) {
+    return event.kind == KIND_ENTRY && is_keys_section(event, section, subsection) && event.entry.key == key.to_lower();
+}
+
+// Where a new key goes: just after the last entry or header of the last
+// section with the key's name, or -1 when there is no such section.
+int insertion_point(List<Event> events, str section, str subsection) {
+    int point = -1;
+    for (Event event in events) {
+        if ((event.kind == KIND_SECTION || event.kind == KIND_ENTRY) && is_keys_section(event, section, subsection)) {
+            point = event.end;
+        }
+    }
+    return point;
+}
+
+// An entry that shares its line with a header ends that header's line first.
+str line_prefix(str body, int begin) {
+    int position = begin;
+    while (position > 0 && body.byte_at(position - 1) != '\n') {
+        position = position - 1;
+    }
+    return body.substr(position, begin);
+}
+
+void append_all(List<Entry> into, List<Entry> more) {
+    for (Entry entry in more) {
+        into.push(entry);
+    }
+}
+
+str trim_blank_end(str text) {
+    int end = text.size();
+    while (end > 0 && (text.byte_at(end - 1) == ' ' || text.byte_at(end - 1) == '\t')) {
+        end = end - 1;
+    }
+    return text.substr(0, end);
+}
+
+str with_newline(str body) {
+    if (body != "" && !body.ends_with("\n")) {
+        return body + "\n";
+    }
+    return body;
+}
+
+// Add a new line for the key after the right section, or in a new one.
+str insert_pair(str body, List<Event> events, str section, str subsection, str key, str value) {
+    int point = insertion_point(events, section, subsection);
+    if (point < 0) {
+        return with_newline(body) + format_header(section, subsection) + format_pair(key, value);
+    }
+    if (point > body.size()) {
+        point = body.size();
+    }
+    str before = body.substr(0, point);
+    str after = body.substr(point, body.size());
+    if (!before.ends_with("\n")) {
+        before = before + "\n";
+    }
+    return before + format_pair(key, value) + after;
+}
+
+/// `git config <key> <value>` over text.
+pub Result<str, Error> edit_set(str body, str section, str subsection, str key, str value) {
+    check_name(section, subsection, key)?;
+    List<Event> events = scan(body)?;
+    List<Event> hits = [];
+    for (Event event in events) {
+        if (is_keys_entry(event, section, subsection, key)) {
+            hits.push(event);
+        }
+    }
+    if (hits.size() > 1) {
+        return Result<str, Error>.Err(Error.MultipleValues);
+    }
+    if (hits.size() == 0) {
+        return Result<str, Error>.Ok(insert_pair(body, events, section, subsection, key, value));
+    }
+    Event hit = hits[0];
+    str prefix = line_prefix(body, hit.begin);
+    str head = body.substr(0, hit.begin);
+    str replacement = format_pair(key, value);
+    if (prefix.trim() != "") {
+        // `[core] a = 1`: the header keeps its line, the key moves below it.
+        head = trim_blank_end(head) + "\n";
+    }
+    return Result<str, Error>.Ok(head + replacement + body.substr(hit.end, body.size()));
+}
+
+/// `git config --add`: a new line, whatever the key already holds.
+pub Result<str, Error> edit_add(str body, str section, str subsection, str key, str value) {
+    check_name(section, subsection, key)?;
+    List<Event> events = scan(body)?;
+    return Result<str, Error>.Ok(insert_pair(body, events, section, subsection, key, value));
+}
+
+/// `git config --unset` over text: one value, or `NotFound`, or
+/// `MultipleValues`.
+pub Result<str, Error> edit_unset(str body, str section, str subsection, str key) {
+    check_name(section, subsection, key)?;
+    List<Event> events = scan(body)?;
+    int count = 0;
+    for (Event event in events) {
+        if (is_keys_entry(event, section, subsection, key)) {
+            count = count + 1;
+        }
+    }
+    if (count == 0) {
+        return Result<str, Error>.Err(Error.NotFound);
+    }
+    if (count > 1) {
+        return Result<str, Error>.Err(Error.MultipleValues);
+    }
+    return Result<str, Error>.Ok(remove_matching(body, events, section, subsection, key));
+}
+
+/// `git config --unset-all` over text. A key that is not there is `NotFound`.
+pub Result<str, Error> edit_unset_all(str body, str section, str subsection, str key) {
+    check_name(section, subsection, key)?;
+    List<Event> events = scan(body)?;
+    int count = 0;
+    for (Event event in events) {
+        if (is_keys_entry(event, section, subsection, key)) {
+            count = count + 1;
+        }
+    }
+    if (count == 0) {
+        return Result<str, Error>.Err(Error.NotFound);
+    }
+    return Result<str, Error>.Ok(remove_matching(body, events, section, subsection, key));
+}
+
+// Remove every matching entry, and a section header whose last entries those
+// were (git's `maybe_remove_section`): no comment before the entry back to the
+// header, no other entry in the section, no comment after it up to the next
+// section of a different name.
+str remove_matching(str body, List<Event> events, str section, str subsection, str key) {
+    List<int> begins = [];
+    List<int> ends = [];
+    List<str> fills = [];
+    int index = 0;
+    while (index < events.size()) {
+        Event event = events[index];
+        if (!is_keys_entry(event, section, subsection, key)) {
+            index = index + 1;
+            continue;
+        }
+        int begin = event.begin;
+        int end = event.end;
+        int skip_to = index + 1;
+        // Backwards: the first entry of its section, with no comment in front.
+        bool is_removable = true;
+        bool is_section_seen = false;
+        int back = index;
+        int section_begin = begin;
+        while (back > 0) {
+            Event before = events[back - 1];
+            if (before.kind == KIND_COMMENT) {
+                is_removable = false;
+                break;
+            }
+            if (before.kind == KIND_ENTRY) {
+                if (!is_section_seen) {
+                    is_removable = false;
+                }
+                break;
+            }
+            if (before.kind == KIND_SECTION) {
+                if (!is_keys_section(before, section, subsection)) {
+                    break;
+                }
+                is_section_seen = true;
+                section_begin = before.begin;
+            }
+            back = back - 1;
+        }
+        // Forwards: only entries that go too, until a section of another name.
+        int last_end = end;
+        if (is_removable) {
+            int forward = index + 1;
+            while (forward < events.size()) {
+                Event after = events[forward];
+                if (after.kind == KIND_COMMENT) {
+                    is_removable = false;
+                    break;
+                }
+                if (after.kind == KIND_SECTION) {
+                    if (is_keys_section(after, section, subsection)) {
+                        last_end = after.end;
+                        forward = forward + 1;
+                        continue;
+                    }
+                    break;
+                }
+                if (after.kind == KIND_ENTRY) {
+                    if (!is_keys_entry(after, section, subsection, key)) {
+                        is_removable = false;
+                        break;
+                    }
+                }
+                last_end = after.end;
+                forward = forward + 1;
+            }
+            if (is_removable) {
+                skip_to = forward;
+            }
+        }
+        if (is_removable && is_section_seen) {
+            begins.push(section_begin);
+            ends.push(last_end);
+            fills.push("");
+            index = skip_to;
+            continue;
+        }
+        if (line_prefix(body, begin).trim() != "") {
+            // `[core] a = 1`: the header keeps its line, and ends it.
+            begins.push(begin - line_prefix(body, begin).size() + trim_blank_end(line_prefix(body, begin)).size());
+            ends.push(end);
+            fills.push("\n");
+        } else {
+            begins.push(begin);
+            ends.push(end);
+            fills.push("");
+        }
+        index = index + 1;
+    }
+    // Delete back to front so the earlier offsets stay true.
+    str out = body;
+    int i = begins.size() - 1;
+    while (i >= 0) {
+        int stop = ends[i];
+        if (stop > out.size()) {
+            stop = out.size();
+        }
+        out = out.substr(0, begins[i]) + fills[i] + out.substr(stop, out.size());
+        i = i - 1;
+    }
+    return out;
+}
+
+// --- writing: files --------------------------------------------------------
+
+Result<bool, Error> write_config(str gitdir, str body) {
+    str path = fs.join(GIT_repository.common(gitdir), "config");
+    random.System rnd = random.system();
+    str temp = path + ".tmp" + rnd.hex(12);
+    match (io.write(temp, body)) {
+        case Ok: {
+        }
+        case Err(_): {
+            return Result<bool, Error>.Err(Error.Io);
+        }
+    }
+    match (fs.rename(temp, path)) {
+        case Ok: {
+            return Result<bool, Error>.Ok(true);
+        }
+        case Err(_): {
+            return Result<bool, Error>.Err(Error.Io);
+        }
+    }
+}
+
+Result<str, Error> read_local(str gitdir) {
+    str path = fs.join(GIT_repository.common(gitdir), "config");
+    if (!fs.exists(path)) {
+        return Result<str, Error>.Ok("");
+    }
+    return read_text(path);
+}
+
+/// `git config <section>.<subsection>.<key> <value>` on the repository's own
+/// config. `Error.MultipleValues` if the key already has several.
+pub Result<bool, Error> set(str gitdir, str section, str subsection, str key, str value) {
+    str body = read_local(gitdir)?;
+    str edited = edit_set(body, section, subsection, key, value)?;
+    return write_config(gitdir, edited);
+}
+
+/// `git config --add`.
+pub Result<bool, Error> add(str gitdir, str section, str subsection, str key, str value) {
+    str body = read_local(gitdir)?;
+    str edited = edit_add(body, section, subsection, key, value)?;
+    return write_config(gitdir, edited);
+}
+
+/// `git config --unset`.
+pub Result<bool, Error> unset(str gitdir, str section, str subsection, str key) {
+    str body = read_local(gitdir)?;
+    str edited = edit_unset(body, section, subsection, key)?;
+    return write_config(gitdir, edited);
+}
+
+/// `git config --unset-all`.
+pub Result<bool, Error> unset_all(str gitdir, str section, str subsection, str key) {
+    str body = read_local(gitdir)?;
+    str edited = edit_unset_all(body, section, subsection, key)?;
+    return write_config(gitdir, edited);
 }

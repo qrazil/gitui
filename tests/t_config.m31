@@ -1,0 +1,153 @@
+// Drives `GIT_config.m31` against a config file, so `test_config.sh` can
+// compare it with `git config --file` on the same bytes.
+//
+//   ./t_config list <file>                      one `name=value` per entry
+//   ./t_config get-all <file> <name>            every value, one per line
+//   ./t_config get <file> <name>                the last value
+//   ./t_config bool <file> <name>               true | false | invalid | unset
+//   ./t_config set <file> <name> <value>        rewrite <file> as git would
+//   ./t_config add <file> <name> <value>
+//   ./t_config unset <file> <name>
+//   ./t_config unset-all <file> <name>
+//   ./t_config repo-set <gitdir> <name> <value>  the file API, on <gitdir>/config
+//
+// An edit prints `ok` and exit 0, or `refused: <why>` and exit 1.
+
+import GIT_config;
+import io;
+import os;
+
+List<str> argv = os.args();
+if (argv.size() < 3) {
+    io.eprint("usage: t_config list|get-all|get|bool|set|add|unset|unset-all <file> [name [value]]");
+    os.exit(2);
+}
+str operation = argv[1];
+str path = argv[2];
+str body = "";
+if (operation != "repo-set") {
+    match (io.read(path)) {
+        case Ok(str text): {
+            body = text;
+        }
+        case Err(_): {
+            io.eprint("cannot read " + path);
+            os.exit(2);
+        }
+    }
+}
+if (operation == "list") {
+    match (GIT_config.parse(body)) {
+        case Ok(GIT_config.Config config): {
+            for (str line in config.list()) {
+                print(line);
+            }
+        }
+        case Err(GIT_config.Error error): {
+            print("refused: " + error.to_str());
+            os.exit(1);
+        }
+    }
+    os.exit(0);
+}
+if (argv.size() < 4) {
+    io.eprint("usage: t_config " + operation + " <file> <name> [value]");
+    os.exit(2);
+}
+str full = argv[3];
+GIT_config.Name name = GIT_config.Name("", "", "");
+match (GIT_config.split_name(full)) {
+    case Ok(GIT_config.Name split): {
+        name = split;
+    }
+    case Err(GIT_config.Error error): {
+        print("refused: " + error.to_str());
+        os.exit(1);
+    }
+}
+str value = "";
+if (argv.size() > 4) {
+    value = argv[4];
+}
+if (operation == "get-all" || operation == "get" || operation == "bool") {
+    match (GIT_config.parse(body)) {
+        case Ok(GIT_config.Config config): {
+            if (operation == "get-all") {
+                for (str each in config.get_all(name.section, name.subsection, name.key)) {
+                    print(each);
+                }
+            } else if (operation == "get") {
+                match (config.get(name.section, name.subsection, name.key)) {
+                    case Some(str found): {
+                        print(found);
+                    }
+                    case None: {
+                        os.exit(1);
+                    }
+                }
+            } else if (!config.has(name.section, name.subsection, name.key)) {
+                print("unset");
+            } else {
+                match (config.get_bool(name.section, name.subsection, name.key)) {
+                    case Some(bool flag): {
+                        if (flag) {
+                            print("true");
+                        } else {
+                            print("false");
+                        }
+                    }
+                    case None: {
+                        print("invalid");
+                    }
+                }
+            }
+        }
+        case Err(GIT_config.Error error): {
+            print("refused: " + error.to_str());
+            os.exit(1);
+        }
+    }
+    os.exit(0);
+}
+if (operation == "repo-set") {
+    match (GIT_config.set(path, name.section, name.subsection, name.key, value)) {
+        case Ok(_): {
+            print("ok");
+            os.exit(0);
+        }
+        case Err(GIT_config.Error error): {
+            print("refused: " + error.to_str());
+            os.exit(1);
+        }
+    }
+}
+Result<str, GIT_config.Error> edited = Result<str, GIT_config.Error>.Ok(body);
+if (operation == "set") {
+    edited = GIT_config.edit_set(body, name.section, name.subsection, name.key, value);
+} else if (operation == "add") {
+    edited = GIT_config.edit_add(body, name.section, name.subsection, name.key, value);
+} else if (operation == "unset") {
+    edited = GIT_config.edit_unset(body, name.section, name.subsection, name.key);
+} else if (operation == "unset-all") {
+    edited = GIT_config.edit_unset_all(body, name.section, name.subsection, name.key);
+} else {
+    io.eprint("unknown operation " + operation);
+    os.exit(2);
+}
+match (edited) {
+    case Ok(str text): {
+        match (io.write(path, text)) {
+            case Ok: {
+                print("ok");
+            }
+            case Err(_): {
+                io.eprint("cannot write " + path);
+                os.exit(2);
+            }
+        }
+    }
+    case Err(GIT_config.Error error): {
+        print("refused: " + error.to_str());
+        os.exit(1);
+    }
+}
