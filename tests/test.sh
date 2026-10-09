@@ -22,6 +22,7 @@
 # `.m31-deps/`.
 set -uo pipefail
 cd "$(dirname "$0")/.."
+unset VISUAL GIT_EDITOR
 
 if [ -z "${M31_ROOT:-}" ]; then
     echo "M31_ROOT is not set -- point it at a checkout of github.com/qrazil/m31" \
