@@ -1,0 +1,105 @@
+// Batch driver for `GIT_diff3.merge3` and the conflict reader, for
+// `test_diff3.sh` and `tests/oracles/oracle_diff3.py`: for each case
+// DIR/NNNNN.{base,ours,theirs} writes
+//
+//   NNNNN.m    merge3, Style.Merge, ZealousAlnum  (git merge-file -p)
+//   NNNNN.m3   merge3, Style.Diff3                (git merge-file -p --diff3)
+//   NNNNN.mz   merge3, Style.Merge, Zealous       (what `git merge` runs)
+//   NNNNN.n    the conflict counts of those three, one per line
+//   NNNNN.rt   "ok", or what is wrong with parse_conflicts/render/resolve on them
+//
+// The labels are the ones the oracle passes with -L: ours, base, theirs.
+//
+//   ./t_diff3 DIR COUNT
+
+import os;
+import io;
+import GIT_diff3;
+
+void run() {
+    List<str> argv = os.args();
+    if (argv.size() != 3) {
+        print("usage: t_diff3 DIR COUNT");
+        os.exit(1);
+    }
+    str dir = argv[1];
+    int count = argv[2].parse_int().or(0);
+    GIT_diff3.Labels labels = GIT_diff3.Labels("ours", "base", "theirs");
+    int c = 0;
+    while (c < count) {
+        str stem = dir + "/" + pad(c);
+        bytes base = read(stem + ".base");
+        bytes ours = read(stem + ".ours");
+        bytes theirs = read(stem + ".theirs");
+        GIT_diff3.Merged m = GIT_diff3.merge3(base, ours, theirs, labels);
+        GIT_diff3.Merged m3 = GIT_diff3.merge3(base, ours, theirs, labels, style: GIT_diff3.Style.Diff3);
+        GIT_diff3.Merged mz = GIT_diff3.merge3(base, ours, theirs, labels, level: GIT_diff3.Level.Zealous);
+        write(stem + ".m", m.text);
+        write(stem + ".m3", m3.text);
+        write(stem + ".mz", mz.text);
+        write(stem + ".n", (m.conflicts.to_str() + "\n" + m3.conflicts.to_str() + "\n" + mz.conflicts.to_str() + "\n").to_bytes());
+        str verdict = check(m, base, ours, theirs);
+        if (verdict == "ok") {
+            verdict = check(m3, base, ours, theirs);
+        }
+        write(stem + ".rt", verdict.to_bytes());
+        c = c + 1;
+    }
+}
+
+// The reading side, on a merge result: parse then render is the identity; the
+// conflicts counted are the ones merge3 reported (when the merge text has any
+// marker-looking line of its own, the count may be higher, so only a lower
+// count is wrong); and resolving every conflict leaves no marker from merge3.
+str check(GIT_diff3.Merged m, bytes base, bytes ours, bytes theirs) {
+    List<GIT_diff3.Segment> segs = GIT_diff3.parse_conflicts(m.text);
+    if (GIT_diff3.render(segs) != m.text) {
+        return "render(parse(x)) != x";
+    }
+    if (GIT_diff3.count_conflicts(segs) < m.conflicts) {
+        return "parse found " + GIT_diff3.count_conflicts(segs).to_str() + " conflicts, merge3 said " + m.conflicts.to_str();
+    }
+    if (m.conflicts == 0) {
+        return "ok";
+    }
+    // Taking ours everywhere gives a file that has no more conflicts to find.
+    bytes taken = GIT_diff3.resolve_all(segs, GIT_diff3.Choice.Ours);
+    if (GIT_diff3.count_conflicts(GIT_diff3.parse_conflicts(taken)) > GIT_diff3.count_conflicts(GIT_diff3.parse_conflicts(ours)) + GIT_diff3.count_conflicts(GIT_diff3.parse_conflicts(theirs))) {
+        return "conflicts left after resolve_all";
+    }
+    return "ok";
+}
+
+str pad(int n) {
+    str s = n.to_str();
+    while (s.size() < 5) {
+        s = "0" + s;
+    }
+    return s;
+}
+
+bytes read(str path) {
+    match (io.read_bytes(path)) {
+        case Ok(bytes contents): {
+            return contents;
+        }
+        case Err(io.Error error): {
+            print("cannot read " + path + ": " + error.to_str());
+            os.exit(1);
+            return [];
+        }
+    }
+}
+
+void write(str path, bytes data) {
+    match (io.write_bytes(path, data)) {
+        case Ok(int _n): {
+        }
+        case Err(io.Error error): {
+            print("cannot write " + path + ": " + error.to_str());
+            os.exit(1);
+        }
+    }
+}
+
+run();

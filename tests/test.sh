@@ -289,6 +289,11 @@ source tests/test_hunks.sh
 
 source tests/test_patch.sh
 
+# --- the git-faithful line diff and the three-way merge on top of it ------------
+
+source tests/test_xdiff.sh
+source tests/test_diff3.sh
+
 # --- the interactive client: unit, oracle and pty-driven end-to-end --------
 #
 # `test_gitui.sh` shares this script's shell the same way `test_write.sh`

@@ -1,0 +1,98 @@
+// Batch driver for `GIT_xdiff.ops`, for `tests/oracles/oracle_xdiff.py`: for each
+// case DIR/NNNNN.{base,ours,theirs} writes, for the pairs base/ours, base/theirs
+// and ours/theirs (NNNNN.dbo, .dbt, .dot), the script the way `git diff -U<huge>`
+// prints the body of its one hunk -- a ` `, `-` or `+` before every line, and
+// `\ No newline at end of file` after a line without a terminator -- or
+// nothing, if the files are equal. The oracle compares that with real
+// `git diff --no-index --no-indent-heuristic`: both run xdiff, so they must agree on
+// every line, not merely on the length of the script.
+//
+//   ./t_xdiff DIR COUNT
+
+import os;
+import io;
+import diff;
+import GIT_xdiff;
+
+void run() {
+    List<str> argv = os.args();
+    if (argv.size() != 3) {
+        print("usage: t_xdiff DIR COUNT");
+        os.exit(1);
+    }
+    str dir = argv[1];
+    int count = argv[2].parse_int().or(0);
+    int c = 0;
+    while (c < count) {
+        str stem = dir + "/" + pad(c);
+        bytes base = read(stem + ".base");
+        bytes ours = read(stem + ".ours");
+        bytes theirs = read(stem + ".theirs");
+        write(stem + ".dbo", script(base, ours));
+        write(stem + ".dbt", script(base, theirs));
+        write(stem + ".dot", script(ours, theirs));
+        c = c + 1;
+    }
+}
+
+bytes script(bytes old, bytes new) {
+    bytes out = [];
+    bool changed = false;
+    for (diff.Op op in GIT_xdiff.ops(GIT_xdiff.split_lines(old), GIT_xdiff.split_lines(new))) {
+        match (op.kind) {
+            case Keep: {
+                out.push(32);
+            }
+            case Add: {
+                out.push(43);
+                changed = true;
+            }
+            case Remove: {
+                out.push(45);
+                changed = true;
+            }
+        }
+        out.extend(op.line);
+        if (op.line[op.line.size() - 1] != 10) {
+            out.extend("\n\\ No newline at end of file\n".to_bytes());
+        }
+    }
+    if (!changed) {
+        return [];
+    }
+    return out;
+}
+
+str pad(int n) {
+    str s = n.to_str();
+    while (s.size() < 5) {
+        s = "0" + s;
+    }
+    return s;
+}
+
+bytes read(str path) {
+    match (io.read_bytes(path)) {
+        case Ok(bytes contents): {
+            return contents;
+        }
+        case Err(io.Error error): {
+            print("cannot read " + path + ": " + error.to_str());
+            os.exit(1);
+            return [];
+        }
+    }
+}
+
+void write(str path, bytes data) {
+    match (io.write_bytes(path, data)) {
+        case Ok(int _n): {
+        }
+        case Err(io.Error error): {
+            print("cannot write " + path + ": " + error.to_str());
+            os.exit(1);
+        }
+    }
+}
+
+run();

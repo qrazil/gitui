@@ -1,0 +1,720 @@
+// A line-based three-way merge that gives the answer git's xdiff merge gives,
+// and the reading side of its conflict markers: parse a merged file back into
+// text and conflicts, and resolve a conflict one way or another.
+//
+// API
+// ---
+//   GIT_diff3.merge3(base, ours, theirs, labels, style:, level:)  -> Merged
+//       `Merged.text` is the merged file, with conflicts spelled out in
+//       markers; `Merged.conflicts` how many there are (0: a clean merge).
+//   GIT_diff3.parse_conflicts(text)           -> List<Segment>
+//   GIT_diff3.render(segments)                -> bytes   (exact inverse)
+//   GIT_diff3.count_conflicts(segments)       -> int
+//   GIT_diff3.resolve(conflict, choice)       -> bytes   one conflict, resolved
+//   GIT_diff3.resolve_at(segments, n, choice) -> List<Segment>  n-th conflict -> Text
+//   GIT_diff3.resolve_all(segments, choice)   -> bytes   whole file, no markers left
+//
+// --- what is promised ------------------------------------------------------
+//
+// `merge3` is a port of xdl_merge (xdiff/xmerge.c): with the default `Style.Merge`
+// and `Level.ZealousAlnum` its output is byte for byte `git merge-file -p`'s,
+// and with `Style.Diff3` it is `git merge-file -p --diff3`'s; `Level.Zealous`
+// is what `git merge` itself runs. `tests/test_diff3.sh` holds that to thousands
+// of seeded random triples (repeated lines, empty lines, moved blocks, CRLF, a
+// missing final newline, empty files). In short, and as git does it:
+//
+//   - the two sides are each diffed against the base (`GIT_xdiff`, which
+//     makes xdiff's own choices; `lib/diff.m31`'s Myers would pick a different
+//     one of several equally short scripts, and so sometimes a different
+//     conflict);
+//   - a change on one side only is taken; a change on both sides is a conflict,
+//     unless both made exactly the same change, which is taken once;
+//   - changes that TOUCH (one ends where the other begins, with no unchanged
+//     line between) are a conflict, as git has it;
+//   - a conflict is then narrowed to the lines that really differ (`Zealous`),
+//     and two conflicts at most three lines apart, or apart by lines that
+//     contain nothing alphanumeric (`ZealousAlnum`), are joined into one;
+//   - `Style.Diff3` caps the level at `Eager` (no narrowing, as git does for
+//     `--diff3`) and adds the base between `|||||||` and `=======`;
+//   - a conflict side that does not end in a newline is given one before the
+//     next marker; the marker lines end in CRLF when the lines around the
+//     conflict do (xdiff's `is_cr_needed`);
+//   - when only one side differs from the base, the result is that side,
+//     verbatim, whatever its bytes.
+//
+// --- where this deliberately differs from git ------------------------------
+//
+//   - No binary check: git refuses ("Cannot merge binary files") when a side
+//     has a NUL in its first 8000 bytes. Callers who care use `diff.is_binary`
+//     first; here a NUL is just a byte of a line.
+//   - An empty label means no label ("<<<<<<<" alone). Git's `-L ""` prints
+//     "<<<<<<< " with a trailing space. Labels are otherwise printed as given.
+//   - No `zdiff3` style, no favor (`--ours`/`--theirs`/`--union`) and no
+//     configurable marker size (7). Resolving is done on the parsed
+//     result instead (`resolve`).
+
+import GIT_xdiff;
+
+/// How conflicts are written.
+pub enum Style {
+    /// `<<<<<<<` ours `=======` theirs `>>>>>>>`.
+    Merge;
+    /// `<<<<<<<` ours `|||||||` base `=======` theirs `>>>>>>>`.
+    Diff3;
+}
+
+/// How hard `merge3` works to avoid or shrink conflicts (xdiff's XDL_MERGE_*).
+pub enum Level {
+    /// Every change on both sides is a conflict, even an identical one.
+    Minimal;
+    /// Identical changes on both sides are taken once.
+    Eager;
+    /// ... and a conflict is narrowed to the lines that differ, close ones
+    /// joined (the level `git merge` uses).
+    Zealous;
+    /// ... and conflicts separated by lines with no letter or digit are joined
+    /// too (the level `git merge-file` uses).
+    ZealousAlnum;
+}
+
+/// The names printed after the markers: ours after `<<<<<<<`, base after
+/// `|||||||` (Diff3 only), theirs after `>>>>>>>`. Empty: no name.
+pub type Labels {
+    pub str ours;
+    pub str base;
+    pub str theirs;
+}
+
+pub type Merged {
+    pub bytes text;
+    pub int conflicts;
+}
+
+// --- merging -----------------------------------------------------------------
+
+const int MARKER_SIZE = 7;
+
+// One stretch of the merge, in the three files' lines: [i0, i0 + chg0) of the
+// base, [i1, i1 + chg1) of ours, [i2, i2 + chg2) of theirs. `mode` says what
+// to emit: 0 a conflict, 1 ours, 2 theirs.
+type Piece {
+    int mode;
+    int i0;
+    int chg0;
+    int i1;
+    int chg1;
+    int i2;
+    int chg2;
+}
+
+type Ctx {
+    List<bytes> base;
+    List<bytes> ours;
+    List<bytes> theirs;
+    Labels labels;
+    Style style;
+}
+
+bool is_diff3(Style style) {
+    match (style) {
+        case Merge: {
+            return false;
+        }
+        case Diff3: {
+            return true;
+        }
+    }
+}
+
+int level_rank(Level level) {
+    match (level) {
+        case Minimal: {
+            return 0;
+        }
+        case Eager: {
+            return 1;
+        }
+        case Zealous: {
+            return 2;
+        }
+        case ZealousAlnum: {
+            return 3;
+        }
+    }
+}
+
+/// Merge `ours` and `theirs`, two edits of `base`.
+pub Merged merge3(bytes base, bytes ours, bytes theirs, Labels labels, Style style = Style.Merge, Level level = Level.ZealousAlnum) {
+    Ctx ctx = Ctx(GIT_xdiff.split_lines(base), GIT_xdiff.split_lines(ours), GIT_xdiff.split_lines(theirs), labels, style);
+    List<GIT_xdiff.Edit> script_ours = GIT_xdiff.edits(GIT_xdiff.diff_lines(ctx.base, ctx.ours));
+    List<GIT_xdiff.Edit> script_theirs = GIT_xdiff.edits(GIT_xdiff.diff_lines(ctx.base, ctx.theirs));
+    if (script_ours.size() == 0) {
+        return Merged(theirs, 0);
+    }
+    if (script_theirs.size() == 0) {
+        return Merged(ours, 0);
+    }
+    int rank = level_rank(level);
+    if (is_diff3(style) && rank > 1) {
+        rank = 1;
+    }
+    List<Piece> pieces = combine(ctx, script_ours, script_theirs, rank);
+    if (rank >= 2) {
+        refine_conflicts(ctx, pieces);
+        simplify_non_conflicts(ctx, pieces, rank > 2);
+    }
+    int conflicts = 0;
+    for (Piece p in pieces) {
+        if (p.mode == 0) {
+            conflicts = conflicts + 1;
+        }
+    }
+    return Merged(fill(ctx, pieces), conflicts);
+}
+
+// Add a stretch to the list, joining it to the previous one when they touch
+// or overlap in ours or in theirs (xdl_append_merge).
+void append_piece(List<Piece> pieces, int mode, int i0, int chg0, int i1, int chg1, int i2, int chg2) {
+    int n = pieces.size();
+    if (n > 0) {
+        Piece last = pieces[n - 1];
+        if (i1 <= last.i1 + last.chg1 || i2 <= last.i2 + last.chg2) {
+            if (mode != last.mode) {
+                last.mode = 0;
+            }
+            last.chg0 = i0 + chg0 - last.i0;
+            last.chg1 = i1 + chg1 - last.i1;
+            last.chg2 = i2 + chg2 - last.i2;
+            return;
+        }
+    }
+    pieces.push(Piece(mode, i0, chg0, i1, chg1, i2, chg2));
+}
+
+bool same_lines(List<bytes> x, int xs, List<bytes> y, int ys, int count) {
+    int k = 0;
+    while (k < count) {
+        if (x[xs + k] != y[ys + k]) {
+            return false;
+        }
+        k = k + 1;
+    }
+    return true;
+}
+
+// Walk the two edit scripts together (xdl_do_merge): in each script an edit is
+// `a_*` in the base and `b_*` in that side.
+List<Piece> combine(Ctx ctx, List<GIT_xdiff.Edit> script1, List<GIT_xdiff.Edit> script2, int rank) {
+    List<Piece> pieces = [];
+    int p = 0;
+    int q = 0;
+    while (p < script1.size() && q < script2.size()) {
+        GIT_xdiff.Edit x1 = script1[p];
+        GIT_xdiff.Edit x2 = script2[q];
+        if (x1.a_start + x1.a_len < x2.a_start) {
+            append_piece(pieces, 1, x1.a_start, x1.a_len, x1.b_start, x1.b_len, x2.b_start - x2.a_start + x1.a_start, x1.a_len);
+            p = p + 1;
+            continue;
+        }
+        if (x2.a_start + x2.a_len < x1.a_start) {
+            append_piece(pieces, 2, x2.a_start, x2.a_len, x1.b_start - x1.a_start + x2.a_start, x2.a_len, x2.b_start, x2.b_len);
+            q = q + 1;
+            continue;
+        }
+        if (rank == 0 || x1.a_start != x2.a_start || x1.a_len != x2.a_len || x1.b_len != x2.b_len || !same_lines(ctx.ours, x1.b_start, ctx.theirs, x2.b_start, x1.b_len)) {
+            int off = x1.a_start - x2.a_start;
+            int ffo = off + x1.a_len - x2.a_len;
+            int i0 = x1.a_start;
+            int i1 = x1.b_start;
+            int i2 = x2.b_start;
+            if (off > 0) {
+                i0 = i0 - off;
+                i1 = i1 - off;
+            } else {
+                i2 = i2 + off;
+            }
+            int chg0 = x1.a_start + x1.a_len - i0;
+            int chg1 = x1.b_start + x1.b_len - i1;
+            int chg2 = x2.b_start + x2.b_len - i2;
+            if (ffo < 0) {
+                chg0 = chg0 - ffo;
+                chg1 = chg1 - ffo;
+            } else {
+                chg2 = chg2 + ffo;
+            }
+            append_piece(pieces, 0, i0, chg0, i1, chg1, i2, chg2);
+        }
+        int end1 = x1.a_start + x1.a_len;
+        int end2 = x2.a_start + x2.a_len;
+        if (end1 >= end2) {
+            q = q + 1;
+        }
+        if (end2 >= end1) {
+            p = p + 1;
+        }
+    }
+    int delta2 = ctx.theirs.size() - ctx.base.size();
+    while (p < script1.size()) {
+        GIT_xdiff.Edit x1 = script1[p];
+        append_piece(pieces, 1, x1.a_start, x1.a_len, x1.b_start, x1.b_len, x1.a_start + delta2, x1.a_len);
+        p = p + 1;
+    }
+    int delta1 = ctx.ours.size() - ctx.base.size();
+    while (q < script2.size()) {
+        GIT_xdiff.Edit x2 = script2[q];
+        append_piece(pieces, 2, x2.a_start, x2.a_len, x2.a_start + delta1, x2.a_len, x2.b_start, x2.b_len);
+        q = q + 1;
+    }
+    return pieces;
+}
+
+List<bytes> slice(List<bytes> lines, int start, int count) {
+    List<bytes> out = [];
+    int k = 0;
+    while (k < count) {
+        out.push(lines[start + k]);
+        k = k + 1;
+    }
+    return out;
+}
+
+// Narrow every conflict to the lines of it that differ (xdl_refine_conflicts):
+// diff ours' side of it against theirs', and let each difference stand as a
+// conflict of its own.
+void refine_conflicts(Ctx ctx, List<Piece> pieces) {
+    List<Piece> out = [];
+    for (Piece each in pieces) {
+        Piece m = clone(each);
+        if (m.mode != 0 || m.chg1 == 0 || m.chg2 == 0) {
+            out.push(m);
+            continue;
+        }
+        int base1 = m.i1;
+        int base2 = m.i2;
+        List<GIT_xdiff.Edit> script = GIT_xdiff.edits(GIT_xdiff.diff_lines(slice(ctx.ours, m.i1, m.chg1), slice(ctx.theirs, m.i2, m.chg2)));
+        if (script.size() == 0) {
+            // Both sides came to the same lines after all.
+            m.mode = 1;
+            out.push(m);
+            continue;
+        }
+        int parent_i0 = m.i0;
+        int parent_chg0 = m.chg0;
+        bool first = true;
+        for (GIT_xdiff.Edit e in script) {
+            if (first) {
+                m.i1 = e.a_start + base1;
+                m.chg1 = e.a_len;
+                m.i2 = e.b_start + base2;
+                m.chg2 = e.b_len;
+                out.push(m);
+                first = false;
+            } else {
+                out.push(Piece(0, parent_i0, parent_chg0, e.a_start + base1, e.a_len, e.b_start + base2, e.b_len));
+            }
+        }
+    }
+    pieces.clear();
+    for (Piece m in out) {
+        pieces.push(m);
+    }
+}
+
+bool is_alnum_byte(int c) {
+    return (c >= 48 && c <= 57) || (c >= 65 && c <= 90) || (c >= 97 && c <= 122);
+}
+
+bool lines_contain_alnum(List<bytes> lines, int start, int count) {
+    int k = 0;
+    while (k < count) {
+        for (int c in lines[start + k]) {
+            if (is_alnum_byte(c)) {
+                return true;
+            }
+        }
+        k = k + 1;
+    }
+    return false;
+}
+
+// Join two conflicts that have almost nothing between them
+// (xdl_simplify_non_conflicts): at most three lines in ours, or, at the
+// highest level, no letter or digit at all.
+void simplify_non_conflicts(Ctx ctx, List<Piece> pieces, bool simplify_if_no_alnum) {
+    List<Piece> out = [];
+    for (Piece m in pieces) {
+        int n = out.size();
+        if (n > 0) {
+            Piece prev = out[n - 1];
+            int begin = prev.i1 + prev.chg1;
+            int end = m.i1;
+            if (prev.mode == 0 && m.mode == 0 && (end - begin <= 3 || (simplify_if_no_alnum && !lines_contain_alnum(ctx.ours, begin, end - begin)))) {
+                prev.chg1 = m.i1 + m.chg1 - prev.i1;
+                prev.chg2 = m.i2 + m.chg2 - prev.i2;
+                continue;
+            }
+        }
+        out.push(m);
+    }
+    pieces.clear();
+    for (Piece m in out) {
+        pieces.push(m);
+    }
+}
+
+// --- writing the merge -------------------------------------------------------
+
+// Does the line end in CR LF? 1 yes, 0 no, -1 cannot tell (xdiff's is_eol_crlf).
+int is_eol_crlf(List<bytes> file, int index) {
+    int n = file.size();
+    if (n == 0) {
+        return -1;
+    }
+    int cur = index;
+    if (cur >= n - 1) {
+        bytes last = file[cur];
+        int size = last.size();
+        if (size > 0 && last[size - 1] == 10) {
+            if (size > 1 && last[size - 2] == 13) {
+                return 1;
+            }
+            return 0;
+        }
+        if (cur == 0) {
+            return -1;
+        }
+        cur = cur - 1;
+    }
+    bytes line = file[cur];
+    int len = line.size();
+    if (len > 1 && line[len - 2] == 13) {
+        return 1;
+    }
+    return 0;
+}
+
+// Marker lines end in CR LF when the lines around the conflict do (xdiff's
+// is_cr_needed): the line before the conflict in ours and in theirs, and the
+// FIRST line of the base, all end in CR LF (an empty file or a lone unterminated
+// line cannot say, and does not veto).
+bool is_cr_needed(Ctx ctx, Piece m) {
+    int at1 = 0;
+    if (m.i1 > 0) {
+        at1 = m.i1 - 1;
+    }
+    int needs = is_eol_crlf(ctx.ours, at1);
+    if (needs != 0) {
+        int at2 = 0;
+        if (m.i2 > 0) {
+            at2 = m.i2 - 1;
+        }
+        needs = is_eol_crlf(ctx.theirs, at2);
+    }
+    if (needs != 0) {
+        needs = is_eol_crlf(ctx.base, 0);
+    }
+    return needs > 0;
+}
+
+// Append lines [start, start + count); `add_nl`: and a newline (CR LF when
+// `needs_cr`) if the last of them has none (xdl_recs_copy).
+void copy_lines(bytes out, List<bytes> lines, int start, int count, bool needs_cr, bool add_nl) {
+    if (count < 1) {
+        return;
+    }
+    int k = 0;
+    while (k < count) {
+        out.extend(lines[start + k]);
+        k = k + 1;
+    }
+    if (add_nl) {
+        bytes last = lines[start + count - 1];
+        int size = last.size();
+        if (size == 0 || last[size - 1] != 10) {
+            if (needs_cr) {
+                out.push(13);
+            }
+            out.push(10);
+        }
+    }
+}
+
+void marker(bytes out, int ch, str label, bool needs_cr) {
+    int k = 0;
+    while (k < MARKER_SIZE) {
+        out.push(ch);
+        k = k + 1;
+    }
+    if (label.size() > 0) {
+        out.push(32);
+        out.extend(label.to_bytes());
+    }
+    if (needs_cr) {
+        out.push(13);
+    }
+    out.push(10);
+}
+
+void conflict_hunk(Ctx ctx, bytes out, Piece m, int done) {
+    bool needs_cr = is_cr_needed(ctx, m);
+    copy_lines(out, ctx.ours, done, m.i1 - done, false, false);
+    marker(out, 60, ctx.labels.ours, needs_cr);
+    copy_lines(out, ctx.ours, m.i1, m.chg1, needs_cr, true);
+    if (is_diff3(ctx.style)) {
+        marker(out, 124, ctx.labels.base, needs_cr);
+        copy_lines(out, ctx.base, m.i0, m.chg0, needs_cr, true);
+    }
+    marker(out, 61, "", needs_cr);
+    copy_lines(out, ctx.theirs, m.i2, m.chg2, needs_cr, true);
+    marker(out, 62, ctx.labels.theirs, needs_cr);
+}
+
+bytes fill(Ctx ctx, List<Piece> pieces) {
+    bytes out = [];
+    int done = 0;
+    for (Piece m in pieces) {
+        if (m.mode == 0) {
+            conflict_hunk(ctx, out, m, done);
+        } else {
+            copy_lines(out, ctx.ours, done, m.i1 - done, false, false);
+            if (m.mode == 1) {
+                copy_lines(out, ctx.ours, m.i1, m.chg1, false, false);
+            } else {
+                copy_lines(out, ctx.theirs, m.i2, m.chg2, false, false);
+            }
+        }
+        done = m.i1 + m.chg1;
+    }
+    copy_lines(out, ctx.ours, done, ctx.ours.size() - done, false, false);
+    return out;
+}
+
+// --- reading conflict markers --------------------------------------------------
+
+/// One conflict as it stands in a file. The marker lines are kept exactly as
+/// read (`<<<<<<< ours\n`, `=======\r\n`, ...) so that `render` gives the file
+/// back byte for byte.
+pub type Conflict {
+    pub bytes ours;
+    pub bytes base;
+    pub bytes theirs;
+    /// The file had a `|||||||` section (diff3 style); `base` is its text.
+    pub bool has_base;
+    pub bytes start_marker;
+    pub bytes base_marker;
+    pub bytes mid_marker;
+    pub bytes end_marker;
+}
+
+/// A file is a run of these: plain text, and conflicts.
+pub enum Segment {
+    Text(bytes);
+    Conflict(Conflict);
+}
+
+/// Which side of a conflict to keep.
+pub enum Choice {
+    Ours;
+    Theirs;
+    /// Ours, then theirs.
+    Both;
+    /// Theirs, then ours.
+    BothReversed;
+    /// The common ancestor; needs a diff3-style conflict, else it is empty.
+    Base;
+}
+
+// A marker line: `ch` MARKER_SIZE times, then the end of the line or a space.
+bool is_marker(bytes line, int ch) {
+    if (line.size() < MARKER_SIZE) {
+        return false;
+    }
+    int k = 0;
+    while (k < MARKER_SIZE) {
+        if (line[k] != ch) {
+            return false;
+        }
+        k = k + 1;
+    }
+    if (line.size() == MARKER_SIZE) {
+        return true;
+    }
+    return line[MARKER_SIZE] == 32 || line[MARKER_SIZE] == 10 || line[MARKER_SIZE] == 13;
+}
+
+// The conflict whose start marker is lines[at], and how many lines it takes,
+// or 0 lines if what follows is not a complete conflict.
+type Found {
+    Conflict conflict;
+    int used;
+}
+
+Option<Found> read_conflict(List<bytes> lines, int at) {
+    int n = lines.size();
+    bytes ours = [];
+    bytes base = [];
+    bytes theirs = [];
+    bytes base_marker = [];
+    bytes mid_marker = [];
+    int phase = 0;
+    int k = at + 1;
+    while (k < n) {
+        bytes line = lines[k];
+        if (is_marker(line, 60)) {
+            return Option<Found>.None;
+        }
+        if (phase == 0 && is_marker(line, 124)) {
+            base_marker = line;
+            phase = 1;
+        } else if (phase <= 1 && is_marker(line, 61)) {
+            mid_marker = line;
+            phase = 2;
+        } else if (phase == 2 && is_marker(line, 62)) {
+            return Option<Found>.Some(Found(Conflict(ours, base, theirs, base_marker.size() > 0, lines[at], base_marker, mid_marker, line), k - at + 1));
+        } else if (phase == 0) {
+            ours.extend(line);
+        } else if (phase == 1) {
+            base.extend(line);
+        } else {
+            theirs.extend(line);
+        }
+        k = k + 1;
+    }
+    return Option<Found>.None;
+}
+
+/// `text` as plain text and conflicts, in order. A conflict is a complete
+/// `<<<<<<<` ... `=======` ... `>>>>>>>` (with an optional `|||||||`) at
+/// the start of lines; anything else that looks like a marker stays text.
+pub List<Segment> parse_conflicts(bytes text) {
+    List<bytes> lines = GIT_xdiff.split_lines(text);
+    List<Segment> out = [];
+    bytes plain = [];
+    int k = 0;
+    while (k < lines.size()) {
+        if (is_marker(lines[k], 60)) {
+            match (read_conflict(lines, k)) {
+                case Some(Found found): {
+                    if (plain.size() > 0) {
+                        out.push(Segment.Text(plain));
+                        plain = [];
+                    }
+                    out.push(Segment.Conflict(found.conflict));
+                    k = k + found.used;
+                    continue;
+                }
+                case None: {
+                }
+            }
+        }
+        plain.extend(lines[k]);
+        k = k + 1;
+    }
+    if (plain.size() > 0) {
+        out.push(Segment.Text(plain));
+    }
+    return out;
+}
+
+/// The file `segments` came from, byte for byte.
+pub bytes render(List<Segment> segments) {
+    bytes out = [];
+    for (Segment s in segments) {
+        match (s) {
+            case Text(bytes t): {
+                out.extend(t);
+            }
+            case Conflict(Conflict c): {
+                out.extend(c.start_marker);
+                out.extend(c.ours);
+                if (c.has_base) {
+                    out.extend(c.base_marker);
+                    out.extend(c.base);
+                }
+                out.extend(c.mid_marker);
+                out.extend(c.theirs);
+                out.extend(c.end_marker);
+            }
+        }
+    }
+    return out;
+}
+
+/// How many conflicts `segments` holds.
+pub int count_conflicts(List<Segment> segments) {
+    int n = 0;
+    for (Segment s in segments) {
+        match (s) {
+            case Text(bytes _t): {
+            }
+            case Conflict(Conflict _c): {
+                n = n + 1;
+            }
+        }
+    }
+    return n;
+}
+
+/// What a conflict becomes when `choice` is taken.
+pub bytes resolve(Conflict c, Choice choice) {
+    bytes out = [];
+    match (choice) {
+        case Ours: {
+            out.extend(c.ours);
+        }
+        case Theirs: {
+            out.extend(c.theirs);
+        }
+        case Both: {
+            out.extend(c.ours);
+            out.extend(c.theirs);
+        }
+        case BothReversed: {
+            out.extend(c.theirs);
+            out.extend(c.ours);
+        }
+        case Base: {
+            out.extend(c.base);
+        }
+    }
+    return out;
+}
+
+/// `segments` with the `index`-th conflict (counting conflicts only, from 0)
+/// replaced by its resolution; the list is unchanged if there is no such one.
+pub List<Segment> resolve_at(List<Segment> segments, int index, Choice choice) {
+    List<Segment> out = [];
+    int seen = 0;
+    for (Segment s in segments) {
+        match (s) {
+            case Text(bytes t): {
+                out.push(Segment.Text(t));
+            }
+            case Conflict(Conflict c): {
+                if (seen == index) {
+                    out.push(Segment.Text(resolve(c, choice)));
+                } else {
+                    out.push(s);
+                }
+                seen = seen + 1;
+            }
+        }
+    }
+    return out;
+}
+
+/// The file with every conflict resolved the same way.
+pub bytes resolve_all(List<Segment> segments, Choice choice) {
+    bytes out = [];
+    for (Segment s in segments) {
+        match (s) {
+            case Text(bytes t): {
+                out.extend(t);
+            }
+            case Conflict(Conflict c): {
+                out.extend(resolve(c, choice));
+            }
+        }
+    }
+    return out;
+}
