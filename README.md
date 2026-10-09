@@ -40,7 +40,7 @@ bash scripts/build-gitui.sh -o ourgitui    # not build.sh -- it is the one with 
 | `GIT_checkout.m31` | local branches, switching branches (the working-tree-writing primitive: refuses on local changes in the way), creating a branch; `apply_tree_diff` (`read-tree -m -u` between two trees) and `reset_hard` (`reset --hard`) |
 | `GIT_hunks.m31` | `lib/diff.m31`'s edit script, grouped into qrazil/tui's `TUI_diff_view.Hunk`/`Line` with context; `spans` is the one definition of where each hunk starts and ends |
 | `GIT_patch.m31` | apply or revert exactly one hunk of a diff, or any selection of its `+`/`-` lines (`apply_lines`, `revert_lines`), byte for byte -- what the diff view's `s`/`u` stage and unstage with |
-| `GIT_xdiff.m31` | a port of git's xdiff line diff (Myers with its heuristics, no indent heuristic): same edit script as `git diff --no-indent-heuristic`; `GIT_hunks` and `GIT_patch` diff with it |
+| `GIT_xdiff.m31` | a port of git's xdiff line diff (Myers with its heuristics): same edit script as `git diff --no-indent-heuristic`, and with `diff_lines_indent` the same as plain `git diff` (the indent heuristic, which `GIT_blame` needs to attribute repeated lines as git does); `GIT_hunks` and `GIT_patch` diff with it |
 | `GIT_diff3.m31` | line-based three-way merge matching `git merge-file` byte for byte (`merge3`, merge and diff3 styles, `Level` Minimal..ZealousAlnum), and the conflict reader: `parse_conflicts`, `render`, `resolve`, `resolve_all` |
 | `GIT_log.m31` | the commit-history walk, shared by `git.m31 -log` and `gitui.m31` |
 | `GIT_client.m31` | the interactive client's top: `State` (the layer tower's last floor), key dispatch, drawing the overlay stack over the body, the `$EDITOR` handoff (no top-level statements, so it is importable and testable) |
@@ -48,6 +48,15 @@ bash scripts/build-gitui.sh -o ourgitui    # not build.sh -- it is the one with 
 | `GIT_ui_model.m31` | the pure model: outline rows, commit-file diffs, commit template, editor choice |
 | `GIT_ui_outline.m31`, `GIT_ui_diff.m31`, `GIT_ui_commit.m31`, `GIT_ui_branch.m31`, `GIT_ui_remote.m31` | one layer per concern (stage/unstage/discard/stage-all, hunk staging, commit and amend, branches, push and pull), each embedding the one below it, plus that concern's overlays |
 | `GIT_ui_help.m31`, `GIT_ui_log.m31`, `GIT_ui_search.m31`, `GIT_ui_picker.m31`, `GIT_ui_panel.m31` | the `?` key help, the `@` command log, `/` search, the reusable fuzzy-filter picker, and the shared frame/clamp drawing helpers |
+| `GIT_pathtree.m31` | a commit's tree as a lookup: `read_commit`, `entry_at(tree, path)`, `blob` |
+| `GIT_blame.m31` | `git blame` without renames or `-M`/`-C`: `blame(gitdir, rev, path, progress)` gives each line's commit, line number in that commit, path and boundary flag, matching `git blame --line-porcelain` (merge parents in order, an identical blob takes all lines) |
+| `GIT_filelog.m31` | `git log -- path` with git's default history simplification: `history(gitdir, rev, path, limit)` |
+| `GIT_undo.m31` | undo/redo from the HEAD reflog the way lazygit does it: `plan` (what one press would do, or why not, refusing while a merge/rebase/cherry-pick/revert is in progress), `apply` (checkout back through `GIT_checkout.apply_tree_diff`, then the ref, writing `undo: ...`/`redo: ...` reflog lines) |
+| `GIT_branches.m31` | upstream tracking (`branch.<n>.remote`/`.merge` mapped through `remote.<r>.fetch`; ahead/behind and git's `[ahead 2, behind 1]`/`[gone]` labels), `set_upstream`, `record_push` ("update by push"), and tags: `tags`, `create_lightweight`, `create_annotated` (byte-identical tag objects), `delete_tag` |
+| `GIT_watch.m31` | has the repository changed? `stat`-only fingerprint of the index, HEAD, refs, every tracked file and every non-ignored directory (bounded) |
+| `GIT_ui_blame.m31`, `GIT_ui_filelog.m31`, `GIT_ui_show.m31` | `B` blame overlay (with `,` re-blame at the parent), `H` file history, and the read-only commit view both open; `GIT_ui_blame.target` works out which file and revision `B`/`H` mean |
+| `GIT_ui_undo.m31`, `GIT_ui_tags.m31`, `GIT_ui_prompt.m31` | the `Z` undo/redo overlay, the `T` tag list, and the one-line text prompt it uses |
+| `GIT_ui_loop.m31`, `GIT_ui_autorefresh.m31` | `TUI_app.Loop.run` with an idle `Ticker`, and the ticker that polls `GIT_watch` about once a second and reloads the outline when something changed behind the client's back |
 | `gitui.m31` | the interactive client's thin driver: parses a path, runs `TUI_app.Loop` |
 | `GIT_http_fetch.m31` | git's smart-HTTP protocol, v0 fetch/clone only: pkt-line framing, the ref advertisement, want/have negotiation, side-band-64k demultiplexing, and pack checksum verification, over `lib/https.m31` (`http://` and `https://`) |
 | `GIT_wire.m31` | the transport-independent half of git's wire protocol over a duplex `Stream { read(n), write(bytes), close() }`: pkt-lines, the advertisement, want/have negotiation in rounds of at most 256 haves with the ACKs read between rounds (no write/write deadlock on a long-lived channel), side-band demultiplexing, pack verification, and the receive-pack command and report-status; `GIT_http_fetch.m31` and `GIT_http_push.m31` are now HTTP adapters over it |
@@ -61,7 +70,7 @@ bash scripts/build-gitui.sh -o ourgitui    # not build.sh -- it is the one with 
 | `scripts/build-gitui.sh` | builds `gitui.m31`; its `import tui.TUI_app;` lines resolve through `deps`, so nothing is staged or copied |
 | `tests/t_*.m31` | test programs, each printing what a Python oracle prints, or asserting against its own expectations |
 | `tests/oracles/oracle_*.py` | the oracles: `hashlib`, `zlib`, and a from-scratch format reader |
-| `tests/pty_e2e.py` | drives `ourgitui` under a real pty against disposable fixtures, real `git` as the oracle |
+| `tests/pty_e2e.py`, `tests/pty_blame_undo.py` | drive `ourgitui` under a real pty against disposable fixtures, real `git` as the oracle (the second file: blame, history, undo, tags, ahead/behind, `push -u`, auto-refresh) |
 | `scripts/compare.sh` | every command beside the real `git`, compared octet for octet |
 | `GIT_pull.m31` | fast-forward-only pull: fetches over smart HTTP (`GIT_http_fetch.m31`), unpacks the pack with `GIT_pack.read_pack`, refuses a dirty tree and anything but a fast-forward, then `GIT_checkout.m31` moves the working tree and the ref |
 | `tests/test.sh` | all of the above (sources the `tests/test_*.sh` files next to it) |
@@ -155,6 +164,23 @@ file, read, and `q`/`Esc`/`Backspace` back to where you were -- inside a
 diff, `q` closes the diff; only the outline's `q` quits. When the log is a
 full page long, a final `… load 200 more commits` row extends it on `Enter`.
 
+Blame, history, undo, tags and tracking. `B` blames a file as of HEAD or of
+any commit and `H` lists the commits that touched it; neither follows
+renames (git's `blame` without `-M`/`-C`, `log` without `--follow`), and
+blame is of committed content, not of the worktree's uncommitted lines. `Z`
+undoes and redoes HEAD moves through the reflog, lazygit's way: a commit,
+reset, checkout or whole rebase is one step, the worktree follows HEAD
+through the same primitive `checkout` uses, and it refuses while an
+operation is in progress or when a local change is in the way. Branch rows,
+the status header and the branch picker show `[ahead N, behind M]` /
+`[gone]` against the upstream. `T` manages tags. The outline also reloads
+by itself, about a second after the worktree, index, HEAD or refs change
+under it (an editor save, a `git` in another terminal), keeping the cursor
+on its row; it waits while a diff or overlay is open. Every write is in the
+`@` command log and writes git-style reflog lines. Tests: `test_blame.sh`,
+`test_undo.sh`, `test_branches.sh` against the real `git`, and the pty cases
+in `tests/pty_blame_undo.py`.
+
 ## Keys
 
 One table (`GIT_ui_core.key_table`) is the source for key dispatch, the
@@ -173,6 +199,11 @@ the top one takes every key.
 | `c` | outline | commit overlay: `e` edit, `f` finish, `A` amend, `a` abort |
 | `b` | outline | branch overlay: `c` check out, `/` fuzzy-pick a branch, `n` new, `a` abort |
 | `P` / `F` | outline | push / pull which-key, `p` runs it |
+| `B` | outline, diff | blame the file under the cursor (at HEAD, or at the commit when it is one of a commit's files): short id (`^` marks a root-commit line), author, date, line number, text. `j`/`k`/`g`/`G` move, `Enter` opens the line's commit with its change to the file, `,` re-blames at that commit's parent, `Backspace` goes back, `q` closes. Untracked files are refused |
+| `H` | outline, diff | history of the file under the cursor (`git log -- path`, newest first, up to 500); `Enter` shows a commit, `B` blames as of it |
+| `Z` | outline | undo the last HEAD move from the reflog, after showing it (`y`/`Enter` does it, `Esc` cancels); `r` switches to redo, `z` back to undo. Worktree changes and stashes are not undoable; a dirty file in the way refuses |
+| `T` | outline | tags: `n` lightweight, `a` annotated (name, then message), `d` delete (type `y`). New tags point at HEAD, or at the commit row the cursor was on |
+| `u` | push menu (`P`) | push and set `origin/<branch>` as the upstream (`git push -u`); every push also moves `refs/remotes/origin/<branch>` ("update by push") |
 | `/` | outline (log included) | search; smart-case: all lower case ignores case, a capital matches exactly. `Enter` runs it, `Esc` cancels |
 | `n` / `N` | outline (log included) | next / previous match, wrapping |
 | `g` / `R` | outline | re-read the repository (`r` is no longer bound) |

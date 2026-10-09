@@ -25,9 +25,12 @@ type TagsOverlay {
     int offset = 0;
     // The name typed for an annotated tag, while its message is asked.
     str pending_name = "";
+    // What the last action did or why not, shown in the title until the next key.
+    str notice = "";
 }
 
 pub TUI_app.Action TagsOverlay.handle_key(term.Code code) {
+    notice = "";
     match (GIT_ui_core.lookup(GIT_ui_core.SCOPE_TAGS, code)) {
         case Some(str cmd): {
             if (cmd == GIT_ui_core.CMD_CLOSE) {
@@ -62,17 +65,17 @@ pub void TagsOverlay.received(str purpose, str text) {
         match (GIT_branches.create_lightweight(host.gitdir, text, target)) {
             case Ok(bool made): {
                 host.log_command("tag " + text + " " + target.substr(0, 7));
-                host.say("tag " + text + " created at " + target_label);
+                tell("tag " + text + " created at " + target_label);
                 load(text);
             }
             case Err(GIT_branches.Error error): {
-                host.say("tag " + text + ": " + error.to_str());
+                tell("tag " + text + ": " + error.to_str());
             }
         }
     }
     if (purpose == "annotate-name") {
         if (text == "") {
-            host.say("tag: a tag needs a name");
+            tell("tag: a tag needs a name");
             return;
         }
         pending_name = text;
@@ -82,31 +85,36 @@ pub void TagsOverlay.received(str purpose, str text) {
         match (GIT_branches.create_annotated(host.gitdir, pending_name, target, text)) {
             case Ok(str id): {
                 host.log_command("tag -a " + pending_name + " " + target.substr(0, 7));
-                host.say("annotated tag " + pending_name + " created at " + target_label);
+                tell("annotated tag " + pending_name + " created at " + target_label);
                 load(pending_name);
             }
             case Err(GIT_branches.Error error): {
-                host.say("tag " + pending_name + ": " + error.to_str());
+                tell("tag " + pending_name + ": " + error.to_str());
             }
         }
     }
     if (purpose == "delete") {
         if (text != "y" || tags.size() == 0) {
-            host.say("tag: not deleted");
+            tell("tag: not deleted");
             return;
         }
         str name = tags[selected].name;
         match (GIT_branches.delete_tag(host.gitdir, name)) {
             case Ok(bool gone): {
                 host.log_command("tag -d " + name);
-                host.say("tag " + name + " deleted");
+                tell("tag " + name + " deleted");
                 load("");
             }
             case Err(GIT_branches.Error error): {
-                host.say("tag -d " + name + ": " + error.to_str());
+                tell("tag -d " + name + ": " + error.to_str());
             }
         }
     }
+}
+
+void TagsOverlay.tell(str text) {
+    notice = text;
+    host.say(text);
 }
 
 // Re-read the tags, putting the cursor on `keep` when it is there.
@@ -116,7 +124,7 @@ void TagsOverlay.load(str keep) {
             tags = found;
         }
         case Err(GIT_branches.Error error): {
-            host.say("tags: " + error.to_str());
+            tell("tags: " + error.to_str());
             return;
         }
     }
@@ -128,8 +136,15 @@ void TagsOverlay.load(str keep) {
     }
 }
 
+str TagsOverlay.notice_suffix() {
+    if (notice == "") {
+        return "";
+    }
+    return " -- " + notice;
+}
+
 pub void TagsOverlay.render(TUI_buffer.Buffer buffer, TUI_geometry.Rect area) {
-    TUI_geometry.Rect inner = GIT_ui_panel.frame(buffer, area, "tags (" + tags.size().to_str() + ") -- new ones point at " + target_label);
+    TUI_geometry.Rect inner = GIT_ui_panel.frame(buffer, area, "tags (" + tags.size().to_str() + ") -- new ones point at " + target_label + notice_suffix());
     if (inner.is_empty()) {
         return;
     }

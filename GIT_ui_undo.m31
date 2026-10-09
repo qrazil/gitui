@@ -16,9 +16,12 @@ import tui.TUI_geometry;
 type UndoOverlay {
     GIT_ui_core.Core host;
     bool is_redo = false;
+    // Why the last try did nothing; shown until the next key.
+    str notice = "";
 }
 
 pub TUI_app.Action UndoOverlay.handle_key(term.Code code) {
+    notice = "";
     match (GIT_ui_core.lookup(GIT_ui_core.SCOPE_UNDO, code)) {
         case Some(str cmd): {
             if (cmd == GIT_ui_core.CMD_CLOSE) {
@@ -55,12 +58,12 @@ void UndoOverlay.apply_now() {
                     run(action);
                 }
                 case None: {
-                    host.say(why(plan));
+                    notice = why(plan);
                 }
             }
         }
         case Err(GIT_undo.Error error): {
-            host.say("undo: " + error.to_str());
+            notice = "undo: " + error.to_str();
         }
     }
 }
@@ -74,7 +77,7 @@ void UndoOverlay.run(GIT_undo.Action action) {
             host.say(action.title + ": " + action.detail);
         }
         case Err(GIT_undo.Error error): {
-            host.say(action.title + " failed: " + error.to_str());
+            notice = action.title + " failed: " + error.to_str();
         }
     }
 }
@@ -121,6 +124,10 @@ pub void UndoOverlay.render(TUI_buffer.Buffer buffer, TUI_geometry.Rect area) {
         case Err(GIT_undo.Error error): {
             lines.push("cannot read the reflog: " + error.to_str());
         }
+    }
+    if (notice != "") {
+        lines.push("");
+        lines.push("! " + notice);
     }
     lines.push("");
     lines.push(GIT_undo.NOTE);

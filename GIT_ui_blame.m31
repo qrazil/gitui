@@ -121,9 +121,12 @@ type BlameOverlay {
     int selected = 0;
     int offset = 0;
     List<Frame> back = [];
+    // Why the last key did nothing, shown in the title until the next key.
+    str notice = "";
 }
 
 pub TUI_app.Action BlameOverlay.handle_key(term.Code code) {
+    notice = "";
     match (GIT_ui_core.lookup(GIT_ui_core.SCOPE_BLAME, code)) {
         case Some(str cmd): {
             if (cmd == GIT_ui_core.CMD_CLOSE) {
@@ -175,13 +178,13 @@ void BlameOverlay.reblame() {
     match (GIT_pathtree.read_commit(host.gitdir, line.commit)) {
         case Ok(GIT_object.Commit commit): {
             if (commit.parents.size() == 0) {
-                host.say("blame: " + line.commit.substr(0, 7) + " is a root commit, there is nothing before it");
+                notice = line.commit.substr(0, 7) + " is a root commit, there is nothing before it";
                 return;
             }
             reblame_at(commit.parents[0], line.path);
         }
         case Err(GIT_object.Error error): {
-            host.say("blame: " + error.to_str());
+            notice = error.to_str();
         }
     }
 }
@@ -197,7 +200,7 @@ void BlameOverlay.reblame_at(str parent, str file) {
             offset = 0;
         }
         case Err(GIT_blame.Error error): {
-            host.say("blame at " + parent.substr(0, 7) + ": " + error.to_str());
+            notice = "blame at " + parent.substr(0, 7) + ": " + error.to_str();
         }
     }
 }
@@ -207,7 +210,7 @@ pub void BlameOverlay.render(TUI_buffer.Buffer buffer, TUI_geometry.Rect area) {
     if (rev != "HEAD") {
         at = rev.substr(0, 7);
     }
-    TUI_geometry.Rect inner = GIT_ui_panel.frame(buffer, area, "blame " + path + " @ " + at);
+    TUI_geometry.Rect inner = GIT_ui_panel.frame(buffer, area, "blame " + path + " @ " + at + notice_suffix());
     if (inner.is_empty()) {
         return;
     }
@@ -230,6 +233,13 @@ pub void BlameOverlay.render(TUI_buffer.Buffer buffer, TUI_geometry.Rect area) {
         text = ["(empty file)"];
     }
     GIT_ui_panel.draw_lines(buffer, inner, text, 0, selected - offset);
+}
+
+str BlameOverlay.notice_suffix() {
+    if (notice == "") {
+        return "";
+    }
+    return " -- " + notice;
 }
 
 str BlameOverlay.format(GIT_blame.Line line, int number, int number_width) {
