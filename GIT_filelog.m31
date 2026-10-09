@@ -1,0 +1,138 @@
+// `git log -- <path>`: the commits that changed a file or a directory, with
+// git's default history simplification.
+//
+// API
+// ---
+//   GIT_filelog.history(gitdir, rev, path, limit) -> Result<List<GIT_log.Entry>, GIT_log.Error>
+//
+// Same queue as `GIT_log.walk` (newest committer date first, ties in the
+// order inserted). A commit is shown when it is not TREESAME to any parent at
+// `path` -- a root commit is shown when the path exists in it. A commit that
+// is TREESAME to a parent hands the walk on to the FIRST such parent only, so
+// a merge whose result equals one side follows that side and drops the other;
+// otherwise every parent is followed. That is `git log`'s default mode, not
+// --full-history or --simplify-merges. `limit` stops after that many shown
+// commits, or walks everything when negative.
+//
+// `path` is relative to the root and `/`-separated; a directory works too,
+// and is the same when its subtree has the same id.
+
+import GIT_log;
+import GIT_object;
+import GIT_pathtree;
+import GIT_refs;
+
+type Walker {
+    str gitdir;
+    str path;
+    Map<str, GIT_object.Commit> commits = {};
+    Map<str, str> signatures = {};
+}
+
+// The commit, or the reason it cannot be read.
+Result<GIT_object.Commit, GIT_log.Error> Walker.commit(str id) {
+    match (commits.get(id)) {
+        case Some(GIT_object.Commit known): {
+            return Result<GIT_object.Commit, GIT_log.Error>.Ok(known);
+        }
+        case None: {
+        }
+    }
+    match (GIT_pathtree.read_commit(gitdir, id)) {
+        case Ok(GIT_object.Commit found): {
+            commits.set(id, found);
+            return Result<GIT_object.Commit, GIT_log.Error>.Ok(found);
+        }
+        case Err(GIT_object.Error error): {
+            return Result<GIT_object.Commit, GIT_log.Error>.Err(GIT_log.Error.Object(error));
+        }
+    }
+}
+
+// What the tree has at the path: mode and id, or "" when nothing.
+str Walker.signature(GIT_object.Commit commit) {
+    match (signatures.get(commit.tree)) {
+        case Some(str known): {
+            return known;
+        }
+        case None: {
+        }
+    }
+    str sig = "";
+    match (GIT_pathtree.entry_at(gitdir, commit.tree, path)) {
+        case Some(GIT_object.Entry entry): {
+            sig = entry.mode.to_str() + ":" + entry.id;
+        }
+        case None: {
+        }
+    }
+    signatures.set(commit.tree, sig);
+    return sig;
+}
+
+/// The commits that changed `path` reachable from `rev`, newest first.
+pub Result<List<GIT_log.Entry>, GIT_log.Error> history(str gitdir, str rev, str path, int limit) {
+    str tip = "";
+    match (GIT_refs.rev_parse(gitdir, rev)) {
+        case Ok(str resolved): {
+            tip = resolved;
+        }
+        case Err(GIT_refs.Error error): {
+            return Result<List<GIT_log.Entry>, GIT_log.Error>.Err(GIT_log.Error.Refs(error));
+        }
+    }
+    match (GIT_refs.peel(gitdir, rev, tip)) {
+        case Ok(str peeled): {
+            tip = peeled;
+        }
+        case Err(GIT_refs.Error error): {
+            return Result<List<GIT_log.Entry>, GIT_log.Error>.Err(GIT_log.Error.Refs(error));
+        }
+    }
+    Walker walker = Walker(gitdir, path);
+    List<str> queue = [tip];
+    List<int> dates = [0];
+    Map<str, bool> seen = {};
+    seen.set(tip, true);
+    List<GIT_log.Entry> out = [];
+    while (queue.size() > 0) {
+        if (limit >= 0 && out.size() >= limit) {
+            break;
+        }
+        str id = queue.remove_at(0);
+        dates.remove_at(0);
+        GIT_object.Commit commit = walker.commit(id)?;
+        str mine = walker.signature(commit);
+        List<str> follow = commit.parents;
+        bool same = false;
+        if (commit.parents.size() == 0) {
+            same = mine == "";
+        } else {
+            for (str parent in commit.parents) {
+                GIT_object.Commit parent_commit = walker.commit(parent)?;
+                if (walker.signature(parent_commit) == mine) {
+                    same = true;
+                    follow = [parent];
+                    break;
+                }
+            }
+        }
+        if (!same) {
+            out.push(GIT_log.Entry(id, commit));
+        }
+        for (str parent in follow) {
+            if (seen.contains(parent)) {
+                continue;
+            }
+            seen.set(parent, true);
+            GIT_object.Commit parent_commit = walker.commit(parent)?;
+            int index = 0;
+            while (index < dates.size() && dates[index] >= parent_commit.committer.when) {
+                index = index + 1;
+            }
+            queue.insert(index, parent);
+            dates.insert(index, parent_commit.committer.when);
+        }
+    }
+    return Result<List<GIT_log.Entry>, GIT_log.Error>.Ok(out);
+}

@@ -20,13 +20,15 @@
 //   5. compact   -- every group of changed lines is slid up and down as far as
 //                   identical neighbours allow, merging with a neighbouring
 //                   group it touches, and left where it lines up with a change
-//                   in the other file (xdl_change_compact; without git's
-//                   indent heuristic, which merge does not use).
+//                   in the other file (xdl_change_compact; the indent
+//                   heuristic is only on for `diff_lines_indent`: merge does
+//                   not use it, `git diff` and `git blame` do).
 //
 // API
 // ---
 //   GIT_xdiff.split_lines(content)   -> List<bytes>   each line keeps its terminator
 //   GIT_xdiff.diff_lines(a, b)       -> Diff          which lines of a / b changed
+//   GIT_xdiff.diff_lines_indent(a, b) -> Diff         the same with git's indent heuristic (blame, diff)
 //   GIT_xdiff.edits(diff)            -> List<Edit>    the change script, in order
 //   GIT_xdiff.ops(a, b)              -> List<diff.Op> the same script as `lib/diff`'s ops
 //   GIT_xdiff.diff_text(old, new)         -> diff.Diff     `diff.diff`, but with git's choices
@@ -621,11 +623,164 @@ bool group_slide_up(List<bool> rchg, List<int> cls, Group g) {
     return true;
 }
 
+// --- the indent heuristic ---------------------------------------------------------------
+//
+// xdiff's XDF_INDENT_HEURISTIC (git's default for `git diff` and `git blame`,
+// not for merge): when a group of changed lines can slide and does not line up
+// with a change in the other file, pick the position whose two splits (before
+// and after the group) look most like block boundaries.
+
+const int MAX_INDENT = 200;
+const int MAX_BLANKS = 20;
+const int START_OF_FILE_PENALTY = 1;
+const int END_OF_FILE_PENALTY = 21;
+const int TOTAL_BLANK_WEIGHT = -30;
+const int POST_BLANK_WEIGHT = 6;
+const int RELATIVE_INDENT_PENALTY = -4;
+const int RELATIVE_INDENT_WITH_BLANK_PENALTY = 10;
+const int RELATIVE_OUTDENT_PENALTY = 24;
+const int RELATIVE_OUTDENT_WITH_BLANK_PENALTY = 17;
+const int RELATIVE_DEDENT_PENALTY = 23;
+const int RELATIVE_DEDENT_WITH_BLANK_PENALTY = 17;
+const int INDENT_WEIGHT = 60;
+const int INDENT_HEURISTIC_MAX_SLIDING = 100;
+
+type Score {
+    int effective_indent;
+    int penalty;
+}
+
+type Measure {
+    bool end_of_file;
+    int indent;
+    int pre_blank;
+    int pre_indent;
+    int post_blank;
+    int post_indent;
+}
+
+bool is_space_byte(int c) {
+    return c == 32 || (c >= 9 && c <= 13);
+}
+
+// The width of a line's leading whitespace, or -1 for a line of only whitespace.
+int get_indent(bytes line) {
+    int ret = 0;
+    for (int i in 0 .. line.size()) {
+        int c = line[i];
+        if (!is_space_byte(c)) {
+            return ret;
+        }
+        if (c == 32) {
+            ret = ret + 1;
+        } else if (c == 9) {
+            ret = ret + 8 - ret % 8;
+        }
+        if (ret >= MAX_INDENT) {
+            return MAX_INDENT;
+        }
+    }
+    return -1;
+}
+
+Measure measure_split(List<bytes> lines, int split) {
+    Measure m = Measure(false, -1, 0, -1, 0, -1);
+    if (split >= lines.size()) {
+        m.end_of_file = true;
+    } else {
+        m.indent = get_indent(lines[split]);
+    }
+    int i = split - 1;
+    while (i >= 0) {
+        m.pre_indent = get_indent(lines[i]);
+        if (m.pre_indent != -1) {
+            break;
+        }
+        m.pre_blank = m.pre_blank + 1;
+        if (m.pre_blank == MAX_BLANKS) {
+            m.pre_indent = 0;
+            break;
+        }
+        i = i - 1;
+    }
+    i = split + 1;
+    while (i < lines.size()) {
+        m.post_indent = get_indent(lines[i]);
+        if (m.post_indent != -1) {
+            break;
+        }
+        m.post_blank = m.post_blank + 1;
+        if (m.post_blank == MAX_BLANKS) {
+            m.post_indent = 0;
+            break;
+        }
+        i = i + 1;
+    }
+    return m;
+}
+
+void score_add_split(Measure m, Score s) {
+    if (m.pre_indent == -1 && m.pre_blank == 0) {
+        s.penalty = s.penalty + START_OF_FILE_PENALTY;
+    }
+    if (m.end_of_file) {
+        s.penalty = s.penalty + END_OF_FILE_PENALTY;
+    }
+    int post_blank = 0;
+    if (m.indent == -1) {
+        post_blank = 1 + m.post_blank;
+    }
+    int total_blank = m.pre_blank + post_blank;
+    s.penalty = s.penalty + TOTAL_BLANK_WEIGHT * total_blank;
+    s.penalty = s.penalty + POST_BLANK_WEIGHT * post_blank;
+    int indent = m.post_indent;
+    if (m.indent != -1) {
+        indent = m.indent;
+    }
+    bool any_blanks = total_blank != 0;
+    s.effective_indent = s.effective_indent + indent;
+    if (indent == -1) {
+        return;
+    }
+    if (m.pre_indent == -1) {
+        return;
+    }
+    if (indent > m.pre_indent) {
+        if (any_blanks) {
+            s.penalty = s.penalty + RELATIVE_INDENT_WITH_BLANK_PENALTY;
+        } else {
+            s.penalty = s.penalty + RELATIVE_INDENT_PENALTY;
+        }
+    } else if (indent < m.pre_indent) {
+        if (m.post_indent != -1 && m.post_indent > indent) {
+            if (any_blanks) {
+                s.penalty = s.penalty + RELATIVE_OUTDENT_WITH_BLANK_PENALTY;
+            } else {
+                s.penalty = s.penalty + RELATIVE_OUTDENT_PENALTY;
+            }
+        } else if (any_blanks) {
+            s.penalty = s.penalty + RELATIVE_DEDENT_WITH_BLANK_PENALTY;
+        } else {
+            s.penalty = s.penalty + RELATIVE_DEDENT_PENALTY;
+        }
+    }
+}
+
+int score_cmp(Score s1, Score s2) {
+    int cmp_indents = 0;
+    if (s1.effective_indent > s2.effective_indent) {
+        cmp_indents = 1;
+    } else if (s1.effective_indent < s2.effective_indent) {
+        cmp_indents = -1;
+    }
+    return INDENT_WEIGHT * cmp_indents + (s1.penalty - s2.penalty);
+}
+
 // xdl_change_compact: slide each group of `rchg` (class numbers `cls`) as far
 // up and down as identical lines allow, merging with groups it runs into,
 // then park it where it lines up with a group of `rchg_other` if it can, and
 // at its lowest position otherwise.
-void compact(List<bool> rchg, List<int> cls, List<bool> rchg_other) {
+void compact(List<bool> rchg, List<int> cls, List<bool> rchg_other, List<bytes> lines, bool indent) {
     Group g = group_init(rchg);
     Group go = group_init(rchg_other);
     while (true) {
@@ -661,6 +816,30 @@ void compact(List<bool> rchg, List<int> cls, List<bool> rchg_other) {
                     group_slide_up(rchg, cls, g);
                     group_previous(rchg_other, go);
                 }
+            } else if (g.end != earliest_end && indent) {
+                int shift = earliest_end;
+                if (g.end - groupsize - 1 > shift) {
+                    shift = g.end - groupsize - 1;
+                }
+                if (g.end - INDENT_HEURISTIC_MAX_SLIDING > shift) {
+                    shift = g.end - INDENT_HEURISTIC_MAX_SLIDING;
+                }
+                int best_shift = -1;
+                Score best = Score(0, 0);
+                while (shift <= g.end) {
+                    Score score = Score(0, 0);
+                    score_add_split(measure_split(lines, shift), score);
+                    score_add_split(measure_split(lines, shift - groupsize), score);
+                    if (best_shift == -1 || score_cmp(score, best) <= 0) {
+                        best = score;
+                        best_shift = shift;
+                    }
+                    shift = shift + 1;
+                }
+                while (g.end > best_shift) {
+                    group_slide_up(rchg, cls, g);
+                    group_previous(rchg_other, go);
+                }
             }
         }
         if (group_next(rchg, g)) {
@@ -675,6 +854,17 @@ void compact(List<bool> rchg, List<int> cls, List<bool> rchg_other) {
 /// Compare two line lists the way xdiff does (Myers, with xdiff's cleanup,
 /// heuristics and change-group compaction).
 pub Diff diff_lines(List<bytes> a, List<bytes> b) {
+    return diff_lines_with(a, b, false);
+}
+
+/// `diff_lines` the way `git diff` and `git blame` run it by default: with the
+/// indent heuristic, which only changes where an ambiguous group of added or
+/// removed lines is placed, never how many lines change.
+pub Diff diff_lines_indent(List<bytes> a, List<bytes> b) {
+    return diff_lines_with(a, b, true);
+}
+
+Diff diff_lines_with(List<bytes> a, List<bytes> b, bool indent) {
     int na = a.size();
     int nb = b.size();
     Classes cl = classify(a, b);
@@ -705,8 +895,8 @@ pub Diff diff_lines(List<bytes> a, List<bytes> b) {
     }
     Env env = Env(keep_a, keep_b, from_a, from_b, flags_a, flags_b, [0; ndiags + 1], [0; ndiags + 1], reduced_b + 1, mxcost);
     env.recs_cmp(0, reduced_a, 0, reduced_b, false);
-    compact(flags_a, cl.a, flags_b);
-    compact(flags_b, cl.b, flags_a);
+    compact(flags_a, cl.a, flags_b, a, indent);
+    compact(flags_b, cl.b, flags_a, b, indent);
     return Diff(flags_a, flags_b, cl.a, cl.b);
 }
 
