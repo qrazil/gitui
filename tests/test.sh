@@ -301,6 +301,7 @@ source tests/test_gitui.sh
 source tests/test_checkout.sh
 source tests/test_config.sh
 source tests/test_reflog.sh
+source tests/test_graph.sh
 
 # --- smart-HTTP fetch/clone, against a real 'git http-backend' -------------
 #

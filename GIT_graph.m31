@@ -1,0 +1,341 @@
+// Commit-graph questions: what is reachable from a commit, whether one commit
+// is an ancestor of another, their merge bases, how far two branches have
+// diverged, and `git rev-list`'s list.
+//
+//   g = GIT_graph.open(gitdir)
+//   g.ancestors(id)               -> Result<Map<str, bool>, Error>   id and everything behind it
+//   g.is_ancestor(a, b)           -> Result<bool, Error>             a is reachable from b (a == b counts)
+//   g.merge_bases(a, b)           -> Result<List<str>, Error>        `git merge-base --all a b`
+//   g.ahead_behind(a, b)          -> Result<AheadBehind, Error>      `git rev-list --left-right --count a...b`
+//   g.rev_list(include, exclude)  -> Result<List<str>, Error>        `git rev-list <include> ^<exclude>`
+//
+// The plain functions (`GIT_graph.merge_bases(gitdir, a, b)` and so on) open a
+// graph for one call. Keep a `Graph` when asking several questions about the
+// same history: it remembers every commit it has read, so the second question
+// costs nothing in object reads.
+//
+// Every id is a full forty-digit commit id; `GIT_refs.rev_parse` turns a name
+// into one. A tag that peels to a commit is not looked through here: pass the
+// commit (`GIT_refs.peel`).
+//
+// --- how the answers are reached ------------------------------------------------
+//
+// The answers do not depend on commit dates, which in the wild are not
+// monotone (clock skew, rebases, `--date`): they come from complete reachable
+// sets, not from the date-ordered walk-and-stop git uses, so they are what git
+// answers when git's heuristic is right and what it should answer when it is
+// not. The price is that a question reads all the history behind both commits
+// (once, with the cache). Dates are used only for the *order* of `rev_list`
+// and of the merge bases, where git uses them too.
+//
+//   - `merge_bases(a, b)`: the set A of everything reachable from a; then walk
+//     down from b, stopping at each commit that is in A. The commits stopped at
+//     are the common ancestors nearest b, and every merge base is among them
+//     (a maximal common ancestor has a path from b, and the first commit on
+//     that path that lies in A is itself a common ancestor above it). Of those,
+//     the ones that are ancestors of another are dropped -- that is the
+//     definition of a merge base, and a criss-cross merge has several.
+//   - `rev_list(include, exclude)`: reachable from `include` and not from
+//     anything reachable from `exclude`, in git's default order -- newest
+//     committer date first, a parent never before the walk reached it, equal
+//     dates in the order they were found.
+//   - `ahead_behind(a, b)`: `ahead` commits are reachable from a and not b,
+//     `behind` from b and not a.
+
+import GIT_object;
+
+/// Why a graph question could not be answered. A missing or damaged commit
+/// (a shallow clone, a corrupt store) is `Object`; an id that is an object but
+/// not a commit is `NotACommit`.
+pub enum Error {
+    Object(GIT_object.Error);
+    NotACommit;
+}
+
+pub str Error.to_str() {
+    match (this) {
+        case Object(GIT_object.Error error): {
+            return "object: " + error.to_str();
+        }
+        case NotACommit: {
+            return "not a commit";
+        }
+    }
+}
+
+/// How far two commits have diverged: `ahead` is reachable from the first and
+/// not the second, `behind` the other way round.
+pub type AheadBehind {
+    pub int ahead;
+    pub int behind;
+}
+
+type Node {
+    List<str> parents;
+    int when;
+}
+
+/// A commit graph over one repository, with a cache of the commits read.
+pub type Graph {
+    pub str gitdir;
+    Map<str, Node> nodes;
+}
+
+Result<Node, Error> Graph.node(str id) {
+    match (nodes.get(id)) {
+        case Some(Node known): {
+            return Result<Node, Error>.Ok(known);
+        }
+        case None: {
+        }
+    }
+    match (GIT_object.read(gitdir, id)) {
+        case Ok(GIT_object.Object object): {
+            match (object.body) {
+                case Commit(GIT_object.Commit commit): {
+                    Node made = Node(commit.parents, commit.committer.when);
+                    nodes.set(id, made);
+                    return Result<Node, Error>.Ok(made);
+                }
+                case Blob: {
+                    return Result<Node, Error>.Err(Error.NotACommit);
+                }
+                case Tree(_): {
+                    return Result<Node, Error>.Err(Error.NotACommit);
+                }
+                case Tag(_): {
+                    return Result<Node, Error>.Err(Error.NotACommit);
+                }
+            }
+        }
+        case Err(GIT_object.Error error): {
+            return Result<Node, Error>.Err(Error.Object(error));
+        }
+    }
+}
+
+/// The parents of a commit, in order.
+pub Result<List<str>, Error> Graph.parents(str id) {
+    Node found = node(id)?;
+    return Result<List<str>, Error>.Ok(found.parents);
+}
+
+/// The committer date of a commit, in seconds.
+pub Result<int, Error> Graph.when(str id) {
+    Node found = node(id)?;
+    return Result<int, Error>.Ok(found.when);
+}
+
+// Everything reachable from `from` without passing through a commit in `stop`
+// (a commit in `stop` is neither included nor walked past).
+Result<Map<str, bool>, Error> Graph.reach(List<str> from, Map<str, bool> stop) {
+    Map<str, bool> seen = {};
+    List<str> pending = [];
+    for (str id in from) {
+        if (!seen.contains(id) && !stop.contains(id)) {
+            seen.set(id, true);
+            pending.push(id);
+        }
+    }
+    while (pending.size() > 0) {
+        str id = pending.pop();
+        Node found = node(id)?;
+        for (str parent in found.parents) {
+            if (!seen.contains(parent) && !stop.contains(parent)) {
+                seen.set(parent, true);
+                pending.push(parent);
+            }
+        }
+    }
+    return Result<Map<str, bool>, Error>.Ok(seen);
+}
+
+/// `id` and every commit reachable from it.
+pub Result<Map<str, bool>, Error> Graph.ancestors(str id) {
+    return reach([id], {});
+}
+
+/// Is `ancestor` reachable from `descendant`? A commit is its own ancestor,
+/// as in `git merge-base --is-ancestor`.
+pub Result<bool, Error> Graph.is_ancestor(str ancestor, str descendant) {
+    if (ancestor == descendant) {
+        node(ancestor)?;
+        return Result<bool, Error>.Ok(true);
+    }
+    node(ancestor)?;
+    Map<str, bool> seen = {};
+    List<str> pending = [descendant];
+    seen.set(descendant, true);
+    while (pending.size() > 0) {
+        str id = pending.pop();
+        Node found = node(id)?;
+        for (str parent in found.parents) {
+            if (parent == ancestor) {
+                return Result<bool, Error>.Ok(true);
+            }
+            if (!seen.contains(parent)) {
+                seen.set(parent, true);
+                pending.push(parent);
+            }
+        }
+    }
+    return Result<bool, Error>.Ok(false);
+}
+
+/// Every merge base of `a` and `b`: the common ancestors that are not
+/// ancestors of another common ancestor. Newest committer date first, equal
+/// dates by id. One for a plain fork, none for unrelated histories, two or
+/// more after a criss-cross merge. If one is an ancestor of the other it is
+/// the only base.
+pub Result<List<str>, Error> Graph.merge_bases(str a, str b) {
+    Map<str, bool> from_a = reach([a], {})?;
+    node(b)?;
+    // The common ancestors nearest b.
+    List<str> candidates = [];
+    Map<str, bool> seen = {};
+    List<str> pending = [b];
+    seen.set(b, true);
+    while (pending.size() > 0) {
+        str id = pending.pop();
+        if (from_a.contains(id)) {
+            candidates.push(id);
+            continue;
+        }
+        Node found = node(id)?;
+        for (str parent in found.parents) {
+            if (!seen.contains(parent)) {
+                seen.set(parent, true);
+                pending.push(parent);
+            }
+        }
+    }
+    // Drop the ones some other candidate already has behind it.
+    Map<str, bool> covered = {};
+    if (candidates.size() > 1) {
+        for (str candidate in candidates) {
+            Node found = node(candidate)?;
+            Map<str, bool> behind = reach(found.parents, {})?;
+            for (str id in behind.keys()) {
+                covered.set(id, true);
+            }
+        }
+    }
+    List<str> bases = [];
+    for (str candidate in candidates) {
+        if (!covered.contains(candidate)) {
+            bases.push(candidate);
+        }
+    }
+    return sorted_newest_first(bases);
+}
+
+// Newest committer date first, ties by id.
+Result<List<str>, Error> Graph.sorted_newest_first(List<str> ids) {
+    List<str> out = [];
+    List<int> dates = [];
+    List<str> by_id = ids.slice(0, ids.size());
+    by_id.sort();
+    for (str id in by_id) {
+        int stamp = when(id)?;
+        int at = 0;
+        while (at < out.size() && dates[at] >= stamp) {
+            at = at + 1;
+        }
+        out.insert(at, id);
+        dates.insert(at, stamp);
+    }
+    return Result<List<str>, Error>.Ok(out);
+}
+
+/// How many commits `a` is ahead of and behind `b`.
+pub Result<AheadBehind, Error> Graph.ahead_behind(str a, str b) {
+    Map<str, bool> from_a = reach([a], {})?;
+    Map<str, bool> from_b = reach([b], {})?;
+    int ahead = 0;
+    for (str id in from_a.keys()) {
+        if (!from_b.contains(id)) {
+            ahead = ahead + 1;
+        }
+    }
+    int behind = 0;
+    for (str id in from_b.keys()) {
+        if (!from_a.contains(id)) {
+            behind = behind + 1;
+        }
+    }
+    return Result<AheadBehind, Error>.Ok(AheadBehind(ahead, behind));
+}
+
+/// The commits reachable from `include` and not from `exclude`, in `git
+/// rev-list`'s default order. An id listed in both is excluded.
+pub Result<List<str>, Error> Graph.rev_list(List<str> include, List<str> exclude) {
+    Map<str, bool> hidden = reach(exclude, {})?;
+    Map<str, bool> wanted = reach(include, hidden)?;
+    List<str> queue = [];
+    List<int> dates = [];
+    Map<str, bool> queued = {};
+    for (str id in include) {
+        if (wanted.contains(id) && !queued.contains(id)) {
+            queued.set(id, true);
+            enqueue(queue, dates, id)?;
+        }
+    }
+    List<str> out = [];
+    while (queue.size() > 0) {
+        str id = queue.remove_at(0);
+        dates.remove_at(0);
+        out.push(id);
+        Node found = node(id)?;
+        for (str parent in found.parents) {
+            if (wanted.contains(parent) && !queued.contains(parent)) {
+                queued.set(parent, true);
+                enqueue(queue, dates, parent)?;
+            }
+        }
+    }
+    return Result<List<str>, Error>.Ok(out);
+}
+
+// `commit_list_insert_by_date`: after every entry at least as new.
+Result<bool, Error> Graph.enqueue(List<str> queue, List<int> dates, str id) {
+    int stamp = when(id)?;
+    int at = 0;
+    while (at < queue.size() && dates[at] >= stamp) {
+        at = at + 1;
+    }
+    queue.insert(at, id);
+    dates.insert(at, stamp);
+    return Result<bool, Error>.Ok(true);
+}
+
+/// A graph over `gitdir`'s history. Nothing is read until asked.
+pub Graph open(str gitdir) {
+    return Graph(gitdir, {});
+}
+
+// --- one-shot forms ----------------------------------------------------------------
+
+/// `id` and everything behind it.
+pub Result<Map<str, bool>, Error> ancestors(str gitdir, str id) {
+    return open(gitdir).ancestors(id);
+}
+
+/// Is `ancestor` reachable from `descendant`?
+pub Result<bool, Error> is_ancestor(str gitdir, str ancestor, str descendant) {
+    return open(gitdir).is_ancestor(ancestor, descendant);
+}
+
+/// Every merge base of `a` and `b`.
+pub Result<List<str>, Error> merge_bases(str gitdir, str a, str b) {
+    return open(gitdir).merge_bases(a, b);
+}
+
+/// How far `a` and `b` have diverged.
+pub Result<AheadBehind, Error> ahead_behind(str gitdir, str a, str b) {
+    return open(gitdir).ahead_behind(a, b);
+}
+
+/// Reachable from `include`, not from `exclude`, newest first.
+pub Result<List<str>, Error> rev_list(str gitdir, List<str> include, List<str> exclude) {
+    return open(gitdir).rev_list(include, exclude);
+}
