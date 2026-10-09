@@ -44,6 +44,8 @@ import tui.TUI_app;
 import tui.TUI_buffer;
 import tui.TUI_geometry;
 import GIT_client;
+import GIT_ui_autorefresh;
+import GIT_ui_loop;
 
 List<str> argv = os.args();
 str path = ".";
@@ -62,9 +64,10 @@ if (!term.is_terminal(0)) {
 GIT_client.State state = GIT_client.State.open(git_directory, path);
 state.reload();
 TUI_app.Loop loop = TUI_app.Loop();
+GIT_ui_autorefresh.AutoRefresh refresher = GIT_ui_autorefresh.open(state.core());
 bool is_running = true;
 while (is_running) {
-    match (loop.run((TUI_buffer.Buffer buffer, TUI_geometry.Rect area) => state.draw(buffer, area), (term.Event event) => state.handle(event))) {
+    match (GIT_ui_loop.run(loop, (TUI_buffer.Buffer buffer, TUI_geometry.Rect area) => state.draw(buffer, area), (term.Event event) => state.handle(event), refresher)) {
         case Ok(_): {
             if (state.is_editor_wanted) {
                 state.launch_editor();

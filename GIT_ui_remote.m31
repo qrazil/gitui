@@ -1,6 +1,7 @@
 // The remote layer: the push (`P`) and pull (`F`) overlays and the two
 // operations behind them, fast-forward only, over smart HTTP.
 
+import GIT_branches;
 import GIT_config;
 import GIT_http_push;
 import GIT_pull;
@@ -33,6 +34,19 @@ pub void RemoteLayer.open_pull() {
 /// of it (`GIT_http_push.parse_remote` strips it from the URL before anything
 /// else sees the URL).
 pub void RemoteLayer.push_current() {
+    push_with(false);
+}
+
+/// `u` in the push menu: push, and on success make `origin/<branch>` the
+/// branch's upstream (`git push -u`).
+pub void RemoteLayer.push_set_upstream() {
+    push_with(true);
+}
+
+// After a successful push git moves the remote-tracking ref to what was
+// pushed (reflog "update by push"), and with `-u` writes branch.<n>.remote
+// and branch.<n>.merge.
+pub void RemoteLayer.push_with(bool set_upstream) {
     str refname = "";
     str id = "";
     match (GIT_refs.head(gitdir)) {
@@ -77,6 +91,7 @@ pub void RemoteLayer.push_current() {
             if (report.is_ok) {
                 message = "pushed " + refname + " to origin";
                 log_command("push origin " + refname + " " + GIT_ui_core.short_id(id));
+                record_pushed(refname, id, set_upstream);
             } else {
                 message = "push refused by origin: " + report.reason;
             }
@@ -126,6 +141,30 @@ pub void RemoteLayer.pull_current() {
     reload();
 }
 
+// The bookkeeping after a push that origin accepted.
+pub void RemoteLayer.record_pushed(str refname, str id, bool set_upstream) {
+    str branch = refname.substr(11, refname.size());
+    match (GIT_branches.record_push(gitdir, branch, "origin", id)) {
+        case Ok(bool wrote): {
+        }
+        case Err(GIT_branches.Error error): {
+            message = message + " (tracking ref: " + error.to_str() + ")";
+        }
+    }
+    if (!set_upstream) {
+        return;
+    }
+    match (GIT_branches.set_upstream(gitdir, branch, "origin", refname)) {
+        case Ok(bool wrote): {
+            message = message + "; upstream is origin/" + branch;
+            log_command("branch --set-upstream-to origin/" + branch + " " + branch);
+        }
+        case Err(GIT_branches.Error error): {
+            message = message + " (upstream: " + error.to_str() + ")";
+        }
+    }
+}
+
 // --- the overlays -----------------------------------------------------------------
 
 /// One type serves both: `is_push` picks the table scope and the text.
@@ -145,6 +184,9 @@ pub TUI_app.Action RemoteOverlay.handle_key(term.Code code) {
             if (cmd == GIT_ui_core.CMD_PUSH) {
                 host.push_current();
             }
+            if (cmd == GIT_ui_core.CMD_PUSH_UPSTREAM) {
+                host.push_set_upstream();
+            }
             if (cmd == GIT_ui_core.CMD_PULL) {
                 host.pull_current();
             }
@@ -159,7 +201,7 @@ pub TUI_app.Action RemoteOverlay.handle_key(term.Code code) {
 pub void RemoteOverlay.render(TUI_buffer.Buffer buffer, TUI_geometry.Rect area) {
     TUI_menu.WhichKey which_key = TUI_menu.WhichKey("pull", [TUI_menu.Item("p", "pull current branch from origin (fast-forward only)")]);
     if (is_push) {
-        which_key = TUI_menu.WhichKey("push", [TUI_menu.Item("p", "push current branch to origin (fast-forward only)")]);
+        which_key = TUI_menu.WhichKey("push", [TUI_menu.Item("p", "push current branch to origin (fast-forward only)"), TUI_menu.Item("u", "push and set origin/<branch> as the upstream")]);
     }
     which_key.render(buffer, area);
 }

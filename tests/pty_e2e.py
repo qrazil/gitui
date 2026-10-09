@@ -242,6 +242,20 @@ def env_with_editor(editor_path):
     return env
 
 
+class Context:
+    """What `pty_blame_undo.run` borrows from this file."""
+
+    def __init__(self, binpath, root, session, make_fixture, git, git_env, ok, fail):
+        self.binpath = binpath
+        self.root = root
+        self.Session = session
+        self.make_fixture = make_fixture
+        self.git = git
+        self.GIT_ENV = git_env
+        self.ok = ok
+        self.fail = fail
+
+
 def main():
     if len(sys.argv) != 3:
         print("usage: pty_e2e.py <ourgitui-binary> <scratch-dir>", file=sys.stderr)
@@ -1230,7 +1244,9 @@ def main():
     with open(os.path.join(fx24, "via_r.txt"), "w") as f:
         f.write("x\n")
     s24.send("r")
-    check("refresh: r is no longer bound (the file is not picked up)", "via_r.txt" not in s24.text(), s24.text())
+    # The outline now also refreshes on its own, so whether via_r.txt shows up
+    # says nothing about r; r must simply not open anything.
+    check("refresh: r is no longer bound (it opens nothing)", "Untracked files" in s24.text() and "Esc" not in s24.text(), s24.text())
     s24.send("g")
     check("refresh: g then picks it up", "via_r.txt" in s24.text(), s24.text())
     s24.quit()
@@ -1278,6 +1294,10 @@ def main():
     head2, _, _ = git(fx25, "symbolic-ref", "--short", "HEAD")
     rc = s25.quit()
     check("picker: Escape cancels and changes nothing; the stack is empty so q quits", head2 == "feature/logout" and rc == 0, "head=%r rc=%r" % (head2, rc))
+
+    import pty_blame_undo
+
+    pty_blame_undo.run(Context(binpath, root, Session, make_fixture, git, GIT_ENV, ok, fail))
 
     return failures
 

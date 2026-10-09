@@ -44,6 +44,29 @@ int PathRow.cmp(PathRow other) {
 pub type BranchRow {
     pub GIT_checkout.Branch branch;
     pub str subject;
+    /// The upstream's short name (`origin/main`), "" when none is set.
+    pub str upstream = "";
+    /// `[ahead 2, behind 1]`, `[gone]`, or "" when level or without upstream.
+    pub str track = "";
+}
+
+/// A branch picker item: the name, then its upstream and ahead/behind when
+/// it has them (`main  origin/main [ahead 2]`). A branch name has no spaces,
+/// so the name is everything before the first one (`picked_name`).
+pub str picker_item(BranchRow row) {
+    str out = row.branch.name;
+    if (row.upstream != "") {
+        out = out + "  " + row.upstream;
+        if (row.track != "") {
+            out = out + " " + row.track;
+        }
+    }
+    return out;
+}
+
+/// The branch name out of a `picker_item`.
+pub str picked_name(str item) {
+    return item.split(" ")[0];
 }
 
 /// One file a commit changed against its first parent (`commit_changes`,
@@ -494,7 +517,11 @@ pub TUI_outline.Outline build_outline(GIT_status.Status status, List<GIT_log.Ent
         if (branch_row.branch.is_current) {
             mark = "* ";
         }
-        branch_children.push(TUI_outline.Node.leaf("branch:" + branch_row.branch.name, mark + branch_row.branch.name + "  " + branch_row.branch.id.substr(0, 7) + "  " + branch_row.subject));
+        str track = "";
+        if (branch_row.track != "") {
+            track = " " + branch_row.track;
+        }
+        branch_children.push(TUI_outline.Node.leaf("branch:" + branch_row.branch.name, mark + branch_row.branch.name + track + "  " + branch_row.branch.id.substr(0, 7) + "  " + branch_row.subject));
     }
     roots.push(TUI_outline.Node.section("branches", "Branches (" + branch_children.size().to_str() + ")", branch_children, is_expanded: is_expanded_for(collapsed, "branches", true)));
     // Stashes, newest first; Enter on one opens the stash list at it (`GIT_ui_stash`).

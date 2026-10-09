@@ -1,0 +1,350 @@
+// `git blame`, in m31: which commit last touched each line of a file at a
+// revision, found by following the file back through history and handing
+// every line to the parent it came from.
+//
+// API
+// ---
+//   GIT_blame.blame(gitdir, rev, path, progress) -> Result<List<Line>, Error>
+//
+// One `Line` per line of `path` at `rev`: the commit that introduced it, its
+// line number in that commit's version of the file (1-based, git's
+// `orig_line`), the path, the text, and whether the commit is a root commit
+// (git's "boundary"). `progress.step(resolved, total, commits)` is called
+// after each commit has been dealt with; returning false stops the walk, and
+// the lines not yet attributed come back with `commit == ""`.
+//
+// Rules, which are git's own for a plain `git blame` (no -M, -C, -w):
+//
+//   - parents are tried in order. A parent whose blob is byte-identical to
+//     the commit's takes every line (even a second parent). Otherwise each
+//     parent in turn takes the lines unchanged against it, by the same xdiff
+//     `git diff` uses, and what no parent has is the commit's own.
+//   - a root commit owns what it adds, marked `boundary`.
+//
+// Not done, and where this differs from git: git also follows a file through
+// a whole-file rename when the path is missing in a parent; here a parent
+// without the path simply passes nothing.
+//
+// Merge commits are handled as git does it, so a line present in a side
+// branch and in the merge result is attributed to whichever parent comes
+// first AND has it unchanged.
+
+import GIT_object;
+import GIT_pathtree;
+import GIT_refs;
+import GIT_xdiff;
+
+pub enum Error {
+    Refs(GIT_refs.Error);
+    Object(GIT_object.Error);
+    /// `path` is not a file at `rev`.
+    NoSuchPath(str);
+}
+
+pub str Error.to_str() {
+    match (this) {
+        case Refs(GIT_refs.Error error): {
+            return "refs: " + error.to_str();
+        }
+        case Object(GIT_object.Error error): {
+            return "object: " + error.to_str();
+        }
+        case NoSuchPath(str path): {
+            return "no such path in the revision: " + path;
+        }
+    }
+}
+
+/// What the walk tells whoever is watching; `false` stops it.
+pub interface Progress {
+    bool step(int resolved, int total, int commits);
+}
+
+/// A `Progress` that never stops the walk.
+pub type Quiet {
+    pub int calls = 0;
+}
+
+pub bool Quiet.step(int resolved, int total, int commits) {
+    calls = calls + 1;
+    return true;
+}
+
+/// One line of the file, as blamed.
+pub type Line {
+    /// The commit that introduced it, "" while not yet attributed.
+    pub str commit;
+    /// Its 1-based line number in that commit's version of the file.
+    pub int orig_line;
+    pub str path;
+    pub bytes text;
+    /// The commit is a root commit.
+    pub bool boundary;
+}
+
+// Lines of one commit's version of the file that still need an owner:
+// `final_index[k]` is where line k sits in the file being blamed,
+// `orig_index[k]` its 0-based index in this commit's version.
+type Suspect {
+    str commit;
+    List<int> final_index;
+    List<int> orig_index;
+}
+
+type Engine {
+    str gitdir;
+    str path;
+    List<Line> lines;
+    Map<str, Suspect> pending = {};
+    Map<str, GIT_object.Commit> commits = {};
+    Map<str, List<bytes>> blob_lines = {};
+    Map<str, List<int>> mappings = {};
+    int resolved = 0;
+}
+
+Result<GIT_object.Commit, Error> Engine.commit(str id) {
+    match (commits.get(id)) {
+        case Some(GIT_object.Commit known): {
+            return Result<GIT_object.Commit, Error>.Ok(known);
+        }
+        case None: {
+        }
+    }
+    match (GIT_pathtree.read_commit(gitdir, id)) {
+        case Ok(GIT_object.Commit found): {
+            commits.set(id, found);
+            return Result<GIT_object.Commit, Error>.Ok(found);
+        }
+        case Err(GIT_object.Error error): {
+            return Result<GIT_object.Commit, Error>.Err(Error.Object(error));
+        }
+    }
+}
+
+// The id of the file at `commit`, or None when the commit does not have it
+// as a file.
+Option<str> Engine.blob_id(GIT_object.Commit commit) {
+    match (GIT_pathtree.entry_at(gitdir, commit.tree, path)) {
+        case Some(GIT_object.Entry entry): {
+            if (entry.is_tree() || entry.is_commit()) {
+                return Option<str>.None;
+            }
+            return Option<str>.Some(entry.id);
+        }
+        case None: {
+            return Option<str>.None;
+        }
+    }
+}
+
+Result<List<bytes>, Error> Engine.file_lines(str blob) {
+    match (blob_lines.get(blob)) {
+        case Some(List<bytes> known): {
+            return Result<List<bytes>, Error>.Ok(known);
+        }
+        case None: {
+        }
+    }
+    match (GIT_pathtree.blob(gitdir, blob)) {
+        case Ok(bytes content): {
+            List<bytes> split = GIT_xdiff.split_lines(content);
+            blob_lines.set(blob, split);
+            return Result<List<bytes>, Error>.Ok(split);
+        }
+        case Err(GIT_object.Error error): {
+            return Result<List<bytes>, Error>.Err(Error.Object(error));
+        }
+    }
+}
+
+// For each line of the child blob, the index of the same line in the parent
+// blob, or -1 when the line is new in the child.
+Result<List<int>, Error> Engine.mapping(str parent_blob, str child_blob) {
+    str key = parent_blob + ":" + child_blob;
+    match (mappings.get(key)) {
+        case Some(List<int> known): {
+            return Result<List<int>, Error>.Ok(known);
+        }
+        case None: {
+        }
+    }
+    List<bytes> a = file_lines(parent_blob)?;
+    List<bytes> b = file_lines(child_blob)?;
+    GIT_xdiff.Diff d = GIT_xdiff.diff_lines_indent(a, b);
+    List<int> map = [-1; b.size()];
+    int n1 = a.size();
+    int n2 = b.size();
+    int i1 = 0;
+    int i2 = 0;
+    while (i1 < n1 || i2 < n2) {
+        bool c1 = i1 < n1 && d.a_changed[i1];
+        bool c2 = i2 < n2 && d.b_changed[i2];
+        if (c1 || c2) {
+            while (i1 < n1 && d.a_changed[i1]) {
+                i1 = i1 + 1;
+            }
+            while (i2 < n2 && d.b_changed[i2]) {
+                i2 = i2 + 1;
+            }
+        } else {
+            map[i2] = i1;
+            i1 = i1 + 1;
+            i2 = i2 + 1;
+        }
+    }
+    mappings.set(key, map);
+    return Result<List<int>, Error>.Ok(map);
+}
+
+// Give a line to `commit` to be looked at later.
+void Engine.hand_over(str commit, int final_at, int orig_at) {
+    match (pending.get(commit)) {
+        case Some(Suspect existing): {
+            existing.final_index.push(final_at);
+            existing.orig_index.push(orig_at);
+        }
+        case None: {
+            pending.set(commit, Suspect(commit, [final_at], [orig_at]));
+        }
+    }
+}
+
+void Engine.own(Suspect suspect, int k, bool boundary) {
+    Line line = lines[suspect.final_index[k]];
+    line.commit = suspect.commit;
+    line.orig_line = suspect.orig_index[k] + 1;
+    line.boundary = boundary;
+    resolved = resolved + 1;
+}
+
+Result<bool, Error> Engine.process(Suspect suspect) {
+    GIT_object.Commit commit = commit(suspect.commit)?;
+    int count = suspect.final_index.size();
+    if (commit.parents.size() == 0) {
+        for (int k in 0 .. count) {
+            own(suspect, k, true);
+        }
+        return Result<bool, Error>.Ok(true);
+    }
+    str mine = "";
+    match (blob_id(commit)) {
+        case Some(str id): {
+            mine = id;
+        }
+        case None: {
+            for (int k in 0 .. count) {
+                own(suspect, k, false);
+            }
+            return Result<bool, Error>.Ok(true);
+        }
+    }
+    List<str> parent_blobs = [];
+    for (str parent in commit.parents) {
+        GIT_object.Commit parent_commit = commit(parent)?;
+        parent_blobs.push(blob_id(parent_commit).or(""));
+    }
+    // a parent with exactly this file takes everything
+    for (int p in 0 .. parent_blobs.size()) {
+        if (parent_blobs[p] == mine) {
+            for (int k in 0 .. count) {
+                hand_over(commit.parents[p], suspect.final_index[k], suspect.orig_index[k]);
+            }
+            return Result<bool, Error>.Ok(true);
+        }
+    }
+    List<bool> alive = [true; count];
+    for (int p in 0 .. parent_blobs.size()) {
+        if (parent_blobs[p] == "") {
+            continue;
+        }
+        List<int> map = mapping(parent_blobs[p], mine)?;
+        for (int k in 0 .. count) {
+            if (!alive[k]) {
+                continue;
+            }
+            int there = map[suspect.orig_index[k]];
+            if (there >= 0) {
+                alive[k] = false;
+                hand_over(commit.parents[p], suspect.final_index[k], there);
+            }
+        }
+    }
+    for (int k in 0 .. count) {
+        if (alive[k]) {
+            own(suspect, k, false);
+        }
+    }
+    return Result<bool, Error>.Ok(true);
+}
+
+/// Blame `path` as of `rev`.
+pub Result<List<Line>, Error> blame(str gitdir, str rev, str path, Progress progress) {
+    str tip = "";
+    match (GIT_refs.rev_parse(gitdir, rev)) {
+        case Ok(str resolved): {
+            tip = resolved;
+        }
+        case Err(GIT_refs.Error error): {
+            return Result<List<Line>, Error>.Err(Error.Refs(error));
+        }
+    }
+    match (GIT_refs.peel(gitdir, rev, tip)) {
+        case Ok(str peeled): {
+            tip = peeled;
+        }
+        case Err(GIT_refs.Error error): {
+            return Result<List<Line>, Error>.Err(Error.Refs(error));
+        }
+    }
+    Engine engine = Engine(gitdir, path, []);
+    GIT_object.Commit head = engine.commit(tip)?;
+    str blob = "";
+    match (engine.blob_id(head)) {
+        case Some(str id): {
+            blob = id;
+        }
+        case None: {
+            return Result<List<Line>, Error>.Err(Error.NoSuchPath(path));
+        }
+    }
+    List<bytes> text = engine.file_lines(blob)?;
+    Suspect first = Suspect(tip, [], []);
+    for (int k in 0 .. text.size()) {
+        engine.lines.push(Line("", 0, path, text[k], false));
+        first.final_index.push(k);
+        first.orig_index.push(k);
+    }
+    int total = text.size();
+    if (total == 0) {
+        return Result<List<Line>, Error>.Ok(engine.lines);
+    }
+    engine.pending.set(tip, first);
+    int visited = 0;
+    while (engine.pending.size() > 0) {
+        // newest committer date first, so a commit is usually dealt with
+        // after every descendant that could hand it lines
+        str next = "";
+        int newest = -1;
+        for (str id in engine.pending.keys()) {
+            GIT_object.Commit c = engine.commit(id)?;
+            if (c.committer.when > newest) {
+                newest = c.committer.when;
+                next = id;
+            }
+        }
+        Option<Suspect> taken = engine.pending.get(next);
+        engine.pending.remove(next);
+        match (taken) {
+            case Some(Suspect suspect): {
+                engine.process(suspect)?;
+            }
+            case None: {
+            }
+        }
+        visited = visited + 1;
+        if (!progress.step(engine.resolved, total, visited)) {
+            break;
+        }
+    }
+    return Result<List<Line>, Error>.Ok(engine.lines);
+}

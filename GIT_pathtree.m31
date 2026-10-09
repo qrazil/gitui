@@ -1,0 +1,89 @@
+// One path in one tree, and the commit it comes from: the lookups blame and
+// the path-limited log both start every step with. Pure object reads; no
+// worktree, no index.
+//
+// API
+// ---
+//   GIT_pathtree.read_commit(gitdir, id)         -> Result<GIT_object.Commit, GIT_object.Error>
+//   GIT_pathtree.entry_at(gitdir, tree_id, path) -> Option<GIT_object.Entry>
+//   GIT_pathtree.blob(gitdir, id)                -> Result<bytes, GIT_object.Error>
+//
+// `path` is `/`-separated and relative to the tree, like `git log -- path`.
+// `entry_at` answers `None` for a path the tree does not have, and for one
+// that runs through a file as if it were a directory.
+
+import GIT_object;
+
+/// `id` as a commit.
+pub Result<GIT_object.Commit, GIT_object.Error> read_commit(str gitdir, str id) {
+    GIT_object.Object object = GIT_object.read(gitdir, id)?;
+    match (object.body) {
+        case Commit(GIT_object.Commit commit): {
+            return Result<GIT_object.Commit, GIT_object.Error>.Ok(commit);
+        }
+        case Blob: {
+            return Result<GIT_object.Commit, GIT_object.Error>.Err(GIT_object.Error.NotFound);
+        }
+        case Tree: {
+            return Result<GIT_object.Commit, GIT_object.Error>.Err(GIT_object.Error.NotFound);
+        }
+        case Tag: {
+            return Result<GIT_object.Commit, GIT_object.Error>.Err(GIT_object.Error.NotFound);
+        }
+    }
+}
+
+/// The content of blob `id`.
+pub Result<bytes, GIT_object.Error> blob(str gitdir, str id) {
+    GIT_object.Object object = GIT_object.read(gitdir, id)?;
+    return Result<bytes, GIT_object.Error>.Ok(object.raw);
+}
+
+/// The entry at `path` under `tree_id`, one subtree read per segment.
+pub Option<GIT_object.Entry> entry_at(str gitdir, str tree_id, str path) {
+    List<str> segments = path.split("/");
+    str current = tree_id;
+    int index = 0;
+    while (index < segments.size()) {
+        bytes want = segments[index].to_bytes();
+        Option<GIT_object.Entry> found = Option<GIT_object.Entry>.None;
+        match (GIT_object.read(gitdir, current)) {
+            case Ok(GIT_object.Object object): {
+                match (object.body) {
+                    case Tree(List<GIT_object.Entry> entries): {
+                        for (GIT_object.Entry entry in entries) {
+                            if (entry.name == want) {
+                                found = Option<GIT_object.Entry>.Some(entry);
+                                break;
+                            }
+                        }
+                    }
+                    case Blob: {
+                    }
+                    case Commit: {
+                    }
+                    case Tag: {
+                    }
+                }
+            }
+            case Err: {
+            }
+        }
+        match (found) {
+            case None: {
+                return found;
+            }
+            case Some(GIT_object.Entry entry): {
+                if (index == segments.size() - 1) {
+                    return found;
+                }
+                if (!entry.is_tree()) {
+                    return Option<GIT_object.Entry>.None;
+                }
+                current = entry.id;
+            }
+        }
+        index = index + 1;
+    }
+    return Option<GIT_object.Entry>.None;
+}

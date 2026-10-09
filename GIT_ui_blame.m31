@@ -1,0 +1,299 @@
+// `B`: who last touched each line of a file. A full-screen overlay listing the
+// file as `GIT_blame.blame` attributes it -- short id (a leading `^` marks a
+// boundary line, one from the root commit), author, date, line number, text.
+//
+//   j / k / g / G   move the cursor
+//   enter           the commit of the line under the cursor, with its change
+//   ,               blame again as of that commit's first parent
+//   backspace       back to the previous blame (closes when there is none)
+//
+// Also here: `target`, which works out which file and revision `B` and `H`
+// mean from the diff view or the outline row under the cursor.
+
+import GIT_blame;
+import GIT_object;
+import GIT_pathtree;
+import GIT_ui_core;
+import GIT_ui_panel;
+import GIT_ui_show;
+import GIT_ui_model;
+import date;
+import term;
+import tui.TUI_app;
+import tui.TUI_buffer;
+import tui.TUI_geometry;
+import tui.TUI_outline;
+import tui.TUI_text;
+
+/// What `B` / `H` act on: a revision ("HEAD", or a commit id) and a path.
+pub type Target {
+    pub str rev;
+    pub str path;
+}
+
+/// The file the user is pointing at, or why there is none. The diff view wins
+/// when open; else the outline row. A worktree or index file is looked up at
+/// HEAD (blame and history are about committed content); a file under a
+/// commit is looked up at that commit; an untracked file has no history.
+pub Result<Target, str> target(GIT_ui_core.Core core) {
+    if (core.is_diff_open) {
+        str name = core.diff_path.utf8().or("");
+        if (core.diff_section == "untracked") {
+            return Result<Target, str>.Err("untracked file: nothing to blame yet");
+        }
+        if (core.diff_section == "commit") {
+            return Result<Target, str>.Ok(Target(core.diff_rev, name));
+        }
+        return Result<Target, str>.Ok(Target("HEAD", name));
+    }
+    match (core.outline.current()) {
+        case Some(TUI_outline.Row row): {
+            str id = row.node.id;
+            if (id.starts_with("untracked:")) {
+                return Result<Target, str>.Err("untracked file: nothing to blame yet");
+            }
+            if (id.starts_with("unstaged:") || id.starts_with("staged:")) {
+                match (core.paths.get(id)) {
+                    case Some(bytes path): {
+                        return Result<Target, str>.Ok(Target("HEAD", path.utf8().or("")));
+                    }
+                    case None: {
+                    }
+                }
+            }
+            if (id.starts_with("commit:") && id.contains(":file:")) {
+                match (core.file_diffs.get(id)) {
+                    case Some(GIT_ui_model.CommitFileDiff found): {
+                        return Result<Target, str>.Ok(Target(id.substr(7, 47), found.path.utf8().or("")));
+                    }
+                    case None: {
+                    }
+                }
+            }
+        }
+        case None: {
+        }
+    }
+    return Result<Target, str>.Err("put the cursor on a file first");
+}
+
+/// Who and when, for the blame margin.
+pub type Margin {
+    pub str who;
+    pub str day;
+}
+
+/// The author and day of a commit, read once per commit and kept.
+pub Margin margin_of(str gitdir, Map<str, Margin> cache, str commit_id) {
+    match (cache.get(commit_id)) {
+        case Some(Margin known): {
+            return known;
+        }
+        case None: {
+        }
+    }
+    Margin made = Margin("?", "");
+    match (GIT_pathtree.read_commit(gitdir, commit_id)) {
+        case Ok(GIT_object.Commit commit): {
+            made = Margin(commit.author.name.utf8().or("?"), date.iso(commit.author.when).substr(0, 10));
+        }
+        case Err(GIT_object.Error error): {
+        }
+    }
+    cache.set(commit_id, made);
+    return made;
+}
+
+// One earlier blame, kept so backspace can return to it.
+type Frame {
+    str rev;
+    List<GIT_blame.Line> lines;
+    int selected;
+    int offset;
+}
+
+type BlameOverlay {
+    GIT_ui_core.Core host;
+    str path;
+    str rev;
+    List<GIT_blame.Line> lines;
+    Map<str, Margin> margins = {};
+    int selected = 0;
+    int offset = 0;
+    List<Frame> back = [];
+    // Why the last key did nothing, shown in the title until the next key.
+    str notice = "";
+}
+
+pub TUI_app.Action BlameOverlay.handle_key(term.Code code) {
+    notice = "";
+    match (GIT_ui_core.lookup(GIT_ui_core.SCOPE_BLAME, code)) {
+        case Some(str cmd): {
+            if (cmd == GIT_ui_core.CMD_CLOSE) {
+                host.pop_overlay();
+            }
+            if (cmd == GIT_ui_core.CMD_DOWN && selected < lines.size() - 1) {
+                selected = selected + 1;
+            }
+            if (cmd == GIT_ui_core.CMD_UP && selected > 0) {
+                selected = selected - 1;
+            }
+            if (cmd == GIT_ui_core.CMD_TOP) {
+                selected = 0;
+            }
+            if (cmd == GIT_ui_core.CMD_BOTTOM) {
+                selected = lines.size() - 1;
+                if (selected < 0) {
+                    selected = 0;
+                }
+            }
+            if (cmd == GIT_ui_core.CMD_OPEN && lines.size() > 0) {
+                GIT_ui_show.open(host, lines[selected].commit, lines[selected].path);
+            }
+            if (cmd == GIT_ui_core.CMD_REBLAME && lines.size() > 0) {
+                reblame();
+            }
+            if (cmd == GIT_ui_core.CMD_BACK) {
+                if (back.size() == 0) {
+                    host.pop_overlay();
+                } else {
+                    Frame frame = back.pop();
+                    rev = frame.rev;
+                    lines = frame.lines;
+                    selected = frame.selected;
+                    offset = frame.offset;
+                }
+            }
+            return TUI_app.Action.Redraw;
+        }
+        case None: {
+        }
+    }
+    return TUI_app.Action.Continue;
+}
+
+// Blame the file again as of the first parent of the selected line's commit.
+void BlameOverlay.reblame() {
+    GIT_blame.Line line = lines[selected];
+    match (GIT_pathtree.read_commit(host.gitdir, line.commit)) {
+        case Ok(GIT_object.Commit commit): {
+            if (commit.parents.size() == 0) {
+                notice = line.commit.substr(0, 7) + " is a root commit, there is nothing before it";
+                return;
+            }
+            reblame_at(commit.parents[0], line.path);
+        }
+        case Err(GIT_object.Error error): {
+            notice = error.to_str();
+        }
+    }
+}
+
+void BlameOverlay.reblame_at(str parent, str file) {
+    GIT_blame.Quiet quiet = GIT_blame.Quiet();
+    match (GIT_blame.blame(host.gitdir, parent, file, quiet)) {
+        case Ok(List<GIT_blame.Line> found): {
+            back.push(Frame(rev, lines, selected, offset));
+            rev = parent;
+            lines = found;
+            selected = 0;
+            offset = 0;
+        }
+        case Err(GIT_blame.Error error): {
+            notice = "blame at " + parent.substr(0, 7) + ": " + error.to_str();
+        }
+    }
+}
+
+pub void BlameOverlay.render(TUI_buffer.Buffer buffer, TUI_geometry.Rect area) {
+    str at = "HEAD";
+    if (rev != "HEAD") {
+        at = rev.substr(0, 7);
+    }
+    TUI_geometry.Rect inner = GIT_ui_panel.frame(buffer, area, "blame " + path + " @ " + at + notice_suffix());
+    if (inner.is_empty()) {
+        return;
+    }
+    // Keep the cursor inside the window.
+    if (selected < offset) {
+        offset = selected;
+    }
+    if (selected >= offset + inner.height) {
+        offset = selected - inner.height + 1;
+    }
+    offset = GIT_ui_panel.clamp(offset, lines.size(), inner.height);
+    int number_width = lines.size().to_str().chars().size();
+    List<str> text = [];
+    int row = 0;
+    while (row < inner.height && offset + row < lines.size()) {
+        text.push(format(lines[offset + row], offset + row + 1, number_width));
+        row = row + 1;
+    }
+    if (lines.size() == 0) {
+        text = ["(empty file)"];
+    }
+    GIT_ui_panel.draw_lines(buffer, inner, text, 0, selected - offset);
+}
+
+str BlameOverlay.notice_suffix() {
+    if (notice == "") {
+        return "";
+    }
+    return " -- " + notice;
+}
+
+str BlameOverlay.format(GIT_blame.Line line, int number, int number_width) {
+    Margin margin = margin_of(host.gitdir, margins, line.commit);
+    str id = line.commit.substr(0, 7);
+    if (line.boundary) {
+        id = "^" + line.commit.substr(0, 6);
+    }
+    return id + " " + pad(margin.who, 12) + " " + margin.day + " " + pad_left(number.to_str(), number_width) + " " + line.text.utf8().or("(not UTF-8)");
+}
+
+pub List<GIT_ui_core.Hint> BlameOverlay.hints() {
+    return GIT_ui_core.hints_for(GIT_ui_core.SCOPE_BLAME);
+}
+
+// `text` cut or space-filled to exactly `width` columns.
+str pad(str text, int width) {
+    str out = TUI_text.truncate(text, width, ellipsis: "");
+    while (TUI_text.width(out) < width) {
+        out = out + " ";
+    }
+    return out;
+}
+
+str pad_left(str text, int width) {
+    str out = text;
+    while (TUI_text.width(out) < width) {
+        out = " " + out;
+    }
+    return out;
+}
+
+/// Blame `path` as of `rev` and open the overlay on it; the message line says
+/// why not when that fails.
+pub void open(GIT_ui_core.Core core, str rev, str path) {
+    GIT_blame.Quiet quiet = GIT_blame.Quiet();
+    match (GIT_blame.blame(core.gitdir, rev, path, quiet)) {
+        case Ok(List<GIT_blame.Line> lines): {
+            core.push_overlay(BlameOverlay(core, path, rev, lines));
+        }
+        case Err(GIT_blame.Error error): {
+            core.say("blame " + path + ": " + error.to_str());
+        }
+    }
+}
+
+/// `B` from the outline or the diff view.
+pub void open_current(GIT_ui_core.Core core) {
+    match (target(core)) {
+        case Ok(Target found): {
+            open(core, found.rev, found.path);
+        }
+        case Err(str why): {
+            core.say("blame: " + why);
+        }
+    }
+}

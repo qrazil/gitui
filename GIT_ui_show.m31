@@ -1,0 +1,167 @@
+// A commit, read-only: who and when, the message, and (given a path) what the
+// commit did to that path against its first parent. Opened by Enter in the
+// blame view and the file-history list. Scrolls with j / k, g / G.
+
+import GIT_hunks;
+import GIT_object;
+import GIT_pathtree;
+import GIT_ui_core;
+import GIT_ui_panel;
+import date;
+import term;
+import tui.TUI_app;
+import tui.TUI_buffer;
+import tui.TUI_diff_view;
+import tui.TUI_geometry;
+
+type ShowOverlay {
+    GIT_ui_core.Core host;
+    str title;
+    List<str> lines;
+    int offset = 0;
+}
+
+pub TUI_app.Action ShowOverlay.handle_key(term.Code code) {
+    match (GIT_ui_core.lookup(GIT_ui_core.SCOPE_SHOW, code)) {
+        case Some(str cmd): {
+            if (cmd == GIT_ui_core.CMD_CLOSE) {
+                host.pop_overlay();
+            }
+            if (cmd == GIT_ui_core.CMD_DOWN) {
+                offset = offset + 1;
+            }
+            if (cmd == GIT_ui_core.CMD_UP) {
+                offset = offset - 1;
+                if (offset < 0) {
+                    offset = 0;
+                }
+            }
+            if (cmd == GIT_ui_core.CMD_TOP) {
+                offset = 0;
+            }
+            if (cmd == GIT_ui_core.CMD_BOTTOM) {
+                offset = 1000000000;
+            }
+            return TUI_app.Action.Redraw;
+        }
+        case None: {
+        }
+    }
+    return TUI_app.Action.Continue;
+}
+
+pub void ShowOverlay.render(TUI_buffer.Buffer buffer, TUI_geometry.Rect area) {
+    TUI_geometry.Rect inner = GIT_ui_panel.frame(buffer, area, title);
+    if (inner.is_empty()) {
+        return;
+    }
+    offset = GIT_ui_panel.clamp(offset, lines.size(), inner.height);
+    GIT_ui_panel.draw_lines(buffer, inner, lines, offset, -1);
+}
+
+pub List<GIT_ui_core.Hint> ShowOverlay.hints() {
+    return GIT_ui_core.hints_for(GIT_ui_core.SCOPE_SHOW);
+}
+
+/// "Name <email>  2023-11-14 22:13:20 +0000" for a commit's author line.
+pub str ident_text(GIT_object.Ident who) {
+    str name = who.name.utf8().or("?");
+    str email = who.email.utf8().or("?");
+    return name + " <" + email + ">  " + date.iso(who.when) + " " + who.zone;
+}
+
+/// The text of a commit view: the headers, the message, then the diff of
+/// `path` ("" for none) against the first parent.
+pub List<str> commit_lines(str gitdir, str commit_id, str path) {
+    List<str> out = [];
+    match (GIT_pathtree.read_commit(gitdir, commit_id)) {
+        case Ok(GIT_object.Commit found): {
+            return describe(gitdir, commit_id, found, path);
+        }
+        case Err(GIT_object.Error error): {
+            return ["cannot read " + commit_id + ": " + error.to_str()];
+        }
+    }
+}
+
+List<str> describe(str gitdir, str commit_id, GIT_object.Commit commit, str path) {
+    List<str> out = [];
+    out.push("commit " + commit_id);
+    out.push("Author: " + ident_text(commit.author));
+    out.push("Commit: " + ident_text(commit.committer));
+    for (str parent in commit.parents) {
+        out.push("Parent: " + parent);
+    }
+    out.push("");
+    for (str line in commit.message.utf8().or("(message is not UTF-8)").split("\n")) {
+        out.push("    " + line);
+    }
+    if (path == "") {
+        return out;
+    }
+    out.push("");
+    out.push("--- " + path);
+    bytes old = [];
+    if (commit.parents.size() > 0) {
+        old = blob_at(gitdir, commit.parents[0], path);
+    }
+    bytes new = blob_at(gitdir, commit_id, path);
+    match (GIT_hunks.hunks(old, new)) {
+        case Binary: {
+            out.push("(binary file)");
+        }
+        case Hunks(List<TUI_diff_view.Hunk> hunks): {
+            if (hunks.size() == 0) {
+                out.push("(no change to this file)");
+            }
+            for (TUI_diff_view.Hunk hunk in hunks) {
+                out.push(hunk.header);
+                for (TUI_diff_view.Line line in hunk.lines) {
+                    match (line.kind) {
+                        case Context: {
+                            out.push("  " + line.text);
+                        }
+                        case Add: {
+                            out.push("+ " + line.text);
+                        }
+                        case Remove: {
+                            out.push("- " + line.text);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    return out;
+}
+
+// The file's content in `commit_id`'s tree; empty when the commit has no such file.
+bytes blob_at(str gitdir, str commit_id, str path) {
+    match (GIT_pathtree.read_commit(gitdir, commit_id)) {
+        case Ok(GIT_object.Commit commit): {
+            match (GIT_pathtree.entry_at(gitdir, commit.tree, path)) {
+                case Some(GIT_object.Entry entry): {
+                    match (GIT_pathtree.blob(gitdir, entry.id)) {
+                        case Ok(bytes content): {
+                            return content;
+                        }
+                        case Err: {
+                            return [];
+                        }
+                    }
+                }
+                case None: {
+                    return [];
+                }
+            }
+        }
+        case Err: {
+            return [];
+        }
+    }
+}
+
+/// Show `commit_id` (and its change to `path`, "" for none) over everything.
+pub void open(GIT_ui_core.Core core, str commit_id, str path) {
+    core.push_overlay(ShowOverlay(core, "commit " + commit_id.substr(0, 7), commit_lines(core.gitdir, commit_id, path)));
+}

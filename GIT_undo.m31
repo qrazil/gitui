@@ -1,0 +1,485 @@
+// Undo and redo for what HEAD's reflog recorded, lazygit's way: the last
+// thing that moved HEAD is reversed by moving it back, and the reversal is
+// itself a reflog line, so Z again goes one step further back and the
+// opposite key walks forward again.
+//
+// API
+// ---
+//   GIT_undo.plan(gitdir)               -> Result<Plan, Error>   what Z and the redo key would do now
+//   GIT_undo.apply(gitdir, worktree, a) -> Result<GIT_checkout.Summary, Error>
+//   GIT_undo.NOTE                       the sentence the confirmation must carry
+//
+// What counts as one step (a "unit") in HEAD's reflog, oldest first:
+//
+//   checkout: moving from X to Y   undo checks out X again (the branch if it
+//                                  still exists, else detached at the old id)
+//   rebase (start) ... (finish)    one unit: the branch goes back to where the
+//                                  rebase began; the picks in between are not steps
+//   anything else that moved HEAD  (commit, amend, reset, merge, pull, ...)
+//                                  the branch HEAD is on (or a detached HEAD)
+//                                  goes back from the new id to the old one
+//
+// Undo and redo both write the reflog line `undo: <original message>` /
+// `redo: <original message>`; scanning the log, an `undo:` line pops the last
+// step onto a redo stack and a `redo:` line pops it back, while any other line
+// is a new step and clears the redo stack.
+//
+// The tree change is `GIT_checkout.apply_tree_diff` (git's `read-tree -m -u`):
+// files the undone step changed go back with it, other worktree and index
+// changes are kept, and one that is in the way refuses the whole thing with
+// nothing written. Never touched: untracked files, ignored files, stashes
+// (`refs/stash` is not HEAD's log) -- hence `NOTE`.
+//
+// Refused: while a merge, rebase, cherry-pick or revert is in progress or the
+// index has unmerged entries; when HEAD is not where the step left it; for the
+// first commit (there is nothing before it).
+
+import GIT_checkout;
+import GIT_index;
+import GIT_object;
+import GIT_pathtree;
+import GIT_refs;
+import GIT_reflog;
+import fs;
+
+/// Said in the confirmation, every time.
+pub const str NOTE = "Worktree changes and stashes are not undoable: only where HEAD and its branch point is restored.";
+
+pub enum Error {
+    Reflog(GIT_reflog.Error);
+    Refs(GIT_refs.Error);
+    Checkout(GIT_checkout.Error);
+    Object(GIT_object.Error);
+    Index(GIT_index.Error);
+    /// HEAD moved since the action was planned, or a merge/rebase is now in progress.
+    Stale;
+}
+
+pub str Error.to_str() {
+    match (this) {
+        case Reflog(GIT_reflog.Error error): {
+            return "reflog: " + error.to_str();
+        }
+        case Refs(GIT_refs.Error error): {
+            return "refs: " + error.to_str();
+        }
+        case Checkout(GIT_checkout.Error error): {
+            return error.to_str();
+        }
+        case Object(GIT_object.Error error): {
+            return "object: " + error.to_str();
+        }
+        case Index(GIT_index.Error error): {
+            return "index: " + error.to_str();
+        }
+        case Stale: {
+            return "HEAD changed since this was planned";
+        }
+    }
+}
+
+/// One step of HEAD's history as the log records it.
+pub type Unit {
+    pub str old;
+    pub str new;
+    /// The original reflog message.
+    pub str message;
+    pub bool is_checkout;
+    pub str from_label;
+    pub str to_label;
+    /// False for a step with nothing before it (the first commit, a clone).
+    pub bool is_undoable;
+}
+
+/// What one press would do.
+pub type Action {
+    pub bool is_redo;
+    /// "undo: checkout main -> feature"
+    pub str title;
+    /// "back to main" / "reset branch main to 1a2b3c4"
+    pub str detail;
+    pub bool is_checkout;
+    /// HEAD's commit now, and the commit it will be at.
+    pub str from_id;
+    pub str to_id;
+    /// A move: the branch (full ref) that moves, "" when HEAD is detached.
+    /// A checkout: the branch (full ref) HEAD ends on, "" for detached.
+    pub str branch;
+    /// The original reflog message, for the line this writes.
+    pub str message;
+}
+
+/// What is available right now, and why not when it is not.
+pub type Plan {
+    pub Option<Action> undo;
+    pub Option<Action> redo;
+    pub str undo_why;
+    pub str redo_why;
+    /// Non-empty while a merge/rebase/... is in progress; both are refused.
+    pub str busy;
+}
+
+pub const str UNDO = "undo: ";
+pub const str REDO = "redo: ";
+
+type Stacks {
+    List<Unit> done;
+    List<Unit> redo;
+}
+
+// "checkout: moving from X to Y" -> X, Y; ("", "") for anything else.
+List<str> moving_labels(str message) {
+    str prefix = "checkout: moving from ";
+    if (!message.starts_with(prefix)) {
+        return ["", ""];
+    }
+    str rest = message.substr(prefix.size(), message.size());
+    Option<int> cut = rest.index_of(" to ");
+    match (cut) {
+        case Some(int at): {
+            return [rest.substr(0, at), rest.substr(at + 4, rest.size())];
+        }
+        case None: {
+            return ["", ""];
+        }
+    }
+}
+
+Result<Stacks, Error> scan(str gitdir) {
+    List<GIT_reflog.Entry> entries = [];
+    if (GIT_reflog.exists(gitdir, "HEAD")) {
+        match (GIT_reflog.read(gitdir, "HEAD")) {
+            case Ok(List<GIT_reflog.Entry> found): {
+                entries = found;
+            }
+            case Err(GIT_reflog.Error error): {
+                return Result<Stacks, Error>.Err(Error.Reflog(error));
+            }
+        }
+    }
+    Stacks stacks = Stacks([], []);
+    bool in_rebase = false;
+    str rebase_from = "";
+    for (GIT_reflog.Entry entry in entries) {
+        str message = entry.message;
+        if (message.starts_with(UNDO)) {
+            if (stacks.done.size() > 0) {
+                stacks.redo.push(stacks.done.pop());
+            }
+            continue;
+        }
+        if (message.starts_with(REDO)) {
+            if (stacks.redo.size() > 0) {
+                stacks.done.push(stacks.redo.pop());
+            }
+            continue;
+        }
+        if (message.starts_with("rebase (start)")) {
+            in_rebase = true;
+            rebase_from = entry.old;
+            continue;
+        }
+        if (in_rebase && message.starts_with("rebase (abort)")) {
+            in_rebase = false;
+            continue;
+        }
+        if (in_rebase && message.starts_with("rebase (finish)")) {
+            in_rebase = false;
+            stacks.redo.clear();
+            stacks.done.push(Unit(rebase_from, entry.new, message, false, "", "", rebase_from != GIT_reflog.ZERO && rebase_from != ""));
+            continue;
+        }
+        if (in_rebase && message.starts_with("rebase")) {
+            continue;
+        }
+        List<str> labels = moving_labels(message);
+        bool is_checkout = labels[0] != "";
+        if (entry.old == entry.new && !is_checkout) {
+            continue;
+        }
+        if (entry.old == entry.new && labels[0] == labels[1]) {
+            continue;
+        }
+        stacks.redo.clear();
+        stacks.done.push(Unit(entry.old, entry.new, message, is_checkout, labels[0], labels[1], entry.old != GIT_reflog.ZERO));
+    }
+    return Result<Stacks, Error>.Ok(stacks);
+}
+
+/// Why a merge, rebase, cherry-pick or revert is in the way, "" when none is.
+pub str in_progress(str gitdir) {
+    if (fs.exists(fs.join(gitdir, "MERGE_HEAD"))) {
+        return "a merge is in progress";
+    }
+    if (fs.exists(fs.join(gitdir, "rebase-merge")) || fs.exists(fs.join(gitdir, "rebase-apply"))) {
+        return "a rebase is in progress";
+    }
+    if (fs.exists(fs.join(gitdir, "CHERRY_PICK_HEAD"))) {
+        return "a cherry-pick is in progress";
+    }
+    if (fs.exists(fs.join(gitdir, "REVERT_HEAD"))) {
+        return "a revert is in progress";
+    }
+    match (GIT_index.read(gitdir)) {
+        case Ok(GIT_index.Index index): {
+            for (GIT_index.Entry entry in index.entries) {
+                if (entry.stage != 0) {
+                    return "the index has unmerged paths";
+                }
+            }
+        }
+        case Err: {
+        }
+    }
+    return "";
+}
+
+str short(str id) {
+    if (id.size() > 7) {
+        return id.substr(0, 7);
+    }
+    return id;
+}
+
+str branch_short(str full) {
+    str prefix = "refs/heads/";
+    if (full.starts_with(prefix)) {
+        return full.substr(prefix.size(), full.size());
+    }
+    return full;
+}
+
+// Where HEAD is: its commit and the full branch ref ("" when detached), or the
+// reason there is no commit.
+type Where {
+    str id;
+    str branch;
+    str why;
+}
+
+Where here(str gitdir) {
+    match (GIT_refs.head(gitdir)) {
+        case Ok(GIT_refs.Head head): {
+            match (head) {
+                case Born(str name, str id): {
+                    return Where(id, name, "");
+                }
+                case Detached(str id): {
+                    return Where(id, "", "");
+                }
+                case Unborn(_): {
+                    return Where("", "", "there are no commits yet");
+                }
+            }
+        }
+        case Err(GIT_refs.Error error): {
+            return Where("", "", "cannot read HEAD: " + error.to_str());
+        }
+    }
+}
+
+// What a checkout of `label` would be: the full ref if the branch exists.
+str existing_branch(str gitdir, str label) {
+    if (label == "") {
+        return "";
+    }
+    if (GIT_refs.has_ref(gitdir, "refs/heads/" + label)) {
+        return "refs/heads/" + label;
+    }
+    return "";
+}
+
+// Is HEAD where a checkout step ended? On a branch, that must be the branch
+// the step named. Detached, the commit already matched (the label may be any
+// spelling the user typed: HEAD~1, a tag, a short id).
+bool is_on(Where at, str label) {
+    if (at.branch != "") {
+        return branch_short(at.branch) == label;
+    }
+    return true;
+}
+
+// The action for taking `unit` back (`is_redo` false) or forward again.
+// Either the action, or the reason it cannot be done.
+type Built {
+    Option<Action> action;
+    str why;
+}
+
+Built build(str gitdir, Unit unit, Where at, bool is_redo) {
+    str verb = "undo";
+    str want_here = unit.new;
+    str go_to = unit.old;
+    if (is_redo) {
+        verb = "redo";
+        want_here = unit.old;
+        go_to = unit.new;
+    }
+    if (!is_redo && !unit.is_undoable) {
+        return Built(Option<Action>.None, "the first step (" + unit.message + ") has nothing before it to go back to");
+    }
+    if (at.why != "") {
+        return Built(Option<Action>.None, at.why);
+    }
+    if (at.id != want_here) {
+        return Built(Option<Action>.None, "HEAD is at " + short(at.id) + " but the last step (" + unit.message + ") left it at " + short(want_here));
+    }
+    if (unit.is_checkout) {
+        str here_label = unit.to_label;
+        str there_label = unit.from_label;
+        if (is_redo) {
+            here_label = unit.from_label;
+            there_label = unit.to_label;
+        }
+        if (!is_on(at, here_label)) {
+            return Built(Option<Action>.None, "HEAD is not on " + here_label + ", where that checkout left it");
+        }
+        str ref = existing_branch(gitdir, there_label);
+        str target = go_to;
+        str detail = "back to " + there_label;
+        if (is_redo) {
+            detail = "forward to " + there_label;
+        }
+        if (ref != "") {
+            match (GIT_refs.resolve(gitdir, ref)) {
+                case Ok(str tip): {
+                    target = tip;
+                }
+                case Err(GIT_refs.Error error): {
+                    return Built(Option<Action>.None, "cannot read " + ref + ": " + error.to_str());
+                }
+            }
+        } else {
+            detail = detail + " (no such branch now: detached at " + short(go_to) + ")";
+        }
+        Action action = Action(is_redo, verb + ": checkout " + unit.from_label + " -> " + unit.to_label, detail, true, at.id, target, ref, unit.message);
+        return Built(Option<Action>.Some(action), "");
+    }
+    str where_text = "detached HEAD";
+    if (at.branch != "") {
+        where_text = "branch " + branch_short(at.branch);
+    }
+    str detail = "reset " + where_text + " to " + short(go_to);
+    Action action = Action(is_redo, verb + ": " + unit.message, detail, false, at.id, go_to, at.branch, unit.message);
+    return Built(Option<Action>.Some(action), "");
+}
+
+/// What undo and redo would each do right now.
+pub Result<Plan, Error> plan(str gitdir) {
+    Stacks stacks = scan(gitdir)?;
+    Where at = here(gitdir);
+    Plan out = Plan(Option<Action>.None, Option<Action>.None, "nothing to undo", "nothing to redo", in_progress(gitdir));
+    if (out.busy != "") {
+        out.undo_why = "cannot undo while " + out.busy;
+        out.redo_why = "cannot redo while " + out.busy;
+        return Result<Plan, Error>.Ok(out);
+    }
+    if (stacks.done.size() > 0) {
+        Built built = build(gitdir, stacks.done[stacks.done.size() - 1], at, false);
+        out.undo = built.action;
+        out.undo_why = built.why;
+    }
+    if (stacks.redo.size() > 0) {
+        Built built = build(gitdir, stacks.redo[stacks.redo.size() - 1], at, true);
+        out.redo = built.action;
+        out.redo_why = built.why;
+    }
+    return Result<Plan, Error>.Ok(out);
+}
+
+/// Do `action`: change the tree, move the ref, write the reflog line. Plans
+/// again first, so a stale action (HEAD moved since it was shown) is refused
+/// with nothing written.
+pub Result<GIT_checkout.Summary, Error> apply(str gitdir, str worktree, Action action) {
+    Plan now = plan(gitdir)?;
+    Option<Action> wanted = now.undo;
+    if (action.is_redo) {
+        wanted = now.redo;
+    }
+    match (wanted) {
+        case Some(Action current): {
+            if (current.from_id != action.from_id || current.to_id != action.to_id || current.title != action.title) {
+                return Result<GIT_checkout.Summary, Error>.Err(Error.Stale);
+            }
+        }
+        case None: {
+            return Result<GIT_checkout.Summary, Error>.Err(Error.Stale);
+        }
+    }
+    str from_tree = tree_of(gitdir, action.from_id)?;
+    str to_tree = tree_of(gitdir, action.to_id)?;
+    GIT_index.Index index = load_index(gitdir)?;
+    GIT_checkout.Summary summary = GIT_checkout.Summary(0, 0);
+    match (GIT_checkout.apply_tree_diff(gitdir, worktree, from_tree, to_tree, index)) {
+        case Ok(GIT_checkout.Summary done): {
+            summary = done;
+        }
+        case Err(GIT_checkout.Error error): {
+            return Result<GIT_checkout.Summary, Error>.Err(Error.Checkout(error));
+        }
+    }
+    str message = UNDO + action.message;
+    if (action.is_redo) {
+        message = REDO + action.message;
+    }
+    move_head(gitdir, action, message)?;
+    return Result<GIT_checkout.Summary, Error>.Ok(summary);
+}
+
+Result<str, Error> tree_of(str gitdir, str commit) {
+    match (GIT_pathtree.read_commit(gitdir, commit)) {
+        case Ok(GIT_object.Commit found): {
+            return Result<str, Error>.Ok(found.tree);
+        }
+        case Err(GIT_object.Error error): {
+            return Result<str, Error>.Err(Error.Object(error));
+        }
+    }
+}
+
+// The ref change and its reflog line(s), after the tree is already done.
+Result<bool, Error> move_head(str gitdir, Action action, str message) {
+    if (action.is_checkout && action.branch != "") {
+        match (GIT_refs.update_symbolic(gitdir, "HEAD", action.branch)) {
+            case Ok: {
+            }
+            case Err(GIT_refs.Error error): {
+                return Result<bool, Error>.Err(Error.Refs(error));
+            }
+        }
+        match (GIT_reflog.log_update(gitdir, "HEAD", action.from_id, action.to_id, message)) {
+            case Ok: {
+            }
+            case Err(GIT_reflog.Error error): {
+                return Result<bool, Error>.Err(Error.Reflog(error));
+            }
+        }
+        return Result<bool, Error>.Ok(true);
+    }
+    str name = action.branch;
+    if (action.is_checkout || name == "") {
+        name = "HEAD";
+    }
+    match (GIT_refs.update(gitdir, name, action.to_id, Option<str>.Some(action.from_id), msg: message)) {
+        case Ok: {
+        }
+        case Err(GIT_refs.Error error): {
+            return Result<bool, Error>.Err(Error.Refs(error));
+        }
+    }
+    return Result<bool, Error>.Ok(true);
+}
+
+Result<GIT_index.Index, Error> load_index(str gitdir) {
+    if (!fs.exists(fs.join(gitdir, "index"))) {
+        return Result<GIT_index.Index, Error>.Ok(GIT_index.Index([]));
+    }
+    match (GIT_index.read(gitdir)) {
+        case Ok(GIT_index.Index got): {
+            return Result<GIT_index.Index, Error>.Ok(got);
+        }
+        case Err(GIT_index.Error error): {
+            return Result<GIT_index.Index, Error>.Err(Error.Index(error));
+        }
+    }
+}

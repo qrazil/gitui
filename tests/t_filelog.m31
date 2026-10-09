@@ -1,0 +1,30 @@
+// Drives `GIT_filelog.m31`: prints the ids of `history(gitdir, rev, path, limit)`,
+// one per line, for `test_blame.sh` to compare with `git log --format=%H`.
+//
+//   ./t_filelog <gitdir> <rev> <path> [limit]
+
+import GIT_filelog;
+import GIT_log;
+import io;
+import os;
+
+List<str> argv = os.args();
+if (argv.size() < 4) {
+    io.eprint("usage: t_filelog <gitdir> <rev> <path> [limit]");
+    os.exit(2);
+}
+int limit = -1;
+if (argv.size() >= 5) {
+    limit = argv[4].parse_int().or(-1);
+}
+match (GIT_filelog.history(argv[1], argv[2], argv[3], limit)) {
+    case Ok(List<GIT_log.Entry> entries): {
+        for (GIT_log.Entry entry in entries) {
+            print(entry.id);
+        }
+    }
+    case Err(GIT_log.Error error): {
+        print("refused: " + error.to_str());
+        os.exit(1);
+    }
+}

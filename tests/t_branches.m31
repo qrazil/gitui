@@ -1,0 +1,102 @@
+// Drives `GIT_branches.m31` for `test_branches.sh`.
+//
+//   t_branches <gitdir> tracking <branch>...       `<branch> <ahead> <behind> <upstream-short>|gone|none`
+//   t_branches <gitdir> label <branch>             the label text
+//   t_branches <gitdir> upstream <branch> <remote> <merge>
+//   t_branches <gitdir> push <branch> <remote> <id>  record_push
+//   t_branches <gitdir> tags                       `<name> <id> <commit> <a|l> <subject>`
+//   t_branches <gitdir> tag <name> <commit>
+//   t_branches <gitdir> atag <name> <commit> <message>
+//   t_branches <gitdir> deltag <name>
+
+import GIT_branches;
+import io;
+import os;
+
+List<str> argv = os.args();
+if (argv.size() < 3) {
+    io.eprint("usage: t_branches <gitdir> <command> ...");
+    os.exit(2);
+}
+str gitdir = argv[1];
+str mode = argv[2];
+
+void report(Result<bool, GIT_branches.Error> outcome) {
+    match (outcome) {
+        case Ok: {
+            print("ok");
+        }
+        case Err(GIT_branches.Error error): {
+            print("refused: " + error.to_str());
+            os.exit(1);
+        }
+    }
+}
+
+if (mode == "tracking") {
+    List<str> names = [];
+    for (int i in 3 .. argv.size()) {
+        names.push(argv[i]);
+    }
+    Map<str, GIT_branches.Tracking> found = GIT_branches.tracking_all(gitdir, names);
+    for (str name in names) {
+        match (found.get(name)) {
+            case Some(GIT_branches.Tracking info): {
+                if (info.is_gone) {
+                    print(name + " gone " + info.upstream);
+                } else {
+                    print(name + " " + info.ahead.to_str() + " " + info.behind.to_str() + " " + info.upstream);
+                }
+            }
+            case None: {
+                print(name + " none");
+            }
+        }
+    }
+} else if (mode == "label") {
+    match (GIT_branches.tracking(gitdir, argv[3])) {
+        case Some(GIT_branches.Tracking info): {
+            print(info.label());
+        }
+        case None: {
+            print("none");
+        }
+    }
+} else if (mode == "upstream") {
+    report(GIT_branches.set_upstream(gitdir, argv[3], argv[4], argv[5]));
+} else if (mode == "push") {
+    report(GIT_branches.record_push(gitdir, argv[3], argv[4], argv[5]));
+} else if (mode == "tags") {
+    match (GIT_branches.tags(gitdir)) {
+        case Ok(List<GIT_branches.Tag> tags): {
+            for (GIT_branches.Tag tag in tags) {
+                str kind = "l";
+                if (tag.is_annotated) {
+                    kind = "a";
+                }
+                print(tag.name + " " + tag.id + " " + tag.commit + " " + kind + " " + tag.subject);
+            }
+        }
+        case Err(GIT_branches.Error error): {
+            print("refused: " + error.to_str());
+            os.exit(1);
+        }
+    }
+} else if (mode == "tag") {
+    report(GIT_branches.create_lightweight(gitdir, argv[3], argv[4]));
+} else if (mode == "atag") {
+    match (GIT_branches.create_annotated(gitdir, argv[3], argv[4], argv[5])) {
+        case Ok(str id): {
+            print(id);
+        }
+        case Err(GIT_branches.Error error): {
+            print("refused: " + error.to_str());
+            os.exit(1);
+        }
+    }
+} else if (mode == "deltag") {
+    report(GIT_branches.delete_tag(gitdir, argv[3]));
+} else {
+    io.eprint("unknown command " + mode);
+    os.exit(2);
+}

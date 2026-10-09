@@ -43,6 +43,7 @@
 // The `@` overlay shows the ring buffer.
 
 import fs;
+import GIT_branches;
 import GIT_checkout;
 import GIT_log;
 import GIT_merge;
@@ -78,6 +79,12 @@ pub const str SCOPE_RESOLVE = "resolve";
 pub const str SCOPE_STASH = "stash";
 pub const str SCOPE_STASH_LIST = "stash-list";
 pub const str SCOPE_STASH_PROMPT = "stash-prompt";
+pub const str SCOPE_BLAME = "blame";
+pub const str SCOPE_FILELOG = "filelog";
+pub const str SCOPE_SHOW = "show";
+pub const str SCOPE_UNDO = "undo";
+pub const str SCOPE_TAGS = "tags";
+pub const str SCOPE_PROMPT = "prompt";
 pub const str CMD_QUIT = "quit";
 pub const str CMD_DOWN = "down";
 pub const str CMD_UP = "up";
@@ -141,6 +148,16 @@ pub const str CMD_STASH_BRANCH = "stash-branch";
 pub const str CMD_STASH_LIST = "stash-list";
 pub const str CMD_PAGE_DOWN = "page-down";
 pub const str CMD_PAGE_UP = "page-up";
+pub const str CMD_BLAME = "blame";
+pub const str CMD_HISTORY = "history";
+pub const str CMD_REDO = "redo";
+pub const str CMD_TAGS = "tags";
+pub const str CMD_OPEN = "open";
+pub const str CMD_REBLAME = "reblame";
+pub const str CMD_NEW = "new";
+pub const str CMD_ANNOTATE = "annotate";
+pub const str CMD_DELETE = "delete";
+pub const str CMD_PUSH_UPSTREAM = "push-upstream";
 /// What `pick_purpose` says a finished `GIT_ui_picker` was for.
 pub const str PICK_CHECKOUT = "checkout";
 /// The merge menu's three pickers: the branch to merge, and how.
@@ -233,6 +250,9 @@ pub type Core {
     /// "staged" or "commit" -- and for which path. Empty while closed.
     pub str diff_section = "";
     pub bytes diff_path = [];
+    /// For a "commit" diff: the commit the file diff belongs to (40 hex), so
+    /// `B` / `H` in the diff view know which revision to start from.
+    pub str diff_rev = "";
     pub Map<str, bool> collapsed = {};
     pub Map<str, bytes> paths = {};
     pub Map<str, GIT_ui_model.CommitFileDiff> file_diffs = {};
@@ -331,8 +351,23 @@ pub void Core.refresh() {
     branch_rows = [];
     match (GIT_checkout.branches(gitdir)) {
         case Ok(List<GIT_checkout.Branch> branches): {
+            List<str> names = [];
             for (GIT_checkout.Branch branch in branches) {
-                branch_rows.push(GIT_ui_model.BranchRow(branch, tip_subject(branch.id)));
+                names.push(branch.name);
+            }
+            // Upstream and ahead/behind, one config read and one graph for all.
+            Map<str, GIT_branches.Tracking> found = GIT_branches.tracking_all(gitdir, names);
+            for (GIT_checkout.Branch branch in branches) {
+                GIT_ui_model.BranchRow row = GIT_ui_model.BranchRow(branch, tip_subject(branch.id));
+                match (found.get(branch.name)) {
+                    case Some(GIT_branches.Tracking tracking): {
+                        row.upstream = tracking.upstream;
+                        row.track = tracking.label();
+                    }
+                    case None: {
+                    }
+                }
+                branch_rows.push(row);
             }
         }
         case Err: {
@@ -343,7 +378,7 @@ pub void Core.refresh() {
         case Ok(GIT_refs.Head head): {
             match (head) {
                 case Born(str name, str id): {
-                    branch_label = "on " + GIT_ui_model.branch_name(name) + " @ " + id.substr(0, 7);
+                    branch_label = "on " + GIT_ui_model.branch_name(name) + " @ " + id.substr(0, 7) + track_suffix(GIT_ui_model.branch_name(name));
                 }
                 case Unborn(str name): {
                     branch_label = "on " + GIT_ui_model.branch_name(name) + " (no commits yet)";
@@ -357,6 +392,16 @@ pub void Core.refresh() {
             branch_label = "?";
         }
     }
+}
+
+// " [ahead 2, behind 1]" for the header, "" when level or without upstream.
+pub str Core.track_suffix(str name) {
+    for (GIT_ui_model.BranchRow row in branch_rows) {
+        if (row.branch.name == name && row.track != "") {
+            return " " + row.track;
+        }
+    }
+    return "";
 }
 
 /// Make sure `commit_changes_cache` has an entry for commit `id` -- computed
@@ -519,6 +564,10 @@ pub List<Binding> key_table() {
     table.push(Binding(SCOPE_OUTLINE, CMD_PUSH, ["P"], "push the current branch to origin (fast-forward only)", "P", "push"));
     table.push(Binding(SCOPE_OUTLINE, CMD_PULL, ["F"], "pull the current branch from origin (fast-forward only)", "F", "pull"));
     table.push(Binding(SCOPE_OUTLINE, CMD_STASH, ["z"], "stash: push, pop, apply, drop, list (the stash under the cursor in the Stashes section, else the newest)", "z", "stash"));
+    table.push(Binding(SCOPE_OUTLINE, CMD_BLAME, ["B"], "blame the file under the cursor: who last changed each line", "B", "blame"));
+    table.push(Binding(SCOPE_OUTLINE, CMD_HISTORY, ["H"], "history of the file under the cursor (git log -- path)", "H", "history"));
+    table.push(Binding(SCOPE_OUTLINE, CMD_UNDO, ["Z"], "undo the last HEAD move from the reflog (asks first; redo from there)", "Z", "undo"));
+    table.push(Binding(SCOPE_OUTLINE, CMD_TAGS, ["T"], "tags: list, create (lightweight or annotated), delete", "T", "tags"));
     table.push(Binding(SCOPE_OUTLINE, CMD_JUMP, ["J"], "show or hide the jump list", "", ""));
     table.push(Binding(SCOPE_OUTLINE, CMD_FOCUS, ["w"], "give the jump list the keys, or take them back", "", ""));
     table.push(Binding(SCOPE_OUTLINE, CMD_SEARCH, ["/"], "search the outline and the log (smart-case: lower case ignores case)", "/", "search"));
@@ -536,6 +585,8 @@ pub List<Binding> key_table() {
     table.push(Binding(SCOPE_DIFF, CMD_LINES, ["space", "enter"], "stage the selected lines (unstage them in the staged view); the line under the cursor with no range, the whole hunk on its header", "", ""));
     table.push(Binding(SCOPE_DIFF, CMD_DISCARD, ["x"], "discard the selected lines from the working tree (asks first)", "", ""));
     table.push(Binding(SCOPE_DIFF, CMD_BACK, ["q", "escape", "backspace"], "cancel the visual range, else back to the outline", "q/esc/backspace", "back"));
+    table.push(Binding(SCOPE_DIFF, CMD_BLAME, ["B"], "blame this file", "B", "blame"));
+    table.push(Binding(SCOPE_DIFF, CMD_HISTORY, ["H"], "history of this file", "H", "history"));
     // In every view.
     table.push(Binding(SCOPE_GLOBAL, CMD_LOG, ["@"], "the command log: one line per write operation", "@", "log"));
     table.push(Binding(SCOPE_GLOBAL, CMD_HELP, ["?"], "this key help", "?", "help"));
@@ -551,6 +602,7 @@ pub List<Binding> key_table() {
     table.push(Binding(SCOPE_BRANCH, CMD_ABORT, ["a", "escape"], "abort", "a", "abort"));
     // The push and pull overlays.
     table.push(Binding(SCOPE_PUSH, CMD_PUSH, ["p"], "push the current branch to origin", "p", "push"));
+    table.push(Binding(SCOPE_PUSH, CMD_PUSH_UPSTREAM, ["u"], "push and set the upstream (git push -u): branch.<n>.remote and .merge", "u", "push -u"));
     table.push(Binding(SCOPE_PUSH, CMD_CLOSE, ["escape"], "close", "esc", "close"));
     table.push(Binding(SCOPE_PULL, CMD_PULL, ["p"], "pull the current branch from origin", "p", "pull"));
     table.push(Binding(SCOPE_PULL, CMD_CLOSE, ["escape"], "close", "esc", "close"));
@@ -615,6 +667,37 @@ pub List<Binding> key_table() {
     table.push(Binding(SCOPE_RESOLVE, CMD_STAGE_FILE, ["s"], "mark the file resolved as it is now and stage it", "s", "stage"));
     table.push(Binding(SCOPE_RESOLVE, CMD_CLOSE, ["escape", "q"], "close the view (choices already made stay in the file)", "esc", "close"));
     // The fuzzy picker.
+    table.push(Binding(SCOPE_BLAME, CMD_DOWN, ["j", "down"], "next line", "j/k", "move"));
+    table.push(Binding(SCOPE_BLAME, CMD_UP, ["k", "up"], "previous line", "", ""));
+    table.push(Binding(SCOPE_BLAME, CMD_TOP, ["g", "home"], "first line", "g/G", "top/bottom"));
+    table.push(Binding(SCOPE_BLAME, CMD_BOTTOM, ["G", "end"], "last line", "", ""));
+    table.push(Binding(SCOPE_BLAME, CMD_OPEN, ["enter"], "open the commit that introduced the line", "enter", "commit"));
+    table.push(Binding(SCOPE_BLAME, CMD_REBLAME, [","], "blame again at the parent of that line's commit (backspace goes back)", ",", "re-blame"));
+    table.push(Binding(SCOPE_BLAME, CMD_BACK, ["backspace"], "back to the previous blame", "backspace", "back"));
+    table.push(Binding(SCOPE_BLAME, CMD_CLOSE, ["escape", "q"], "close", "q", "close"));
+    table.push(Binding(SCOPE_FILELOG, CMD_DOWN, ["j", "down"], "next commit", "j/k", "move"));
+    table.push(Binding(SCOPE_FILELOG, CMD_UP, ["k", "up"], "previous commit", "", ""));
+    table.push(Binding(SCOPE_FILELOG, CMD_OPEN, ["enter"], "open the commit", "enter", "commit"));
+    table.push(Binding(SCOPE_FILELOG, CMD_BLAME, ["B"], "blame the file as of that commit", "B", "blame"));
+    table.push(Binding(SCOPE_FILELOG, CMD_CLOSE, ["escape", "q"], "close", "q", "close"));
+    table.push(Binding(SCOPE_SHOW, CMD_DOWN, ["j", "down"], "scroll down", "j/k", "scroll"));
+    table.push(Binding(SCOPE_SHOW, CMD_UP, ["k", "up"], "scroll up", "", ""));
+    table.push(Binding(SCOPE_SHOW, CMD_TOP, ["g", "home"], "top", "g/G", "top/bottom"));
+    table.push(Binding(SCOPE_SHOW, CMD_BOTTOM, ["G", "end"], "bottom", "", ""));
+    table.push(Binding(SCOPE_SHOW, CMD_CLOSE, ["escape", "q", "backspace"], "close", "q", "close"));
+    table.push(Binding(SCOPE_UNDO, CMD_YES, ["y", "enter"], "do it", "y", "confirm"));
+    table.push(Binding(SCOPE_UNDO, CMD_REDO, ["r"], "show redo instead of undo", "r", "redo"));
+    table.push(Binding(SCOPE_UNDO, CMD_UNDO, ["z"], "show undo instead of redo", "z", "undo"));
+    table.push(Binding(SCOPE_UNDO, CMD_CLOSE, ["escape", "n", "q"], "cancel", "esc", "cancel"));
+    table.push(Binding(SCOPE_TAGS, CMD_DOWN, ["j", "down"], "next tag", "j/k", "move"));
+    table.push(Binding(SCOPE_TAGS, CMD_UP, ["k", "up"], "previous tag", "", ""));
+    table.push(Binding(SCOPE_TAGS, CMD_NEW, ["n"], "new lightweight tag at HEAD (or the commit under the outline cursor)", "n", "new"));
+    table.push(Binding(SCOPE_TAGS, CMD_ANNOTATE, ["a"], "new annotated tag: name, then message", "a", "annotate"));
+    table.push(Binding(SCOPE_TAGS, CMD_DELETE, ["d"], "delete the tag under the cursor (asks first)", "d", "delete"));
+    table.push(Binding(SCOPE_TAGS, CMD_CLOSE, ["escape", "q"], "close", "q", "close"));
+    table.push(Binding(SCOPE_PROMPT, CMD_SUBMIT, ["enter"], "accept what is typed", "enter", "ok"));
+    table.push(Binding(SCOPE_PROMPT, CMD_CLOSE, ["escape"], "cancel", "esc", "cancel"));
+    table.push(Binding(SCOPE_PROMPT, CMD_ERASE, ["backspace"], "erase the last character", "", ""));
     table.push(Binding(SCOPE_PICKER, CMD_SUBMIT, ["enter"], "choose the highlighted item", "enter", "choose"));
     table.push(Binding(SCOPE_PICKER, CMD_DOWN, ["down", "tab"], "highlight the next item", "down", "next"));
     table.push(Binding(SCOPE_PICKER, CMD_UP, ["up", "back-tab"], "highlight the previous item", "up", "prev"));
@@ -724,12 +807,30 @@ pub str scope_title(str scope) {
     if (scope == SCOPE_STASH_PROMPT) {
         return "stash message / branch name prompt";
     }
+    if (scope == SCOPE_BLAME) {
+        return "blame view (B)";
+    }
+    if (scope == SCOPE_FILELOG) {
+        return "file history (H)";
+    }
+    if (scope == SCOPE_SHOW) {
+        return "commit view";
+    }
+    if (scope == SCOPE_UNDO) {
+        return "undo / redo (Z)";
+    }
+    if (scope == SCOPE_TAGS) {
+        return "tags (T)";
+    }
+    if (scope == SCOPE_PROMPT) {
+        return "text prompt";
+    }
     return scope;
 }
 
 /// Every scope, in the order the help overlay lists them.
 pub List<str> all_scopes() {
-    return [SCOPE_OUTLINE, SCOPE_DIFF, SCOPE_GLOBAL, SCOPE_COMMIT, SCOPE_BRANCH, SCOPE_PUSH, SCOPE_PULL, SCOPE_CONFIRM, SCOPE_LOG, SCOPE_HELP, SCOPE_SEARCH, SCOPE_PICKER, SCOPE_MERGE, SCOPE_MERGE_ASK, SCOPE_RESOLVE, SCOPE_STASH, SCOPE_STASH_LIST, SCOPE_STASH_PROMPT];
+    return [SCOPE_OUTLINE, SCOPE_DIFF, SCOPE_GLOBAL, SCOPE_COMMIT, SCOPE_BRANCH, SCOPE_PUSH, SCOPE_PULL, SCOPE_CONFIRM, SCOPE_LOG, SCOPE_HELP, SCOPE_SEARCH, SCOPE_PICKER, SCOPE_MERGE, SCOPE_MERGE_ASK, SCOPE_RESOLVE, SCOPE_STASH, SCOPE_STASH_LIST, SCOPE_STASH_PROMPT, SCOPE_BLAME, SCOPE_FILELOG, SCOPE_SHOW, SCOPE_UNDO, SCOPE_TAGS, SCOPE_PROMPT];
 }
 
 // --- the overlay stack and the command log -------------------------------------

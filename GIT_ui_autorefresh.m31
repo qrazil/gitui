@@ -1,0 +1,53 @@
+// Keeps the outline in step with the repository while the program is idle.
+//
+// Every `POLL_TICKS`-th idle tick (about a second) `GIT_watch` is asked
+// whether the worktree, index, HEAD or refs changed behind our back (an
+// editor saving a file, a `git` in another terminal). If so the outline is
+// reloaded -- `Core.reload` keeps the cursor on the same row by id -- and the
+// loop redraws through its usual diff, so nothing flickers.
+//
+// Not while the diff view or an overlay is open: reloading would pull the
+// rows out from under them. The change is not lost, though: the baseline is
+// not advanced, so the first idle poll after they close sees it.
+//
+// Our own writes move the fingerprint too, so one more reload follows each of
+// them within a second. That is deliberate: telling our writes from somebody
+// else's would mean a window in which an outside change is swallowed, and a
+// reload of unchanged rows redraws nothing (the renderer diffs frames).
+
+import GIT_ui_core;
+import GIT_ui_loop;
+import GIT_watch;
+
+/// Idle ticks (250 ms each) between polls.
+pub const int POLL_TICKS = 4;
+
+pub type AutoRefresh {
+    GIT_ui_core.Core core;
+    GIT_watch.Watcher watcher;
+    int idle = 0;
+    /// How many reloads this has caused; the tests read it.
+    pub int reloads = 0;
+}
+
+pub bool AutoRefresh.tick() {
+    idle = idle + 1;
+    if (idle < POLL_TICKS) {
+        return false;
+    }
+    idle = 0;
+    if (core.is_diff_open || core.has_overlay()) {
+        return false;
+    }
+    if (watcher.has_changed()) {
+        core.reload();
+        reloads = reloads + 1;
+        return true;
+    }
+    return false;
+}
+
+/// A ticker for `core`, its baseline the repository as it is now.
+pub AutoRefresh open(GIT_ui_core.Core core) {
+    return AutoRefresh(core, GIT_watch.open(core.gitdir, core.worktree));
+}

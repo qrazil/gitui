@@ -1,0 +1,51 @@
+// Drives `GIT_blame.m31` so `test_blame.sh` can compare it with `git blame`.
+//
+//   ./t_blame <gitdir> blame <rev> <path> [stop-after N]
+//        per line: `<commit> <orig line> <final line>` (like `git blame
+//        --porcelain`'s header), `^` before the id for a boundary commit
+//   ./t_blame <gitdir> sketch <rev> <path>
+//        the same, but the commit abbreviated to 7 and the text appended
+
+import GIT_blame;
+import io;
+import os;
+
+List<str> argv = os.args();
+if (argv.size() < 5) {
+    io.eprint("usage: t_blame <gitdir> blame|sketch <rev> <path> [stop N]");
+    os.exit(2);
+}
+
+type Stopper {
+    int limit;
+}
+
+bool Stopper.step(int resolved, int total, int commits) {
+    return commits < limit;
+}
+
+GIT_blame.Progress progress = GIT_blame.Quiet();
+if (argv.size() >= 7) {
+    progress = Stopper(argv[6].parse_int().or(1));
+}
+match (GIT_blame.blame(argv[1], argv[3], argv[4], progress)) {
+    case Ok(List<GIT_blame.Line> lines): {
+        int n = 1;
+        for (GIT_blame.Line line in lines) {
+            str mark = "";
+            if (line.boundary) {
+                mark = "^";
+            }
+            if (argv[2] == "sketch") {
+                print(mark + line.commit.substr(0, 7) + " " + line.orig_line.to_str() + " " + n.to_str() + " " + line.text.utf8().or("?"));
+            } else {
+                print(mark + line.commit + " " + line.orig_line.to_str() + " " + n.to_str());
+            }
+            n = n + 1;
+        }
+    }
+    case Err(GIT_blame.Error error): {
+        print("refused: " + error.to_str());
+        os.exit(1);
+    }
+}

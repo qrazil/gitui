@@ -1,0 +1,249 @@
+// Has the repository changed under us? A cheap poll for the interactive
+// client's idle tick: no events, no inotify -- just `stat`.
+//
+// What counts as a change, in one fingerprint:
+//   * the git directory's own state files: the index, HEAD, packed-refs, the
+//     HEAD reflog, the refs/heads and refs/tags directories, the current
+//     branch's ref file, and the markers of an operation in progress
+//   * every tracked file's size and mtime (up to `FILE_CAP` of them; the
+//     index is only re-read when its own stat changes)
+//   * the mtime of every directory of the worktree that is not ignored (up to
+//     `DIR_CAP`): adding, removing or renaming a file changes its directory's
+//     mtime, which is how a new untracked file is seen without reading
+//     anything. A changed directory is listed again, so a new subdirectory is
+//     picked up and watched too.
+//
+// What does not: the content of an untracked file that was already there (the
+// outline lists only its name), and files beyond the caps (a huge repository
+// still has the manual `g` refresh).
+//
+// `Watcher.has_changed` compares with the last fingerprint and adopts the new
+// one, so each change is reported once. `Watcher.rebaseline` adopts without
+// reporting, for after our own writes.
+
+import fs;
+import GIT_ignore;
+import GIT_index;
+import io;
+
+pub const int FILE_CAP = 4000;
+pub const int DIR_CAP = 3000;
+
+pub type Watcher {
+    pub str gitdir;
+    pub str worktree;
+    str baseline = "";
+    // The index stat the `tracked` list was read at.
+    str index_sig = "";
+    List<str> tracked = [];
+    // Watched directories (relative, "" is the root) and their mtimes.
+    List<str> dirs = [];
+    Map<str, int> dir_mtime = {};
+    Option<GIT_ignore.Ignore> ignore = Option<GIT_ignore.Ignore>.None;
+    str ignore_sig = "";
+    bool is_dirs_changed = false;
+}
+
+/// Adopt the current state as "nothing changed".
+pub void Watcher.rebaseline() {
+    baseline = fingerprint();
+    is_dirs_changed = false;
+}
+
+/// Is the repository different from the last time this was asked (or
+/// `rebaseline` was called)?
+pub bool Watcher.has_changed() {
+    str now = fingerprint();
+    bool changed = now != baseline || is_dirs_changed;
+    baseline = now;
+    is_dirs_changed = false;
+    return changed;
+}
+
+str Watcher.fingerprint() {
+    List<str> parts = [];
+    List<str> state_files = ["index", "HEAD", "packed-refs", "logs/HEAD", "refs/heads", "refs/tags", "MERGE_HEAD", "CHERRY_PICK_HEAD", "REVERT_HEAD", "rebase-merge", "rebase-apply"];
+    for (str name in state_files) {
+        parts.push(name + "=" + stamp(fs.join(gitdir, name)));
+    }
+    match (io.read(fs.join(gitdir, "HEAD"))) {
+        case Ok(str head): {
+            if (head.starts_with("ref: ")) {
+                str ref = head.substr(5, head.size()).trim();
+                parts.push(ref + "=" + stamp(fs.join(gitdir, ref)));
+            }
+        }
+        case Err: {
+        }
+    }
+    str root_ignore = stamp(fs.join(worktree, ".gitignore")) + stamp(fs.join(gitdir, "info/exclude"));
+    if (parts[0] != index_sig || root_ignore != ignore_sig) {
+        read_index(parts[0]);
+        ignore_sig = root_ignore;
+        match (GIT_ignore.load(gitdir, worktree)) {
+            case Ok(GIT_ignore.Ignore loaded): {
+                ignore = Option<GIT_ignore.Ignore>.Some(loaded);
+            }
+            case Err: {
+                ignore = Option<GIT_ignore.Ignore>.None;
+            }
+        }
+        index_sig = parts[0];
+        dirs = [];
+        dir_mtime = {};
+        scan("");
+    }
+    int shown = 0;
+    for (str path in tracked) {
+        if (shown >= FILE_CAP) {
+            break;
+        }
+        parts.push(path + "=" + stamp(fs.join(worktree, path)));
+        shown = shown + 1;
+    }
+    poll_dirs();
+    return parts.join("\n");
+}
+
+void Watcher.read_index(str sig) {
+    tracked = [];
+    match (GIT_index.read(gitdir)) {
+        case Ok(GIT_index.Index index): {
+            for (GIT_index.Entry entry in index.entries) {
+                match (entry.path.utf8()) {
+                    case Some(str path): {
+                        if (entry.stage == 0) {
+                            tracked.push(path);
+                        }
+                    }
+                    case None: {
+                    }
+                }
+            }
+        }
+        case Err: {
+        }
+    }
+}
+
+bool Watcher.is_skipped(str relative) {
+    match (ignore) {
+        case Some(GIT_ignore.Ignore rules): {
+            return rules.is_ignored(relative + "/x");
+        }
+        case None: {
+            return false;
+        }
+    }
+}
+
+// Record directory `relative` (if new) and every directory under it.
+void Watcher.scan(str relative) {
+    if (!dir_mtime.contains(relative)) {
+        if (dirs.size() >= DIR_CAP) {
+            return;
+        }
+        dirs.push(relative);
+    }
+    str full = worktree;
+    if (relative != "") {
+        full = fs.join(worktree, relative);
+    }
+    dir_mtime.set(relative, dir_stamp(full));
+    scan_children(relative);
+}
+
+// Stat every watched directory; one whose mtime moved, or that is gone, is a
+// change, and a moved one is listed again for new subdirectories.
+void Watcher.poll_dirs() {
+    List<str> kept = [];
+    int count = dirs.size();
+    for (int at in 0 .. count) {
+        str relative = dirs[at];
+        str full = worktree;
+        if (relative != "") {
+            full = fs.join(worktree, relative);
+        }
+        int now = dir_stamp(full);
+        match (dir_mtime.get(relative)) {
+            case Some(int before): {
+                if (now == -1) {
+                    is_dirs_changed = true;
+                    dir_mtime.remove(relative);
+                } else {
+                    kept.push(relative);
+                    if (now != before) {
+                        is_dirs_changed = true;
+                        dir_mtime.set(relative, now);
+                        scan_children(relative);
+                    }
+                }
+            }
+            case None: {
+            }
+        }
+    }
+    // Directories `scan_children` added went on the end of `dirs`.
+    for (int at in count .. dirs.size()) {
+        kept.push(dirs[at]);
+    }
+    dirs = kept;
+}
+
+// Look for subdirectories of `relative` that are not watched yet.
+void Watcher.scan_children(str relative) {
+    str full = worktree;
+    if (relative != "") {
+        full = fs.join(worktree, relative);
+    }
+    match (fs.listdir(full)) {
+        case Ok(List<str> names): {
+            for (str name in names) {
+                if (relative == "" && name == ".git") {
+                    continue;
+                }
+                str child = name;
+                if (relative != "") {
+                    child = relative + "/" + name;
+                }
+                str child_full = fs.join(worktree, child);
+                if (!dir_mtime.contains(child) && fs.is_dir(child_full) && !fs.is_link(child_full) && !is_skipped(child)) {
+                    scan(child);
+                }
+            }
+        }
+        case Err: {
+        }
+    }
+}
+
+/// A watcher whose baseline is the repository as it is now.
+pub Watcher open(str gitdir, str worktree) {
+    Watcher watcher = Watcher(gitdir, worktree);
+    watcher.rebaseline();
+    return watcher;
+}
+
+// "size:mtime" of a path, "-" when it cannot be statted.
+str stamp(str path) {
+    match (fs.stat(path)) {
+        case Ok(fs.Stat found): {
+            return found.size.to_str() + ":" + found.mtime_ns.to_str();
+        }
+        case Err: {
+            return "-";
+        }
+    }
+}
+
+// The mtime of a directory, -1 when it is gone.
+int dir_stamp(str path) {
+    match (fs.stat(path)) {
+        case Ok(fs.Stat found): {
+            return found.mtime_ns;
+        }
+        case Err: {
+            return -1;
+        }
+    }
+}
