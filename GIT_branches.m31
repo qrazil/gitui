@@ -1,0 +1,583 @@
+// Upstreams, ahead/behind, and tags.
+//
+// API
+// ---
+//   GIT_branches.tracking(gitdir, branch)             -> Option<Tracking>       `branch.<n>.remote/.merge`, the remote-tracking ref, ahead/behind
+//   GIT_branches.tracking_all(gitdir, List<str> names)-> Map<str, Tracking>     the same for many, config and graph read once
+//   Tracking.label()                                  -> str                    "[ahead 2, behind 1]", "[gone]", or "" when level
+//   GIT_branches.set_upstream(gitdir, branch, remote, merge)     -> Result<bool, Error>   writes branch.<n>.remote and .merge (git branch -u / push -u)
+//   GIT_branches.unset_upstream(gitdir, branch)                  -> Result<bool, Error>
+//   GIT_branches.record_push(gitdir, branch, remote, id)         -> Result<bool, Error>   moves refs/remotes/<remote>/<branch> as a push does
+//   GIT_branches.tags(gitdir)                         -> Result<List<Tag>, Error>
+//   GIT_branches.create_lightweight(gitdir, name, commit)        -> Result<bool, Error>
+//   GIT_branches.create_annotated(gitdir, name, commit, message) -> Result<str, Error>   the tag object's id
+//   GIT_branches.delete_tag(gitdir, name)             -> Result<bool, Error>
+//
+// Upstream. `branch.<n>.remote` names the remote and `branch.<n>.merge` the ref
+// on it (`refs/heads/main`). The remote-tracking ref that mirrors it is found
+// by running the merge ref through the remote's `fetch` refspecs
+// (`+refs/heads/*:refs/remotes/origin/*` turns `refs/heads/main` into
+// `refs/remotes/origin/main`); the remote `.` is this repository, and its
+// "tracking ref" is the merge ref itself. Ahead is what the branch has that the
+// upstream does not, behind the other way round -- `git rev-list --left-right
+// --count <branch>...<upstream>`. A configured upstream whose ref does not
+// exist is "gone", as `git branch -vv` says.
+//
+// Tags. A lightweight tag is `refs/tags/<name>` holding the commit. An
+// annotated one is a tag object
+//
+//     object <id>\ntype commit\ntag <name>\ntagger <name> <<email>> <when> <zone>\n\n<message>\n
+//
+// with the ref pointing at it; tagger and date come from the committer
+// identity (`GIT_COMMITTER_NAME/_EMAIL/_DATE`, then `user.*`, as for a reflog
+// line), and the message is cleaned the way `git tag -m` cleans it
+// (trailing blanks stripped, runs of blank lines collapsed, blank lines
+// dropped at both ends, one final newline). Deleting a tag removes the loose
+// ref and any `packed-refs` line (and its peeled `^` line).
+
+import GIT_config;
+import GIT_graph;
+import GIT_object;
+import GIT_refs;
+import GIT_reflog;
+import GIT_repository;
+import fs;
+import io;
+import random;
+import text;
+
+pub enum Error {
+    Config(GIT_config.Error);
+    Refs(GIT_refs.Error);
+    Object(GIT_object.Error);
+    /// A name git would refuse.
+    BadName;
+    /// A tag of that name already exists.
+    Exists;
+    /// No such tag.
+    NotFound;
+    /// An annotated tag needs a message.
+    EmptyMessage;
+    /// A file could not be written.
+    Io;
+}
+
+pub str Error.to_str() {
+    match (this) {
+        case Config(GIT_config.Error error): {
+            return "config: " + error.to_str();
+        }
+        case Refs(GIT_refs.Error error): {
+            return "refs: " + error.to_str();
+        }
+        case Object(GIT_object.Error error): {
+            return "object: " + error.to_str();
+        }
+        case BadName: {
+            return "not a valid tag name";
+        }
+        case Exists: {
+            return "a tag of that name already exists";
+        }
+        case NotFound: {
+            return "no such tag";
+        }
+        case EmptyMessage: {
+            return "an annotated tag needs a message";
+        }
+        case Io: {
+            return "a file could not be written";
+        }
+    }
+}
+
+// --- upstream ----------------------------------------------------------------------
+
+/// A branch's upstream, as configured and as it stands.
+pub type Tracking {
+    pub str remote;
+    /// The ref on the remote: `refs/heads/main`.
+    pub str merge;
+    /// Where we keep it: `refs/remotes/origin/main` (the merge ref itself for remote `.`).
+    pub str tracking_ref;
+    /// The short name to show: `origin/main`.
+    pub str upstream;
+    /// Configured, but the tracking ref does not exist.
+    pub bool is_gone;
+    pub int ahead;
+    pub int behind;
+}
+
+/// `[ahead 2, behind 1]`, `[ahead 2]`, `[behind 1]`, `[gone]`, and `""` for a
+/// branch level with its upstream.
+pub str Tracking.label() {
+    if (is_gone) {
+        return "[gone]";
+    }
+    if (ahead > 0 && behind > 0) {
+        return "[ahead " + ahead.to_str() + ", behind " + behind.to_str() + "]";
+    }
+    if (ahead > 0) {
+        return "[ahead " + ahead.to_str() + "]";
+    }
+    if (behind > 0) {
+        return "[behind " + behind.to_str() + "]";
+    }
+    return "";
+}
+
+// `refs/remotes/origin/main` -> `origin/main`.
+str short_tracking(str full) {
+    str prefix = "refs/remotes/";
+    if (full.starts_with(prefix)) {
+        return full.substr(prefix.size(), full.size());
+    }
+    if (full.starts_with("refs/heads/")) {
+        return full.substr(11, full.size());
+    }
+    return full;
+}
+
+/// The local ref a `fetch` refspec list keeps `merge` (a ref on `remote`) in,
+/// or "" when none of them covers it.
+pub str map_through_fetch(List<str> refspecs, str merge) {
+    for (str raw in refspecs) {
+        str spec = raw;
+        if (spec.starts_with("+")) {
+            spec = spec.substr(1, spec.size());
+        }
+        Option<int> colon = spec.index_of(":");
+        match (colon) {
+            case Some(int at): {
+                str src = spec.substr(0, at);
+                str dst = spec.substr(at + 1, spec.size());
+                Option<int> star = src.index_of("*");
+                match (star) {
+                    case Some(int s): {
+                        str head = src.substr(0, s);
+                        str tail = src.substr(s + 1, src.size());
+                        if (merge.size() >= head.size() + tail.size() && merge.starts_with(head) && merge.ends_with(tail)) {
+                            str middle = merge.substr(head.size(), merge.size() - tail.size());
+                            Option<int> dstar = dst.index_of("*");
+                            match (dstar) {
+                                case Some(int d): {
+                                    return dst.substr(0, d) + middle + dst.substr(d + 1, dst.size());
+                                }
+                                case None: {
+                                }
+                            }
+                        }
+                    }
+                    case None: {
+                        if (src == merge && dst != "") {
+                            return dst;
+                        }
+                    }
+                }
+            }
+            case None: {
+            }
+        }
+    }
+    return "";
+}
+
+Option<Tracking> tracking_from(GIT_config.Config config, GIT_graph.Graph graph, str gitdir, str branch, str tip) {
+    Option<str> remote = config.get("branch", branch, "remote");
+    Option<str> merge = config.get("branch", branch, "merge");
+    if (!remote.is_some() || !merge.is_some()) {
+        return Option<Tracking>.None;
+    }
+    str remote_name = remote.or("");
+    str merge_ref = merge.or("");
+    str tracking_ref = merge_ref;
+    if (remote_name != ".") {
+        List<str> specs = config.get_all("remote", remote_name, "fetch");
+        if (specs.size() == 0) {
+            specs = ["+refs/heads/*:refs/remotes/" + remote_name + "/*"];
+        }
+        tracking_ref = map_through_fetch(specs, merge_ref);
+    }
+    Tracking out = Tracking(remote_name, merge_ref, tracking_ref, short_tracking(tracking_ref), true, 0, 0);
+    if (tracking_ref == "") {
+        out.upstream = remote_name + "/" + short_tracking(merge_ref);
+        return Option<Tracking>.Some(out);
+    }
+    match (GIT_refs.resolve(gitdir, tracking_ref)) {
+        case Ok(str upstream_id): {
+            out.is_gone = false;
+            match (graph.ahead_behind(tip, upstream_id)) {
+                case Ok(GIT_graph.AheadBehind counts): {
+                    out.ahead = counts.ahead;
+                    out.behind = counts.behind;
+                }
+                case Err: {
+                }
+            }
+        }
+        case Err: {
+        }
+    }
+    return Option<Tracking>.Some(out);
+}
+
+GIT_config.Config load_config(str gitdir) {
+    match (GIT_config.load(gitdir)) {
+        case Ok(GIT_config.Config config): {
+            return config;
+        }
+        case Err: {
+            return GIT_config.Config([]);
+        }
+    }
+}
+
+/// The upstream of local branch `branch` (short name), with the counts, or
+/// `None` when none is configured.
+pub Option<Tracking> tracking(str gitdir, str branch) {
+    match (GIT_refs.resolve(gitdir, "refs/heads/" + branch)) {
+        case Ok(str tip): {
+            return tracking_from(load_config(gitdir), GIT_graph.open(gitdir), gitdir, branch, tip);
+        }
+        case Err: {
+            return Option<Tracking>.None;
+        }
+    }
+}
+
+/// `tracking` for each of `names` that has an upstream, keyed by branch name.
+/// Config and commit graph are read once.
+pub Map<str, Tracking> tracking_all(str gitdir, List<str> names) {
+    Map<str, Tracking> out = {};
+    GIT_config.Config config = load_config(gitdir);
+    GIT_graph.Graph graph = GIT_graph.open(gitdir);
+    for (str name in names) {
+        match (GIT_refs.resolve(gitdir, "refs/heads/" + name)) {
+            case Ok(str tip): {
+                match (tracking_from(config, graph, gitdir, name, tip)) {
+                    case Some(Tracking found): {
+                        out.set(name, found);
+                    }
+                    case None: {
+                    }
+                }
+            }
+            case Err: {
+            }
+        }
+    }
+    return out;
+}
+
+/// `branch.<branch>.remote = remote`, `branch.<branch>.merge = merge`: what
+/// `git push -u` and `git branch -u` write.
+pub Result<bool, Error> set_upstream(str gitdir, str branch, str remote, str merge) {
+    match (GIT_config.set(gitdir, "branch", branch, "remote", remote)) {
+        case Ok: {
+        }
+        case Err(GIT_config.Error error): {
+            return Result<bool, Error>.Err(Error.Config(error));
+        }
+    }
+    match (GIT_config.set(gitdir, "branch", branch, "merge", merge)) {
+        case Ok: {
+            return Result<bool, Error>.Ok(true);
+        }
+        case Err(GIT_config.Error error): {
+            return Result<bool, Error>.Err(Error.Config(error));
+        }
+    }
+}
+
+/// `git branch --unset-upstream`. A branch with no upstream is not an error.
+pub Result<bool, Error> unset_upstream(str gitdir, str branch) {
+    List<str> keys = ["remote", "merge"];
+    for (str key in keys) {
+        if (!load_config(gitdir).has("branch", branch, key)) {
+            continue;
+        }
+        match (GIT_config.unset(gitdir, "branch", branch, key)) {
+            case Ok: {
+            }
+            case Err(GIT_config.Error error): {
+                return Result<bool, Error>.Err(Error.Config(error));
+            }
+        }
+    }
+    return Result<bool, Error>.Ok(true);
+}
+
+/// After a push of `refs/heads/<branch>` to `remote`, point the remote-tracking
+/// ref at what was pushed (`update by push`), as git does. Returns whether a
+/// ref was written: false when the remote has no refspec that covers the branch.
+pub Result<bool, Error> record_push(str gitdir, str branch, str remote, str id) {
+    GIT_config.Config config = load_config(gitdir);
+    List<str> specs = config.get_all("remote", remote, "fetch");
+    if (specs.size() == 0) {
+        specs = ["+refs/heads/*:refs/remotes/" + remote + "/*"];
+    }
+    str tracking_ref = map_through_fetch(specs, "refs/heads/" + branch);
+    if (tracking_ref == "") {
+        return Result<bool, Error>.Ok(false);
+    }
+    match (GIT_refs.update(gitdir, tracking_ref, id, Option<str>.None, msg: "update by push")) {
+        case Ok: {
+            return Result<bool, Error>.Ok(true);
+        }
+        case Err(GIT_refs.Error error): {
+            return Result<bool, Error>.Err(Error.Refs(error));
+        }
+    }
+}
+
+// --- tags --------------------------------------------------------------------------
+
+pub type Tag {
+    pub str name;
+    /// What `refs/tags/<name>` holds: the commit, or the tag object.
+    pub str id;
+    pub bool is_annotated;
+    /// The commit it ends at.
+    pub str commit;
+    /// The first line of the annotation; "" for a lightweight tag.
+    pub str subject;
+}
+
+/// Every tag, sorted by name.
+pub Result<List<Tag>, Error> tags(str gitdir) {
+    List<GIT_refs.Ref> refs = [];
+    match (GIT_refs.all(gitdir)) {
+        case Ok(List<GIT_refs.Ref> found): {
+            refs = found;
+        }
+        case Err(GIT_refs.Error error): {
+            return Result<List<Tag>, Error>.Err(Error.Refs(error));
+        }
+    }
+    List<Tag> out = [];
+    str prefix = "refs/tags/";
+    for (GIT_refs.Ref ref in refs) {
+        if (!ref.name.starts_with(prefix)) {
+            continue;
+        }
+        Tag tag = Tag(ref.name.substr(prefix.size(), ref.name.size()), ref.id, false, ref.id, "");
+        match (GIT_object.read(gitdir, ref.id)) {
+            case Ok(GIT_object.Object object): {
+                match (object.body) {
+                    case Tag(GIT_object.Tag annotation): {
+                        tag.is_annotated = true;
+                        tag.subject = first_line(annotation.message);
+                        match (GIT_refs.peel(gitdir, ref.name, ref.id)) {
+                            case Ok(str peeled): {
+                                tag.commit = peeled;
+                            }
+                            case Err: {
+                                tag.commit = annotation.object;
+                            }
+                        }
+                    }
+                    case Blob: {
+                    }
+                    case Tree: {
+                    }
+                    case Commit: {
+                    }
+                }
+            }
+            case Err: {
+            }
+        }
+        out.push(tag);
+    }
+    return Result<List<Tag>, Error>.Ok(out);
+}
+
+str first_line(bytes message) {
+    match (message.utf8()) {
+        case Some(str body): {
+            for (str line in text.lines(body)) {
+                return line;
+            }
+            return "";
+        }
+        case None: {
+            return "";
+        }
+    }
+}
+
+/// Would git accept `name` as a tag name?
+pub bool is_valid_tag_name(str name) {
+    if (name == "" || name == "HEAD" || name.starts_with("-") || name.starts_with("/") || name.ends_with("/") || name.ends_with(".lock") || name.ends_with(".")) {
+        return false;
+    }
+    if (name.contains("..") || name.contains("//") || name.contains("@{") || name.contains("/.") || name.starts_with(".")) {
+        return false;
+    }
+    for (int i in 0 .. name.size()) {
+        int byte_value = name.byte_at(i);
+        if (byte_value <= 32 || byte_value == 127 || byte_value == '~' || byte_value == '^' || byte_value == ':' || byte_value == '?' || byte_value == '*' || byte_value == '[' || byte_value == '\\') {
+            return false;
+        }
+    }
+    return true;
+}
+
+Result<bool, Error> check_new(str gitdir, str name) {
+    if (!is_valid_tag_name(name)) {
+        return Result<bool, Error>.Err(Error.BadName);
+    }
+    if (GIT_refs.has_ref(gitdir, "refs/tags/" + name)) {
+        return Result<bool, Error>.Err(Error.Exists);
+    }
+    return Result<bool, Error>.Ok(true);
+}
+
+Result<bool, Error> write_tag_ref(str gitdir, str name, str id) {
+    match (GIT_refs.update(gitdir, "refs/tags/" + name, id, Option<str>.Some(""))) {
+        case Ok: {
+            return Result<bool, Error>.Ok(true);
+        }
+        case Err(GIT_refs.Error error): {
+            return Result<bool, Error>.Err(Error.Refs(error));
+        }
+    }
+}
+
+/// `git tag <name> <commit>`.
+pub Result<bool, Error> create_lightweight(str gitdir, str name, str commit) {
+    check_new(gitdir, name)?;
+    return write_tag_ref(gitdir, name, commit);
+}
+
+str rtrim(str line) {
+    int end = line.size();
+    while (end > 0 && (line.byte_at(end - 1) == ' ' || line.byte_at(end - 1) == '\t' || line.byte_at(end - 1) == '\r')) {
+        end = end - 1;
+    }
+    return line.substr(0, end);
+}
+
+/// `git tag` cleans a `-m` message with `stripspace`: trailing whitespace off
+/// every line, blank-line runs collapsed to one, no blank lines at either
+/// end, one final newline. "" when nothing is left.
+pub str clean_message(str raw) {
+    List<str> lines = [];
+    bool pending_blank = false;
+    for (str line in text.lines(raw)) {
+        str trimmed = rtrim(line);
+        if (trimmed == "") {
+            pending_blank = lines.size() > 0;
+            continue;
+        }
+        if (pending_blank) {
+            lines.push("");
+            pending_blank = false;
+        }
+        lines.push(trimmed);
+    }
+    if (lines.size() == 0) {
+        return "";
+    }
+    return lines.join("\n") + "\n";
+}
+
+/// `git tag -a -m <message> <name> <commit>`: the tag object, then the ref.
+/// Returns the tag object's id.
+pub Result<str, Error> create_annotated(str gitdir, str name, str commit, str message) {
+    check_new(gitdir, name)?;
+    str body = clean_message(message);
+    if (body == "") {
+        return Result<str, Error>.Err(Error.EmptyMessage);
+    }
+    str kind = "commit";
+    match (GIT_object.read(gitdir, commit)) {
+        case Ok(GIT_object.Object object): {
+            kind = object.kind();
+        }
+        case Err(GIT_object.Error error): {
+            return Result<str, Error>.Err(Error.Object(error));
+        }
+    }
+    GIT_object.Ident who = GIT_reflog.default_ident(gitdir);
+    bytes content = [];
+    content.extend(("object " + commit + "\ntype " + kind + "\ntag " + name + "\ntagger ").to_bytes());
+    content.extend(who.name);
+    content.extend(" <".to_bytes());
+    content.extend(who.email);
+    content.extend(("> " + who.when.to_str() + " " + who.zone + "\n\n" + body).to_bytes());
+    str id = "";
+    match (GIT_object.write(gitdir, "tag", content)) {
+        case Ok(str written): {
+            id = written;
+        }
+        case Err(GIT_object.Error error): {
+            return Result<str, Error>.Err(Error.Object(error));
+        }
+    }
+    write_tag_ref(gitdir, name, id)?;
+    return Result<str, Error>.Ok(id);
+}
+
+/// `git tag -d <name>`: the loose ref, and the packed line if there is one.
+pub Result<bool, Error> delete_tag(str gitdir, str name) {
+    str full = "refs/tags/" + name;
+    if (!is_valid_tag_name(name) || !GIT_refs.has_ref(gitdir, full)) {
+        return Result<bool, Error>.Err(Error.NotFound);
+    }
+    str common = GIT_repository.common(gitdir);
+    str loose = fs.join(common, full);
+    if (fs.exists(loose)) {
+        match (fs.remove(loose)) {
+            case Ok: {
+            }
+            case Err: {
+                return Result<bool, Error>.Err(Error.Io);
+            }
+        }
+    }
+    str packed = fs.join(common, "packed-refs");
+    if (fs.exists(packed)) {
+        match (io.read(packed)) {
+            case Ok(str body): {
+                List<str> kept = [];
+                bool skipping = false;
+                bool changed = false;
+                for (str line in text.lines(body)) {
+                    if (skipping && line.starts_with("^")) {
+                        continue;
+                    }
+                    skipping = false;
+                    if (line.ends_with(" " + full) && !line.starts_with("#") && !line.starts_with("^")) {
+                        skipping = true;
+                        changed = true;
+                        continue;
+                    }
+                    kept.push(line);
+                }
+                if (changed) {
+                    str next = kept.join("\n") + "\n";
+                    str temp = packed + ".tmp" + random.system().hex(12);
+                    match (io.write(temp, next)) {
+                        case Ok: {
+                        }
+                        case Err: {
+                            return Result<bool, Error>.Err(Error.Io);
+                        }
+                    }
+                    match (fs.rename(temp, packed)) {
+                        case Ok: {
+                        }
+                        case Err: {
+                            return Result<bool, Error>.Err(Error.Io);
+                        }
+                    }
+                }
+            }
+            case Err: {
+                return Result<bool, Error>.Err(Error.Io);
+            }
+        }
+    }
+    return Result<bool, Error>.Ok(true);
+}
