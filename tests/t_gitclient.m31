@@ -165,7 +165,13 @@ Map<str, List<GIT_ui_model.CommitFileDiff>> changes_long = {};
 Map<str, GIT_ui_model.CommitFileDiff> file_diffs_long = {};
 TUI_outline.Outline o_long = GIT_ui_model.build_outline(status, long_log, changes_long, collapsed_long, paths_long, file_diffs_long, []);
 List<TUI_outline.Row> long_rows = o_long.rows();
-str last_id = long_rows[long_rows.size() - 1].node.id;
+str last_id = "";
+for (TUI_outline.Row row in long_rows) {
+    if (row.node.id == "branches") {
+        break;
+    }
+    last_id = row.node.id;
+}
 str commits_label_long = "";
 for (TUI_outline.Row row in long_rows) {
     if (row.node.id == "commits") {

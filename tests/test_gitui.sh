@@ -17,8 +17,10 @@
 
 if build t_gitclient; then
     "$WORK/t_gitclient" >"$WORK/gitclient_unit.out" 2>"$WORK/gitclient_unit.err"
-    if grep -q '^FAIL' "$WORK/gitclient_unit.out"; then
-        bad "gitui: unit tests (t_gitclient)" "$(grep '^FAIL' "$WORK/gitclient_unit.out")" "$(cat "$WORK/gitclient_unit.err")"
+    if grep -q 'FAIL' "$WORK/gitclient_unit.out"; then
+        bad "gitui: unit tests (t_gitclient)" "$(grep 'FAIL' "$WORK/gitclient_unit.out")" "$(cat "$WORK/gitclient_unit.err")"
+    elif ! tail -1 "$WORK/gitclient_unit.out" | grep -q ' 0 failed'; then
+        bad "gitui: unit tests (t_gitclient) did not finish" "$(tail -3 "$WORK/gitclient_unit.out")" "$(cat "$WORK/gitclient_unit.err")"
     else
         note "gitui: unit tests -- $(tail -1 "$WORK/gitclient_unit.out")"
     fi
