@@ -245,7 +245,7 @@ pub str state_dir(str gitdir) {
 }
 
 pub bool in_progress(str gitdir) {
-    return fs.exists(state_dir(gitdir));
+    return fs.is_present(state_dir(gitdir));
 }
 
 str rd(str gitdir, str name) {
@@ -265,7 +265,7 @@ void rm(str gitdir, str name) {
 }
 
 bool has(str gitdir, str name) {
-    return fs.exists(fs.join(state_dir(gitdir), name));
+    return fs.is_present(fs.join(state_dir(gitdir), name));
 }
 
 void rm_git(str gitdir, str name) {
@@ -315,11 +315,11 @@ str message_text(GIT_object.Commit commit) {
 }
 
 str strip_leading_blank(str text) {
-    int at = 0;
-    while (at < text.size() && text.byte_at(at) == '\n') {
-        at = at + 1;
+    int newline_end = 0;
+    while (newline_end < text.size() && text.byte_at(newline_end) == '\n') {
+        newline_end = newline_end + 1;
     }
-    return text.substr(at, text.size());
+    return text.substr(newline_end, text.size());
 }
 
 str commented(str body) {
@@ -416,8 +416,8 @@ Result<GIT_index.Index, GIT_sequencer.Error> index_of(str gitdir) {
     return GIT_sequencer.lift_index(GIT_merge.read_index(gitdir));
 }
 
-Result<bool, GIT_sequencer.Error> move_head(str gitdir, str old, str new_id, str msg) {
-    return GIT_sequencer.move_ref(gitdir, "HEAD", new_id, Option<str>.Some(old), msg);
+Result<bool, GIT_sequencer.Error> move_head(str gitdir, str old, str new_id, str message) {
+    return GIT_sequencer.move_ref(gitdir, "HEAD", new_id, Option<str>.Some(old), message);
 }
 
 /// A commit on top of HEAD (or replacing it with `amend`), HEAD moved to it.
@@ -486,8 +486,8 @@ bool config_flag(str gitdir, str key) {
     match (GIT_config.load_all(gitdir)) {
         case Ok(GIT_config.Config config): {
             match (config.get_bool("rebase", "", key)) {
-                case Some(bool on): {
-                    return on;
+                case Some(bool is_enabled): {
+                    return is_enabled;
                 }
                 case None: {
                     return false;
@@ -516,8 +516,8 @@ Result<str, GIT_sequencer.Error> commit_named(str gitdir, str spec) {
     }
 }
 
-List<str> bases_of(str gitdir, str a, str b) {
-    match (GIT_graph.merge_bases(gitdir, a, b)) {
+List<str> bases_of(str gitdir, str first, str second) {
+    match (GIT_graph.merge_bases(gitdir, first, second)) {
         case Ok(List<str> found): {
             return found;
         }
@@ -633,7 +633,7 @@ pub Result<Report, GIT_sequencer.Error> start(str gitdir, str worktree, Plan pla
     }
     str autostash = "";
     if (opts.autostash && is_dirty(gitdir, worktree)) {
-        match (GIT_stash.push(gitdir, worktree, message: "autostash", store: false)) {
+        match (GIT_stash.push(gitdir, worktree, message: "autostash", should_store: false)) {
             case Ok(GIT_stash.Saved saved): {
                 autostash = saved.commit;
                 notes.push("Created autostash: " + GIT_sequencer.abbrev(gitdir, saved.commit));
@@ -661,8 +661,8 @@ pub Result<Report, GIT_sequencer.Error> start(str gitdir, str worktree, Plan pla
     return run(gitdir, worktree, editor, notes);
 }
 
-void log_head(str gitdir, str old, str new_id, str msg) {
-    match (GIT_reflog.append(gitdir, "HEAD", old, new_id, GIT_reflog.default_ident(gitdir), msg)) {
+void log_head(str gitdir, str old, str new_id, str message) {
+    match (GIT_reflog.append(gitdir, "HEAD", old, new_id, GIT_reflog.default_ident(gitdir), message)) {
         case Ok(_): {
         }
         case Err(_): {
@@ -751,17 +751,17 @@ Result<bool, GIT_sequencer.Error> begin(str gitdir, str worktree, Plan plan, Lis
 }
 
 void drop_state(str gitdir) {
-    str dir = state_dir(gitdir);
-    match (fs.listdir(dir)) {
+    str directory = state_dir(gitdir);
+    match (fs.listdir(directory)) {
         case Ok(List<str> names): {
             for (str name in names) {
-                GIT_sequencer.remove_file(fs.join(dir, name));
+                GIT_sequencer.remove_file(fs.join(directory, name));
             }
         }
         case Err(_): {
         }
     }
-    match (fs.rmdir(dir)) {
+    match (fs.rmdir(directory)) {
         case Ok: {
         }
         case Err(_): {
@@ -793,13 +793,13 @@ bool next_is_fixup(str gitdir) {
 }
 
 int line_count(str text) {
-    int n = 0;
+    int count = 0;
     for (str line in text.split("\n")) {
         if (line.trim() != "") {
-            n = n + 1;
+            count = count + 1;
         }
     }
-    return n;
+    return count;
 }
 
 Result<bool, GIT_sequencer.Error> flush_rewritten(str gitdir) {
@@ -1154,7 +1154,7 @@ Result<Option<Report>, GIT_sequencer.Error> run_exec(str gitdir, str worktree, G
     bool is_ok = false;
     match (os.run(["sh", "-c", script])) {
         case Ok(os.ExitStatus status): {
-            is_ok = status.success();
+            is_ok = status.is_success();
         }
         case Err(_): {
             is_ok = false;

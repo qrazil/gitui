@@ -3,7 +3,7 @@
 //
 // API
 // ---
-//   GIT_stash.push(gitdir, worktree, include_untracked:, keep_index:, message:)
+//   GIT_stash.push(gitdir, worktree, should_include_untracked:, should_keep_index:, message:)
 //                                      -> Result<Saved, Error>
 //   GIT_stash.list(gitdir)             -> Result<List<Item>, Error>, newest first
 //   GIT_stash.resolve(gitdir, n)       -> Result<str, Error>      stash@{n}'s commit
@@ -320,7 +320,7 @@ Result<GIT_index.Index, Error> read_index(str gitdir) {
             return Result<GIT_index.Index, Error>.Ok(index);
         }
         case Err(GIT_index.Error error): {
-            if (!fs.exists(fs.join(gitdir, "index"))) {
+            if (!fs.is_present(fs.join(gitdir, "index"))) {
                 return Result<GIT_index.Index, Error>.Ok(GIT_index.Index([]));
             }
             return Result<GIT_index.Index, Error>.Err(Error.Failed("index: " + error.to_str()));
@@ -467,9 +467,9 @@ Result<str, Error> tree_of_entries(str gitdir, List<GIT_index.Entry> entries) {
 
 str clean_ident(str raw) {
     List<int> out = [];
-    for (int c in raw.chars()) {
-        if (c != '<' && c != '>' && c != '\n') {
-            out.push(c);
+    for (int byte in raw.chars()) {
+        if (byte != '<' && byte != '>' && byte != '\n') {
+            out.push(byte);
         }
     }
     return str.from_chars(out).trim();
@@ -633,7 +633,7 @@ GIT_object.Commit stash_commit(str tree, List<str> parents, GIT_object.Ident aut
 /// Save the work tree and index as a stash: the W commit goes on `refs/stash`
 /// and its reflog, and the work tree and index go back to HEAD (the index and
 /// files of the index with `keep_index`). See the module header.
-pub Result<Saved, Error> push(str gitdir, str worktree, bool include_untracked = false, bool keep_index = false, str message = "", bool store = true) {
+pub Result<Saved, Error> push(str gitdir, str worktree, bool should_include_untracked = false, bool should_keep_index = false, str message = "", bool should_store = true) {
     HeadInfo head = head_info(gitdir)?;
     GIT_index.Index index = read_index(gitdir)?;
     for (GIT_index.Entry entry in index.entries) {
@@ -655,7 +655,7 @@ pub Result<Saved, Error> push(str gitdir, str worktree, bool include_untracked =
     }
     // the untracked files that will go into U (symlinks cannot be read: left alone)
     List<bytes> untracked = [];
-    if (include_untracked) {
+    if (should_include_untracked) {
         for (bytes path in status.untracked) {
             if (!fs.is_link(fs.join(worktree, path.utf8().or("")))) {
                 untracked.push(path);
@@ -726,11 +726,11 @@ pub Result<Saved, Error> push(str gitdir, str worktree, bool include_untracked =
         text = "On " + head.branch + ": " + message;
     }
     str commit = put_commit(gitdir, stash_commit(work_tree, parents, author, committer, text))?;
-    if (store) {
+    if (should_store) {
         put_on_stack(gitdir, commit, text)?;
     }
     // the work tree and index back to HEAD
-    if (store) {
+    if (should_store) {
         match (GIT_checkout.reset_hard(gitdir, worktree, head.id)) {
             case Ok: {
             }
@@ -750,7 +750,7 @@ pub Result<Saved, Error> push(str gitdir, str worktree, bool include_untracked =
     for (bytes path in untracked) {
         remove_and_prune(worktree, fs.join(worktree, path.utf8().or("")));
     }
-    if (keep_index) {
+    if (should_keep_index) {
         GIT_index.Index fresh = read_index(gitdir)?;
         match (GIT_checkout.apply_tree_diff(gitdir, worktree, head.tree, index_tree, fresh)) {
             case Ok: {
@@ -842,7 +842,7 @@ Result<bool, Error> write_ref(str gitdir, str name, str id) {
 /// Delete the ref (loose and packed) and its log.
 Result<bool, Error> delete_ref(str gitdir, str name) {
     str path = ref_path(gitdir, name);
-    if (fs.exists(path)) {
+    if (fs.is_present(path)) {
         match (fs.remove(path)) {
             case Ok: {
             }
@@ -852,7 +852,7 @@ Result<bool, Error> delete_ref(str gitdir, str name) {
         }
     }
     str packed = fs.join(GIT_repository.common(gitdir), "packed-refs");
-    if (fs.exists(packed)) {
+    if (fs.is_present(packed)) {
         match (io.read(packed)) {
             case Ok(str body): {
                 List<str> kept = [];
@@ -902,12 +902,12 @@ pub Result<List<Item>, Error> list(str gitdir) {
         }
     }
     List<Item> out = [];
-    int n = 0;
-    int i = lines.size() - 1;
-    while (i >= 0) {
-        out.push(Item(n, lines[i].new, lines[i].message, lines[i].when));
-        n = n + 1;
-        i = i - 1;
+    int number = 0;
+    int index = lines.size() - 1;
+    while (index >= 0) {
+        out.push(Item(number, lines[index].new, lines[index].message, lines[index].when));
+        number = number + 1;
+        index = index - 1;
     }
     if (out.size() == 0) {
         match (GIT_refs.resolve(gitdir, STASH_REF)) {
@@ -937,12 +937,12 @@ pub List<str> labels(str gitdir) {
 }
 
 /// The W commit of `stash@{n}`.
-pub Result<str, Error> resolve(str gitdir, int n) {
+pub Result<str, Error> resolve(str gitdir, int number) {
     List<Item> items = list(gitdir)?;
-    if (n < 0 || n >= items.size()) {
+    if (number < 0 || number >= items.size()) {
         return Result<str, Error>.Err(Error.NoSuchStash);
     }
-    return Result<str, Error>.Ok(items[n].id);
+    return Result<str, Error>.Ok(items[number].id);
 }
 
 /// Take a stash commit apart.
@@ -962,8 +962,8 @@ pub Result<Parts, Error> parts_of(str gitdir, str id) {
 
 /// `git stash show -p stash@{n}`: base -> W, plus the untracked files as added
 /// ones when asked for (and there are some).
-pub Result<bytes, Error> show(str gitdir, int n, bool include_untracked = false) {
-    str id = resolve(gitdir, n)?;
+pub Result<bytes, Error> show(str gitdir, int number, bool should_include_untracked = false) {
+    str id = resolve(gitdir, number)?;
     Parts parts = parts_of(gitdir, id)?;
     // git diffs base against W with the untracked files laid over it, so the
     // untracked paths come in sorted among the rest
@@ -985,7 +985,7 @@ pub Result<bytes, Error> show(str gitdir, int n, bool include_untracked = false)
             return Result<bytes, Error>.Err(Error.Failed("diff: " + error.to_str()));
         }
     }
-    if (include_untracked && parts.untracked_tree != "") {
+    if (should_include_untracked && parts.untracked_tree != "") {
         match (GIT_udiff.flat(gitdir, parts.untracked_tree)) {
             case Ok(Map<str, GIT_udiff.Leaf> found): {
                 for (str path in found.keys()) {
@@ -1010,14 +1010,14 @@ pub Result<bytes, Error> show(str gitdir, int n, bool include_untracked = false)
 /// Remove `stash@{n}`; returns its commit. The log is rewritten the way
 /// `git reflog delete --rewrite` does, and the ref follows the newest line (or
 /// goes, with the last).
-pub Result<str, Error> drop(str gitdir, int n) {
-    str id = resolve(gitdir, n)?;
+pub Result<str, Error> drop(str gitdir, int number) {
+    str id = resolve(gitdir, number)?;
     List<Item> items = list(gitdir)?;
     if (items.size() == 1) {
         delete_ref(gitdir, STASH_REF)?;
         return Result<str, Error>.Ok(id);
     }
-    match (GIT_reflog.delete(gitdir, STASH_REF, n, true)) {
+    match (GIT_reflog.delete(gitdir, STASH_REF, number, true)) {
         case Ok: {
         }
         case Err(GIT_reflog.Error error): {
@@ -1025,7 +1025,7 @@ pub Result<str, Error> drop(str gitdir, int n) {
         }
     }
     int top = 0;
-    if (n == 0) {
+    if (number == 0) {
         top = 1;
     }
     write_ref(gitdir, STASH_REF, items[top].id)?;
@@ -1204,7 +1204,7 @@ Result<GIT_merge.TreeMerge, Error> merge_index_changes(str gitdir, Parts parts, 
 }
 
 /// `git stash apply` for the stash commit `id`. See the module header.
-pub Result<Applied, Error> apply(str gitdir, str worktree, str id, bool restore_index = false) {
+pub Result<Applied, Error> apply(str gitdir, str worktree, str id, bool should_restore_index = false) {
     Parts parts = parts_of(gitdir, id)?;
     GIT_index.Index index = read_index(gitdir)?;
     for (GIT_index.Entry entry in index.entries) {
@@ -1228,7 +1228,7 @@ pub Result<Applied, Error> apply(str gitdir, str worktree, str id, bool restore_
     untracked_paths.sort();
     for (str path in untracked_paths) {
         str full = fs.join(worktree, path);
-        if (fs.exists(full) || fs.is_link(full)) {
+        if (fs.is_present(full) || fs.is_link(full)) {
             return Result<Applied, Error>.Err(Error.UntrackedExists(path));
         }
     }
@@ -1244,7 +1244,7 @@ pub Result<Applied, Error> apply(str gitdir, str worktree, str id, bool restore_
         }
     }
     List<str> staged_paths = [];
-    if (restore_index && needs_merge) {
+    if (should_restore_index && needs_merge) {
         // git restores the index only when it differs both from the base and from
         // what the index holds now
         if (parts.index_tree != current_tree && parts.index_tree != parts.base_tree) {
@@ -1270,7 +1270,7 @@ pub Result<Applied, Error> apply(str gitdir, str worktree, str id, bool restore_
             staged = landed;
             staged_paths = GIT_udiff.changed_paths(current, staged);
         }
-    } else if (restore_index) {
+    } else if (should_restore_index) {
         staged_paths = GIT_udiff.changed_paths(base, staged);
         for (str path in staged_paths) {
             GIT_udiff.Leaf was = leaf_at(base, path);
@@ -1383,10 +1383,10 @@ pub Result<Applied, Error> apply(str gitdir, str worktree, str id, bool restore_
 }
 
 /// `apply` and then `drop` of `stash@{n}`; the stash stays when the apply fails.
-pub Result<Applied, Error> pop(str gitdir, str worktree, int n, bool restore_index = false) {
-    str id = resolve(gitdir, n)?;
-    Applied done = apply(gitdir, worktree, id, restore_index: restore_index)?;
-    drop(gitdir, n)?;
+pub Result<Applied, Error> pop(str gitdir, str worktree, int number, bool should_restore_index = false) {
+    str id = resolve(gitdir, number)?;
+    Applied done = apply(gitdir, worktree, id, should_restore_index: should_restore_index)?;
+    drop(gitdir, number)?;
     return Result<Applied, Error>.Ok(done);
 }
 
@@ -1398,8 +1398,8 @@ bool is_plausible_branch(str name) {
         return false;
     }
     for (int i in 0 .. name.size()) {
-        int c = name.byte_at(i);
-        if (c <= 32 || c == 127 || c == '~' || c == '^' || c == ':' || c == '?' || c == '*' || c == '[' || c == '\\') {
+        int byte = name.byte_at(i);
+        if (byte <= 32 || byte == 127 || byte == '~' || byte == '^' || byte == ':' || byte == '?' || byte == '*' || byte == '[' || byte == '\\') {
             return false;
         }
     }
@@ -1407,17 +1407,17 @@ bool is_plausible_branch(str name) {
 }
 
 /// `git stash branch <name> stash@{n}`.
-pub Result<Applied, Error> branch(str gitdir, str worktree, str name, int n) {
+pub Result<Applied, Error> branch(str gitdir, str worktree, str name, int number) {
     if (!is_plausible_branch(name)) {
         return Result<Applied, Error>.Err(Error.BadName);
     }
-    str id = resolve(gitdir, n)?;
+    str id = resolve(gitdir, number)?;
     Parts parts = parts_of(gitdir, id)?;
     str full = "refs/heads/" + name;
     if (GIT_refs.has_ref(gitdir, full)) {
         return Result<Applied, Error>.Err(Error.BranchExists);
     }
-    match (GIT_refs.update(gitdir, full, parts.base, Option<str>.Some(""), msg: "branch: Created from " + parts.base)) {
+    match (GIT_refs.update(gitdir, full, parts.base, Option<str>.Some(""), reflog_message: "branch: Created from " + parts.base)) {
         case Ok: {
         }
         case Err(GIT_refs.Error error): {
@@ -1432,7 +1432,7 @@ pub Result<Applied, Error> branch(str gitdir, str worktree, str name, int n) {
             return Result<Applied, Error>.Err(from_checkout(error));
         }
     }
-    Applied done = apply(gitdir, worktree, id, restore_index: true)?;
-    drop(gitdir, n)?;
+    Applied done = apply(gitdir, worktree, id, should_restore_index: true)?;
+    drop(gitdir, number)?;
     return Result<Applied, Error>.Ok(done);
 }

@@ -32,19 +32,19 @@ import tui.TUI_text;
 
 // --- the work ------------------------------------------------------------------------
 
-str ref_name(int n) {
-    return "stash@{" + n.to_str() + "}";
+str ref_name(int number) {
+    return "stash@{" + number.to_str() + "}";
 }
 
 /// `git stash push`, with `-u`, `-k` and `-m` as asked.
-pub void push_stash(GIT_ui_core.Core core, bool include_untracked, bool keep_index, str message) {
-    match (GIT_stash.push(core.gitdir, core.worktree, include_untracked: include_untracked, keep_index: keep_index, message: message)) {
+pub void push_stash(GIT_ui_core.Core core, bool should_include_untracked, bool should_keep_index, str message) {
+    match (GIT_stash.push(core.gitdir, core.worktree, should_include_untracked: should_include_untracked, should_keep_index: should_keep_index, message: message)) {
         case Ok(GIT_stash.Saved saved): {
             str line = "stash push";
-            if (include_untracked) {
+            if (should_include_untracked) {
                 line = line + " -u";
             }
-            if (keep_index) {
+            if (should_keep_index) {
                 line = line + " -k";
             }
             if (message != "") {
@@ -61,40 +61,40 @@ pub void push_stash(GIT_ui_core.Core core, bool include_untracked, bool keep_ind
 }
 
 // A merge that stopped on conflicts has changed the tree: say so and reload.
-bool conflicted(GIT_ui_core.Core core, str verb, int n, GIT_stash.Error error) {
+bool conflicted(GIT_ui_core.Core core, str verb, int number, GIT_stash.Error error) {
     List<str> paths = error.conflicted_paths();
     if (paths.size() == 0) {
         return false;
     }
-    core.log_command("stash " + verb + " " + ref_name(n) + " (conflicts in " + paths.join(", ") + ")");
-    core.say(verb + " stopped on conflicts in " + paths.join(", ") + "; " + ref_name(n) + " is kept");
+    core.log_command("stash " + verb + " " + ref_name(number) + " (conflicts in " + paths.join(", ") + ")");
+    core.say(verb + " stopped on conflicts in " + paths.join(", ") + "; " + ref_name(number) + " is kept");
     core.reload();
     return true;
 }
 
 /// `git stash apply` (and with `drop_after`, `pop`) of `stash@{n}`.
-pub void apply_stash(GIT_ui_core.Core core, int n, bool restore_index, bool drop_after) {
+pub void apply_stash(GIT_ui_core.Core core, int number, bool should_restore_index, bool should_drop_after) {
     if (core.is_blocked_by_sequence("stash apply")) {
         return;
     }
     GIT_stash.Applied done = GIT_stash.Applied(0, 0, 0);
-    if (drop_after) {
-        match (GIT_stash.pop(core.gitdir, core.worktree, n, restore_index: restore_index)) {
+    if (should_drop_after) {
+        match (GIT_stash.pop(core.gitdir, core.worktree, number, should_restore_index: should_restore_index)) {
             case Ok(GIT_stash.Applied found): {
                 done = found;
             }
             case Err(GIT_stash.Error error): {
-                if (conflicted(core, "pop", n, error)) {
+                if (conflicted(core, "pop", number, error)) {
                     return;
                 }
                 core.say("pop refused: " + error.to_str());
                 return;
             }
         }
-        core.log_command("stash pop " + ref_name(n));
+        core.log_command("stash pop " + ref_name(number));
     } else {
         str id = "";
-        match (GIT_stash.resolve(core.gitdir, n)) {
+        match (GIT_stash.resolve(core.gitdir, number)) {
             case Ok(str found): {
                 id = found;
             }
@@ -103,34 +103,34 @@ pub void apply_stash(GIT_ui_core.Core core, int n, bool restore_index, bool drop
                 return;
             }
         }
-        match (GIT_stash.apply(core.gitdir, core.worktree, id, restore_index: restore_index)) {
+        match (GIT_stash.apply(core.gitdir, core.worktree, id, should_restore_index: should_restore_index)) {
             case Ok(GIT_stash.Applied found): {
                 done = found;
             }
             case Err(GIT_stash.Error error): {
-                if (conflicted(core, "apply", n, error)) {
+                if (conflicted(core, "apply", number, error)) {
                     return;
                 }
                 core.say("apply refused: " + error.to_str());
                 return;
             }
         }
-        core.log_command("stash apply " + ref_name(n));
+        core.log_command("stash apply " + ref_name(number));
     }
     str verb = "applied ";
-    if (drop_after) {
+    if (should_drop_after) {
         verb = "popped ";
     }
-    core.say(verb + ref_name(n) + " (" + done.written.to_str() + " written, " + done.removed.to_str() + " removed, " + done.untracked.to_str() + " untracked)");
+    core.say(verb + ref_name(number) + " (" + done.written.to_str() + " written, " + done.removed.to_str() + " removed, " + done.untracked.to_str() + " untracked)");
     core.reload();
 }
 
 /// `git stash drop stash@{n}`.
-pub void drop_stash(GIT_ui_core.Core core, int n) {
-    match (GIT_stash.drop(core.gitdir, n)) {
+pub void drop_stash(GIT_ui_core.Core core, int number) {
+    match (GIT_stash.drop(core.gitdir, number)) {
         case Ok(str id): {
-            core.log_command("stash drop " + ref_name(n) + " (" + GIT_ui_core.short_id(id) + ")");
-            core.say("dropped " + ref_name(n) + " (" + GIT_ui_core.short_id(id) + ")");
+            core.log_command("stash drop " + ref_name(number) + " (" + GIT_ui_core.short_id(id) + ")");
+            core.say("dropped " + ref_name(number) + " (" + GIT_ui_core.short_id(id) + ")");
             core.reload();
         }
         case Err(GIT_stash.Error error): {
@@ -140,7 +140,7 @@ pub void drop_stash(GIT_ui_core.Core core, int n) {
 }
 
 /// `git stash branch <name> stash@{n}`.
-pub void branch_stash(GIT_ui_core.Core core, int n, str name) {
+pub void branch_stash(GIT_ui_core.Core core, int number, str name) {
     if (core.is_blocked_by_sequence("stash branch")) {
         return;
     }
@@ -148,10 +148,10 @@ pub void branch_stash(GIT_ui_core.Core core, int n, str name) {
         core.say("no branch created (empty name)");
         return;
     }
-    match (GIT_stash.branch(core.gitdir, core.worktree, name, n)) {
+    match (GIT_stash.branch(core.gitdir, core.worktree, name, number)) {
         case Ok(GIT_stash.Applied done): {
-            core.log_command("stash branch " + name + " " + ref_name(n));
-            core.say("created " + name + " from " + ref_name(n) + " (" + done.written.to_str() + " written)");
+            core.log_command("stash branch " + name + " " + ref_name(number));
+            core.say("created " + name + " from " + ref_name(number) + " (" + done.written.to_str() + " written)");
             core.reload();
         }
         case Err(GIT_stash.Error error): {
@@ -167,8 +167,8 @@ pub int target(GIT_ui_core.Core core) {
         case Some(TUI_outline.Row row): {
             if (row.node.id.starts_with("stash:")) {
                 match (row.node.id.substr(6, row.node.id.size()).parse_int()) {
-                    case Some(int n): {
-                        return n;
+                    case Some(int number): {
+                        return number;
                     }
                     case None: {
                     }
@@ -181,8 +181,8 @@ pub int target(GIT_ui_core.Core core) {
     return 0;
 }
 
-bool has_stash(GIT_ui_core.Core core, int n) {
-    if (n >= core.stash_labels.size()) {
+bool has_stash(GIT_ui_core.Core core, int number) {
+    if (number >= core.stash_labels.size()) {
         core.say("no stashes yet -- z, z saves the current changes");
         return false;
     }
@@ -199,7 +199,7 @@ pub TUI_app.Action StashMenu.handle_key(term.Code code) {
     match (GIT_ui_core.lookup(GIT_ui_core.SCOPE_STASH, code)) {
         case Some(str cmd): {
             host.pop_overlay();
-            int n = target(host);
+            int number = target(host);
             if (cmd == GIT_ui_core.CMD_STASH_PUSH) {
                 push_stash(host, false, false, "");
             }
@@ -212,23 +212,23 @@ pub TUI_app.Action StashMenu.handle_key(term.Code code) {
             if (cmd == GIT_ui_core.CMD_STASH_MESSAGE) {
                 host.push_overlay(PromptOverlay(host, "message", 0));
             }
-            if (cmd == GIT_ui_core.CMD_STASH_POP && has_stash(host, n)) {
-                apply_stash(host, n, false, true);
+            if (cmd == GIT_ui_core.CMD_STASH_POP && has_stash(host, number)) {
+                apply_stash(host, number, false, true);
             }
-            if (cmd == GIT_ui_core.CMD_STASH_APPLY && has_stash(host, n)) {
-                apply_stash(host, n, false, false);
+            if (cmd == GIT_ui_core.CMD_STASH_APPLY && has_stash(host, number)) {
+                apply_stash(host, number, false, false);
             }
-            if (cmd == GIT_ui_core.CMD_STASH_APPLY_INDEX && has_stash(host, n)) {
-                apply_stash(host, n, true, false);
+            if (cmd == GIT_ui_core.CMD_STASH_APPLY_INDEX && has_stash(host, number)) {
+                apply_stash(host, number, true, false);
             }
-            if (cmd == GIT_ui_core.CMD_STASH_DROP && has_stash(host, n)) {
-                host.push_overlay(DropConfirm(host, n));
+            if (cmd == GIT_ui_core.CMD_STASH_DROP && has_stash(host, number)) {
+                host.push_overlay(DropConfirm(host, number));
             }
-            if (cmd == GIT_ui_core.CMD_STASH_BRANCH && has_stash(host, n)) {
-                host.push_overlay(PromptOverlay(host, "branch", n));
+            if (cmd == GIT_ui_core.CMD_STASH_BRANCH && has_stash(host, number)) {
+                host.push_overlay(PromptOverlay(host, "branch", number));
             }
             if (cmd == GIT_ui_core.CMD_STASH_LIST) {
-                open_list(host, n);
+                open_list(host, number);
             }
             return TUI_app.Action.Redraw;
         }
@@ -430,7 +430,7 @@ void ListOverlay.load_preview() {
     }
     preview_id = id;
     preview = [];
-    match (GIT_stash.show(host.gitdir, selected, include_untracked: true)) {
+    match (GIT_stash.show(host.gitdir, selected, should_include_untracked: true)) {
         case Ok(bytes shown): {
             match (shown.utf8()) {
                 case Some(str body): {
@@ -513,8 +513,8 @@ TUI_style.Style diff_style(str line) {
 }
 
 /// Open the stash list with `n` highlighted (`z`, `l`; Enter on a stash row).
-pub void open_list(GIT_ui_core.Core core, int n) {
-    int selected = n;
+pub void open_list(GIT_ui_core.Core core, int number) {
+    int selected = number;
     if (selected >= core.stash_labels.size()) {
         selected = 0;
     }

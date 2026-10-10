@@ -11,7 +11,7 @@ import GIT_graph;
 import io;
 import os;
 
-List<str> argv = os.args();
+List<str> argv = os.arguments();
 if (argv.size() < 4) {
     io.eprint("usage: t_graph <gitdir> pairs|revlist <file> | count <id>");
     os.exit(2);
@@ -25,8 +25,8 @@ void fail(GIT_graph.Error error) {
     os.exit(1);
 }
 
-str flag(bool value) {
-    if (value) {
+str flag(bool is_set) {
+    if (is_set) {
         return "1";
     }
     return "0";
@@ -59,10 +59,10 @@ for (str line in body.split("\n")) {
     }
     List<str> words = line.trim().split(" ");
     if (operation == "pairs") {
-        str a = words[0];
-        str b = words[1];
+        str first = words[0];
+        str second = words[1];
         List<str> bases = [];
-        match (graph.merge_bases(a, b)) {
+        match (graph.merge_bases(first, second)) {
             case Ok(List<str> found): {
                 bases = found;
             }
@@ -72,7 +72,7 @@ for (str line in body.split("\n")) {
         }
         bases.sort();
         GIT_graph.AheadBehind counts = GIT_graph.AheadBehind(0, 0);
-        match (graph.ahead_behind(a, b)) {
+        match (graph.ahead_behind(first, second)) {
             case Ok(GIT_graph.AheadBehind found): {
                 counts = found;
             }
@@ -80,25 +80,25 @@ for (str line in body.split("\n")) {
                 fail(error);
             }
         }
-        bool a_in_b = false;
-        bool b_in_a = false;
-        match (graph.is_ancestor(a, b)) {
+        bool is_first_in_second = false;
+        bool is_second_in_first = false;
+        match (graph.is_ancestor(first, second)) {
             case Ok(bool found): {
-                a_in_b = found;
+                is_first_in_second = found;
             }
             case Err(GIT_graph.Error error): {
                 fail(error);
             }
         }
-        match (graph.is_ancestor(b, a)) {
+        match (graph.is_ancestor(second, first)) {
             case Ok(bool found): {
-                b_in_a = found;
+                is_second_in_first = found;
             }
             case Err(GIT_graph.Error error): {
                 fail(error);
             }
         }
-        print(a + " " + b + " | " + bases.join(" ") + " | " + counts.ahead.to_str() + " " + counts.behind.to_str() + " | " + flag(a_in_b) + " " + flag(b_in_a));
+        print(first + " " + second + " | " + bases.join(" ") + " | " + counts.ahead.to_str() + " " + counts.behind.to_str() + " | " + flag(is_first_in_second) + " " + flag(is_second_in_first));
     } else {
         List<str> include = [];
         List<str> exclude = [];

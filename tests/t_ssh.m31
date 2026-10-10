@@ -44,9 +44,9 @@ import io;
 import net;
 import os;
 import ssh;
-import sshhosts;
+import ssh.sshhosts;
 
-List<str> argv = os.args();
+List<str> argv = os.arguments();
 if (argv.size() < 2) {
     usage();
 }
@@ -127,7 +127,7 @@ void check(str name, bool is_good, str detail) {
 // trust_host appends one line that sshhosts reads back for the very host and
 // port, and does not run into a last line that lacks its newline.
 void unit_trust(str name, GIT_ssh_transport.PendingHost pending, str seed_end) {
-    if (seed_end == "" && !fs.exists(pending.known_hosts)) {
+    if (seed_end == "" && !fs.is_present(pending.known_hosts)) {
         match (io.write(pending.known_hosts, sshhosts.plain_line("other.example", 22, pending.key))) {
             case Ok(_): {
             }
@@ -211,11 +211,11 @@ void run_unit() {
     check("PendingHost.prompt shows the fingerprint", plain.prompt().contains(plain.fingerprint()), plain.prompt());
     check("PendingHost.spec: [host]:port, lower-case", plain.spec() == "[example.org]:2200", plain.spec());
     // trust_host through sshhosts.add, into files under the throwaway $HOME.
-    str dir = fs.join(os.env("HOME").or("/nonexistent"), "unit-known-hosts");
-    unit_trust("plain", GIT_ssh_transport.PendingHost("Example.org", 2200, key, fs.join(dir, "plain"), false), "\n");
-    unit_trust("plain, no trailing newline", GIT_ssh_transport.PendingHost("example.org", 22, key, fs.join(dir, "bare"), false), "");
-    unit_trust("hashed", GIT_ssh_transport.PendingHost("example.org", 22, key, fs.join(dir, "hashed"), true), "\n");
-    unit_trust("a nested missing directory", GIT_ssh_transport.PendingHost("example.org", 22, key, fs.join(fs.join(dir, "a/b"), "kh"), false), "\n");
+    str directory = fs.join(os.env("HOME").or("/nonexistent"), "unit-known-hosts");
+    unit_trust("plain", GIT_ssh_transport.PendingHost("Example.org", 2200, key, fs.join(directory, "plain"), false), "\n");
+    unit_trust("plain, no trailing newline", GIT_ssh_transport.PendingHost("example.org", 22, key, fs.join(directory, "bare"), false), "");
+    unit_trust("hashed", GIT_ssh_transport.PendingHost("example.org", 22, key, fs.join(directory, "hashed"), true), "\n");
+    unit_trust("a nested missing directory", GIT_ssh_transport.PendingHost("example.org", 22, key, fs.join(fs.join(directory, "a/b"), "kh"), false), "\n");
     check("probe_host_key: a server that says nothing times out", unit_silent_server(), "no timeout");
     str config = "Host *.corp\n  HashKnownHosts yes\nHost plain\n  HashKnownHosts no\nHost *\n  HashKnownHosts no\n";
     check("hashes_known_hosts: glob host block", GIT_ssh_transport.hashes_known_hosts(config, "git.corp"), "not hashed");

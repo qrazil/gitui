@@ -12,7 +12,7 @@ import GIT_reflog;
 import io;
 import os;
 
-List<str> argv = os.args();
+List<str> argv = os.arguments();
 if (argv.size() < 4) {
     io.eprint("usage: t_reflog <gitdir> show|append|update|delete|drop|should <ref> ...");
     os.exit(2);
@@ -57,8 +57,8 @@ if (operation == "show") {
         }
     }
 } else if (operation == "delete") {
-    bool rewrite = argv.size() > 5 && argv[5] == "rewrite";
-    match (GIT_reflog.delete(gitdir, ref, argv[4].parse_int().or(0), rewrite)) {
+    bool should_rewrite = argv.size() > 5 && argv[5] == "rewrite";
+    match (GIT_reflog.delete(gitdir, ref, argv[4].parse_int().or(0), should_rewrite)) {
         case Ok(_): {
             print("ok");
         }

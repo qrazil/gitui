@@ -183,7 +183,7 @@ pub Result<Index, Error> read(str gitdir) {
             data = contents;
         }
         case Err(_): {
-            if (!fs.exists(path)) {
+            if (!fs.is_present(path)) {
                 return Result<Index, Error>.Err(Error.NotFound);
             }
             return Result<Index, Error>.Err(Error.Io);

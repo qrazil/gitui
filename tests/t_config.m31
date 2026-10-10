@@ -17,7 +17,7 @@ import GIT_config;
 import io;
 import os;
 
-List<str> argv = os.args();
+List<str> argv = os.arguments();
 if (argv.size() < 3) {
     io.eprint("usage: t_config list|get-all|get|bool|set|add|unset|unset-all <file> [name [value]]");
     os.exit(2);

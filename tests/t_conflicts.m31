@@ -70,18 +70,18 @@ merges(counter, "custom labels", "a\n", "b\n", "c\n", "<<<<<<< ours\nb\n=======\
 // --- the reader ---------------------------------------------------------------
 
 str three = "x\n<<<<<<< ours\nO1\nO2\n||||||| base\nB1\n=======\nT1\n>>>>>>> theirs\nmid\n<<<<<<< ours\n=======\nT2\n>>>>>>> theirs\nend";
-List<GIT_diff3.Segment> segs = GIT_diff3.parse_conflicts(b(three));
-counter.check("parse: 2 conflicts", GIT_diff3.count_conflicts(segs) == 2, GIT_diff3.count_conflicts(segs).to_str());
-counter.check("parse: render is the identity", GIT_diff3.render(segs) == b(three), GIT_diff3.render(segs).hex());
-counter.check("resolve_all Ours", GIT_diff3.resolve_all(segs, GIT_diff3.Choice.Ours) == b("x\nO1\nO2\nmid\nend"), GIT_diff3.resolve_all(segs, GIT_diff3.Choice.Ours).hex());
-counter.check("resolve_all Theirs", GIT_diff3.resolve_all(segs, GIT_diff3.Choice.Theirs) == b("x\nT1\nmid\nT2\nend"), GIT_diff3.resolve_all(segs, GIT_diff3.Choice.Theirs).hex());
-counter.check("resolve_all Both", GIT_diff3.resolve_all(segs, GIT_diff3.Choice.Both) == b("x\nO1\nO2\nT1\nmid\nT2\nend"), GIT_diff3.resolve_all(segs, GIT_diff3.Choice.Both).hex());
-counter.check("resolve_all BothReversed", GIT_diff3.resolve_all(segs, GIT_diff3.Choice.BothReversed) == b("x\nT1\nO1\nO2\nmid\nT2\nend"), GIT_diff3.resolve_all(segs, GIT_diff3.Choice.BothReversed).hex());
-counter.check("resolve_all Base", GIT_diff3.resolve_all(segs, GIT_diff3.Choice.Base) == b("x\nB1\nmid\nend"), GIT_diff3.resolve_all(segs, GIT_diff3.Choice.Base).hex());
-List<GIT_diff3.Segment> one = GIT_diff3.resolve_at(segs, 1, GIT_diff3.Choice.Theirs);
+List<GIT_diff3.Segment> segments = GIT_diff3.parse_conflicts(b(three));
+counter.check("parse: 2 conflicts", GIT_diff3.count_conflicts(segments) == 2, GIT_diff3.count_conflicts(segments).to_str());
+counter.check("parse: render is the identity", GIT_diff3.render(segments) == b(three), GIT_diff3.render(segments).hex());
+counter.check("resolve_all Ours", GIT_diff3.resolve_all(segments, GIT_diff3.Choice.Ours) == b("x\nO1\nO2\nmid\nend"), GIT_diff3.resolve_all(segments, GIT_diff3.Choice.Ours).hex());
+counter.check("resolve_all Theirs", GIT_diff3.resolve_all(segments, GIT_diff3.Choice.Theirs) == b("x\nT1\nmid\nT2\nend"), GIT_diff3.resolve_all(segments, GIT_diff3.Choice.Theirs).hex());
+counter.check("resolve_all Both", GIT_diff3.resolve_all(segments, GIT_diff3.Choice.Both) == b("x\nO1\nO2\nT1\nmid\nT2\nend"), GIT_diff3.resolve_all(segments, GIT_diff3.Choice.Both).hex());
+counter.check("resolve_all BothReversed", GIT_diff3.resolve_all(segments, GIT_diff3.Choice.BothReversed) == b("x\nT1\nO1\nO2\nmid\nT2\nend"), GIT_diff3.resolve_all(segments, GIT_diff3.Choice.BothReversed).hex());
+counter.check("resolve_all Base", GIT_diff3.resolve_all(segments, GIT_diff3.Choice.Base) == b("x\nB1\nmid\nend"), GIT_diff3.resolve_all(segments, GIT_diff3.Choice.Base).hex());
+List<GIT_diff3.Segment> one = GIT_diff3.resolve_at(segments, 1, GIT_diff3.Choice.Theirs);
 counter.check("resolve_at 1 leaves one conflict", GIT_diff3.count_conflicts(one) == 1, GIT_diff3.count_conflicts(one).to_str());
 counter.check("resolve_at 1 rendered", GIT_diff3.render(one) == b("x\n<<<<<<< ours\nO1\nO2\n||||||| base\nB1\n=======\nT1\n>>>>>>> theirs\nmid\nT2\nend"), GIT_diff3.render(one).hex());
-counter.check("resolve_at out of range changes nothing", GIT_diff3.render(GIT_diff3.resolve_at(segs, 7, GIT_diff3.Choice.Ours)) == b(three), "changed");
+counter.check("resolve_at out of range changes nothing", GIT_diff3.render(GIT_diff3.resolve_at(segments, 7, GIT_diff3.Choice.Ours)) == b(three), "changed");
 List<GIT_diff3.Segment> two = GIT_diff3.resolve_at(one, 0, GIT_diff3.Choice.Base);
 counter.check("resolve_at both: no conflict left", GIT_diff3.count_conflicts(two) == 0 && GIT_diff3.render(two) == b("x\nB1\nmid\nT2\nend"), GIT_diff3.render(two).hex());
 str crlf = "a\r\n<<<<<<< ours\r\nO\r\n=======\r\nT\r\n>>>>>>> theirs\r\nz\r\n";

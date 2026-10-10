@@ -136,8 +136,8 @@ List<str> moving_labels(str message) {
     str rest = message.substr(prefix.size(), message.size());
     Option<int> cut = rest.index_of(" to ");
     match (cut) {
-        case Some(int at): {
-            return [rest.substr(0, at), rest.substr(at + 4, rest.size())];
+        case Some(int separator_index): {
+            return [rest.substr(0, separator_index), rest.substr(separator_index + 4, rest.size())];
         }
         case None: {
             return ["", ""];
@@ -158,7 +158,7 @@ Result<Stacks, Error> scan(str gitdir) {
         }
     }
     Stacks stacks = Stacks([], []);
-    bool in_rebase = false;
+    bool is_in_rebase = false;
     str rebase_from = "";
     for (GIT_reflog.Entry entry in entries) {
         str message = entry.message;
@@ -175,21 +175,21 @@ Result<Stacks, Error> scan(str gitdir) {
             continue;
         }
         if (message.starts_with("rebase (start)")) {
-            in_rebase = true;
+            is_in_rebase = true;
             rebase_from = entry.old;
             continue;
         }
-        if (in_rebase && message.starts_with("rebase (abort)")) {
-            in_rebase = false;
+        if (is_in_rebase && message.starts_with("rebase (abort)")) {
+            is_in_rebase = false;
             continue;
         }
-        if (in_rebase && message.starts_with("rebase (finish)")) {
-            in_rebase = false;
+        if (is_in_rebase && message.starts_with("rebase (finish)")) {
+            is_in_rebase = false;
             stacks.redo.clear();
             stacks.done.push(Unit(rebase_from, entry.new, message, false, "", "", !GIT_reflog.is_zero(rebase_from) && rebase_from != ""));
             continue;
         }
-        if (in_rebase && message.starts_with("rebase")) {
+        if (is_in_rebase && message.starts_with("rebase")) {
             continue;
         }
         List<str> labels = moving_labels(message);
@@ -208,16 +208,16 @@ Result<Stacks, Error> scan(str gitdir) {
 
 /// Why a merge, rebase, cherry-pick or revert is in the way, "" when none is.
 pub str in_progress(str gitdir) {
-    if (fs.exists(fs.join(gitdir, "MERGE_HEAD"))) {
+    if (fs.is_present(fs.join(gitdir, "MERGE_HEAD"))) {
         return "a merge is in progress";
     }
-    if (fs.exists(fs.join(gitdir, "rebase-merge")) || fs.exists(fs.join(gitdir, "rebase-apply"))) {
+    if (fs.is_present(fs.join(gitdir, "rebase-merge")) || fs.is_present(fs.join(gitdir, "rebase-apply"))) {
         return "a rebase is in progress";
     }
-    if (fs.exists(fs.join(gitdir, "CHERRY_PICK_HEAD"))) {
+    if (fs.is_present(fs.join(gitdir, "CHERRY_PICK_HEAD"))) {
         return "a cherry-pick is in progress";
     }
-    if (fs.exists(fs.join(gitdir, "REVERT_HEAD"))) {
+    if (fs.is_present(fs.join(gitdir, "REVERT_HEAD"))) {
         return "a revert is in progress";
     }
     match (GIT_index.read(gitdir)) {
@@ -292,9 +292,9 @@ str existing_branch(str gitdir, str label) {
 // Is HEAD where a checkout step ended? On a branch, that must be the branch
 // the step named. Detached, the commit already matched (the label may be any
 // spelling the user typed: HEAD~1, a tag, a short id).
-bool is_on(Where at, str label) {
-    if (at.branch != "") {
-        return branch_short(at.branch) == label;
+bool is_on(Where position, str label) {
+    if (position.branch != "") {
+        return branch_short(position.branch) == label;
     }
     return true;
 }
@@ -306,7 +306,7 @@ type Built {
     str why;
 }
 
-Built build(str gitdir, Unit unit, Where at, bool is_redo) {
+Built build(str gitdir, Unit unit, Where position, bool is_redo) {
     str verb = "undo";
     str want_here = unit.new;
     str go_to = unit.old;
@@ -318,11 +318,11 @@ Built build(str gitdir, Unit unit, Where at, bool is_redo) {
     if (!is_redo && !unit.is_undoable) {
         return Built(Option<Action>.None, "the first step (" + unit.message + ") has nothing before it to go back to");
     }
-    if (at.why != "") {
-        return Built(Option<Action>.None, at.why);
+    if (position.why != "") {
+        return Built(Option<Action>.None, position.why);
     }
-    if (at.id != want_here) {
-        return Built(Option<Action>.None, "HEAD is at " + short(at.id) + " but the last step (" + unit.message + ") left it at " + short(want_here));
+    if (position.id != want_here) {
+        return Built(Option<Action>.None, "HEAD is at " + short(position.id) + " but the last step (" + unit.message + ") left it at " + short(want_here));
     }
     if (unit.is_checkout) {
         str here_label = unit.to_label;
@@ -331,7 +331,7 @@ Built build(str gitdir, Unit unit, Where at, bool is_redo) {
             here_label = unit.from_label;
             there_label = unit.to_label;
         }
-        if (!is_on(at, here_label)) {
+        if (!is_on(position, here_label)) {
             return Built(Option<Action>.None, "HEAD is not on " + here_label + ", where that checkout left it");
         }
         str ref = existing_branch(gitdir, there_label);
@@ -352,22 +352,22 @@ Built build(str gitdir, Unit unit, Where at, bool is_redo) {
         } else {
             detail = detail + " (no such branch now: detached at " + short(go_to) + ")";
         }
-        Action action = Action(is_redo, verb + ": checkout " + unit.from_label + " -> " + unit.to_label, detail, true, at.id, target, ref, unit.message);
+        Action action = Action(is_redo, verb + ": checkout " + unit.from_label + " -> " + unit.to_label, detail, true, position.id, target, ref, unit.message);
         return Built(Option<Action>.Some(action), "");
     }
     str where_text = "detached HEAD";
-    if (at.branch != "") {
-        where_text = "branch " + branch_short(at.branch);
+    if (position.branch != "") {
+        where_text = "branch " + branch_short(position.branch);
     }
     str detail = "reset " + where_text + " to " + short(go_to);
-    Action action = Action(is_redo, verb + ": " + unit.message, detail, false, at.id, go_to, at.branch, unit.message);
+    Action action = Action(is_redo, verb + ": " + unit.message, detail, false, position.id, go_to, position.branch, unit.message);
     return Built(Option<Action>.Some(action), "");
 }
 
 /// What undo and redo would each do right now.
 pub Result<Plan, Error> plan(str gitdir) {
     Stacks stacks = scan(gitdir)?;
-    Where at = here(gitdir);
+    Where position = here(gitdir);
     Plan out = Plan(Option<Action>.None, Option<Action>.None, "nothing to undo", "nothing to redo", in_progress(gitdir));
     if (out.busy != "") {
         out.undo_why = "cannot undo while " + out.busy;
@@ -375,12 +375,12 @@ pub Result<Plan, Error> plan(str gitdir) {
         return Result<Plan, Error>.Ok(out);
     }
     if (stacks.done.size() > 0) {
-        Built built = build(gitdir, stacks.done[stacks.done.size() - 1], at, false);
+        Built built = build(gitdir, stacks.done[stacks.done.size() - 1], position, false);
         out.undo = built.action;
         out.undo_why = built.why;
     }
     if (stacks.redo.size() > 0) {
-        Built built = build(gitdir, stacks.redo[stacks.redo.size() - 1], at, true);
+        Built built = build(gitdir, stacks.redo[stacks.redo.size() - 1], position, true);
         out.redo = built.action;
         out.redo_why = built.why;
     }
@@ -460,7 +460,7 @@ Result<bool, Error> move_head(str gitdir, Action action, str message) {
     if (action.is_checkout || name == "") {
         name = "HEAD";
     }
-    match (GIT_refs.update(gitdir, name, action.to_id, Option<str>.Some(action.from_id), msg: message)) {
+    match (GIT_refs.update(gitdir, name, action.to_id, Option<str>.Some(action.from_id), reflog_message: message)) {
         case Ok: {
         }
         case Err(GIT_refs.Error error): {
@@ -471,7 +471,7 @@ Result<bool, Error> move_head(str gitdir, Action action, str message) {
 }
 
 Result<GIT_index.Index, Error> load_index(str gitdir) {
-    if (!fs.exists(fs.join(gitdir, "index"))) {
+    if (!fs.is_present(fs.join(gitdir, "index"))) {
         return Result<GIT_index.Index, Error>.Ok(GIT_index.Index([]));
     }
     match (GIT_index.read(gitdir)) {

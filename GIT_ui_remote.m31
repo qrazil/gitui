@@ -53,7 +53,7 @@ pub void RemoteLayer.push_set_upstream() {
 // After a successful push git moves the remote-tracking ref to what was
 // pushed (reflog "update by push"), and with `-u` writes branch.<n>.remote
 // and branch.<n>.merge.
-pub void RemoteLayer.push_with(bool set_upstream) {
+pub void RemoteLayer.push_with(bool should_set_upstream) {
     str refname = "";
     str id = "";
     match (GIT_refs.head(gitdir)) {
@@ -86,7 +86,7 @@ pub void RemoteLayer.push_with(bool set_upstream) {
     match (GIT_remote.parse(GIT_remote.rewrite_gitdir(gitdir, url.or(""), true))) {
         case Ok(GIT_remote.Remote ssh_remote): {
             if (ssh_remote.transport.eq(GIT_remote.Transport.Ssh)) {
-                push_over_ssh(ssh_remote, refname, id, set_upstream);
+                push_over_ssh(ssh_remote, refname, id, should_set_upstream);
                 return;
             }
         }
@@ -108,7 +108,7 @@ pub void RemoteLayer.push_with(bool set_upstream) {
             if (report.is_ok) {
                 message = "pushed " + refname + " to origin";
                 log_command("push origin " + refname + " " + GIT_ui_core.short_id(id));
-                record_pushed(refname, id, set_upstream);
+                record_pushed(refname, id, should_set_upstream);
             } else {
                 message = "push refused by origin: " + report.reason;
             }
@@ -169,7 +169,7 @@ pub void RemoteLayer.pull_current() {
 }
 
 // The bookkeeping after a push that origin accepted.
-pub void RemoteLayer.record_pushed(str refname, str id, bool set_upstream) {
+pub void RemoteLayer.record_pushed(str refname, str id, bool should_set_upstream) {
     str branch = refname.substr(11, refname.size());
     match (GIT_branches.record_push(gitdir, branch, "origin", id)) {
         case Ok(bool wrote): {
@@ -178,7 +178,7 @@ pub void RemoteLayer.record_pushed(str refname, str id, bool set_upstream) {
             message = message + " (tracking ref: " + error.to_str() + ")";
         }
     }
-    if (!set_upstream) {
+    if (!should_set_upstream) {
         return;
     }
     match (GIT_branches.set_upstream(gitdir, branch, "origin", refname)) {
@@ -208,7 +208,7 @@ pub void RemoteLayer.ssh_stopped(str verb, GIT_ssh_transport.Error error, bool i
     }
 }
 
-pub void RemoteLayer.push_over_ssh(GIT_remote.Remote remote, str refname, str id, bool set_upstream) {
+pub void RemoteLayer.push_over_ssh(GIT_remote.Remote remote, str refname, str id, bool should_set_upstream) {
     match (GIT_ssh_transport.target_for(remote)) {
         case Ok(GIT_ssh_transport.Target target): {
             match (GIT_ssh_transport.connect_receive(target)) {
@@ -218,7 +218,7 @@ pub void RemoteLayer.push_over_ssh(GIT_remote.Remote remote, str refname, str id
                             if (result.is_ok) {
                                 message = "pushed " + refname + " to origin";
                                 log_command("push origin " + refname + " " + GIT_ui_core.short_id(id));
-                                record_pushed(refname, id, set_upstream);
+                                record_pushed(refname, id, should_set_upstream);
                             } else {
                                 message = "push refused by origin: " + result.reason + " " + result.remote;
                             }

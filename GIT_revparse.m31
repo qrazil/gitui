@@ -65,7 +65,7 @@
 
 import fs;
 import io;
-import regex;
+import text.regex;
 import text;
 import GIT_branches;
 import GIT_config;
@@ -415,16 +415,16 @@ bool is_null(str id) {
     return true;
 }
 
-bool is_hex(str s) {
-    return s.size() > 0 && GIT_object.is_name(s.to_lower());
+bool is_hex(str candidate) {
+    return candidate.size() > 0 && GIT_object.is_name(candidate.to_lower());
 }
 
-bool is_digit(int c) {
-    return c >= '0' && c <= '9';
+bool is_digit(int character) {
+    return character >= '0' && character <= '9';
 }
 
-bool is_alnum(int c) {
-    return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z');
+bool is_alnum(int character) {
+    return (character >= '0' && character <= '9') || (character >= 'a' && character <= 'z') || (character >= 'A' && character <= 'Z');
 }
 
 // --- abbreviated names -----------------------------------------------------------
@@ -481,45 +481,45 @@ Result<str, Error> short_oid(str gitdir, str prefix, int flags) {
     return Result<str, Error>.Err(Error.Ambiguous);
 }
 
-bool is_hex_char(int ch) {
-    return (ch >= '0' && ch <= '9') || (ch >= 'a' && ch <= 'f') || (ch >= 'A' && ch <= 'F');
+bool is_hex_char(int character) {
+    return (character >= '0' && character <= '9') || (character >= 'a' && character <= 'f') || (character >= 'A' && character <= 'F');
 }
 
 // `ref_and_count_parts_valid`: `name` (the text before the `-g`) is a
 // well-formed ref name, a dash, and at least one hex digit.
 bool ref_and_count_valid(str name) {
-    int len = name.size();
-    if (len == 0 || !is_hex_char(name.byte_at(len - 1))) {
+    int length = name.size();
+    if (length == 0 || !is_hex_char(name.byte_at(length - 1))) {
         return false;
     }
-    int at = len - 2;
-    while (at > 0) {
-        int ch = name.byte_at(at);
-        if (ch == '-') {
+    int index = length - 2;
+    while (index > 0) {
+        int character = name.byte_at(index);
+        if (character == '-') {
             break;
         }
-        if (!is_hex_char(ch)) {
+        if (!is_hex_char(character)) {
             return false;
         }
-        at = at - 1;
+        index = index - 1;
     }
-    if (name.byte_at(at) != '-') {
+    if (name.byte_at(index) != '-') {
         return false;
     }
-    return refname_ok(name.substr(0, at));
+    return refname_ok(name.substr(0, index));
 }
 
 // `<tag>-<n>-g<hex>`: scanning from the right, a `g` that follows a `-` and
 // a well-formed `<tag>-<n>` starts the abbreviation. git does not stop at
 // other non-hex characters, and keeps looking left when the head is no good.
 Result<str, Error> describe(str gitdir, str name, int flags) {
-    int at = name.size() - 1;
-    while (at >= 2) {
-        int ch = name.byte_at(at);
-        if (!is_hex_char(ch) && ch == 'g' && name.byte_at(at - 1) == '-' && ref_and_count_valid(name.substr(0, at - 1))) {
-            return short_oid(gitdir, name.substr(at + 1, name.size()), F_COMMIT);
+    int index = name.size() - 1;
+    while (index >= 2) {
+        int character = name.byte_at(index);
+        if (!is_hex_char(character) && character == 'g' && name.byte_at(index - 1) == '-' && ref_and_count_valid(name.substr(0, index - 1))) {
+            return short_oid(gitdir, name.substr(index + 1, name.size()), F_COMMIT);
         }
-        at = at - 1;
+        index = index - 1;
     }
     return Result<str, Error>.Err(Error.Unknown);
 }
@@ -535,8 +535,8 @@ bool refname_ok(str name) {
         return false;
     }
     for (int i in 0 .. name.size()) {
-        int c = name.byte_at(i);
-        if (c < 32 || c == 127 || c == ' ' || c == '~' || c == '^' || c == ':' || c == '?' || c == '*' || c == '[' || c == '\\') {
+        int character = name.byte_at(i);
+        if (character < 32 || character == 127 || character == ' ' || character == '~' || character == '^' || character == ':' || character == '?' || character == '*' || character == '[' || character == '\\') {
             return false;
         }
     }
@@ -551,19 +551,19 @@ bool refname_ok(str name) {
 // `ambiguous_path`: a name git will not even look up as a ref -- empty
 // components, a leading or trailing slash, a component of nothing but dots.
 bool ambiguous_path(str path) {
-    bool slash = true;
+    bool is_after_slash = true;
     for (int i in 0 .. path.size()) {
-        int c = path.byte_at(i);
-        if (c == '/') {
-            if (slash) {
+        int character = path.byte_at(i);
+        if (character == '/') {
+            if (is_after_slash) {
                 return true;
             }
-            slash = true;
-        } else if (c != '.') {
-            slash = false;
+            is_after_slash = true;
+        } else if (character != '.') {
+            is_after_slash = false;
         }
     }
-    return slash;
+    return is_after_slash;
 }
 
 // A ref `dwim_ref` or `dwim_log` found: its name (the end of a symbolic
@@ -642,19 +642,19 @@ Option<str> nth_prior(str gitdir, int nth) {
     match (GIT_reflog.read(gitdir, "HEAD")) {
         case Ok(List<GIT_reflog.Entry> entries): {
             int remaining = nth;
-            int i = entries.size() - 1;
-            while (i >= 0) {
-                str message = entries[i].message;
-                i = i - 1;
+            int index = entries.size() - 1;
+            while (index >= 0) {
+                str message = entries[index].message;
+                index = index - 1;
                 if (!message.starts_with("checkout: moving from ")) {
                     continue;
                 }
                 str rest = message.substr(22, message.size());
                 match (rest.index_of(" to ")) {
-                    case Some(int to): {
+                    case Some(int end_index): {
                         remaining = remaining - 1;
                         if (remaining == 0) {
-                            return Option<str>.Some(rest.substr(0, to));
+                            return Option<str>.Some(rest.substr(0, end_index));
                         }
                     }
                     case None: {
@@ -695,18 +695,18 @@ Result<str, Error> read_ref_at(str gitdir, str log_ref, str current, int at_time
         }
         return Result<str, Error>.Err(Error.ReflogShort);
     }
-    int i = size - 1;
-    while (i >= 0) {
-        if (entries[i].when <= at_time) {
+    int index = size - 1;
+    while (index >= 0) {
+        if (entries[index].when <= at_time) {
             // The first entry looked at has no newer neighbour to say what
             // came after it; git then trusts the ref itself unless the time
             // is exactly that of the entry.
-            if (i == size - 1 && entries[i].when != at_time) {
+            if (index == size - 1 && entries[index].when != at_time) {
                 return Result<str, Error>.Ok(current);
             }
-            return Result<str, Error>.Ok(entries[i].new);
+            return Result<str, Error>.Ok(entries[index].new);
         }
-        i = i - 1;
+        index = index - 1;
     }
     if (!is_null(entries[0].old)) {
         return Result<str, Error>.Ok(entries[0].old);
@@ -786,9 +786,9 @@ Result<str, Error> push_destination(List<str> specs, str refname) {
         if (!spec.starts_with("refs/") && !spec.starts_with("*")) {
             return Result<str, Error>.Err(Error.UnsupportedPush);
         }
-        str dst = GIT_branches.map_through_fetch([spec], refname);
-        if (dst != "") {
-            return Result<str, Error>.Ok(dst);
+        str destination = GIT_branches.map_through_fetch([spec], refname);
+        if (destination != "") {
+            return Result<str, Error>.Ok(destination);
         }
     }
     return Result<str, Error>.Err(Error.NoPush);
@@ -800,8 +800,8 @@ Result<str, Error> push_ref(str gitdir, GIT_config.Config config, str branch) {
     str remote = config.get("branch", branch, "pushremote").or(config.get("remote", "", "pushdefault").or(config.get("branch", branch, "remote").or("origin")));
     List<str> specs = config.get_all("remote", remote, "push");
     if (specs.size() > 0) {
-        str dst = push_destination(specs, refname)?;
-        str kept = tracking_for(config, remote, dst);
+        str destination = push_destination(specs, refname)?;
+        str kept = tracking_for(config, remote, destination);
         if (kept == "") {
             return Result<str, Error>.Err(Error.NoPush);
         }
@@ -825,8 +825,8 @@ Result<str, Error> push_ref(str gitdir, GIT_config.Config config, str branch) {
         return Result<str, Error>.Err(Error.NoPush);
     }
     if (mode == "simple") {
-        str up = upstream_ref(gitdir, config, branch)?;
-        if (up != direct) {
+        str upstream = upstream_ref(gitdir, config, branch)?;
+        if (upstream != direct) {
             return Result<str, Error>.Err(Error.NoPush);
         }
     }
@@ -855,46 +855,46 @@ Result<str, Error> substitute(str gitdir, str name) {
 
 // `get_oid_basic`: a full object name, or a ref (with an `@{...}` suffix).
 Result<str, Error> basic(str gitdir, str name, int flags) {
-    int n = name.size();
-    if (n == GIT_object.hex_len(gitdir) && is_hex(name)) {
+    int name_size = name.size();
+    if (name_size == GIT_object.hex_len(gitdir) && is_hex(name)) {
         return Result<str, Error>.Ok(name.to_lower());
     }
-    int len = n;
-    int reflog_len = 0;
-    bool log_spec = false;
-    int at = 0;
-    bool prior = false;
-    if (n > 0 && name.byte_at(n - 1) == '}') {
-        at = n - 4;
-        while (at >= 0) {
-            if (name.byte_at(at) == '@' && name.byte_at(at + 1) == '{') {
-                if (name.byte_at(at + 2) == '-') {
-                    if (at != 0) {
+    int length = name_size;
+    int reflog_length = 0;
+    bool is_log_spec = false;
+    int suffix_start = 0;
+    bool is_prior = false;
+    if (name_size > 0 && name.byte_at(name_size - 1) == '}') {
+        suffix_start = name_size - 4;
+        while (suffix_start >= 0) {
+            if (name.byte_at(suffix_start) == '@' && name.byte_at(suffix_start + 1) == '{') {
+                if (name.byte_at(suffix_start + 2) == '-') {
+                    if (suffix_start != 0) {
                         return Result<str, Error>.Err(Error.Syntax);
                     }
-                    prior = true;
-                    at = at - 1;
+                    is_prior = true;
+                    suffix_start = suffix_start - 1;
                     continue;
                 }
-                str tail = name.substr(at, n).to_lower();
+                str tail = name.substr(suffix_start, name_size).to_lower();
                 if (tail != "@{upstream}" && tail != "@{u}" && tail != "@{push}") {
-                    reflog_len = (n - 1) - (at + 2);
-                    log_spec = true;
-                    len = at;
+                    reflog_length = (name_size - 1) - (suffix_start + 2);
+                    is_log_spec = true;
+                    length = suffix_start;
                 }
                 break;
             }
-            at = at - 1;
+            suffix_start = suffix_start - 1;
         }
     }
-    str base = name.substr(0, len);
-    if (len > 0 && ambiguous_path(base)) {
+    str base = name.substr(0, length);
+    if (length > 0 && ambiguous_path(base)) {
         return Result<str, Error>.Err(Error.Unknown);
     }
-    if (prior) {
+    if (is_prior) {
         // git reads up to the first `}` and ignores what follows when the
         // branch switch was to a detached HEAD.
-        int brace = name.index_of("}").or(n - 1);
+        int brace = name.index_of("}").or(name_size - 1);
         str number = name.substr(3, brace);
         if (number == "" || !is_all_digits(number) || number.size() > 9) {
             return Result<str, Error>.Err(Error.Syntax);
@@ -908,7 +908,7 @@ Result<str, Error> basic(str gitdir, str name, int flags) {
                 if (was.size() == GIT_object.hex_len(gitdir) && is_hex(was)) {
                     return Result<str, Error>.Ok(was.to_lower());
                 }
-                if (brace != n - 1) {
+                if (brace != name_size - 1) {
                     return Result<str, Error>.Err(Error.Unknown);
                 }
                 return resolve_ref_name(gitdir, was);
@@ -918,19 +918,19 @@ Result<str, Error> basic(str gitdir, str name, int flags) {
             }
         }
     }
-    if (log_spec && reflog_len == 0) {
+    if (is_log_spec && reflog_length == 0) {
         return Result<str, Error>.Err(Error.Unknown);
     }
-    if (reflog_len > 0) {
+    if (reflog_length > 0) {
         Option<Found> source = Option<Found>.None;
-        if (len == 0) {
+        if (length == 0) {
             source = dwim_ref(gitdir, "HEAD");
         } else {
             source = dwim_log(gitdir, base);
         }
         match (source) {
             case Some(Found found): {
-                str spec = name.substr(at + 2, n - 1);
+                str spec = name.substr(suffix_start + 2, name_size - 1);
                 int nth = -1;
                 int at_time = 0;
                 if (is_all_digits(spec)) {
@@ -956,12 +956,12 @@ Result<str, Error> basic(str gitdir, str name, int flags) {
     return resolve_ref_name(gitdir, name);
 }
 
-bool is_all_digits(str s) {
-    if (s.size() == 0) {
+bool is_all_digits(str digits) {
+    if (digits.size() == 0) {
         return false;
     }
-    for (int i in 0 .. s.size()) {
-        if (!is_digit(s.byte_at(i))) {
+    for (int i in 0 .. digits.size()) {
+        if (!is_digit(digits.byte_at(i))) {
             return false;
         }
     }
@@ -986,21 +986,21 @@ Result<str, Error> resolve_ref_name(str gitdir, str name) {
 // `peel_onion`: `<rev>^{<type>}`, read from the right. `Ok(None)` when the
 // name is not of that form, so the caller goes on to try it as something else.
 Result<Option<str>, Error> peel_onion(str gitdir, str name) {
-    int len = name.size();
-    if (len < 4 || name.byte_at(len - 1) != '}') {
+    int length = name.size();
+    if (length < 4 || name.byte_at(length - 1) != '}') {
         return Result<Option<str>, Error>.Ok(Option<str>.None);
     }
-    int sp = len - 1;
-    while (sp >= 1) {
-        if (name.byte_at(sp) == '{' && name.byte_at(sp - 1) == '^') {
+    int brace_index = length - 1;
+    while (brace_index >= 1) {
+        if (name.byte_at(brace_index) == '{' && name.byte_at(brace_index - 1) == '^') {
             break;
         }
-        sp = sp - 1;
+        brace_index = brace_index - 1;
     }
-    if (sp < 1) {
+    if (brace_index < 1) {
         return Result<Option<str>, Error>.Ok(Option<str>.None);
     }
-    str tail = name.substr(sp + 1, len);
+    str tail = name.substr(brace_index + 1, length);
     int flags = 0;
     if (tail == "commit}" || tail.starts_with("/")) {
         flags = F_COMMITTISH;
@@ -1009,7 +1009,7 @@ Result<Option<str>, Error> peel_onion(str gitdir, str name) {
     } else if (tail != "tag}" && tail != "blob}" && tail != "object}" && tail != "}") {
         return Result<Option<str>, Error>.Ok(Option<str>.None);
     }
-    str outer = one(gitdir, name.substr(0, sp - 1), flags)?;
+    str outer = one(gitdir, name.substr(0, brace_index - 1), flags)?;
     GIT_object.Object first = load(gitdir, outer)?;
     if (tail == "}") {
         GIT_object.Object peeled = deref(gitdir, outer)?;
@@ -1040,7 +1040,7 @@ Result<Option<str>, Error> peel_onion(str gitdir, str name) {
             case Tag(_): {
             }
         }
-        str hit = oneline(gitdir, name.substr(sp + 2, len - 1), list)?;
+        str hit = oneline(gitdir, name.substr(brace_index + 2, length - 1), list)?;
         return Result<Option<str>, Error>.Ok(Option<str>.Some(hit));
     }
     return Result<Option<str>, Error>.Ok(Option<str>.Some(found.id));
@@ -1077,45 +1077,45 @@ Result<GIT_object.Object, Error> peel_to(str gitdir, GIT_object.Object start, st
 // `get_oid_1`: a name, then the `~` and `^` suffixes, then `^{...}`, then a
 // ref, then describe output, then an abbreviation -- the order matters.
 Result<str, Error> one(str gitdir, str name, int flags) {
-    int len = name.size();
-    if (len == 0) {
+    int length = name.size();
+    if (length == 0) {
         return Result<str, Error>.Err(Error.Empty);
     }
-    int cp = len - 1;
+    int digit_index = length - 1;
     int suffix = 0;
-    while (cp >= 0) {
-        int ch = name.byte_at(cp);
-        if (is_digit(ch)) {
-            cp = cp - 1;
+    while (digit_index >= 0) {
+        int character = name.byte_at(digit_index);
+        if (is_digit(character)) {
+            digit_index = digit_index - 1;
             continue;
         }
-        if (ch == '~' || ch == '^') {
-            suffix = ch;
+        if (character == '~' || character == '^') {
+            suffix = character;
         }
         break;
     }
     if (suffix != 0) {
-        str digits = name.substr(cp + 1, len);
+        str digits = name.substr(digit_index + 1, length);
         if (digits.size() > 9) {
             return Result<str, Error>.Err(Error.NoSuchParent);
         }
-        int num = 1;
+        int number = 1;
         if (digits.size() > 0) {
-            num = digits.parse_int().or(0);
+            number = digits.parse_int().or(0);
         }
-        str inner = one(gitdir, name.substr(0, cp), F_COMMITTISH)?;
+        str inner = one(gitdir, name.substr(0, digit_index), F_COMMITTISH)?;
         Peeled start = lookup_commit(gitdir, inner)?;
         if (suffix == '^') {
-            if (num == 0) {
+            if (number == 0) {
                 return Result<str, Error>.Ok(start.id);
             }
-            if (num > start.commit.parents.size()) {
+            if (number > start.commit.parents.size()) {
                 return Result<str, Error>.Err(Error.NoSuchParent);
             }
-            return Result<str, Error>.Ok(start.commit.parents[num - 1]);
+            return Result<str, Error>.Ok(start.commit.parents[number - 1]);
         }
         Peeled current = start;
-        for (int step in 0 .. num) {
+        for (int step in 0 .. number) {
             if (current.commit.parents.size() == 0) {
                 return Result<str, Error>.Err(Error.NoSuchParent);
             }
@@ -1245,16 +1245,16 @@ Result<List<Cand>, Error> start_all(str gitdir) {
             return Result<List<Cand>, Error>.Err(Error.Io);
         }
     }
-    int at = refs.size() - 1;
-    while (at >= 0) {
-        match (as_cand(gitdir, refs[at].id)) {
+    int index = refs.size() - 1;
+    while (index >= 0) {
+        match (as_cand(gitdir, refs[index].id)) {
             case Some(Cand cand): {
                 list.push(cand);
             }
             case None: {
             }
         }
-        at = at - 1;
+        index = index - 1;
     }
     list.sort();
     return Result<List<Cand>, Error>.Ok(list);
@@ -1277,20 +1277,20 @@ Result<str, Error> oneline(str gitdir, str pattern, List<Cand> start) {
     if (start.size() == 0) {
         return Result<str, Error>.Err(Error.NoMatch);
     }
-    bool negate = false;
+    bool is_negated = false;
     str body = pattern;
     if (body.starts_with("!")) {
         if (body.starts_with("!!")) {
             body = body.substr(1, body.size());
         } else if (body.starts_with("!-")) {
-            negate = true;
+            is_negated = true;
             body = body.substr(2, body.size());
         } else {
             return Result<str, Error>.Err(Error.Syntax);
         }
     }
     str translated = ere_translate(body)?;
-    regex.Regex re = compile_pattern(translated)?;
+    regex.Regex compiled = compile_pattern(translated)?;
     Map<str, bool> seen = {};
     List<Cand> queue = [];
     for (Cand cand in start) {
@@ -1319,15 +1319,15 @@ Result<str, Error> oneline(str gitdir, str pattern, List<Cand> start) {
                 }
             }
         }
-        bool found = false;
+        bool is_found = false;
         match (loaded.commit.message.utf8()) {
             case Some(str message): {
-                found = re.is_match(message);
+                is_found = compiled.is_match(message);
             }
             case None: {
             }
         }
-        if (found != negate) {
+        if (is_found != is_negated) {
             return Result<str, Error>.Ok(current.id);
         }
     }
@@ -1336,31 +1336,31 @@ Result<str, Error> oneline(str gitdir, str pattern, List<Cand> start) {
 
 // --- POSIX extended regular expressions, for lib/regex -------------------------------
 
-void put_char(List<int> out, int c) {
-    out.push(c);
+void put_char(List<int> out, int character) {
+    out.push(character);
 }
 
 // A literal character, escaped for lib/regex.
-void put_literal(List<int> out, int c) {
-    if (c < 128 && c > 32 && c != 127 && !is_alnum(c)) {
+void put_literal(List<int> out, int character) {
+    if (character < 128 && character > 32 && character != 127 && !is_alnum(character)) {
         out.push('\\');
     }
-    out.push(c);
+    out.push(character);
 }
 
 // One character inside `[...]`.
-void put_member(List<int> out, int c) {
-    if (c == '\n') {
+void put_member(List<int> out, int character) {
+    if (character == '\n') {
         out.push('\\');
         out.push('n');
-    } else if (c == '\t') {
+    } else if (character == '\t') {
         out.push('\\');
         out.push('t');
-    } else if (c == '\r') {
+    } else if (character == '\r') {
         out.push('\\');
         out.push('r');
     } else {
-        put_literal(out, c);
+        put_literal(out, character);
     }
 }
 
@@ -1394,89 +1394,89 @@ bool class_ranges(str name, List<int> lows, List<int> highs) {
     } else {
         return false;
     }
-    int k = 0;
-    while (k < flat.size()) {
-        lows.push(flat[k]);
-        highs.push(flat[k + 1]);
-        k = k + 2;
+    int index = 0;
+    while (index < flat.size()) {
+        lows.push(flat[index]);
+        highs.push(flat[index + 1]);
+        index = index + 2;
     }
     return true;
 }
 
 // A bracket expression starting at `open`; the translation is appended to
 // `out` and the index just past the closing `]` comes back.
-Result<int, Error> bracket(List<int> src, int open, List<int> out) {
-    int n = src.size();
-    int i = open + 1;
-    bool negate = false;
-    if (i < n && src[i] == '^') {
-        negate = true;
-        i = i + 1;
+Result<int, Error> bracket(List<int> source, int open, List<int> out) {
+    int source_size = source.size();
+    int index = open + 1;
+    bool is_negated = false;
+    if (index < source_size && source[index] == '^') {
+        is_negated = true;
+        index = index + 1;
     }
     List<int> lows = [];
     List<int> highs = [];
-    bool first = true;
+    bool is_first = true;
     while (true) {
-        if (i >= n) {
+        if (index >= source_size) {
             return Result<int, Error>.Err(Error.BadPattern);
         }
-        int c = src[i];
-        if (c == ']' && !first) {
-            i = i + 1;
+        int character = source[index];
+        if (character == ']' && !is_first) {
+            index = index + 1;
             break;
         }
-        first = false;
-        if (c == '[' && i + 1 < n) {
-            int k = src[i + 1];
-            if (k == '=' || k == '.') {
+        is_first = false;
+        if (character == '[' && index + 1 < source_size) {
+            int next_character = source[index + 1];
+            if (next_character == '=' || next_character == '.') {
                 return Result<int, Error>.Err(Error.UnsupportedPattern);
             }
-            if (k == ':') {
-                int j = i + 2;
-                while (j + 1 < n && !(src[j] == ':' && src[j + 1] == ']')) {
-                    j = j + 1;
+            if (next_character == ':') {
+                int class_end = index + 2;
+                while (class_end + 1 < source_size && !(source[class_end] == ':' && source[class_end + 1] == ']')) {
+                    class_end = class_end + 1;
                 }
-                if (j + 1 >= n) {
+                if (class_end + 1 >= source_size) {
                     return Result<int, Error>.Err(Error.BadPattern);
                 }
-                if (!class_ranges(str.from_chars(src.slice(i + 2, j)), lows, highs)) {
+                if (!class_ranges(str.from_chars(source.slice(index + 2, class_end)), lows, highs)) {
                     return Result<int, Error>.Err(Error.BadPattern);
                 }
-                i = j + 2;
+                index = class_end + 2;
                 continue;
             }
         }
-        int lo = c;
-        i = i + 1;
-        if (i + 1 < n && src[i] == '-' && src[i + 1] != ']') {
-            int hi = src[i + 1];
-            if (hi == '[' && i + 2 < n && (src[i + 2] == ':' || src[i + 2] == '=' || src[i + 2] == '.')) {
+        int low = character;
+        index = index + 1;
+        if (index + 1 < source_size && source[index] == '-' && source[index + 1] != ']') {
+            int high = source[index + 1];
+            if (high == '[' && index + 2 < source_size && (source[index + 2] == ':' || source[index + 2] == '=' || source[index + 2] == '.')) {
                 return Result<int, Error>.Err(Error.UnsupportedPattern);
             }
-            i = i + 2;
-            if (hi < lo) {
+            index = index + 2;
+            if (high < low) {
                 return Result<int, Error>.Err(Error.BadPattern);
             }
-            lows.push(lo);
-            highs.push(hi);
+            lows.push(low);
+            highs.push(high);
         } else {
-            lows.push(lo);
-            highs.push(lo);
+            lows.push(low);
+            highs.push(low);
         }
     }
     out.push('[');
-    if (negate) {
+    if (is_negated) {
         out.push('^');
     }
-    for (int k in 0 .. lows.size()) {
-        put_member(out, lows[k]);
-        if (highs[k] != lows[k]) {
+    for (int range_index in 0 .. lows.size()) {
+        put_member(out, lows[range_index]);
+        if (highs[range_index] != lows[range_index]) {
             out.push('-');
-            put_member(out, highs[k]);
+            put_member(out, highs[range_index]);
         }
     }
     out.push(']');
-    return Result<int, Error>.Ok(i);
+    return Result<int, Error>.Ok(index);
 }
 
 // git compiles `:/` and `^{/}` text with `regcomp` and `REG_EXTENDED`: a POSIX
@@ -1485,93 +1485,93 @@ Result<int, Error> bracket(List<int> src, int open, List<int> out) {
 // This gives the same pattern in lib/regex's syntax, or an error for what
 // lib/regex has no equivalent of or what the C libraries disagree on.
 Result<str, Error> ere_translate(str pattern) {
-    List<int> src = pattern.chars();
+    List<int> source = pattern.chars();
     List<int> out = [];
-    int n = src.size();
-    int i = 0;
+    int source_size = source.size();
+    int index = 0;
     // `start`: nothing to repeat yet (the pattern's start, after `(` or `|`).
-    bool start = true;
+    bool is_start = true;
     // The last thing was a quantifier.
-    bool quantified = false;
+    bool is_quantified = false;
     int depth = 0;
-    while (i < n) {
-        int c = src[i];
-        i = i + 1;
-        if (c == '\\') {
-            if (i >= n) {
+    while (index < source_size) {
+        int character = source[index];
+        index = index + 1;
+        if (character == '\\') {
+            if (index >= source_size) {
                 return Result<str, Error>.Err(Error.BadPattern);
             }
-            int d = src[i];
-            i = i + 1;
-            if (is_alnum(d) || d == '<' || d == '>' || d == '`' || d == '\'') {
+            int next_character = source[index];
+            index = index + 1;
+            if (is_alnum(next_character) || next_character == '<' || next_character == '>' || next_character == '`' || next_character == '\'') {
                 // `\w \b \< \1` and friends: GNU extensions, back-references,
                 // and escapes that mean a different thing in each C library.
                 return Result<str, Error>.Err(Error.UnsupportedPattern);
             }
-            put_literal(out, d);
-            start = false;
-            quantified = false;
-        } else if (c == '(') {
+            put_literal(out, next_character);
+            is_start = false;
+            is_quantified = false;
+        } else if (character == '(') {
             out.push('(');
             depth = depth + 1;
-            start = true;
-            quantified = false;
-        } else if (c == ')') {
+            is_start = true;
+            is_quantified = false;
+        } else if (character == ')') {
             if (depth == 0) {
                 // glibc takes an unmatched `)` as itself.
-                put_literal(out, c);
+                put_literal(out, character);
             } else {
                 out.push(')');
                 depth = depth - 1;
             }
-            start = false;
-            quantified = false;
-        } else if (c == '|') {
+            is_start = false;
+            is_quantified = false;
+        } else if (character == '|') {
             out.push('|');
-            start = true;
-            quantified = false;
-        } else if (c == '*' || c == '+' || c == '?') {
-            if (start || quantified) {
+            is_start = true;
+            is_quantified = false;
+        } else if (character == '*' || character == '+' || character == '?') {
+            if (is_start || is_quantified) {
                 return Result<str, Error>.Err(Error.UnsupportedPattern);
             }
-            out.push(c);
-            quantified = true;
-        } else if (c == '{') {
-            int stop = i;
-            while (stop < n && src[stop] != '}') {
+            out.push(character);
+            is_quantified = true;
+        } else if (character == '{') {
+            int stop = index;
+            while (stop < source_size && source[stop] != '}') {
                 stop = stop + 1;
             }
-            if (start || quantified || stop >= n) {
+            if (is_start || is_quantified || stop >= source_size) {
                 return Result<str, Error>.Err(Error.UnsupportedPattern);
             }
-            str inner = str.from_chars(src.slice(i, stop));
+            str inner = str.from_chars(source.slice(index, stop));
             List<str> parts = inner.split(",");
-            bool good = parts.size() <= 2 && is_all_digits(parts[0]);
-            if (good && parts.size() == 2 && parts[1] != "" && !is_all_digits(parts[1])) {
-                good = false;
+            bool is_valid = parts.size() <= 2 && is_all_digits(parts[0]);
+            if (is_valid && parts.size() == 2 && parts[1] != "" && !is_all_digits(parts[1])) {
+                is_valid = false;
             }
-            if (!good) {
+            if (!is_valid) {
                 return Result<str, Error>.Err(Error.UnsupportedPattern);
             }
             out.push('{');
-            for (int ch in inner.chars()) {
-                out.push(ch);
+            for (int literal_character in inner.chars()) {
+                out.push(literal_character);
             }
             out.push('}');
-            i = stop + 1;
-            quantified = true;
-        } else if (c == '[') {
-            i = bracket(src, i - 1, out)?;
-            start = false;
-            quantified = false;
-        } else if (c == '^' || c == '$' || c == '.') {
-            out.push(c);
-            start = c == '^';
-            quantified = false;
+            index = stop + 1;
+            is_quantified = true;
+        } else if (character == '[') {
+            index = bracket(source, index - 1, out)?;
+            is_start = false;
+            is_quantified = false;
+        } else if (character == '^' || character == '$' || character == '.') {
+            out.push(character);
+            is_start = character == '^';
+            is_quantified = false;
         } else {
-            put_literal(out, c);
-            start = false;
-            quantified = false;
+            put_literal(out, character);
+            is_start = false;
+            is_quantified = false;
         }
     }
     if (depth != 0) {
@@ -1608,29 +1608,29 @@ Result<str, Error> tree_entry(str gitdir, str treeish, str path) {
             }
         }
         str part = rest;
-        bool more = false;
+        bool has_more = false;
         match (rest.index_of("/")) {
             case Some(int slash): {
                 part = rest.substr(0, slash);
-                more = true;
+                has_more = true;
             }
             case None: {
             }
         }
         bytes wanted = part.to_bytes();
-        bool found = false;
+        bool is_found = false;
         GIT_object.Entry entry = GIT_object.Entry(0, wanted, "");
         for (GIT_object.Entry candidate in entries) {
             if (candidate.name == wanted) {
                 entry = candidate;
-                found = true;
+                is_found = true;
                 break;
             }
         }
-        if (!found) {
+        if (!is_found) {
             return Result<str, Error>.Err(Error.NoSuchPath);
         }
-        if (!more) {
+        if (!has_more) {
             return Result<str, Error>.Ok(entry.id);
         }
         if (!entry.is_tree()) {
@@ -1681,7 +1681,7 @@ Result<str, Error> index_lookup(str gitdir, int stage, str path) {
         case Err(_): {
             // No index file at all is an empty index; one that is there and
             // will not parse is an error.
-            if (fs.exists(fs.join(GIT_repository.common(gitdir), "index"))) {
+            if (fs.is_present(fs.join(GIT_repository.common(gitdir), "index"))) {
                 return Result<str, Error>.Err(Error.Io);
             }
         }
@@ -1709,29 +1709,29 @@ Result<str, Error> resolve(str gitdir, str name, int flags) {
             failure = why;
         }
     }
-    int len = name.size();
-    if (len > 0 && name.byte_at(0) == ':') {
-        if (len > 2 && name.byte_at(1) == '/') {
+    int length = name.size();
+    if (length > 0 && name.byte_at(0) == ':') {
+        if (length > 2 && name.byte_at(1) == '/') {
             List<Cand> list = start_all(gitdir)?;
-            return oneline(gitdir, name.substr(2, len), list);
+            return oneline(gitdir, name.substr(2, length), list);
         }
         int stage = 0;
-        str path = name.substr(1, len);
-        if (len >= 3 && name.byte_at(2) == ':' && name.byte_at(1) >= '0' && name.byte_at(1) <= '3') {
+        str path = name.substr(1, length);
+        if (length >= 3 && name.byte_at(2) == ':' && name.byte_at(1) >= '0' && name.byte_at(1) <= '3') {
             stage = name.byte_at(1) - '0';
-            path = name.substr(3, len);
+            path = name.substr(3, length);
         }
         return index_lookup(gitdir, stage, relative(path)?);
     }
     int depth = 0;
     int cut = -1;
-    for (int i in 0 .. len) {
-        int c = name.byte_at(i);
-        if (c == '{') {
+    for (int i in 0 .. length) {
+        int character = name.byte_at(i);
+        if (character == '{') {
             depth = depth + 1;
-        } else if (depth > 0 && c == '}') {
+        } else if (depth > 0 && character == '}') {
             depth = depth - 1;
-        } else if (depth == 0 && c == ':') {
+        } else if (depth == 0 && character == ':') {
             cut = i;
             break;
         }
@@ -1740,7 +1740,7 @@ Result<str, Error> resolve(str gitdir, str name, int flags) {
         return Result<str, Error>.Err(failure);
     }
     str treeish = one(gitdir, name.substr(0, cut), F_TREEISH)?;
-    return tree_entry(gitdir, treeish, relative(name.substr(cut + 1, len))?);
+    return tree_entry(gitdir, treeish, relative(name.substr(cut + 1, length))?);
 }
 
 // --- rev-parse's own forms -----------------------------------------------------------------
@@ -1763,8 +1763,8 @@ Result<Option<List<str>>, Error> declined(Error why) {
 Result<Option<List<str>>, Error> difference(str gitdir, str spec) {
     int dots = 0;
     match (spec.index_of("..")) {
-        case Some(int at): {
-            dots = at;
+        case Some(int dots_index): {
+            dots = dots_index;
         }
         case None: {
             return none_found();
@@ -1772,12 +1772,12 @@ Result<Option<List<str>>, Error> difference(str gitdir, str spec) {
     }
     str left = spec.substr(0, dots);
     int from = dots + 2;
-    bool symmetric = from < spec.size() && spec.byte_at(from) == '.';
-    if (symmetric) {
+    bool is_symmetric = from < spec.size() && spec.byte_at(from) == '.';
+    if (is_symmetric) {
         from = from + 1;
     }
     str right = spec.substr(from, spec.size());
-    if (left == "" && right == "" && !symmetric) {
+    if (left == "" && right == "" && !is_symmetric) {
         // Just `..`: the parent directory, not a range.
         return none_found();
     }
@@ -1806,16 +1806,16 @@ Result<Option<List<str>>, Error> difference(str gitdir, str spec) {
         }
     }
     List<str> out = [end];
-    if (!symmetric) {
+    if (!is_symmetric) {
         out.push("^" + start);
         return Result<Option<List<str>>, Error>.Ok(Option<List<str>>.Some(out));
     }
     out.push(start);
     match (lookup_commit(gitdir, start)) {
-        case Ok(Peeled a): {
+        case Ok(Peeled start_commit): {
             match (lookup_commit(gitdir, end)) {
-                case Ok(Peeled b): {
-                    match (GIT_graph.open(gitdir).merge_bases(a.id, b.id)) {
+                case Ok(Peeled end_commit): {
+                    match (GIT_graph.open(gitdir).merge_bases(start_commit.id, end_commit.id)) {
                         case Ok(List<str> bases): {
                             for (str base in bases) {
                                 out.push("^" + base);
@@ -1840,14 +1840,14 @@ Result<Option<List<str>>, Error> difference(str gitdir, str spec) {
 
 // `X^!`, `X^@` and `X^-N`. `None` when `spec` is not one of them.
 Result<Option<List<str>>, Error> shorthand(str gitdir, str spec) {
-    int at = 0;
-    bool include_rev = false;
-    bool include_parents = false;
+    int marker_start = 0;
+    bool should_include_rev = false;
+    bool should_include_parents = false;
     int exclude = 0;
     match (spec.index_of("^!")) {
         case Some(int found): {
-            at = found;
-            include_rev = true;
+            marker_start = found;
+            should_include_rev = true;
             if (found + 2 != spec.size()) {
                 return none_found();
             }
@@ -1855,8 +1855,8 @@ Result<Option<List<str>>, Error> shorthand(str gitdir, str spec) {
         case None: {
             match (spec.index_of("^@")) {
                 case Some(int found): {
-                    at = found;
-                    include_parents = true;
+                    marker_start = found;
+                    should_include_parents = true;
                     if (found + 2 != spec.size()) {
                         return none_found();
                     }
@@ -1864,8 +1864,8 @@ Result<Option<List<str>>, Error> shorthand(str gitdir, str spec) {
                 case None: {
                     match (spec.index_of("^-")) {
                         case Some(int found): {
-                            at = found;
-                            include_rev = true;
+                            marker_start = found;
+                            should_include_rev = true;
                             exclude = 1;
                             if (found + 2 < spec.size()) {
                                 str digits = spec.substr(found + 2, spec.size());
@@ -1887,7 +1887,7 @@ Result<Option<List<str>>, Error> shorthand(str gitdir, str spec) {
         }
     }
     str id = "";
-    match (resolve(gitdir, spec.substr(0, at), F_COMMITTISH)) {
+    match (resolve(gitdir, spec.substr(0, marker_start), F_COMMITTISH)) {
         case Ok(str found): {
             id = found;
         }
@@ -1908,17 +1908,17 @@ Result<Option<List<str>>, Error> shorthand(str gitdir, str spec) {
         return none_found();
     }
     List<str> out = [];
-    if (include_rev) {
+    if (should_include_rev) {
         out.push(id);
     }
-    for (int k in 0 .. parents.size()) {
-        if (exclude > 0 && k + 1 != exclude) {
+    for (int i in 0 .. parents.size()) {
+        if (exclude > 0 && i + 1 != exclude) {
             continue;
         }
-        if (include_parents) {
-            out.push(parents[k]);
+        if (should_include_parents) {
+            out.push(parents[i]);
         } else {
-            out.push("^" + parents[k]);
+            out.push("^" + parents[i]);
         }
     }
     return Result<Option<List<str>>, Error>.Ok(Option<List<str>>.Some(out));

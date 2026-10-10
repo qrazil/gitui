@@ -42,7 +42,7 @@
 // header is free text rather than something this always fills with three
 // lines regardless.
 
-import diff;
+import text.diff;
 import GIT_xdiff;
 import tui.TUI_diff_view;
 

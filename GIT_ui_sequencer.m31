@@ -75,14 +75,14 @@ str label_of(str spec) {
 str describe(GIT_sequencer.Report report) {
     str noun = report.verb.noun();
     if (report.ending.eq(GIT_sequencer.Ending.Finished)) {
-        int n = report.commits.size();
-        if (n == 0) {
+        int commit_count = report.commits.size();
+        if (commit_count == 0) {
             return noun + ": changes applied to the index and files, not committed";
         }
-        if (n == 1) {
+        if (commit_count == 1) {
             return noun + ": committed " + GIT_ui_core.short_id(report.commits[0]);
         }
-        return noun + ": committed " + n.to_str() + " commits, now at " + GIT_ui_core.short_id(report.commits[n - 1]);
+        return noun + ": committed " + commit_count.to_str() + " commits, now at " + GIT_ui_core.short_id(report.commits[commit_count - 1]);
     }
     str key = key_of(report.verb);
     if (report.ending.eq(GIT_sequencer.Ending.Conflicts)) {
@@ -119,12 +119,12 @@ pub void run(GIT_ui_core.Core core, GIT_sequencer.Verb verb, List<str> specs, GI
     core.reload();
 }
 
-GIT_sequencer.Options options(GIT_ui_core.Core core, bool no_commit, bool record_origin, int mainline, bool keep, bool as_range) {
-    return GIT_sequencer.Options(no_commit: no_commit, record_origin: record_origin, mainline: mainline, allow_empty: false, keep_redundant: keep, as_range: as_range, style: GIT_merge.configured_style(core.gitdir));
+GIT_sequencer.Options options(GIT_ui_core.Core core, bool is_no_commit, bool should_record_origin, int mainline, bool should_keep, bool is_as_range) {
+    return GIT_sequencer.Options(no_commit: is_no_commit, record_origin: should_record_origin, mainline: mainline, allow_empty: false, keep_redundant: should_keep, as_range: is_as_range, style: GIT_merge.configured_style(core.gitdir));
 }
 
 /// `continue`, `skip`: both answer with a report.
-void step_on(GIT_ui_core.Core core, bool skip) {
+void step_on(GIT_ui_core.Core core, bool should_skip) {
     GIT_sequencer.Verb verb = GIT_sequencer.Verb.Pick;
     match (GIT_sequencer.state(core.gitdir)) {
         case Some(GIT_sequencer.State found): {
@@ -136,11 +136,11 @@ void step_on(GIT_ui_core.Core core, bool skip) {
         }
     }
     str flag = "--continue";
-    if (skip) {
+    if (should_skip) {
         flag = "--skip";
     }
     Result<GIT_sequencer.Report, GIT_sequencer.Error> result = GIT_sequencer.continue_sequence(core.gitdir, core.worktree);
-    if (skip) {
+    if (should_skip) {
         result = GIT_sequencer.skip(core.gitdir, core.worktree);
     }
     match (result) {
@@ -247,9 +247,9 @@ str PickMenu.scope() {
     return GIT_ui_core.SCOPE_PICK;
 }
 
-void PickMenu.ask_range(bool record_origin) {
+void PickMenu.ask_range(bool should_record_origin) {
     str label = verb.noun() + " (A..B, or commits separated by spaces)";
-    GIT_ui_prompt.open(host, RangeAsk(host, verb, record_origin), "range", label);
+    GIT_ui_prompt.open(host, RangeAsk(host, verb, should_record_origin), "range", label);
 }
 
 void PickMenu.apply(str cmd) {
@@ -268,9 +268,9 @@ void PickMenu.apply(str cmd) {
         host.say(verb.noun() + ": put the cursor on a commit (or r for a range)");
         return;
     }
-    bool no_commit = cmd == GIT_ui_core.CMD_PICK_NO_COMMIT;
-    bool record_origin = cmd == GIT_ui_core.CMD_PICK_ORIGIN;
-    bool keep = cmd == GIT_ui_core.CMD_PICK_KEEP;
+    bool is_no_commit = cmd == GIT_ui_core.CMD_PICK_NO_COMMIT;
+    bool should_record_origin = cmd == GIT_ui_core.CMD_PICK_ORIGIN;
+    bool should_keep = cmd == GIT_ui_core.CMD_PICK_KEEP;
     int mainline = 0;
     if (cmd == GIT_ui_core.CMD_PICK_PARENT_1) {
         mainline = 1;
@@ -279,19 +279,19 @@ void PickMenu.apply(str cmd) {
         mainline = 2;
     }
     str line = verb.noun();
-    if (record_origin) {
+    if (should_record_origin) {
         line = line + " -x";
     }
-    if (no_commit) {
+    if (is_no_commit) {
         line = line + " -n";
     }
-    if (keep) {
+    if (should_keep) {
         line = line + " --keep-redundant-commits";
     }
     if (mainline > 0) {
         line = line + " -m " + mainline.to_str();
     }
-    run(host, verb, [target], options(host, no_commit, record_origin, mainline, keep, false), line + " " + label_of(target));
+    run(host, verb, [target], options(host, is_no_commit, should_record_origin, mainline, should_keep, false), line + " " + label_of(target));
 }
 
 pub TUI_app.Action PickMenu.handle_key(term.Code code) {

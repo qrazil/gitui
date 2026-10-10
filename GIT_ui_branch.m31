@@ -133,7 +133,7 @@ pub void BranchLayer.launch_branch_editor() {
     if (has_run) {
         finish_new_branch();
     }
-    if (fs.exists(branch_name_path)) {
+    if (fs.is_present(branch_name_path)) {
         match (fs.remove(branch_name_path)) {
             case Ok: {
             }

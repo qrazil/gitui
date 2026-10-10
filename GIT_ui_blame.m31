@@ -206,11 +206,11 @@ void BlameOverlay.reblame_at(str parent, str file) {
 }
 
 pub void BlameOverlay.render(TUI_buffer.Buffer buffer, TUI_geometry.Rect area) {
-    str at = "HEAD";
+    str at_revision = "HEAD";
     if (rev != "HEAD") {
-        at = rev.substr(0, 7);
+        at_revision = rev.substr(0, 7);
     }
-    TUI_geometry.Rect inner = GIT_ui_panel.frame(buffer, area, "blame " + path + " @ " + at + notice_suffix());
+    TUI_geometry.Rect inner = GIT_ui_panel.frame(buffer, area, "blame " + path + " @ " + at_revision + notice_suffix());
     if (inner.is_empty()) {
         return;
     }

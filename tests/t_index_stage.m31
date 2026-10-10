@@ -11,7 +11,7 @@ import fs;
 import io;
 import os;
 
-List<str> argv = os.args();
+List<str> argv = os.arguments();
 if (argv.size() < 4) {
     io.eprint("usage: t_index_stage <gitdir> <worktree> <relative-path>");
     os.exit(2);

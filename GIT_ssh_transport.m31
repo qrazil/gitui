@@ -53,11 +53,11 @@ import io;
 import net;
 import os;
 import ssh;
-import sshauth;
-import sshclient;
-import sshexec;
-import sshhosts;
-import sshkey;
+import ssh.sshauth;
+import ssh.sshclient;
+import ssh.sshexec;
+import ssh.sshhosts;
+import ssh.sshkey;
 
 /// A host whose key is not in known_hosts yet, as the server presented it.
 pub type PendingHost {
@@ -281,7 +281,7 @@ List<str> fields_of(str line) {
 /// value wins, as in ssh; `Host` blocks are matched with their globs and
 /// `!` negations; a `Match` block is not understood and so applies to nothing.
 pub bool hashes_known_hosts(str config_text, str host) {
-    bool applies = true;
+    bool is_applicable = true;
     for (str raw in config_text.split("\n")) {
         List<str> words = fields_of(raw.trim());
         if (words.size() == 0 || words[0].starts_with("#")) {
@@ -289,22 +289,22 @@ pub bool hashes_known_hosts(str config_text, str host) {
         }
         str keyword = words[0].to_lower();
         if (keyword == "host") {
-            bool hit = false;
-            bool negated = false;
+            bool is_hit = false;
+            bool is_negated = false;
             for (int i in 1 .. words.size()) {
                 str pattern = words[i];
                 if (pattern.starts_with("!")) {
                     if (GIT_remote.glob_matches(pattern.substr(1, pattern.size()), host)) {
-                        negated = true;
+                        is_negated = true;
                     }
                 } else if (GIT_remote.glob_matches(pattern, host)) {
-                    hit = true;
+                    is_hit = true;
                 }
             }
-            applies = hit && !negated;
+            is_applicable = is_hit && !is_negated;
         } else if (keyword == "match") {
-            applies = false;
-        } else if (applies && (keyword == "hashknownhosts" || keyword.starts_with("hashknownhosts="))) {
+            is_applicable = false;
+        } else if (is_applicable && (keyword == "hashknownhosts" || keyword.starts_with("hashknownhosts="))) {
             if (words.size() >= 2) {
                 return words[1].to_lower() == "yes";
             }
@@ -373,7 +373,7 @@ Result<List<sshkey.PrivateKey>, Error> load_keys(Target target) {
     str encrypted = "";
     str broken = "";
     for (str path in target.identities) {
-        if (!fs.exists(path)) {
+        if (!fs.is_present(path)) {
             continue;
         }
         match (sshkey.load(path)) {
@@ -445,12 +445,12 @@ pub const int PROBE_TIMEOUT_MS = 15000;
 /// thread is waited for.
 pub Result<ssh.HostKey, str> probe_host_key(str host, int port, int timeout_ms) {
     match (net.connect(host, port)) {
-        case Ok(net.Conn c): {
-            Result<bool, net.Error> spoke = c.wait(timeout_ms);
-            match (c.close()) {
+        case Ok(net.Conn connection): {
+            Result<bool, net.Error> spoke = connection.wait(timeout_ms);
+            match (connection.close()) {
                 case Ok(bool closed): {
                 }
-                case Err(io.Error e): {
+                case Err(_): {
                 }
             }
             match (spoke) {
@@ -484,7 +484,7 @@ Result<sshclient.Session, Error> unknown_host(Target target) {
         case Ok(ssh.HostKey key): {
             // sshhosts only drops a revoked key that is also listed as good;
             // a bare `@revoked` line for the very key presented is still a refusal.
-            if (fs.exists(target.known_hosts)) {
+            if (fs.is_present(target.known_hosts)) {
                 match (sshhosts.load(target.known_hosts)) {
                     case Ok(sshhosts.KnownHosts hosts): {
                         if (hosts.is_revoked(target.host, target.port, key)) {
@@ -508,7 +508,7 @@ Result<sshclient.Session, Error> unknown_host(Target target) {
 
 Result<sshclient.Session, Error> open_session(Target target) {
     List<sshkey.PrivateKey> keys = load_keys(target)?;
-    if (!fs.exists(target.known_hosts)) {
+    if (!fs.is_present(target.known_hosts)) {
         return unknown_host(target);
     }
     str auth_failure = "";
@@ -572,8 +572,8 @@ pub type Conn {
     bool is_finished;
 }
 
-pub Result<bytes, io.Error> Conn.read(int n) {
-    match (channel.read(n)) {
+pub Result<bytes, io.Error> Conn.read(int count) {
+    match (channel.read(count)) {
         case Ok(bytes data): {
             if (data.size() == 0 && !is_ended) {
                 is_ended = true;
@@ -606,7 +606,7 @@ pub Result<bool, io.Error> Conn.close() {
 
 // The channel is at EOF, so everything it will say on stderr is buffered.
 void Conn.collect_stderr() {
-    match (channel.read_all_err()) {
+    match (channel.read_all_error()) {
         case Ok(bytes data): {
             stderr_text = stderr_text + data.utf8().or("");
         }
@@ -694,14 +694,14 @@ Result<Conn, Error> start(Target target, str command) {
 }
 
 // The advertisement, or the connection finished and the reason in words.
-Result<GIT_wire.Advertisement, Error> advertise(Conn conn) {
-    match (GIT_wire.read_advertisement(conn)) {
+Result<GIT_wire.Advertisement, Error> advertise(Conn connection) {
+    match (GIT_wire.read_advertisement(connection)) {
         case Ok(GIT_wire.Advertisement advertisement): {
             return Result<GIT_wire.Advertisement, Error>.Ok(advertisement);
         }
         case Err(GIT_wire.Error why): {
-            str message = conn.describe("the server did not send a ref advertisement: " + why.to_str());
-            conn.finish(false);
+            str message = connection.describe("the server did not send a ref advertisement: " + why.to_str());
+            connection.finish(false);
             return Result<GIT_wire.Advertisement, Error>.Err(Error.Protocol(message));
         }
     }
@@ -765,9 +765,9 @@ pub void Upload.finish() {
 }
 
 pub Result<Upload, Error> connect_upload(Target target) {
-    Conn conn = start(target, GIT_remote.service_command("git-upload-pack", target.path))?;
-    GIT_wire.Advertisement advertisement = advertise(conn)?;
-    return Result<Upload, Error>.Ok(Upload(conn, advertisement));
+    Conn connection = start(target, GIT_remote.service_command("git-upload-pack", target.path))?;
+    GIT_wire.Advertisement advertisement = advertise(connection)?;
+    return Result<Upload, Error>.Ok(Upload(connection, advertisement));
 }
 
 // --- push -----------------------------------------------------------------------------------------
@@ -881,7 +881,7 @@ Result<GIT_wire.ReportStatus, Error> Receive.transmit(str gitdir, str refname, s
 }
 
 pub Result<Receive, Error> connect_receive(Target target) {
-    Conn conn = start(target, GIT_remote.service_command("git-receive-pack", target.path))?;
-    GIT_wire.Advertisement advertisement = advertise(conn)?;
-    return Result<Receive, Error>.Ok(Receive(conn, advertisement));
+    Conn connection = start(target, GIT_remote.service_command("git-receive-pack", target.path))?;
+    GIT_wire.Advertisement advertisement = advertise(connection)?;
+    return Result<Receive, Error>.Ok(Receive(connection, advertisement));
 }

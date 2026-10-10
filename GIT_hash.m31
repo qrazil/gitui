@@ -54,8 +54,8 @@
 // git refuses an unknown extension the same way, with its own wording.
 
 import GIT_config;
-import sha1digest;
-import sha256;
+import crypto.sha1digest;
+import crypto.sha256;
 
 pub const int SHA1_LEN = 20;
 pub const int SHA256_LEN = 32;

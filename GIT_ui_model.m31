@@ -530,8 +530,8 @@ pub TUI_outline.Outline build_outline(GIT_status.Status status, List<GIT_log.Ent
     // The section is there only while a stash exists, so a repository without
     // any keeps the outline it always had (`z` still opens the menu).
     List<TUI_outline.Node> stash_children = [];
-    for (int n in 0 .. stashes.size()) {
-        stash_children.push(TUI_outline.Node.leaf("stash:" + n.to_str(), stashes[n]));
+    for (int index in 0 .. stashes.size()) {
+        stash_children.push(TUI_outline.Node.leaf("stash:" + index.to_str(), stashes[index]));
     }
     if (stash_children.size() > 0) {
         roots.push(TUI_outline.Node.section("stashes", "Stashes (" + stash_children.size().to_str() + ")", stash_children, is_expanded: is_expanded_for(collapsed, "stashes", true)));

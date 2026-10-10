@@ -12,7 +12,7 @@ import GIT_ui_model;
 import io;
 import os;
 
-List<str> argv = os.args();
+List<str> argv = os.arguments();
 if (argv.size() < 3) {
     io.eprint("usage: t_config_extras <gitdir> list|get|ident|editor|settings ...");
     os.exit(2);

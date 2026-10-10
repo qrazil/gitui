@@ -109,14 +109,14 @@ pub void jump(GIT_ui_core.Core core, bool is_forward, bool is_from_cursor) {
     if (!is_forward) {
         step = -1;
     }
-    int at = core.outline.cursor;
+    int position = core.outline.cursor;
     int tried = 0;
     if (!is_from_cursor) {
-        at = at + step;
+        position = position + step;
         tried = 1;
     }
     while (tried <= total) {
-        int index = ((at % total) + total) % total;
+        int index = ((position % total) + total) % total;
         if (is_match(rows[index].node.label, query)) {
             core.outline.cursor = index;
             int ordinal = 0;
@@ -130,7 +130,7 @@ pub void jump(GIT_ui_core.Core core, bool is_forward, bool is_from_cursor) {
             core.say("/" + query + ": match " + ordinal.to_str() + " of " + matches.to_str());
             return;
         }
-        at = at + step;
+        position = position + step;
         tried = tried + 1;
     }
 }

@@ -37,8 +37,8 @@ void print_report(GIT_sequencer.Report report) {
     if (report.stopped != "") {
         print("stopped " + report.stopped);
     }
-    for (GIT_merge.Conflicted c in report.conflicts) {
-        print("kind " + c.path + " " + c.kind.word());
+    for (GIT_merge.Conflicted conflicted in report.conflicts) {
+        print("kind " + conflicted.path + " " + conflicted.kind.word());
     }
 }
 
@@ -53,7 +53,7 @@ void print_result(Result<GIT_sequencer.Report, GIT_sequencer.Error> found) {
     }
 }
 
-List<str> argv = os.args();
+List<str> argv = os.arguments();
 if (argv.size() < 4) {
     io.eprint("usage: t_sequencer <gitdir> <worktree> pick|revert|continue|skip|abort|quit|state ...");
     os.exit(2);
@@ -64,23 +64,23 @@ str command = argv[3];
 if (command == "pick" || command == "revert") {
     GIT_sequencer.Options opts = GIT_sequencer.Options(style: GIT_merge.configured_style(gitdir));
     List<str> specs = [];
-    int i = 4;
-    while (i < argv.size()) {
-        if (argv[i] == "-n") {
+    int position = 4;
+    while (position < argv.size()) {
+        if (argv[position] == "-n") {
             opts.no_commit = true;
-        } else if (argv[i] == "-x") {
+        } else if (argv[position] == "-x") {
             opts.record_origin = true;
-        } else if (argv[i] == "--allow-empty") {
+        } else if (argv[position] == "--allow-empty") {
             opts.allow_empty = true;
-        } else if (argv[i] == "--keep-redundant") {
+        } else if (argv[position] == "--keep-redundant") {
             opts.keep_redundant = true;
-        } else if (argv[i] == "--range") {
+        } else if (argv[position] == "--range") {
             opts.as_range = true;
-        } else if (argv[i] == "-m" && i + 1 < argv.size()) {
-            opts.mainline = argv[i + 1].parse_int().or(0);
-            i = i + 1;
+        } else if (argv[position] == "-m" && position + 1 < argv.size()) {
+            opts.mainline = argv[position + 1].parse_int().or(0);
+            position = position + 1;
         } else {
-            match (GIT_revparse.is_range(gitdir, argv[i])) {
+            match (GIT_revparse.is_range(gitdir, argv[position])) {
                 case Ok(bool answer): {
                     if (answer) {
                         opts.as_range = true;
@@ -89,9 +89,9 @@ if (command == "pick" || command == "revert") {
                 case Err(_): {
                 }
             }
-            specs.push(argv[i]);
+            specs.push(argv[position]);
         }
-        i = i + 1;
+        position = position + 1;
     }
     GIT_sequencer.Verb verb = GIT_sequencer.Verb.Pick;
     if (command == "revert") {

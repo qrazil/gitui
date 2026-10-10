@@ -9,7 +9,7 @@
 // throughput on stderr, which is deliberately not on stdout: a timing is not
 // something a diff can check.
 
-import sha1digest;
+import crypto.sha1digest;
 import io;
 import os;
 import date;
@@ -60,7 +60,7 @@ for (int size in CHUNKS) {
 
 // --- a real file, if one was named -------------------------------------------
 
-List<str> argv = os.args();
+List<str> argv = os.arguments();
 if (argv.size() > 1) {
     match (io.read_bytes(argv[1])) {
         case Ok(bytes data): {

@@ -17,11 +17,11 @@
 //       "ok <name>" or "FAIL <name>: <detail>" per check.
 
 import GIT_remote;
-import hexcodec;
+import encoding.hexcodec;
 import io;
 import os;
 
-List<str> argv = os.args();
+List<str> argv = os.arguments();
 if (argv.size() < 2) {
     usage();
 }
@@ -68,8 +68,8 @@ str read_text(str path) {
         case Ok(str text): {
             return text;
         }
-        case Err(io.Error e): {
-            fail("cannot read " + path + ": " + e.to_str());
+        case Err(io.Error error): {
+            fail("cannot read " + path + ": " + error.to_str());
         }
     }
     return "";
@@ -107,8 +107,8 @@ void do_parse(str url) {
         case Ok(GIT_remote.Remote remote): {
             print(remote.transport.to_str() + " host=" + remote.host + " port=" + remote.port.to_str() + " user=" + remote.user + " path=" + remote.path);
         }
-        case Err(GIT_remote.Error e): {
-            print("error " + e.to_str());
+        case Err(GIT_remote.Error error): {
+            print("error " + error.to_str());
         }
     }
 }
@@ -122,8 +122,8 @@ void do_exec(str url, str which) {
             }
             print("dest=" + GIT_remote.ssh_destination(remote) + " port=" + remote.port.to_str() + " cmd=" + command);
         }
-        case Err(GIT_remote.Error e): {
-            print("error " + e.to_str());
+        case Err(GIT_remote.Error error): {
+            print("error " + error.to_str());
         }
     }
 }
@@ -174,8 +174,8 @@ str shape(str url) {
         case Ok(GIT_remote.Remote remote): {
             return remote.transport.to_str() + " " + remote.user + "@" + remote.host + ":" + remote.port.to_str() + " " + remote.path;
         }
-        case Err(GIT_remote.Error e): {
-            return "error " + e.to_str();
+        case Err(GIT_remote.Error error): {
+            return "error " + error.to_str();
         }
     }
 }

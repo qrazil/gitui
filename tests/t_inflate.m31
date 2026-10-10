@@ -15,14 +15,14 @@
 // `t_object.m31` compares real objects octet for octet.
 
 import GIT_zlib;
-import sha1digest;
+import crypto.sha1digest;
 import io;
 import os;
 import fs;
 import text;
 import date;
 
-List<str> argv = os.args();
+List<str> argv = os.arguments();
 if (argv.size() < 2) {
     io.eprint("usage: t_inflate <fixture-dir>");
     os.exit(2);

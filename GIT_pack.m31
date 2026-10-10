@@ -389,7 +389,7 @@ type PackFile {
 List<PackFile> discover(str gitdir) {
     List<PackFile> out = [];
     str directory = fs.join(fs.join(GIT_repository.common(gitdir), "objects"), "pack");
-    if (!fs.is_dir(directory)) {
+    if (!fs.is_directory(directory)) {
         return out;
     }
     match (fs.listdir(directory)) {
@@ -423,7 +423,7 @@ List<PackFile> discover(str gitdir) {
 Option<Found> loose_raw(str gitdir, str id) {
     str root = fs.join(GIT_repository.common(gitdir), "objects");
     str path = fs.join(fs.join(root, id.substr(0, 2)), id.substr(2, id.size()));
-    if (!fs.exists(path)) {
+    if (!fs.is_present(path)) {
         return Option<Found>.None;
     }
     match (io.read_bytes(path)) {

@@ -187,14 +187,14 @@ pub Result<bool, Error> Graph.is_ancestor(str ancestor, str descendant) {
 /// dates by id. One for a plain fork, none for unrelated histories, two or
 /// more after a criss-cross merge. If one is an ancestor of the other it is
 /// the only base.
-pub Result<List<str>, Error> Graph.merge_bases(str a, str b) {
-    Map<str, bool> from_a = reach([a], {})?;
-    node(b)?;
+pub Result<List<str>, Error> Graph.merge_bases(str first, str second) {
+    Map<str, bool> from_a = reach([first], {})?;
+    node(second)?;
     // The common ancestors nearest b.
     List<str> candidates = [];
     Map<str, bool> seen = {};
-    List<str> pending = [b];
-    seen.set(b, true);
+    List<str> pending = [second];
+    seen.set(second, true);
     while (pending.size() > 0) {
         str id = pending.pop();
         if (from_a.contains(id)) {
@@ -237,20 +237,20 @@ Result<List<str>, Error> Graph.sorted_newest_first(List<str> ids) {
     by_id.sort();
     for (str id in by_id) {
         int stamp = when(id)?;
-        int at = 0;
-        while (at < out.size() && dates[at] >= stamp) {
-            at = at + 1;
+        int insert_index = 0;
+        while (insert_index < out.size() && dates[insert_index] >= stamp) {
+            insert_index = insert_index + 1;
         }
-        out.insert(at, id);
-        dates.insert(at, stamp);
+        out.insert(insert_index, id);
+        dates.insert(insert_index, stamp);
     }
     return Result<List<str>, Error>.Ok(out);
 }
 
 /// How many commits `a` is ahead of and behind `b`.
-pub Result<AheadBehind, Error> Graph.ahead_behind(str a, str b) {
-    Map<str, bool> from_a = reach([a], {})?;
-    Map<str, bool> from_b = reach([b], {})?;
+pub Result<AheadBehind, Error> Graph.ahead_behind(str first, str second) {
+    Map<str, bool> from_a = reach([first], {})?;
+    Map<str, bool> from_b = reach([second], {})?;
     int ahead = 0;
     for (str id in from_a.keys()) {
         if (!from_b.contains(id)) {
@@ -299,12 +299,12 @@ pub Result<List<str>, Error> Graph.rev_list(List<str> include, List<str> exclude
 // `commit_list_insert_by_date`: after every entry at least as new.
 Result<bool, Error> Graph.enqueue(List<str> queue, List<int> dates, str id) {
     int stamp = when(id)?;
-    int at = 0;
-    while (at < queue.size() && dates[at] >= stamp) {
-        at = at + 1;
+    int insert_index = 0;
+    while (insert_index < queue.size() && dates[insert_index] >= stamp) {
+        insert_index = insert_index + 1;
     }
-    queue.insert(at, id);
-    dates.insert(at, stamp);
+    queue.insert(insert_index, id);
+    dates.insert(insert_index, stamp);
     return Result<bool, Error>.Ok(true);
 }
 
@@ -326,13 +326,13 @@ pub Result<bool, Error> is_ancestor(str gitdir, str ancestor, str descendant) {
 }
 
 /// Every merge base of `a` and `b`.
-pub Result<List<str>, Error> merge_bases(str gitdir, str a, str b) {
-    return open(gitdir).merge_bases(a, b);
+pub Result<List<str>, Error> merge_bases(str gitdir, str first, str second) {
+    return open(gitdir).merge_bases(first, second);
 }
 
 /// How far `a` and `b` have diverged.
-pub Result<AheadBehind, Error> ahead_behind(str gitdir, str a, str b) {
-    return open(gitdir).ahead_behind(a, b);
+pub Result<AheadBehind, Error> ahead_behind(str gitdir, str first, str second) {
+    return open(gitdir).ahead_behind(first, second);
 }
 
 /// Reachable from `include`, not from `exclude`, newest first.

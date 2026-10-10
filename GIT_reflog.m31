@@ -127,7 +127,7 @@ pub str log_path(str gitdir, str ref) {
 
 /// Does this ref have a log file already?
 pub bool exists(str gitdir, str ref) {
-    return fs.exists(log_path(gitdir, ref));
+    return fs.is_present(log_path(gitdir, ref));
 }
 
 bool is_safe_ref(str ref) {
@@ -226,9 +226,9 @@ int zone_offset(str zone) {
 // its ends.
 str clean_ident(str raw) {
     List<int> out = [];
-    for (int c in raw.chars()) {
-        if (c != '<' && c != '>' && c != '\n') {
-            out.push(c);
+    for (int byte in raw.chars()) {
+        if (byte != '<' && byte != '>' && byte != '\n') {
+            out.push(byte);
         }
     }
     return str.from_chars(out).trim();
@@ -238,15 +238,15 @@ str clean_ident(str raw) {
 str clean_message(str raw) {
     List<int> out = [];
     bool was_space = true;
-    for (int c in raw.chars()) {
-        bool is_space = c == ' ' || c == '\t' || c == '\n' || c == '\r' || c == 11 || c == 12;
+    for (int byte in raw.chars()) {
+        bool is_space = byte == ' ' || byte == '\t' || byte == '\n' || byte == '\r' || byte == 11 || byte == 12;
         if (is_space) {
             if (!was_space) {
                 out.push(' ');
             }
             was_space = true;
         } else {
-            out.push(c);
+            out.push(byte);
             was_space = false;
         }
     }
@@ -263,7 +263,7 @@ pub Result<List<Entry>, Error> read(str gitdir, str ref) {
     }
     str path = log_path(gitdir, ref);
     List<Entry> out = [];
-    if (!fs.exists(path)) {
+    if (!fs.is_present(path)) {
         return Result<List<Entry>, Error>.Ok(out);
     }
     int width = GIT_object.hex_len(gitdir);
@@ -341,11 +341,11 @@ Result<Entry, Error> parse_line(str line, int width) {
 
 // --- writing -------------------------------------------------------------------
 
-str format_line(str old, str new, GIT_object.Ident who, str msg) {
+str format_line(str old, str new, GIT_object.Ident who, str raw_message) {
     str name = who.name.utf8().or("unknown");
     str email = who.email.utf8().or("");
     str line = old + " " + new + " " + name + " <" + email + "> " + who.when.to_str() + " " + who.zone;
-    str message = clean_message(msg);
+    str message = clean_message(raw_message);
     if (message != "") {
         line = line + "\t" + message;
     }
@@ -355,7 +355,7 @@ str format_line(str old, str new, GIT_object.Ident who, str msg) {
 /// Append one line to the log of `ref`, whether or not git would have logged
 /// this ref (`should_log` decides that; `append` obeys). `old`/`new` are
 /// full object names, `""` meaning "none" (all zeros).
-pub Result<bool, Error> append(str gitdir, str ref, str old, str new, GIT_object.Ident who, str msg) {
+pub Result<bool, Error> append(str gitdir, str ref, str old, str new, GIT_object.Ident who, str message) {
     if (!is_safe_ref(ref)) {
         return Result<bool, Error>.Err(Error.BadValue);
     }
@@ -363,11 +363,11 @@ pub Result<bool, Error> append(str gitdir, str ref, str old, str new, GIT_object
     if (from == "") {
         from = zero(gitdir);
     }
-    str to = new;
-    if (to == "") {
-        to = zero(gitdir);
+    str target_id = new;
+    if (target_id == "") {
+        target_id = zero(gitdir);
     }
-    if (!is_id(gitdir, from) || !is_id(gitdir, to)) {
+    if (!is_id(gitdir, from) || !is_id(gitdir, target_id)) {
         return Result<bool, Error>.Err(Error.BadValue);
     }
     str path = log_path(gitdir, ref);
@@ -378,7 +378,7 @@ pub Result<bool, Error> append(str gitdir, str ref, str old, str new, GIT_object
             return Result<bool, Error>.Err(Error.Io);
         }
     }
-    match (io.append(path, format_line(from, to, who, msg))) {
+    match (io.append(path, format_line(from, target_id, who, message))) {
         case Ok(_): {
             return Result<bool, Error>.Ok(true);
         }
@@ -418,28 +418,28 @@ str head_target(str gitdir) {
 /// Record a ref update the way git does: on the ref's own log (if
 /// `should_log`), and on `HEAD`'s as well when `ref` is the branch `HEAD` is on.
 /// Returns whether anything was written.
-pub Result<bool, Error> log_update(str gitdir, str ref, str old, str new, str msg) {
+pub Result<bool, Error> log_update(str gitdir, str ref, str old, str new, str message) {
     GIT_object.Ident who = default_ident(gitdir);
-    bool wrote = false;
+    bool did_write = false;
     if (should_log(gitdir, ref)) {
-        append(gitdir, ref, old, new, who, msg)?;
-        wrote = true;
+        append(gitdir, ref, old, new, who, message)?;
+        did_write = true;
     }
     if (ref != "HEAD" && head_target(gitdir) == ref && should_log(gitdir, "HEAD")) {
-        append(gitdir, "HEAD", old, new, who, msg)?;
-        wrote = true;
+        append(gitdir, "HEAD", old, new, who, message)?;
+        did_write = true;
     }
-    return Result<bool, Error>.Ok(wrote);
+    return Result<bool, Error>.Ok(did_write);
 }
 
 /// Remove entry `n` (0 is the newest) from the log of `ref`. With `rewrite`,
 /// every kept entry's old id is made the previous kept entry's new id (the
 /// oldest keeps zeros), which is `git reflog delete --rewrite`. Without it the
 /// other lines are untouched. `Error.NotFound` if the log has fewer entries.
-pub Result<bool, Error> delete(str gitdir, str ref, int n, bool rewrite) {
+pub Result<bool, Error> delete(str gitdir, str ref, int count, bool should_rewrite) {
     List<Entry> entries = read(gitdir, ref)?;
-    int target = entries.size() - 1 - n;
-    if (n < 0 || target < 0) {
+    int target = entries.size() - 1 - count;
+    if (count < 0 || target < 0) {
         return Result<bool, Error>.Err(Error.NotFound);
     }
     str out = "";
@@ -450,7 +450,7 @@ pub Result<bool, Error> delete(str gitdir, str ref, int n, bool rewrite) {
         }
         Entry entry = entries[i];
         str old = entry.old;
-        if (rewrite) {
+        if (should_rewrite) {
             old = previous;
         }
         previous = entry.new;
@@ -487,7 +487,7 @@ pub Result<bool, Error> delete_log(str gitdir, str ref) {
         return Result<bool, Error>.Err(Error.BadValue);
     }
     str path = log_path(gitdir, ref);
-    if (!fs.exists(path)) {
+    if (!fs.is_present(path)) {
         return Result<bool, Error>.Ok(false);
     }
     match (fs.remove(path)) {
@@ -499,16 +499,16 @@ pub Result<bool, Error> delete_log(str gitdir, str ref) {
     }
     str root = parent_of(log_path(gitdir, "refs/heads/x"));
     root = parent_of(parent_of(root));
-    str dir = parent_of(path);
-    while (dir.size() > root.size() && dir.starts_with(root)) {
-        match (fs.rmdir(dir)) {
+    str directory = parent_of(path);
+    while (directory.size() > root.size() && directory.starts_with(root)) {
+        match (fs.rmdir(directory)) {
             case Ok(_): {
             }
             case Err(_): {
                 break;
             }
         }
-        dir = parent_of(dir);
+        directory = parent_of(directory);
     }
     return Result<bool, Error>.Ok(true);
 }

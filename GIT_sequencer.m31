@@ -446,7 +446,7 @@ pub Result<bool, Error> write_text(str path, str text) {
 }
 
 pub void remove_file(str path) {
-    if (fs.exists(path) || fs.is_link(path)) {
+    if (fs.is_present(path) || fs.is_link(path)) {
         match (fs.remove(path)) {
             case Ok: {
             }
@@ -487,13 +487,13 @@ void clear_all_state(str gitdir) {
     remove_file(fs.join(gitdir, "AUTO_MERGE"));
 }
 
-void remove_dir(str dir) {
+void remove_dir(str directory) {
     List<str> names = ["todo", "head", "opts", "abort-safety"];
     for (str name in names) {
-        remove_file(fs.join(dir, name));
+        remove_file(fs.join(directory, name));
     }
-    if (fs.exists(dir)) {
-        match (fs.rmdir(dir)) {
+    if (fs.is_present(directory)) {
+        match (fs.rmdir(directory)) {
             case Ok: {
             }
             case Err(_): {
@@ -530,8 +530,8 @@ Result<Head, Error> read_head(str gitdir) {
     }
 }
 
-pub Result<bool, Error> move_ref(str gitdir, str name, str new_id, Option<str> expect, str msg) {
-    return lift_bool(GIT_merge.ref_update(gitdir, name, new_id, expect, msg));
+pub Result<bool, Error> move_ref(str gitdir, str name, str new_id, Option<str> expect, str message) {
+    return lift_bool(GIT_merge.ref_update(gitdir, name, new_id, expect, message));
 }
 
 // --- messages ----------------------------------------------------------------------------
@@ -570,9 +570,9 @@ bool is_trailer_line(str line) {
         return false;
     }
     for (int i in 0 .. colon) {
-        int c = line.byte_at(i);
-        bool word = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '-';
-        if (!word) {
+        int byte = line.byte_at(i);
+        bool is_word = (byte >= 'a' && byte <= 'z') || (byte >= 'A' && byte <= 'Z') || (byte >= '0' && byte <= '9') || byte == '-';
+        if (!is_word) {
             return false;
         }
     }
@@ -600,11 +600,11 @@ bool has_footer(str message) {
     }
     int trailers = 0;
     int others = 0;
-    bool known = false;
+    bool has_known = false;
     for (int i in from .. lines.size()) {
         str line = lines[i];
         if (line.starts_with("(cherry picked from commit ") || line.starts_with("Signed-off-by: ")) {
-            known = true;
+            has_known = true;
             trailers = trailers + 1;
         } else if (is_trailer_line(line)) {
             trailers = trailers + 1;
@@ -616,12 +616,12 @@ bool has_footer(str message) {
     if (trailers > 0 && others == 0) {
         return true;
     }
-    return known && trailers * 3 >= others;
+    return has_known && trailers * 3 >= others;
 }
 
-str pick_message(str original, str id, bool record_origin) {
+str pick_message(str original, str id, bool should_record_origin) {
     str text = original;
-    if (record_origin) {
+    if (should_record_origin) {
         if (!text.ends_with("\n")) {
             text = text + "\n";
         }
@@ -821,8 +821,8 @@ pub List<str> todo_lines(str gitdir, List<Item> items) {
 }
 
 /// Write `<dir>/todo`, creating `dir`.
-pub Result<bool, Error> write_todo(str gitdir, str dir, List<Item> items) {
-    match (fs.makedirs(dir)) {
+pub Result<bool, Error> write_todo(str gitdir, str directory, List<Item> items) {
+    match (fs.makedirs(directory)) {
         case Ok: {
         }
         case Err(_): {
@@ -833,14 +833,14 @@ pub Result<bool, Error> write_todo(str gitdir, str dir, List<Item> items) {
     for (str line in todo_lines(gitdir, items)) {
         text = text + line + "\n";
     }
-    return write_text(fs.join(dir, "todo"), text);
+    return write_text(fs.join(directory, "todo"), text);
 }
 
 /// The items of `<dir>/todo`; the ids are resolved to commits. `#` lines and
 /// blank lines are skipped, `p` and `r` stand for pick and revert.
-pub Result<List<Item>, Error> read_todo(str gitdir, str dir) {
+pub Result<List<Item>, Error> read_todo(str gitdir, str directory) {
     List<Item> out = [];
-    for (str raw in read_text(fs.join(dir, "todo")).split("\n")) {
+    for (str raw in read_text(fs.join(directory, "todo")).split("\n")) {
         str line = raw.trim();
         if (line == "" || line.starts_with("#")) {
             continue;
@@ -879,9 +879,9 @@ pub Result<List<Item>, Error> read_todo(str gitdir, str dir) {
 }
 
 /// `<dir>/opts` in git's config format; a missing file is the defaults.
-pub Options read_options(str dir) {
+pub Options read_options(str directory) {
     Options opts = Options();
-    for (str raw in read_text(fs.join(dir, "opts")).split("\n")) {
+    for (str raw in read_text(fs.join(directory, "opts")).split("\n")) {
         str line = raw.trim();
         int equals = line.index_of("=").or(-1);
         if (equals < 0) {
@@ -889,15 +889,15 @@ pub Options read_options(str dir) {
         }
         str key = line.substr(0, equals).trim();
         str value = line.substr(equals + 1, line.size()).trim();
-        bool on = value == "true";
+        bool is_enabled = value == "true";
         if (key == "no-commit") {
-            opts.no_commit = on;
+            opts.no_commit = is_enabled;
         } else if (key == "record-origin") {
-            opts.record_origin = on;
+            opts.record_origin = is_enabled;
         } else if (key == "allow-empty") {
-            opts.allow_empty = on;
+            opts.allow_empty = is_enabled;
         } else if (key == "keep-redundant-commits") {
-            opts.keep_redundant = on;
+            opts.keep_redundant = is_enabled;
         } else if (key == "mainline") {
             opts.mainline = value.parse_int().or(0);
         }
@@ -907,7 +907,7 @@ pub Options read_options(str dir) {
 
 /// Write `<dir>/opts` with the options that are not default; no file when
 /// there are none. A revert always has `edit = false`: no editor is run.
-pub Result<bool, Error> write_options(str dir, Verb verb, Options opts) {
+pub Result<bool, Error> write_options(str directory, Verb verb, Options opts) {
     str body = "";
     if (verb == Verb.Revert) {
         body = body + "\tedit = false\n";
@@ -930,7 +930,7 @@ pub Result<bool, Error> write_options(str dir, Verb verb, Options opts) {
     if (body == "") {
         return Result<bool, Error>.Ok(true);
     }
-    return write_text(fs.join(dir, "opts"), "[options]\n" + body);
+    return write_text(fs.join(directory, "opts"), "[options]\n" + body);
 }
 
 // --- what is under way ---------------------------------------------------------------------------
@@ -960,7 +960,7 @@ bool has_pending(str gitdir) {
 
 /// Is a cherry-pick or revert under way: a stopped step or a sequencer directory.
 pub bool in_progress(str gitdir) {
-    return fs.exists(sequencer_dir(gitdir)) || fs.exists(fs.join(gitdir, CHERRY_PICK_HEAD)) || fs.exists(fs.join(gitdir, REVERT_HEAD));
+    return fs.is_present(sequencer_dir(gitdir)) || fs.is_present(fs.join(gitdir, CHERRY_PICK_HEAD)) || fs.is_present(fs.join(gitdir, REVERT_HEAD));
 }
 
 /// What is under way, or None.
@@ -1033,12 +1033,12 @@ pub Result<List<str>, Error> expand(str gitdir, Verb verb, List<str> specs) {
     // Git walks the words as one revision list when any of them is a range
     // (a plain commit among them then stands for its whole history, a `^A`
     // for what to leave out), and takes the commits one by one when none is.
-    bool walks = false;
+    bool should_walk = false;
     for (str spec in specs) {
         match (GIT_revparse.is_range(gitdir, spec)) {
             case Ok(bool answer): {
                 if (answer) {
-                    walks = true;
+                    should_walk = true;
                 }
             }
             case Err(GIT_revparse.Error error): {
@@ -1047,7 +1047,7 @@ pub Result<List<str>, Error> expand(str gitdir, Verb verb, List<str> specs) {
         }
     }
     List<str> out = [];
-    if (!walks) {
+    if (!should_walk) {
         for (str spec in specs) {
             out.push(resolve_commit(gitdir, spec)?);
         }
@@ -1077,10 +1077,10 @@ pub Result<List<str>, Error> expand(str gitdir, Verb verb, List<str> specs) {
                     out.push(id);
                 }
             } else {
-                int at = found.size();
-                while (at > 0) {
-                    at = at - 1;
-                    out.push(found[at]);
+                int insert_index = found.size();
+                while (insert_index > 0) {
+                    insert_index = insert_index - 1;
+                    out.push(found[insert_index]);
                 }
             }
         }
@@ -1106,8 +1106,8 @@ str log_prefix_of(Verb verb) {
     return verb.noun();
 }
 
-Result<bool, Error> write_abort_safety(str dir, str id) {
-    return write_text(fs.join(dir, "abort-safety"), id + "\n");
+Result<bool, Error> write_abort_safety(str directory, str id) {
+    return write_text(fs.join(directory, "abort-safety"), id + "\n");
 }
 
 Report stopped_report(Ending ending, List<str> made, Item item, StepResult step) {
@@ -1117,20 +1117,20 @@ Report stopped_report(Ending ending, List<str> made, Item item, StepResult step)
 // Apply `items` one after the other. With `sequence` the todo is rewritten
 // before each step and `abort-safety` follows HEAD. A stop leaves the state,
 // the end of the list removes the directory.
-Result<Report, Error> run(str gitdir, str worktree, List<Item> items, Options opts, bool sequence) {
-    str dir = sequencer_dir(gitdir);
+Result<Report, Error> run(str gitdir, str worktree, List<Item> items, Options opts, bool is_sequence) {
+    str directory = sequencer_dir(gitdir);
     List<str> made = [];
     for (int i in 0 .. items.size()) {
         Item item = items[i];
-        if (sequence) {
-            write_todo(gitdir, dir, items.slice(i, items.size()))?;
+        if (is_sequence) {
+            write_todo(gitdir, directory, items.slice(i, items.size()))?;
         }
         StepResult step = apply_step(gitdir, worktree, item, opts, log_prefix_of(item.verb))?;
         match (step.landed) {
             case Committed: {
                 made.push(step.commit);
-                if (sequence) {
-                    write_abort_safety(dir, step.commit)?;
+                if (is_sequence) {
+                    write_abort_safety(directory, step.commit)?;
                 }
             }
             case Staged: {
@@ -1143,8 +1143,8 @@ Result<Report, Error> run(str gitdir, str worktree, List<Item> items, Options op
             }
         }
     }
-    if (sequence) {
-        remove_dir(dir);
+    if (is_sequence) {
+        remove_dir(directory);
     }
     List<GIT_merge.Conflicted> none = [];
     List<str> no_messages = [];
@@ -1181,21 +1181,21 @@ pub Result<Report, Error> start(str gitdir, str worktree, Verb verb, List<str> i
     refuse_if_busy(gitdir)?;
     Head head = read_head(gitdir)?;
     List<Item> items = items_of(gitdir, verb, ids)?;
-    bool sequence = items.size() > 1 || opts.as_range;
-    str dir = sequencer_dir(gitdir);
-    if (sequence) {
-        write_text_in(dir, "head", head.id + "\n")?;
-        write_abort_safety(dir, head.id)?;
-        write_options(dir, verb, opts)?;
+    bool is_sequence = items.size() > 1 || opts.as_range;
+    str directory = sequencer_dir(gitdir);
+    if (is_sequence) {
+        write_text_in(directory, "head", head.id + "\n")?;
+        write_abort_safety(directory, head.id)?;
+        write_options(directory, verb, opts)?;
     }
-    match (run(gitdir, worktree, items, opts, sequence)) {
+    match (run(gitdir, worktree, items, opts, is_sequence)) {
         case Ok(Report report): {
             return Result<Report, Error>.Ok(report);
         }
         case Err(Error error): {
-            if (sequence && read_text(fs.join(dir, "head")) != "" && !fs.exists(fs.join(gitdir, head_file(verb)))) {
-                if (read_text(fs.join(dir, "abort-safety")).trim() == head.id) {
-                    remove_dir(dir);
+            if (is_sequence && read_text(fs.join(directory, "head")) != "" && !fs.is_present(fs.join(gitdir, head_file(verb)))) {
+                if (read_text(fs.join(directory, "abort-safety")).trim() == head.id) {
+                    remove_dir(directory);
                 }
             }
             return Result<Report, Error>.Err(error);
@@ -1203,22 +1203,22 @@ pub Result<Report, Error> start(str gitdir, str worktree, Verb verb, List<str> i
     }
 }
 
-Result<bool, Error> write_text_in(str dir, str name, str text) {
-    match (fs.makedirs(dir)) {
+Result<bool, Error> write_text_in(str directory, str name, str text) {
+    match (fs.makedirs(directory)) {
         case Ok: {
         }
         case Err(_): {
             return Result<bool, Error>.Err(io_error());
         }
     }
-    return write_text(fs.join(dir, name), text);
+    return write_text(fs.join(directory, name), text);
 }
 
 // Carry on with `rest` after a step is done or skipped.
 Result<Report, Error> carry_on(str gitdir, str worktree, List<Item> rest, Options opts, List<str> made, Verb verb) {
-    str dir = sequencer_dir(gitdir);
+    str directory = sequencer_dir(gitdir);
     if (rest.size() == 0) {
-        remove_dir(dir);
+        remove_dir(directory);
         List<GIT_merge.Conflicted> none = [];
         List<str> no_messages = [];
         return Result<Report, Error>.Ok(Report(Ending.Finished, made, "", verb, none, no_messages));
@@ -1238,17 +1238,17 @@ Result<Report, Error> carry_on(str gitdir, str worktree, List<Item> rest, Option
 /// With no stopped step (`git commit` made the commit, or `no_commit`) the
 /// first todo item counts as done.
 pub Result<Report, Error> continue_sequence(str gitdir, str worktree) {
-    str dir = sequencer_dir(gitdir);
-    bool sequence = fs.exists(dir);
+    str directory = sequencer_dir(gitdir);
+    bool is_sequence = fs.is_present(directory);
     Option<Pending> stopped = pending(gitdir);
-    if (!sequence && !has_pending(gitdir)) {
+    if (!is_sequence && !has_pending(gitdir)) {
         return Result<Report, Error>.Err(Error.NoSequence);
     }
-    Options opts = read_options(dir);
+    Options opts = read_options(directory);
     List<str> made = [];
     List<Item> todo = [];
-    if (sequence) {
-        todo = read_todo(gitdir, dir)?;
+    if (is_sequence) {
+        todo = read_todo(gitdir, directory)?;
     }
     Verb verb = Verb.Pick;
     if (todo.size() > 0) {
@@ -1264,8 +1264,8 @@ pub Result<Report, Error> continue_sequence(str gitdir, str worktree) {
                 return Result<Report, Error>.Ok(Report(Ending.Empty, made, found.id, found.verb, none, no_messages));
             }
             made.push(step.commit);
-            if (sequence) {
-                write_abort_safety(dir, step.commit)?;
+            if (is_sequence) {
+                write_abort_safety(directory, step.commit)?;
             }
         }
         case None: {
@@ -1280,7 +1280,7 @@ pub Result<Report, Error> continue_sequence(str gitdir, str worktree) {
             }
         }
     }
-    if (!sequence) {
+    if (!is_sequence) {
         List<GIT_merge.Conflicted> none = [];
         List<str> no_messages = [];
         return Result<Report, Error>.Ok(Report(Ending.Finished, made, "", verb, none, no_messages));
@@ -1345,16 +1345,16 @@ pub Result<bool, Error> reset_to(str gitdir, str worktree, str target, str messa
 /// `--skip`: forget the stopped step (index and files back to HEAD) and do
 /// the rest of the sequence.
 pub Result<Report, Error> skip(str gitdir, str worktree) {
-    str dir = sequencer_dir(gitdir);
-    bool sequence = fs.exists(dir);
-    if (!sequence && !has_pending(gitdir)) {
+    str directory = sequencer_dir(gitdir);
+    bool is_sequence = fs.is_present(directory);
+    if (!is_sequence && !has_pending(gitdir)) {
         return Result<Report, Error>.Err(Error.NoSequence);
     }
     Head head = read_head(gitdir)?;
-    Options opts = read_options(dir);
+    Options opts = read_options(directory);
     List<Item> todo = [];
-    if (sequence) {
-        todo = read_todo(gitdir, dir)?;
+    if (is_sequence) {
+        todo = read_todo(gitdir, directory)?;
     }
     Verb verb = Verb.Pick;
     if (todo.size() > 0) {
@@ -1370,7 +1370,7 @@ pub Result<Report, Error> skip(str gitdir, str worktree) {
     }
     reset_to(gitdir, worktree, head.id, "reset: moving to " + head.id)?;
     List<str> made = [];
-    if (!sequence) {
+    if (!is_sequence) {
         List<GIT_merge.Conflicted> none = [];
         List<str> no_messages = [];
         return Result<Report, Error>.Ok(Report(Ending.Finished, made, "", verb, none, no_messages));
@@ -1387,8 +1387,8 @@ pub Result<Report, Error> skip(str gitdir, str worktree) {
 /// and only the state goes (`Aborted.HeadMoved`). A single step is undone by
 /// a `reset --merge` to HEAD.
 pub Result<Aborted, Error> abort(str gitdir, str worktree) {
-    str dir = sequencer_dir(gitdir);
-    if (!fs.exists(dir)) {
+    str directory = sequencer_dir(gitdir);
+    if (!fs.is_present(directory)) {
         if (!has_pending(gitdir)) {
             return Result<Aborted, Error>.Err(Error.NoSequence);
         }
@@ -1397,17 +1397,17 @@ pub Result<Aborted, Error> abort(str gitdir, str worktree) {
         return Result<Aborted, Error>.Ok(Aborted.Rewound);
     }
     Head head = read_head(gitdir)?;
-    str start_id = read_text(fs.join(dir, "head")).trim();
+    str start_id = read_text(fs.join(directory, "head")).trim();
     if (!GIT_object.is_full(gitdir, start_id)) {
         return Result<Aborted, Error>.Err(Error.BadState("head"));
     }
-    str safety = read_text(fs.join(dir, "abort-safety")).trim();
+    str safety = read_text(fs.join(directory, "abort-safety")).trim();
     if (safety != "" && safety != head.id) {
-        remove_dir(dir);
+        remove_dir(directory);
         return Result<Aborted, Error>.Ok(Aborted.HeadMoved);
     }
     reset_to(gitdir, worktree, start_id, "reset: moving to " + start_id)?;
-    remove_dir(dir);
+    remove_dir(directory);
     return Result<Aborted, Error>.Ok(Aborted.Rewound);
 }
 

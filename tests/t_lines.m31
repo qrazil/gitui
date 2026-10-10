@@ -18,21 +18,21 @@
 import os;
 import io;
 import fs;
-import diff;
+import text.diff;
 import GIT_xdiff;
 import GIT_patch;
 
 void run() {
-    List<str> argv = os.args();
+    List<str> argv = os.arguments();
     if (argv.size() != 3) {
         print("usage: t_lines DIR COUNT");
         os.exit(1);
     }
-    str dir = argv[1];
+    str directory = argv[1];
     int count = argv[2].parse_int().or(0);
-    int c = 0;
-    while (c < count) {
-        str stem = dir + "/" + pad(c);
+    int counter = 0;
+    while (counter < count) {
+        str stem = directory + "/" + pad(counter);
         bytes old = read(stem + ".old");
         bytes new = read(stem + ".new");
         List<int> selected = [];
@@ -51,7 +51,7 @@ void run() {
                 write(stem + ".applied", orNone(GIT_patch.apply_lines(old, ops, selected)));
                 write(stem + ".reverted", orNone(GIT_patch.revert_lines(new, ops, selected)));
                 write(stem + ".ops", listing(ops));
-                if (fs.exists(stem + ".stale")) {
+                if (fs.is_present(stem + ".stale")) {
                     // a text the ops were not made from, and an index no op has: both None
                     bytes stale = read(stem + ".stale");
                     write(stem + ".stale_applied", orNone(GIT_patch.apply_lines(stale, ops, selected)));
@@ -61,7 +61,7 @@ void run() {
                 }
             }
         }
-        c = c + 1;
+        counter = counter + 1;
     }
 }
 
@@ -78,8 +78,8 @@ bytes orNone(Option<bytes> result) {
 
 bytes listing(List<diff.Op> ops) {
     bytes out = (ops.size().to_str() + "\n").to_bytes();
-    for (diff.Op op in ops) {
-        match (op.kind) {
+    for (diff.Op operation in ops) {
+        match (operation.kind) {
             case Keep: {
                 out.push(32);
             }
@@ -90,20 +90,20 @@ bytes listing(List<diff.Op> ops) {
                 out.push(45);
             }
         }
-        out.extend(op.line);
-        if (op.line[op.line.size() - 1] != 10) {
+        out.extend(operation.line);
+        if (operation.line[operation.line.size() - 1] != 10) {
             out.push(10);
         }
     }
     return out;
 }
 
-str pad(int n) {
-    str s = n.to_str();
-    while (s.size() < 5) {
-        s = "0" + s;
+str pad(int number) {
+    str text_number = number.to_str();
+    while (text_number.size() < 5) {
+        text_number = "0" + text_number;
     }
-    return s;
+    return text_number;
 }
 
 bytes read(str path) {
@@ -125,7 +125,7 @@ str read_text(str path) {
 
 void write(str path, bytes data) {
     match (io.write_bytes(path, data)) {
-        case Ok(int _n): {
+        case Ok(_): {
         }
         case Err(io.Error error): {
             print("cannot write " + path + ": " + error.to_str());

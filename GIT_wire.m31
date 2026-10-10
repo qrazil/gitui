@@ -200,7 +200,7 @@ pub bool Error.eq(Error other) {
 /// What the protocol needs of a transport: a subset of `io.Stream`, so a
 /// `net.Conn`, an `io.File` and an `io.Buffer` already satisfy it.
 pub interface Stream {
-    Result<bytes, io.Error> read(int n);
+    Result<bytes, io.Error> read(int count);
     Result<int, io.Error> write(bytes data);
     Result<bool, io.Error> close();
 }
@@ -586,9 +586,9 @@ bytes want_lines(Advertisement advertisement, List<str> wants, bool is_multi_ack
     return out;
 }
 
-bytes have_lines(List<str> haves, int from, int to) {
+bytes have_lines(List<str> haves, int from, int end) {
     bytes out = [];
-    for (int i in from .. to) {
+    for (int i in from .. end) {
         out.extend(pkt_line(("have " + haves[i] + "\n").to_bytes()));
     }
     return out;
@@ -619,18 +619,18 @@ pub Result<DemuxResult, Error> fetch_pack(Stream stream, Advertisement advertise
     bool is_multi_ack = has_cap(advertisement.capabilities, "multi_ack_detailed");
     write_all(stream, want_lines(advertisement, wants, is_multi_ack, agent))?;
     if (is_multi_ack) {
-        int at = 0;
+        int start = 0;
         bool is_ready = false;
-        while (at < haves.size() && !is_ready) {
-            int stop = at + HAVES_PER_ROUND;
+        while (start < haves.size() && !is_ready) {
+            int stop = start + HAVES_PER_ROUND;
             if (stop > haves.size()) {
                 stop = haves.size();
             }
-            bytes round = have_lines(haves, at, stop);
+            bytes round = have_lines(haves, start, stop);
             round.extend(FLUSH_PKT);
             write_all(stream, round)?;
             is_ready = read_round_replies(stream)?;
-            at = stop;
+            start = stop;
         }
     } else {
         int stop = haves.size();

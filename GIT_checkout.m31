@@ -248,7 +248,7 @@ pub Result<bool, Error> create_branch(str gitdir, str name) {
             return Result<bool, Error>.Err(Error.Refs(error));
         }
     }
-    match (GIT_refs.update(gitdir, full, head_id, Option<str>.Some(""), msg: "branch: Created from HEAD")) {
+    match (GIT_refs.update(gitdir, full, head_id, Option<str>.Some(""), reflog_message: "branch: Created from HEAD")) {
         case Ok: {
         }
         case Err(GIT_refs.Error error): {
@@ -394,7 +394,7 @@ pub Result<Summary, Error> checkout(str gitdir, str worktree, str target_commit_
             // silently; this refuses it too, the stricter and safer choice
             // for a client whose whole promise is never losing a file).
             str full = fs.join(worktree, step.path);
-            if (untracked.contains(step.path) || fs.exists(full) || fs.is_link(full)) {
+            if (untracked.contains(step.path) || fs.is_present(full) || fs.is_link(full)) {
                 return Result<Summary, Error>.Err(Error.UntrackedCollision);
             }
         }
@@ -486,7 +486,7 @@ pub Result<Summary, Error> checkout(str gitdir, str worktree, str target_commit_
     }
     // --- 5. HEAD ---------------------------------------------------------
     if (target_ref == "") {
-        match (GIT_refs.update(gitdir, "HEAD", target_commit_id, Option<str>.None, msg: moving_message(from_label, target_commit_id))) {
+        match (GIT_refs.update(gitdir, "HEAD", target_commit_id, Option<str>.None, reflog_message: moving_message(from_label, target_commit_id))) {
             case Ok: {
             }
             case Err(GIT_refs.Error error): {
@@ -523,8 +523,8 @@ str moving_message(str from_label, str to_label) {
 
 // HEAD's reflog line for a move that changed which branch it is on and so was
 // not a ref update. Best effort, like every reflog write.
-void log_head_move(str gitdir, str old_id, str new_id, str msg) {
-    match (GIT_reflog.log_update(gitdir, "HEAD", old_id, new_id, msg)) {
+void log_head_move(str gitdir, str old_id, str new_id, str message) {
+    match (GIT_reflog.log_update(gitdir, "HEAD", old_id, new_id, message)) {
         case Ok(_): {
         }
         case Err(_): {
@@ -642,7 +642,7 @@ Result<bool, Error> write_path(str full, bytes content, int mode) {
             }
         }
     }
-    if (fs.exists(full) || fs.is_link(full)) {
+    if (fs.is_present(full) || fs.is_link(full)) {
         match (fs.remove(full)) {
             case Ok: {
             }
@@ -702,7 +702,7 @@ Result<bool, Error> write_path(str full, bytes content, int mode) {
 // empty, up to (never including) the working tree's root -- what `git
 // checkout` does when a switch deletes the last file in a directory.
 Result<bool, Error> remove_path(str worktree, str full) {
-    if (fs.exists(full) || fs.is_link(full)) {
+    if (fs.is_present(full) || fs.is_link(full)) {
         match (fs.remove(full)) {
             case Ok: {
             }
@@ -786,9 +786,9 @@ pub Result<Summary, Error> apply_tree_diff(str gitdir, str worktree, str from_tr
     if (from_tree != "") {
         walk(gitdir, from_tree, "", from)?;
     }
-    Map<str, TreeEntry> to = {};
+    Map<str, TreeEntry> to_entries = {};
     if (to_tree != "") {
-        walk(gitdir, to_tree, "", to)?;
+        walk(gitdir, to_tree, "", to_entries)?;
     }
     Map<str, GIT_index.Entry> staged = {};
     Map<str, bool> conflicted = {};
@@ -806,11 +806,11 @@ pub Result<Summary, Error> apply_tree_diff(str gitdir, str worktree, str from_tr
         }
     }
     List<str> paths = [];
-    for (str path in to.keys()) {
+    for (str path in to_entries.keys()) {
         paths.push(path);
     }
     for (str path in from.keys()) {
-        if (!to.contains(path)) {
+        if (!to_entries.contains(path)) {
             paths.push(path);
         }
     }
@@ -820,7 +820,7 @@ pub Result<Summary, Error> apply_tree_diff(str gitdir, str worktree, str from_tr
     Map<str, bool> deleted = {};
     for (str path in paths) {
         TreeEntry old = from.get(path).or(TreeEntry(0, ""));
-        TreeEntry new = to.get(path).or(TreeEntry(0, ""));
+        TreeEntry new = to_entries.get(path).or(TreeEntry(0, ""));
         if (old.mode == new.mode && old.id == new.id) {
             continue;
         }
@@ -943,7 +943,7 @@ pub Result<Summary, Error> reset_files(str gitdir, str worktree, str commit) {
     int removed = 0;
     for (str path in gone_paths) {
         str full = fs.join(worktree, path);
-        if (fs.is_link(full) || (fs.exists(full) && !fs.is_dir(full))) {
+        if (fs.is_link(full) || (fs.is_present(full) && !fs.is_directory(full))) {
             remove_path(worktree, full)?;
         }
         removed = removed + 1;
@@ -989,7 +989,7 @@ pub Result<Summary, Error> reset_hard(str gitdir, str worktree, str commit) {
             return Result<Summary, Error>.Err(Error.Refs(error));
         }
     }
-    match (GIT_refs.update(gitdir, ref_name, commit, Option<str>.None, msg: "reset: moving to " + commit)) {
+    match (GIT_refs.update(gitdir, ref_name, commit, Option<str>.None, reflog_message: "reset: moving to " + commit)) {
         case Ok: {
         }
         case Err(GIT_refs.Error error): {
@@ -1057,7 +1057,7 @@ int worktree_state(str full, GIT_index.Entry entry) {
         if (fs.is_link(full)) {
             return 0;
         }
-        if (fs.exists(full)) {
+        if (fs.is_present(full)) {
             return 2;
         }
         return 1;
@@ -1102,8 +1102,8 @@ bool is_blocked(str worktree, str path, Map<str, bool> deleted) {
     if (fs.is_link(full)) {
         return true;
     }
-    if (fs.exists(full)) {
-        if (!fs.is_dir(full) || !holds_only(worktree, full, deleted)) {
+    if (fs.is_present(full)) {
+        if (!fs.is_directory(full) || !holds_only(worktree, full, deleted)) {
             return true;
         }
     }
@@ -1114,7 +1114,7 @@ bool is_blocked(str worktree, str path, Map<str, bool> deleted) {
 // not in the way (it is overwritten, as git's `reset --hard` does).
 bool is_blocked_for_reset(str worktree, str path, Map<str, bool> gone) {
     str full = fs.join(worktree, path);
-    if (!fs.is_link(full) && fs.is_dir(full) && !holds_only(worktree, full, gone)) {
+    if (!fs.is_link(full) && fs.is_directory(full) && !holds_only(worktree, full, gone)) {
         return true;
     }
     return parent_in_the_way(worktree, path, gone);
@@ -1140,7 +1140,7 @@ bool holds_only(str worktree, str full, Map<str, bool> deleted) {
     match (fs.walk(full)) {
         case Ok(List<str> found): {
             for (str each in found) {
-                if (fs.is_link(each) || !fs.is_dir(each)) {
+                if (fs.is_link(each) || !fs.is_directory(each)) {
                     if (!each.starts_with(base) || !deleted.contains(each.substr(base.size(), each.size()))) {
                         return false;
                     }

@@ -40,7 +40,7 @@ pub str find(str path) {
     str current = path;
     for (int i in 0 .. 64) {
         str inner = fs.join(current, ".git");
-        if (fs.is_dir(inner)) {
+        if (fs.is_directory(inner)) {
             return inner;
         }
         if (fs.is_file(inner)) {
@@ -49,7 +49,7 @@ pub str find(str path) {
                 return pointed;
             }
         }
-        if (fs.is_dir(fs.join(current, "objects")) && fs.exists(fs.join(current, "HEAD"))) {
+        if (fs.is_directory(fs.join(current, "objects")) && fs.is_present(fs.join(current, "HEAD"))) {
             return current;
         }
         current = fs.join(current, "..");
@@ -113,7 +113,7 @@ str gitfile(str tree, str path) {
             if (!line.starts_with("/")) {
                 full = fs.join(tree, line);
             }
-            if (fs.is_dir(full)) {
+            if (fs.is_directory(full)) {
                 return full;
             }
             return "";

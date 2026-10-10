@@ -399,15 +399,15 @@ pub type Report {
 /// The `git ls-files -u` lines of a conflict list: `<mode> <id> <stage>\t<path>`.
 pub List<str> stage_lines(List<Conflicted> conflicts) {
     List<str> out = [];
-    for (Conflicted c in conflicts) {
-        if (c.base.mode != 0) {
-            out.push(stage_line(c.base, 1, c.path));
+    for (Conflicted conflict in conflicts) {
+        if (conflict.base.mode != 0) {
+            out.push(stage_line(conflict.base, 1, conflict.path));
         }
-        if (c.ours.mode != 0) {
-            out.push(stage_line(c.ours, 2, c.path));
+        if (conflict.ours.mode != 0) {
+            out.push(stage_line(conflict.ours, 2, conflict.path));
         }
-        if (c.theirs.mode != 0) {
-            out.push(stage_line(c.theirs, 3, c.path));
+        if (conflict.theirs.mode != 0) {
+            out.push(stage_line(conflict.theirs, 3, conflict.path));
         }
     }
     return out;
@@ -445,8 +445,8 @@ bool is_reg(Side side) {
     return side.mode >> 12 == 0o10;
 }
 
-bool same_side(Side a, Side b) {
-    return a.mode == b.mode && a.id == b.id;
+bool same_side(Side left_side, Side right_side) {
+    return left_side.mode == right_side.mode && left_side.id == right_side.id;
 }
 
 str short_id(str id) {
@@ -624,24 +624,24 @@ type Ctx {
 
 /// Merge three trees (or commits; `""` is the empty tree). See the module header.
 pub Result<TreeMerge, Error> merge_trees(str gitdir, str base_tree, str ours_tree, str theirs_tree, GIT_diff3.Labels labels, GIT_diff3.Style style = GIT_diff3.Style.Merge) {
-    str b = tree_of(gitdir, base_tree)?;
-    str o = tree_of(gitdir, ours_tree)?;
-    str t = tree_of(gitdir, theirs_tree)?;
-    Ctx ctx = Ctx(gitdir, labels, style, [], []);
-    str merged = merge_dir(ctx, "", b, o, t)?;
+    str base_tree_id = tree_of(gitdir, base_tree)?;
+    str ours_tree_id = tree_of(gitdir, ours_tree)?;
+    str theirs_tree_id = tree_of(gitdir, theirs_tree)?;
+    Ctx context = Ctx(gitdir, labels, style, [], []);
+    str merged = merge_dir(context, "", base_tree_id, ours_tree_id, theirs_tree_id)?;
     if (merged == "") {
         List<GIT_object.Entry> none = [];
         merged = write_tree(gitdir, none)?;
     }
-    ctx.conflicts.sort();
-    return Result<TreeMerge, Error>.Ok(TreeMerge(merged, ctx.conflicts, ctx.messages));
+    context.conflicts.sort();
+    return Result<TreeMerge, Error>.Ok(TreeMerge(merged, context.conflicts, context.messages));
 }
 
 // The merged tree of one directory, written; `""` when it came out empty.
-Result<str, Error> merge_dir(Ctx ctx, str prefix, str base_tree, str ours_tree, str theirs_tree) {
-    Map<str, Side> base = side_map(read_tree(ctx.gitdir, base_tree)?)?;
-    Map<str, Side> ours = side_map(read_tree(ctx.gitdir, ours_tree)?)?;
-    Map<str, Side> theirs = side_map(read_tree(ctx.gitdir, theirs_tree)?)?;
+Result<str, Error> merge_dir(Ctx context, str prefix, str base_tree, str ours_tree, str theirs_tree) {
+    Map<str, Side> base = side_map(read_tree(context.gitdir, base_tree)?)?;
+    Map<str, Side> ours = side_map(read_tree(context.gitdir, ours_tree)?)?;
+    Map<str, Side> theirs = side_map(read_tree(context.gitdir, theirs_tree)?)?;
     Map<str, bool> taken = {};
     List<str> names = [];
     for (str name in base.keys()) {
@@ -663,15 +663,15 @@ Result<str, Error> merge_dir(Ctx ctx, str prefix, str base_tree, str ours_tree, 
     names.sort();
     List<GIT_object.Entry> out = [];
     for (str name in names) {
-        Side b = base.get(name).or(absent());
-        Side o = ours.get(name).or(absent());
-        Side t = theirs.get(name).or(absent());
-        merge_name(ctx, prefix, name, b, o, t, out, taken)?;
+        Side base_side = base.get(name).or(absent());
+        Side ours_side = ours.get(name).or(absent());
+        Side theirs_side = theirs.get(name).or(absent());
+        merge_name(context, prefix, name, base_side, ours_side, theirs_side, out, taken)?;
     }
     if (out.size() == 0) {
         return Result<str, Error>.Ok("");
     }
-    return write_tree(ctx.gitdir, out);
+    return write_tree(context.gitdir, out);
 }
 
 void push_side(List<GIT_object.Entry> out, str name, Side side) {
@@ -681,76 +681,76 @@ void push_side(List<GIT_object.Entry> out, str name, Side side) {
 }
 
 // One name of a directory, given what the three trees have there.
-Result<bool, Error> merge_name(Ctx ctx, str prefix, str name, Side b, Side o, Side t, List<GIT_object.Entry> out, Map<str, bool> taken) {
+Result<bool, Error> merge_name(Ctx context, str prefix, str name, Side base_side, Side ours_side, Side theirs_side, List<GIT_object.Entry> out, Map<str, bool> taken) {
     str full = name;
     if (prefix != "") {
         full = prefix + "/" + name;
     }
     // Nothing to decide: the same on both sides, or only one side changed.
-    if (same_side(o, t)) {
-        push_side(out, name, o);
+    if (same_side(ours_side, theirs_side)) {
+        push_side(out, name, ours_side);
         return Result<bool, Error>.Ok(true);
     }
-    if (same_side(b, o)) {
-        push_side(out, name, t);
+    if (same_side(base_side, ours_side)) {
+        push_side(out, name, theirs_side);
         return Result<bool, Error>.Ok(true);
     }
-    if (same_side(b, t)) {
-        push_side(out, name, o);
+    if (same_side(base_side, theirs_side)) {
+        push_side(out, name, ours_side);
         return Result<bool, Error>.Ok(true);
     }
-    bool o_dirish = is_absent(o) || is_dir(o);
-    bool t_dirish = is_absent(t) || is_dir(t);
-    if (o_dirish && t_dirish) {
-        str bt = "";
-        if (is_dir(b)) {
-            bt = b.id;
+    bool is_ours_tree_or_absent = is_absent(ours_side) || is_dir(ours_side);
+    bool is_theirs_tree_or_absent = is_absent(theirs_side) || is_dir(theirs_side);
+    if (is_ours_tree_or_absent && is_theirs_tree_or_absent) {
+        str base_subtree = "";
+        if (is_dir(base_side)) {
+            base_subtree = base_side.id;
         }
-        str ot = "";
-        if (is_dir(o)) {
-            ot = o.id;
+        str ours_subtree = "";
+        if (is_dir(ours_side)) {
+            ours_subtree = ours_side.id;
         }
-        str tt = "";
-        if (is_dir(t)) {
-            tt = t.id;
+        str theirs_subtree = "";
+        if (is_dir(theirs_side)) {
+            theirs_subtree = theirs_side.id;
         }
-        str sub = merge_dir(ctx, full, bt, ot, tt)?;
+        str sub = merge_dir(context, full, base_subtree, ours_subtree, theirs_subtree)?;
         if (sub != "") {
             out.push(GIT_object.Entry(0o40000, name.to_bytes(), sub));
         }
         return Result<bool, Error>.Ok(true);
     }
     // The base's file, if it had a file there.
-    Side bf = b;
-    if (is_dir(b)) {
-        bf = absent();
+    Side base_leaf = base_side;
+    if (is_dir(base_side)) {
+        base_leaf = absent();
     }
-    if (!o_dirish && !t_dirish) {
-        return merge_leaves(ctx, full, name, bf, o, t, out, taken);
+    if (!is_ours_tree_or_absent && !is_theirs_tree_or_absent) {
+        return merge_leaves(context, full, name, base_leaf, ours_side, theirs_side, out, taken);
     }
     // One side has a file, the other a directory or nothing.
-    bool file_is_ours = !o_dirish;
-    Side file = t;
-    Side other = o;
-    str file_label = ctx.labels.theirs;
-    if (file_is_ours) {
-        file = o;
-        other = t;
-        file_label = ctx.labels.ours;
+    bool is_file_ours = !is_ours_tree_or_absent;
+    Side file = theirs_side;
+    Side other = ours_side;
+    str file_label = context.labels.theirs;
+    if (is_file_ours) {
+        file = ours_side;
+        other = theirs_side;
+        file_label = context.labels.ours;
     }
     if (is_dir(other)) {
-        str dir_ours = "";
-        str dir_theirs = "";
-        if (file_is_ours) {
-            dir_theirs = other.id;
+        str ours_subtree = "";
+        str theirs_subtree = "";
+        if (is_file_ours) {
+            theirs_subtree = other.id;
         } else {
-            dir_ours = other.id;
+            ours_subtree = other.id;
         }
-        str bt = "";
-        if (is_dir(b)) {
-            bt = b.id;
+        str base_subtree = "";
+        if (is_dir(base_side)) {
+            base_subtree = base_side.id;
         }
-        str sub = merge_dir(ctx, full, bt, dir_ours, dir_theirs)?;
+        str sub = merge_dir(context, full, base_subtree, ours_subtree, theirs_subtree)?;
         if (sub != "") {
             out.push(GIT_object.Entry(0o40000, name.to_bytes(), sub));
             str moved = unique_name(name, file_label, taken);
@@ -759,59 +759,59 @@ Result<bool, Error> merge_name(Ctx ctx, str prefix, str name, Side b, Side o, Si
                 moved_full = prefix + "/" + moved;
             }
             push_side(out, moved, file);
-            Side stage1 = bf;
+            Side stage1 = base_leaf;
             Side stage2 = absent();
             Side stage3 = absent();
-            if (file_is_ours) {
+            if (is_file_ours) {
                 stage2 = file;
             } else {
                 stage3 = file;
             }
-            ctx.conflicts.push(Conflicted(moved_full, Kind.FileDirectory, stage1, stage2, stage3));
-            ctx.messages.push("CONFLICT (file/directory): directory in the way of " + full + " from " + ctx.labels.ours + "; moving it to " + moved_full + " instead.");
+            context.conflicts.push(Conflicted(moved_full, Kind.FileDirectory, stage1, stage2, stage3));
+            context.messages.push("CONFLICT (file/directory): directory in the way of " + full + " from " + context.labels.ours + "; moving it to " + moved_full + " instead.");
             return Result<bool, Error>.Ok(true);
         }
     }
     // The other side has no such entry as far as this file is concerned.
-    if (is_absent(bf)) {
+    if (is_absent(base_leaf)) {
         push_side(out, name, file);
         return Result<bool, Error>.Ok(true);
     }
     push_side(out, name, file);
-    Side s2 = absent();
-    Side s3 = absent();
-    str deleted_in = ctx.labels.theirs;
-    str modified_in = ctx.labels.ours;
+    Side ours_leaf = absent();
+    Side theirs_leaf = absent();
+    str deleted_in = context.labels.theirs;
+    str modified_in = context.labels.ours;
     Kind kind = Kind.ModifyDelete;
-    if (file_is_ours) {
-        s2 = file;
+    if (is_file_ours) {
+        ours_leaf = file;
     } else {
-        s3 = file;
-        deleted_in = ctx.labels.ours;
-        modified_in = ctx.labels.theirs;
+        theirs_leaf = file;
+        deleted_in = context.labels.ours;
+        modified_in = context.labels.theirs;
         kind = Kind.DeleteModify;
     }
-    ctx.conflicts.push(Conflicted(full, kind, bf, s2, s3));
-    ctx.messages.push("CONFLICT (modify/delete): " + full + " deleted in " + deleted_in + " and modified in " + modified_in + ".  Version " + modified_in + " of " + full + " left in tree.");
+    context.conflicts.push(Conflicted(full, kind, base_leaf, ours_leaf, theirs_leaf));
+    context.messages.push("CONFLICT (modify/delete): " + full + " deleted in " + deleted_in + " and modified in " + modified_in + ".  Version " + modified_in + " of " + full + " left in tree.");
     return Result<bool, Error>.Ok(true);
 }
 
 // `name~label`, `/` in the label as `_`, made unique among the names in use.
 str unique_name(str name, str label, Map<str, bool> taken) {
     List<int> clean = [];
-    for (int c in label.chars()) {
-        if (c == '/') {
+    for (int character in label.chars()) {
+        if (character == '/') {
             clean.push('_');
         } else {
-            clean.push(c);
+            clean.push(character);
         }
     }
     str stem = name + "~" + str.from_chars(clean);
     str candidate = stem;
-    int n = 0;
+    int suffix_number = 0;
     while (taken.contains(candidate)) {
-        candidate = stem + "_" + n.to_str();
-        n = n + 1;
+        candidate = stem + "_" + suffix_number.to_str();
+        suffix_number = suffix_number + 1;
     }
     taken.set(candidate, true);
     return candidate;
@@ -819,64 +819,64 @@ str unique_name(str name, str label, Map<str, bool> taken) {
 
 // Both sides have a file (or symlink, or submodule) there, and they differ
 // from each other and from the base (`b`; absent for an add/add).
-Result<bool, Error> merge_leaves(Ctx ctx, str full, str name, Side b, Side o, Side t, List<GIT_object.Entry> out, Map<str, bool> taken) {
-    if (o.mode >> 12 != t.mode >> 12) {
-        return merge_distinct_types(ctx, full, name, b, o, t, out, taken);
+Result<bool, Error> merge_leaves(Ctx context, str full, str name, Side base_side, Side ours_side, Side theirs_side, List<GIT_object.Entry> out, Map<str, bool> taken) {
+    if (ours_side.mode >> 12 != theirs_side.mode >> 12) {
+        return merge_distinct_types(context, full, name, base_side, ours_side, theirs_side, out, taken);
     }
-    if (!is_reg(o)) {
+    if (!is_reg(ours_side)) {
         // Symlinks and submodules: no merging, ours stays.
-        push_side(out, name, o);
-        ctx.conflicts.push(Conflicted(full, Kind.Content, b, o, t));
-        ctx.messages.push("CONFLICT (content): Merge conflict in " + full);
+        push_side(out, name, ours_side);
+        context.conflicts.push(Conflicted(full, Kind.Content, base_side, ours_side, theirs_side));
+        context.messages.push("CONFLICT (content): Merge conflict in " + full);
         return Result<bool, Error>.Ok(true);
     }
     // Modes first, as git does: one side's change wins, two different ones conflict.
-    int mode = t.mode;
-    bool mode_conflict = false;
-    if (!(o.mode == t.mode || o.mode == b.mode)) {
-        mode = o.mode;
-        if (t.mode != b.mode) {
-            mode_conflict = true;
+    int mode = theirs_side.mode;
+    bool is_mode_conflict = false;
+    if (!(ours_side.mode == theirs_side.mode || ours_side.mode == base_side.mode)) {
+        mode = ours_side.mode;
+        if (theirs_side.mode != base_side.mode) {
+            is_mode_conflict = true;
         }
     }
     str id = "";
-    bool content_conflict = false;
-    if (o.id == t.id) {
-        id = o.id;
-    } else if (b.mode != 0 && b.id == o.id) {
-        id = t.id;
-    } else if (b.mode != 0 && b.id == t.id) {
-        id = o.id;
+    bool is_content_conflict = false;
+    if (ours_side.id == theirs_side.id) {
+        id = ours_side.id;
+    } else if (base_side.mode != 0 && base_side.id == ours_side.id) {
+        id = theirs_side.id;
+    } else if (base_side.mode != 0 && base_side.id == theirs_side.id) {
+        id = ours_side.id;
     } else {
         bytes base_content = [];
-        if (b.mode != 0) {
-            base_content = read_object(ctx.gitdir, b.id)?.raw;
+        if (base_side.mode != 0) {
+            base_content = read_object(context.gitdir, base_side.id)?.raw;
         }
-        bytes ours_content = read_object(ctx.gitdir, o.id)?.raw;
-        bytes theirs_content = read_object(ctx.gitdir, t.id)?.raw;
+        bytes ours_content = read_object(context.gitdir, ours_side.id)?.raw;
+        bytes theirs_content = read_object(context.gitdir, theirs_side.id)?.raw;
         if (is_binary(base_content) || is_binary(ours_content) || is_binary(theirs_content)) {
-            id = o.id;
-            content_conflict = true;
-            ctx.messages.push("warning: Cannot merge binary files: " + full + " (" + ctx.labels.ours + " vs. " + ctx.labels.theirs + ")");
+            id = ours_side.id;
+            is_content_conflict = true;
+            context.messages.push("warning: Cannot merge binary files: " + full + " (" + context.labels.ours + " vs. " + context.labels.theirs + ")");
         } else {
-            ctx.messages.push("Auto-merging " + full);
-            GIT_diff3.Merged merged = GIT_diff3.merge3(base_content, ours_content, theirs_content, ctx.labels, style: ctx.style, level: GIT_diff3.Level.Zealous);
-            id = write_blob(ctx.gitdir, merged.text)?;
-            content_conflict = merged.conflicts > 0;
+            context.messages.push("Auto-merging " + full);
+            GIT_diff3.Merged merged = GIT_diff3.merge3(base_content, ours_content, theirs_content, context.labels, style: context.style, level: GIT_diff3.Level.Zealous);
+            id = write_blob(context.gitdir, merged.text)?;
+            is_content_conflict = merged.conflicts > 0;
         }
     }
     out.push(GIT_object.Entry(mode, name.to_bytes(), id));
-    if (content_conflict || mode_conflict) {
+    if (is_content_conflict || is_mode_conflict) {
         Kind kind = Kind.Content;
         str word = "content";
-        if (b.mode == 0) {
+        if (base_side.mode == 0) {
             kind = Kind.AddAdd;
             word = "add/add";
-        } else if (!content_conflict) {
+        } else if (!is_content_conflict) {
             kind = Kind.Mode;
         }
-        ctx.conflicts.push(Conflicted(full, kind, b, o, t));
-        ctx.messages.push("CONFLICT (" + word + "): Merge conflict in " + full);
+        context.conflicts.push(Conflicted(full, kind, base_side, ours_side, theirs_side));
+        context.messages.push("CONFLICT (" + word + "): Merge conflict in " + full);
     }
     return Result<bool, Error>.Ok(true);
 }
@@ -899,46 +899,46 @@ bool is_binary(bytes content) {
 // The regular file is renamed `name~label` (both, if neither is regular), each
 // side keeping its own stage, and the base's stage with the side whose kind
 // the base had.
-Result<bool, Error> merge_distinct_types(Ctx ctx, str full, str name, Side b, Side o, Side t, List<GIT_object.Entry> out, Map<str, bool> taken) {
-    bool rename_ours = false;
-    bool rename_theirs = false;
-    if (is_reg(o)) {
-        rename_ours = true;
-    } else if (is_reg(t)) {
-        rename_theirs = true;
+Result<bool, Error> merge_distinct_types(Ctx context, str full, str name, Side base_side, Side ours_side, Side theirs_side, List<GIT_object.Entry> out, Map<str, bool> taken) {
+    bool should_rename_ours = false;
+    bool should_rename_theirs = false;
+    if (is_reg(ours_side)) {
+        should_rename_ours = true;
+    } else if (is_reg(theirs_side)) {
+        should_rename_theirs = true;
     } else {
-        rename_ours = true;
-        rename_theirs = true;
+        should_rename_ours = true;
+        should_rename_theirs = true;
     }
     str parent = "";
     if (full.size() > name.size()) {
         parent = full.substr(0, full.size() - name.size());
     }
     str ours_name = name;
-    if (rename_ours) {
-        ours_name = unique_name(name, ctx.labels.ours, taken);
+    if (should_rename_ours) {
+        ours_name = unique_name(name, context.labels.ours, taken);
     }
     str theirs_name = name;
-    if (rename_theirs) {
-        theirs_name = unique_name(name, ctx.labels.theirs, taken);
+    if (should_rename_theirs) {
+        theirs_name = unique_name(name, context.labels.theirs, taken);
     }
     Side ours_base = absent();
     Side theirs_base = absent();
-    if (b.mode >> 12 == o.mode >> 12) {
-        ours_base = b;
+    if (base_side.mode >> 12 == ours_side.mode >> 12) {
+        ours_base = base_side;
     }
-    if (b.mode >> 12 == t.mode >> 12) {
-        theirs_base = b;
+    if (base_side.mode >> 12 == theirs_side.mode >> 12) {
+        theirs_base = base_side;
     }
-    push_side(out, ours_name, o);
-    push_side(out, theirs_name, t);
-    ctx.conflicts.push(Conflicted(parent + ours_name, Kind.DistinctTypes, ours_base, o, absent()));
-    ctx.conflicts.push(Conflicted(parent + theirs_name, Kind.DistinctTypes, theirs_base, absent(), t));
+    push_side(out, ours_name, ours_side);
+    push_side(out, theirs_name, theirs_side);
+    context.conflicts.push(Conflicted(parent + ours_name, Kind.DistinctTypes, ours_base, ours_side, absent()));
+    context.conflicts.push(Conflicted(parent + theirs_name, Kind.DistinctTypes, theirs_base, absent(), theirs_side));
     str how = "renamed one of them so each can be recorded somewhere.";
-    if (rename_ours && rename_theirs) {
+    if (should_rename_ours && should_rename_theirs) {
         how = "renamed both of them so each can be recorded somewhere.";
     }
-    ctx.messages.push("CONFLICT (distinct types): " + full + " had different types on each side; " + how);
+    context.messages.push("CONFLICT (distinct types): " + full + " had different types on each side; " + how);
     return Result<bool, Error>.Ok(true);
 }
 
@@ -1014,8 +1014,8 @@ Result<bool, Error> graph_is_ancestor(str gitdir, str ancestor, str descendant) 
     }
 }
 
-pub Result<bool, Error> ref_update(str gitdir, str name, str new_id, Option<str> expect_old, str msg) {
-    match (GIT_refs.update(gitdir, name, new_id, expect_old, msg: msg)) {
+pub Result<bool, Error> ref_update(str gitdir, str name, str new_id, Option<str> expect_old, str message) {
+    match (GIT_refs.update(gitdir, name, new_id, expect_old, reflog_message: message)) {
         case Ok: {
             return Result<bool, Error>.Ok(true);
         }
@@ -1029,7 +1029,7 @@ pub Result<bool, Error> ref_update(str gitdir, str name, str new_id, Option<str>
 
 /// Is a merge under way (`.git/MERGE_HEAD` exists)?
 pub bool in_progress(str gitdir) {
-    return fs.exists(fs.join(gitdir, "MERGE_HEAD"));
+    return fs.is_present(fs.join(gitdir, "MERGE_HEAD"));
 }
 
 /// The commits being merged in, from `MERGE_HEAD` (one line each; several only
@@ -1089,7 +1089,7 @@ pub void clear_state(str gitdir) {
     List<str> names = ["MERGE_HEAD", "MERGE_MODE", "MERGE_MSG", "AUTO_MERGE"];
     for (str name in names) {
         str path = fs.join(gitdir, name);
-        if (fs.exists(path) || fs.is_link(path)) {
+        if (fs.is_present(path) || fs.is_link(path)) {
             match (fs.remove(path)) {
                 case Ok: {
                 }
@@ -1136,9 +1136,9 @@ int parts_minutes(str zone) {
 
 str strip_ident(str raw) {
     List<int> out = [];
-    for (int c in raw.chars()) {
-        if (c != '<' && c != '>' && c != '\n') {
-            out.push(c);
+    for (int character in raw.chars()) {
+        if (character != '<' && character != '>' && character != '\n') {
+            out.push(character);
         }
     }
     return str.from_chars(out).trim();
@@ -1203,7 +1203,7 @@ pub str default_message(str gitdir, str spec) {
 /// and trailing blank lines gone, and one final newline (empty stays empty).
 pub str clean_message(str raw) {
     List<str> kept = [];
-    bool blank_pending = false;
+    bool has_pending_blank = false;
     for (str line in raw.split("\n")) {
         if (line.starts_with("#")) {
             continue;
@@ -1211,13 +1211,13 @@ pub str clean_message(str raw) {
         str text = trim_end(line);
         if (text == "") {
             if (kept.size() > 0) {
-                blank_pending = true;
+                has_pending_blank = true;
             }
             continue;
         }
-        if (blank_pending) {
+        if (has_pending_blank) {
             kept.push("");
-            blank_pending = false;
+            has_pending_blank = false;
         }
         kept.push(text);
     }
@@ -1231,11 +1231,11 @@ pub str clean_message(str raw) {
 pub str conflicts_block(List<Conflicted> conflicts) {
     str out = "\n# Conflicts:\n";
     str last = "";
-    for (Conflicted c in conflicts) {
-        if (c.path != last) {
-            out = out + "#\t" + c.path + "\n";
+    for (Conflicted conflict in conflicts) {
+        if (conflict.path != last) {
+            out = out + "#\t" + conflict.path + "\n";
         }
-        last = c.path;
+        last = conflict.path;
     }
     return out;
 }
@@ -1336,15 +1336,15 @@ List<str> dedupe(List<str> sorted) {
 }
 
 // Paths where two flattened trees differ (either side may lack the path).
-List<str> tree_differences(Map<str, Side> a, Map<str, Side> b) {
+List<str> tree_differences(Map<str, Side> left_sides, Map<str, Side> right_sides) {
     List<str> out = [];
-    for (str path in a.keys()) {
-        if (!same_side(a.get(path).or(absent()), b.get(path).or(absent()))) {
+    for (str path in left_sides.keys()) {
+        if (!same_side(left_sides.get(path).or(absent()), right_sides.get(path).or(absent()))) {
             out.push(path);
         }
     }
-    for (str path in b.keys()) {
-        if (!a.contains(path)) {
+    for (str path in right_sides.keys()) {
+        if (!left_sides.contains(path)) {
             out.push(path);
         }
     }
@@ -1375,8 +1375,8 @@ pub Result<Applied, Error> merge_with_base(str gitdir, str worktree, str base, s
     Map<str, Side> before = flatten(gitdir, ours_tree)?;
     Map<str, Side> after = flatten(gitdir, merged.tree)?;
     List<str> touched = tree_differences(before, after);
-    for (Conflicted c in merged.conflicts) {
-        touched.push(c.path);
+    for (Conflicted conflict in merged.conflicts) {
+        touched.push(conflict.path);
     }
     Map<str, bool> touched_set = {};
     for (str path in touched) {
@@ -1428,8 +1428,8 @@ pub Result<GIT_status.Status, Error> status_of(str gitdir, str worktree) {
 Result<bool, Error> stage_conflicts(str gitdir, List<Conflicted> conflicts) {
     GIT_index.Index index = read_index(gitdir)?;
     Map<str, bool> replaced = {};
-    for (Conflicted c in conflicts) {
-        replaced.set(c.path, true);
+    for (Conflicted conflict in conflicts) {
+        replaced.set(conflict.path, true);
     }
     List<GIT_index.Entry> kept = [];
     for (GIT_index.Entry entry in index.entries) {
@@ -1437,10 +1437,10 @@ Result<bool, Error> stage_conflicts(str gitdir, List<Conflicted> conflicts) {
             kept.push(entry);
         }
     }
-    for (Conflicted c in conflicts) {
-        stage_entry(kept, c.path, c.base, 1);
-        stage_entry(kept, c.path, c.ours, 2);
-        stage_entry(kept, c.path, c.theirs, 3);
+    for (Conflicted conflict in conflicts) {
+        stage_entry(kept, conflict.path, conflict.base, 1);
+        stage_entry(kept, conflict.path, conflict.ours, 2);
+        stage_entry(kept, conflict.path, conflict.theirs, 3);
     }
     kept.sort();
     index.entries = kept;
@@ -1668,43 +1668,43 @@ pub Result<Report, Error> continue_merge(str gitdir, str worktree, str message) 
 
 // The tree for index entries[lo, hi) (sorted, all stage 0) whose paths agree
 // up to byte `depth`: one tree object per directory, written bottom-up.
-pub Result<str, Error> index_tree(str gitdir, List<GIT_index.Entry> entries, int lo, int hi, int depth) {
+pub Result<str, Error> index_tree(str gitdir, List<GIT_index.Entry> entries, int first_index, int end_index, int depth) {
     List<GIT_object.Entry> out = [];
-    int i = lo;
-    while (i < hi) {
-        bytes path = entries[i].path;
+    int entry_index = first_index;
+    while (entry_index < end_index) {
+        bytes path = entries[entry_index].path;
         int slash = -1;
-        int k = depth;
-        while (k < path.size()) {
-            if (path[k] == '/') {
-                slash = k;
+        int byte_index = depth;
+        while (byte_index < path.size()) {
+            if (path[byte_index] == '/') {
+                slash = byte_index;
                 break;
             }
-            k = k + 1;
+            byte_index = byte_index + 1;
         }
         if (slash < 0) {
-            out.push(GIT_object.Entry(entries[i].mode, path.substr(depth, path.size()), entries[i].id));
-            i = i + 1;
+            out.push(GIT_object.Entry(entries[entry_index].mode, path.substr(depth, path.size()), entries[entry_index].id));
+            entry_index = entry_index + 1;
             continue;
         }
-        int j = i + 1;
-        while (j < hi && shares_prefix(entries[j].path, path, slash + 1)) {
-            j = j + 1;
+        int group_end = entry_index + 1;
+        while (group_end < end_index && shares_prefix(entries[group_end].path, path, slash + 1)) {
+            group_end = group_end + 1;
         }
-        str sub = index_tree(gitdir, entries, i, j, slash + 1)?;
+        str sub = index_tree(gitdir, entries, entry_index, group_end, slash + 1)?;
         out.push(GIT_object.Entry(0o40000, path.substr(depth, slash), sub));
-        i = j;
+        entry_index = group_end;
     }
     return write_tree(gitdir, out);
 }
 
 // Do `a` and `b` agree on their first `count` bytes?
-bool shares_prefix(bytes a, bytes b, int count) {
-    if (a.size() < count || b.size() < count) {
+bool shares_prefix(bytes left_path, bytes right_path, int count) {
+    if (left_path.size() < count || right_path.size() < count) {
         return false;
     }
     for (int i in 0 .. count) {
-        if (a[i] != b[i]) {
+        if (left_path[i] != right_path[i]) {
             return false;
         }
     }
@@ -1838,7 +1838,7 @@ Result<GIT_index.Entry, Error> put_file(str gitdir, str worktree, str path, Side
             }
         }
     }
-    if (fs.exists(full) || fs.is_link(full)) {
+    if (fs.is_present(full) || fs.is_link(full)) {
         match (fs.remove(full)) {
             case Ok: {
             }
@@ -1895,7 +1895,7 @@ Result<GIT_index.Entry, Error> put_file(str gitdir, str worktree, str path, Side
 // Remove the file at `full`, then the directories above it that are left
 // empty, never `worktree` itself.
 Result<bool, Error> drop_file(str worktree, str full) {
-    if (fs.exists(full) || fs.is_link(full)) {
+    if (fs.is_present(full) || fs.is_link(full)) {
         match (fs.remove(full)) {
             case Ok: {
             }
@@ -1977,7 +1977,7 @@ pub Result<bool, Error> mark_resolved(str gitdir, str worktree, str path) {
     if (fs.is_link(full)) {
         return Result<bool, Error>.Err(Error.Unsupported("a symlink cannot be staged as it is; take ours or theirs"));
     }
-    if (!fs.exists(full)) {
+    if (!fs.is_present(full)) {
         return settle_path(gitdir, path, Option<GIT_index.Entry>.None);
     }
     bytes content = [];
@@ -2027,8 +2027,8 @@ pub bool message_file_is_current(str gitdir, str path) {
     match (fs.stat(path)) {
         case Ok(fs.Stat mine): {
             match (fs.stat(fs.join(gitdir, "MERGE_MSG"))) {
-                case Ok(fs.Stat merge_msg): {
-                    return mine.mtime_ns >= merge_msg.mtime_ns;
+                case Ok(fs.Stat merge_message_stat): {
+                    return mine.mtime_ns >= merge_message_stat.mtime_ns;
                 }
                 case Err(_): {
                     return true;

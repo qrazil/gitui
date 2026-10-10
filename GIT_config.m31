@@ -313,7 +313,7 @@ pub Result<Config, Error> load(str gitdir) {
 /// One config file, its entries marked with `origin`. A missing file is an
 /// empty `Config`, as it is for git.
 pub Result<Config, Error> load_file(str path, str origin) {
-    if (!fs.exists(path)) {
+    if (!fs.is_present(path)) {
         return Result<Config, Error>.Ok(Config([]));
     }
     str body = read_text(path)?;
@@ -457,7 +457,7 @@ str include_target(str value, str file) {
     return fs.join(dirname(file), value);
 }
 
-bool gitdir_matches(str raw, str gitdir, str file, bool fold) {
+bool gitdir_matches(str raw, str gitdir, str file, bool should_fold_case) {
     str pattern = raw;
     if (pattern.starts_with("~/")) {
         pattern = os.env("HOME").or("") + pattern.substr(1, pattern.size());
@@ -468,7 +468,7 @@ bool gitdir_matches(str raw, str gitdir, str file, bool fold) {
     }
     pattern = trailing_wildcard(pattern);
     str target = absolute(gitdir);
-    if (fold) {
+    if (should_fold_case) {
         return GIT_ignore.path_glob(pattern.to_lower(), target.to_lower());
     }
     return GIT_ignore.path_glob(pattern, target);
@@ -608,7 +608,7 @@ pub bool rerere_enabled(str gitdir) {
     if (config.has("rerere", "", "enabled")) {
         return config.get_bool("rerere", "", "enabled").or(false);
     }
-    return fs.is_dir(fs.join(GIT_repository.common(gitdir), "rr-cache"));
+    return fs.is_directory(fs.join(GIT_repository.common(gitdir), "rr-cache"));
 }
 
 Result<str, Error> read_text(str path) {
@@ -674,12 +674,12 @@ Event blank_event(int kind, int begin, int end) {
     return Event(kind, begin, end, "", "", "", Entry("", "", "", "", false, 0));
 }
 
-bool is_blank_char(int c) {
-    return c == ' ' || c == '\t' || c == '\r' || c == 11 || c == 12;
+bool is_blank_char(int byte) {
+    return byte == ' ' || byte == '\t' || byte == '\r' || byte == 11 || byte == 12;
 }
 
-bool is_alnum_char(int c) {
-    return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9');
+bool is_alnum_char(int byte) {
+    return (byte >= 'a' && byte <= 'z') || (byte >= 'A' && byte <= 'Z') || (byte >= '0' && byte <= '9');
 }
 
 int line_end(str body, int from) {
@@ -720,18 +720,18 @@ Result<List<Event>, Error> scan(str body) {
         if (position >= body.size()) {
             break;
         }
-        int c = body.byte_at(position);
-        if (c == '\n') {
+        int byte = body.byte_at(position);
+        if (byte == '\n') {
             position = position + 1;
             events.push(blank_event(KIND_BLANK, line_start, position));
             continue;
         }
-        if (c == '#' || c == ';') {
+        if (byte == '#' || byte == ';') {
             position = line_end(body, position);
             events.push(blank_event(KIND_COMMENT, line_start, position));
             continue;
         }
-        if (c == '[') {
+        if (byte == '[') {
             Header header = parse_header(body, position)?;
             section = header.section;
             subsection = header.subsection;
@@ -772,7 +772,7 @@ Result<List<Event>, Error> scan(str body) {
             return Result<List<Event>, Error>.Err(Error.Syntax);
         }
         // A key.
-        if (!((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z'))) {
+        if (!((byte >= 'a' && byte <= 'z') || (byte >= 'A' && byte <= 'Z'))) {
             return Result<List<Event>, Error>.Err(Error.Syntax);
         }
         int key_start = position;
@@ -826,8 +826,8 @@ Result<Header, Error> parse_header(str body, int start) {
     if (name == "" || position >= body.size()) {
         return Result<Header, Error>.Err(Error.Syntax);
     }
-    int c = body.byte_at(position);
-    if (c == ']') {
+    int byte = body.byte_at(position);
+    if (byte == ']') {
         // `[section]`, or the deprecated `[section.sub]`, folded whole.
         str lower = name.to_lower();
         match (lower.index_of(".")) {
@@ -839,7 +839,7 @@ Result<Header, Error> parse_header(str body, int start) {
             }
         }
     }
-    if (c != ' ' && c != '\t') {
+    if (byte != ' ' && byte != '\t') {
         return Result<Header, Error>.Err(Error.Syntax);
     }
     while (position < body.size() && (body.byte_at(position) == ' ' || body.byte_at(position) == '\t')) {
@@ -854,22 +854,22 @@ Result<Header, Error> parse_header(str body, int start) {
         if (position >= body.size()) {
             return Result<Header, Error>.Err(Error.Syntax);
         }
-        int d = body.byte_at(position);
-        if (d == '\n') {
+        int next_byte = body.byte_at(position);
+        if (next_byte == '\n') {
             return Result<Header, Error>.Err(Error.Syntax);
         }
-        if (d == '"') {
+        if (next_byte == '"') {
             position = position + 1;
             break;
         }
-        if (d == '\\') {
+        if (next_byte == '\\') {
             position = position + 1;
             if (position >= body.size() || body.byte_at(position) == '\n') {
                 return Result<Header, Error>.Err(Error.Syntax);
             }
-            d = body.byte_at(position);
+            next_byte = body.byte_at(position);
         }
-        sub.push(d);
+        sub.push(next_byte);
         position = position + 1;
     }
     if (position >= body.size() || body.byte_at(position) != ']') {
@@ -897,12 +897,12 @@ Result<Value, Error> parse_value(str body, int start) {
             }
             break;
         }
-        int c = body.byte_at(position);
+        int byte = body.byte_at(position);
         position = position + 1;
-        if (c == '\r' && position < body.size() && body.byte_at(position) == '\n') {
+        if (byte == '\r' && position < body.size() && body.byte_at(position) == '\n') {
             continue;
         }
-        if (c == '\n') {
+        if (byte == '\n') {
             if (is_quoted) {
                 return Result<Value, Error>.Err(Error.Syntax);
             }
@@ -911,13 +911,13 @@ Result<Value, Error> parse_value(str body, int start) {
         if (is_comment) {
             continue;
         }
-        if ((c == ' ' || c == '\t' || c == '\r' || c == 11 || c == 12) && !is_quoted) {
+        if ((byte == ' ' || byte == '\t' || byte == '\r' || byte == 11 || byte == 12) && !is_quoted) {
             if (out.size() > 0) {
                 spaces = spaces + 1;
             }
             continue;
         }
-        if (!is_quoted && (c == ';' || c == '#')) {
+        if (!is_quoted && (byte == ';' || byte == '#')) {
             is_comment = true;
             continue;
         }
@@ -925,37 +925,37 @@ Result<Value, Error> parse_value(str body, int start) {
             out.push(' ');
             spaces = spaces - 1;
         }
-        if (c == '\\') {
+        if (byte == '\\') {
             if (position >= body.size()) {
                 return Result<Value, Error>.Err(Error.Syntax);
             }
-            int e = body.byte_at(position);
+            int escaped_byte = body.byte_at(position);
             position = position + 1;
-            if (e == '\r' && position < body.size() && body.byte_at(position) == '\n') {
+            if (escaped_byte == '\r' && position < body.size() && body.byte_at(position) == '\n') {
                 position = position + 1;
                 continue;
             }
-            if (e == '\n') {
+            if (escaped_byte == '\n') {
                 continue;
             }
-            if (e == 'n') {
+            if (escaped_byte == 'n') {
                 out.push('\n');
-            } else if (e == 't') {
+            } else if (escaped_byte == 't') {
                 out.push('\t');
-            } else if (e == 'b') {
+            } else if (escaped_byte == 'b') {
                 out.push(8);
-            } else if (e == '"' || e == '\\') {
-                out.push(e);
+            } else if (escaped_byte == '"' || escaped_byte == '\\') {
+                out.push(escaped_byte);
             } else {
                 return Result<Value, Error>.Err(Error.Syntax);
             }
             continue;
         }
-        if (c == '"') {
+        if (byte == '"') {
             is_quoted = !is_quoted;
             continue;
         }
-        out.push(c);
+        out.push(byte);
     }
     match (out.utf8()) {
         case Some(str text): {
@@ -1004,8 +1004,8 @@ Result<bool, Error> check_name(str section, str subsection, str key) {
         return Result<bool, Error>.Err(Error.BadKey);
     }
     for (int i in 0 .. section.size()) {
-        int c = section.byte_at(i);
-        if (!(is_alnum_char(c) || c == '-')) {
+        int byte = section.byte_at(i);
+        if (!(is_alnum_char(byte) || byte == '-')) {
             return Result<bool, Error>.Err(Error.BadKey);
         }
     }
@@ -1014,8 +1014,8 @@ Result<bool, Error> check_name(str section, str subsection, str key) {
         return Result<bool, Error>.Err(Error.BadKey);
     }
     for (int i in 0 .. key.size()) {
-        int c = key.byte_at(i);
-        if (!(is_alnum_char(c) || c == '-')) {
+        int byte = key.byte_at(i);
+        if (!(is_alnum_char(byte) || byte == '-')) {
             return Result<bool, Error>.Err(Error.BadKey);
         }
     }
@@ -1027,11 +1027,11 @@ Result<bool, Error> check_name(str section, str subsection, str key) {
 
 str escape_subsection(str sub) {
     List<int> out = [];
-    for (int c in sub.chars()) {
-        if (c == '"' || c == '\\') {
+    for (int byte in sub.chars()) {
+        if (byte == '"' || byte == '\\') {
             out.push('\\');
         }
-        out.push(c);
+        out.push(byte);
     }
     return str.from_chars(out);
 }
@@ -1043,18 +1043,18 @@ str format_pair(str key, str value) {
         quote = "\"";
     }
     List<int> out = [];
-    for (int c in value.chars()) {
-        if (c == '\n') {
+    for (int byte in value.chars()) {
+        if (byte == '\n') {
             out.push('\\');
             out.push('n');
-        } else if (c == '\t') {
+        } else if (byte == '\t') {
             out.push('\\');
             out.push('t');
         } else {
-            if (c == '"' || c == '\\') {
+            if (byte == '"' || byte == '\\') {
                 out.push('\\');
             }
-            out.push(c);
+            out.push(byte);
         }
     }
     return "\t" + key + " = " + quote + str.from_chars(out) + quote + "\n";
@@ -1301,14 +1301,14 @@ str remove_matching(str body, List<Event> events, str section, str subsection, s
     }
     // Delete back to front so the earlier offsets stay true.
     str out = body;
-    int i = begins.size() - 1;
-    while (i >= 0) {
-        int stop = ends[i];
+    int last_index = begins.size() - 1;
+    while (last_index >= 0) {
+        int stop = ends[last_index];
         if (stop > out.size()) {
             stop = out.size();
         }
-        out = out.substr(0, begins[i]) + fills[i] + out.substr(stop, out.size());
-        i = i - 1;
+        out = out.substr(0, begins[last_index]) + fills[last_index] + out.substr(stop, out.size());
+        last_index = last_index - 1;
     }
     return out;
 }
@@ -1338,7 +1338,7 @@ Result<bool, Error> write_config(str gitdir, str body) {
 
 Result<str, Error> read_local(str gitdir) {
     str path = fs.join(GIT_repository.common(gitdir), "config");
-    if (!fs.exists(path)) {
+    if (!fs.is_present(path)) {
         return Result<str, Error>.Ok("");
     }
     return read_text(path);

@@ -93,12 +93,12 @@ for (str scope in GIT_ui_core.all_scopes()) {
     if (hints.size() != footer_keys.size()) {
         is_footer_in_table = false;
     }
-    int at = 0;
+    int position = 0;
     for (GIT_ui_core.Hint hint in hints) {
-        if (hint.keys != footer_keys[at]) {
+        if (hint.keys != footer_keys[position]) {
             is_footer_in_table = false;
         }
-        at = at + 1;
+        position = position + 1;
     }
 }
 counter.check("footer: hints_for(scope) is exactly the table rows that carry footer text", is_footer_in_table, "mismatch");

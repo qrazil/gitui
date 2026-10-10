@@ -65,7 +65,7 @@ log_command.optional("rev", "HEAD", help: "where to start: any revision that nam
 args.Parser rev_parse_command = parser.command("rev-parse", "the object names a revision resolves to");
 rev_parse_command.positional("rev", help: "a revision: a ref, an object name, HEAD~2, main^{tree}, v1:path, A..B, ...", placeholder: "REV");
 args.Parser refs_command = parser.command("refs", "every ref in the repository, with what it points at");
-List<str> argv = os.args();
+List<str> argv = os.arguments();
 match (parser.parse(argv.slice(1, argv.size()))) {
     case Ok(args.Parsed parsed): {
         match (parsed.help()) {
@@ -156,11 +156,11 @@ int cat_file(str git_directory, args.Parsed parsed_command) {
     }
     match (GIT_object.read(git_directory, id)) {
         case Ok(GIT_object.Object object): {
-            if (parsed_command.flag("type")) {
+            if (parsed_command.is_flag_set("type")) {
                 say(object.kind());
                 return 0;
             }
-            if (parsed_command.flag("size")) {
+            if (parsed_command.is_flag_set("size")) {
                 say(object.raw.size().to_str());
                 return 0;
             }

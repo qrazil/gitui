@@ -64,9 +64,9 @@
 // `revoked`, and must not treat `cert-authority` as a host key**; this module
 // reports them rather than hiding them so that cannot be forgotten by omission.
 
-import base64;
+import encoding.base64;
 import GIT_config;
-import sha1digest;
+import crypto.sha1digest;
 import io;
 
 pub enum Error {
@@ -177,10 +177,10 @@ pub Result<Remote, Error> parse(str url) {
         }
     }
     match (url.index_of("://")) {
-        case Some(int at): {
-            str scheme = url.substr(0, at);
+        case Some(int separator_index): {
+            str scheme = url.substr(0, separator_index);
             if (is_scheme(scheme)) {
-                str rest = url.substr(at + 3, url.size());
+                str rest = url.substr(separator_index + 3, url.size());
                 if (scheme == "https") {
                     return parse_web(Transport.Https, rest);
                 }
@@ -285,10 +285,10 @@ Result<Remote, Error> parse_web(Transport transport, str rest) {
     }
     str user = "";
     str hostport = authority;
-    int at = last_index(authority, "@");
-    if (at >= 0) {
-        str userinfo = authority.substr(0, at);
-        hostport = authority.substr(at + 1, authority.size());
+    int at_index = last_index(authority, "@");
+    if (at_index >= 0) {
+        str userinfo = authority.substr(0, at_index);
+        hostport = authority.substr(at_index + 1, authority.size());
         user = userinfo;
         match (userinfo.index_of(":")) {
             case Some(int colon): {
@@ -299,8 +299,8 @@ Result<Remote, Error> parse_web(Transport transport, str rest) {
         }
         user = decode_percent(user);
     }
-    HostPort hp = split_host_port(hostport)?;
-    return Result<Remote, Error>.Ok(Remote(transport, hp.host, hp.port, user, path));
+    HostPort host_port = split_host_port(hostport)?;
+    return Result<Remote, Error>.Ok(Remote(transport, host_port.host, host_port.port, user, path));
 }
 
 // `ssh://` and the text after it.
@@ -310,13 +310,13 @@ Result<Remote, Error> parse_ssh_url(str rest) {
     str path = rest.substr(slash, rest.size());
     str user = "";
     str hostport = authority;
-    int at = last_index(authority, "@");
-    if (at >= 0) {
-        user = decode_percent(authority.substr(0, at));
-        hostport = authority.substr(at + 1, authority.size());
+    int at_index = last_index(authority, "@");
+    if (at_index >= 0) {
+        user = decode_percent(authority.substr(0, at_index));
+        hostport = authority.substr(at_index + 1, authority.size());
         check_user(user)?;
     }
-    HostPort hp = split_host_port(hostport)?;
+    HostPort host_port = split_host_port(hostport)?;
     if (path == "") {
         return Result<Remote, Error>.Err(Error.NoPath);
     }
@@ -325,7 +325,7 @@ Result<Remote, Error> parse_ssh_url(str rest) {
         path = path.substr(1, path.size());
     }
     check_path(path)?;
-    return Result<Remote, Error>.Ok(Remote(Transport.Ssh, hp.host, hp.port, user, path));
+    return Result<Remote, Error>.Ok(Remote(Transport.Ssh, host_port.host, host_port.port, user, path));
 }
 
 // `file://[host]/path`: the host is ignored, as git ignores it.
@@ -367,10 +367,10 @@ Result<Remote, Error> parse_scp(str url) {
         str head = url.substr(0, colon);
         path = url.substr(colon + 1, url.size());
         hostspec = head;
-        int at = last_index(head, "@");
-        if (at >= 0) {
-            user = head.substr(0, at);
-            hostspec = head.substr(at + 1, head.size());
+        int at_index = last_index(head, "@");
+        if (at_index >= 0) {
+            user = head.substr(0, at_index);
+            hostspec = head.substr(at_index + 1, head.size());
         }
     }
     if (bracket_open >= 0 || user != "") {
@@ -379,12 +379,12 @@ Result<Remote, Error> parse_scp(str url) {
             check_user(user)?;
         }
     }
-    HostPort hp = split_scp_host(hostspec, bracket_open >= 0)?;
+    HostPort host_port = split_scp_host(hostspec, bracket_open >= 0)?;
     if (path == "") {
         return Result<Remote, Error>.Err(Error.NoPath);
     }
     check_path(path)?;
-    return Result<Remote, Error>.Ok(Remote(Transport.Ssh, hp.host, hp.port, user, path));
+    return Result<Remote, Error>.Ok(Remote(Transport.Ssh, host_port.host, host_port.port, user, path));
 }
 
 type HostPort {
@@ -629,32 +629,32 @@ pub str rewrite_gitdir(str gitdir, str url, bool is_push) {
 /// Does `pattern` (`*` any run, `?` any one character, nothing else special)
 /// match all of `text`, byte for byte?
 pub bool glob_matches(str pattern, str text) {
-    List<int> p = pattern.chars();
-    List<int> t = text.chars();
-    int pi = 0;
-    int ti = 0;
+    List<int> pattern_chars = pattern.chars();
+    List<int> text_chars = text.chars();
+    int pattern_index = 0;
+    int text_index = 0;
     int star = -1;
     int mark = 0;
-    while (ti < t.size()) {
-        if (pi < p.size() && p[pi] == '*') {
-            star = pi;
-            mark = ti;
-            pi = pi + 1;
-        } else if (pi < p.size() && (p[pi] == '?' || p[pi] == t[ti])) {
-            pi = pi + 1;
-            ti = ti + 1;
+    while (text_index < text_chars.size()) {
+        if (pattern_index < pattern_chars.size() && pattern_chars[pattern_index] == '*') {
+            star = pattern_index;
+            mark = text_index;
+            pattern_index = pattern_index + 1;
+        } else if (pattern_index < pattern_chars.size() && (pattern_chars[pattern_index] == '?' || pattern_chars[pattern_index] == text_chars[text_index])) {
+            pattern_index = pattern_index + 1;
+            text_index = text_index + 1;
         } else if (star >= 0) {
-            pi = star + 1;
+            pattern_index = star + 1;
             mark = mark + 1;
-            ti = mark;
+            text_index = mark;
         } else {
             return false;
         }
     }
-    while (pi < p.size() && p[pi] == '*') {
-        pi = pi + 1;
+    while (pattern_index < pattern_chars.size() && pattern_chars[pattern_index] == '*') {
+        pattern_index = pattern_index + 1;
     }
-    return pi == p.size();
+    return pattern_index == pattern_chars.size();
 }
 
 // A pattern list (already split) against `text`: a hit on a `!pattern`
@@ -766,23 +766,23 @@ pub SshTarget ssh_config_resolve(str text, str host, str user, int port) {
             }
             case Some(List<str> option): {
                 str keyword = option[0];
-                List<str> args = option.slice(1, option.size());
+                List<str> arguments = option.slice(1, option.size());
                 if (keyword == "host") {
-                    is_applying = list_matches(args, host, false);
+                    is_applying = list_matches(arguments, host, false);
                 } else if (keyword == "match") {
                     is_applying = false;
-                } else if (is_applying && args.size() > 0) {
+                } else if (is_applying && arguments.size() > 0) {
                     if (keyword == "hostname" && hostname == "") {
-                        hostname = expand_host(args[0], host.to_lower());
+                        hostname = expand_host(arguments[0], host.to_lower());
                     } else if (keyword == "user" && found_user == "") {
-                        found_user = args[0];
+                        found_user = arguments[0];
                     } else if (keyword == "port" && found_port == 0) {
-                        found_port = args[0].parse_int().or(0);
+                        found_port = arguments[0].parse_int().or(0);
                         if (found_port < 1 || found_port > 65535) {
                             found_port = 0;
                         }
-                    } else if (keyword == "identityfile" && args[0] != "none" && !identities.contains(args[0])) {
-                        identities.push(args[0]);
+                    } else if (keyword == "identityfile" && arguments[0] != "none" && !identities.contains(arguments[0])) {
+                        identities.push(arguments[0]);
                     }
                 }
             }

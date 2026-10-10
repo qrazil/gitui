@@ -54,10 +54,10 @@ pub void Watcher.rebaseline() {
 /// `rebaseline` was called)?
 pub bool Watcher.has_changed() {
     str now = fingerprint();
-    bool changed = now != baseline || is_dirs_changed;
+    bool is_changed = now != baseline || is_dirs_changed;
     baseline = now;
     is_dirs_changed = false;
-    return changed;
+    return is_changed;
 }
 
 str Watcher.fingerprint() {
@@ -158,8 +158,8 @@ void Watcher.scan(str relative) {
 void Watcher.poll_dirs() {
     List<str> kept = [];
     int count = dirs.size();
-    for (int at in 0 .. count) {
-        str relative = dirs[at];
+    for (int index in 0 .. count) {
+        str relative = dirs[index];
         str full = worktree;
         if (relative != "") {
             full = fs.join(worktree, relative);
@@ -184,8 +184,8 @@ void Watcher.poll_dirs() {
         }
     }
     // Directories `scan_children` added went on the end of `dirs`.
-    for (int at in count .. dirs.size()) {
-        kept.push(dirs[at]);
+    for (int index in count .. dirs.size()) {
+        kept.push(dirs[index]);
     }
     dirs = kept;
 }
@@ -207,7 +207,7 @@ void Watcher.scan_children(str relative) {
                     child = relative + "/" + name;
                 }
                 str child_full = fs.join(worktree, child);
-                if (!dir_mtime.contains(child) && fs.is_dir(child_full) && !fs.is_link(child_full) && !is_skipped(child)) {
+                if (!dir_mtime.contains(child) && fs.is_directory(child_full) && !fs.is_link(child_full) && !is_skipped(child)) {
                     scan(child);
                 }
             }

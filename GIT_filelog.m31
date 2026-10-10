@@ -96,20 +96,20 @@ pub Result<List<GIT_log.Entry>, GIT_log.Error> history(str gitdir, str rev, str 
         GIT_object.Commit commit = walker.commit(id)?;
         str mine = walker.signature(commit);
         List<str> follow = commit.parents;
-        bool same = false;
+        bool is_same = false;
         if (commit.parents.size() == 0) {
-            same = mine == "";
+            is_same = mine == "";
         } else {
             for (str parent in commit.parents) {
                 GIT_object.Commit parent_commit = walker.commit(parent)?;
                 if (walker.signature(parent_commit) == mine) {
-                    same = true;
+                    is_same = true;
                     follow = [parent];
                     break;
                 }
             }
         }
-        if (!same) {
+        if (!is_same) {
             out.push(GIT_log.Entry(id, commit));
         }
         for (str parent in follow) {

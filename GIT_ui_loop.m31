@@ -36,8 +36,8 @@ pub Result<int, term.Error> run(TUI_app.Loop loop, TUI_widget.Widget view, TUI_a
             writer.put(loop.enter);
             term.Reader reader = term.reader();
             term.Size window_size = TUI_app.screen_size();
-            TUI_buffer.Buffer previous = TUI_buffer.Buffer.sized(window_size.cols, window_size.rows);
-            TUI_buffer.Buffer next = TUI_buffer.Buffer.sized(window_size.cols, window_size.rows);
+            TUI_buffer.Buffer previous = TUI_buffer.Buffer.sized(window_size.columns, window_size.rows);
+            TUI_buffer.Buffer next = TUI_buffer.Buffer.sized(window_size.columns, window_size.rows);
             view.render(previous, previous.area());
             writer.put_bytes(TUI_diff.full(previous, loop.depth));
             flush(writer);
@@ -79,8 +79,8 @@ pub Result<int, term.Error> run(TUI_app.Loop loop, TUI_widget.Widget view, TUI_a
                     window_size = now;
                     if (should_redraw || did_resize) {
                         if (did_resize) {
-                            next = TUI_buffer.Buffer.sized(window_size.cols, window_size.rows);
-                            previous = TUI_buffer.Buffer.sized(window_size.cols, window_size.rows);
+                            next = TUI_buffer.Buffer.sized(window_size.columns, window_size.rows);
+                            previous = TUI_buffer.Buffer.sized(window_size.columns, window_size.rows);
                         } else {
                             next.clear();
                         }

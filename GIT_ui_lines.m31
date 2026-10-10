@@ -31,7 +31,7 @@
 // entry gets size -1 and zeroed times, the same "never matches a stat"
 // rule `did_set_index_blob` uses, so `status` re-hashes it.
 
-import diff;
+import text.diff;
 import fs;
 import GIT_hunks;
 import GIT_index;

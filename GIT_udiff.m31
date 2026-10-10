@@ -29,7 +29,7 @@
 // Paths are in byte order, which is what a tree walk gives. Submodule entries
 // (mode 0o160000) print as git does, a one-line `Subproject commit` change.
 
-import diff;
+import text.diff;
 import GIT_hunks;
 import GIT_object;
 import GIT_xdiff;
@@ -283,9 +283,9 @@ str range(int before, int count) {
 // git's default funcname: the nearest of the first `before` old lines (searching
 // upward from the last) that starts with a letter, `_` or `$`.
 str function_name(List<bytes> old_lines, int before) {
-    int i = before - 1;
-    while (i >= 0) {
-        bytes line = old_lines[i];
+    int index = before - 1;
+    while (index >= 0) {
+        bytes line = old_lines[index];
         if (line.size() > 0) {
             int first = line[0];
             bool is_alpha = (first >= 'a' && first <= 'z') || (first >= 'A' && first <= 'Z');
@@ -300,13 +300,13 @@ str function_name(List<bytes> old_lines, int before) {
                 return line.substr(0, length).utf8().or("");
             }
         }
-        i = i - 1;
+        index = index - 1;
     }
     return "";
 }
 
-bool is_space(int c) {
-    return c == ' ' || c == '\t' || c == '\n' || c == '\r' || c == 11 || c == 12;
+bool is_space(int byte) {
+    return byte == ' ' || byte == '\t' || byte == '\n' || byte == '\r' || byte == 11 || byte == 12;
 }
 
 str octal(int mode) {

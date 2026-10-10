@@ -367,9 +367,9 @@ str normalised(str gitdir, str text) {
         }
         List<str> kept = [];
         for (int i in 0 .. line.size()) {
-            str c = line.substr(i, i + 1);
-            if (c != " " && c != "\t" && c != "\r") {
-                kept.push(c);
+            str character = line.substr(i, i + 1);
+            if (character != " " && character != "\t" && character != "\r") {
+                kept.push(character);
             }
         }
         out = out + kept.join("") + "\n";
@@ -400,10 +400,10 @@ pub Result<Picked, GIT_sequencer.Error> pick_range(str gitdir, str head, str ups
     bool is_theirs_read = false;
     List<Command> commands = [];
     List<str> applied = [];
-    int at = newest.size() - 1;
-    while (at >= 0) {
-        str id = newest[at];
-        at = at - 1;
+    int index = newest.size() - 1;
+    while (index >= 0) {
+        str id = newest[index];
+        index = index - 1;
         GIT_object.Commit commit = GIT_sequencer.lift_commit(GIT_merge.read_commit(gitdir, id))?;
         if (commit.parents.size() > 1) {
             continue;
@@ -502,8 +502,8 @@ pub List<Command> autosquash(List<Command> cmds) {
             case Some(_): {
                 str title = stripped_title(cmd.text);
                 match (by_subject.get(title)) {
-                    case Some(int at): {
-                        found = at;
+                    case Some(int found_index): {
+                        found = found_index;
                     }
                     case None: {
                         found = by_id_or_prefix(cmds, i, title);
@@ -537,11 +537,11 @@ pub List<Command> autosquash(List<Command> cmds) {
         if (target[i] >= 0) {
             continue;
         }
-        int cur = i;
-        while (cur >= 0) {
-            Command cmd = cmds[cur];
-            out.push(Command(verbs[cur], cmd.id, cmd.text));
-            cur = next[cur];
+        int current = i;
+        while (current >= 0) {
+            Command cmd = cmds[current];
+            out.push(Command(verbs[current], cmd.id, cmd.text));
+            current = next[current];
         }
     }
     return out;

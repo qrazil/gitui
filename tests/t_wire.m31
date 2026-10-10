@@ -35,14 +35,14 @@ import GIT_log;
 import GIT_object;
 import GIT_pack_write;
 import GIT_refs;
-import sha1digest;
-import sha256;
+import crypto.sha1digest;
+import crypto.sha256;
 import GIT_wire;
 import io;
 import net;
 import os;
 
-List<str> argv = os.args();
+List<str> argv = os.arguments();
 if (argv.size() < 2) {
     usage();
 }
@@ -195,8 +195,8 @@ type Dribble {
     int at;
 }
 
-Result<bytes, io.Error> Dribble.read(int n) {
-    if (at >= data.size() || n <= 0) {
+Result<bytes, io.Error> Dribble.read(int count) {
+    if (at >= data.size() || count <= 0) {
         bytes none = [];
         return Result<bytes, io.Error>.Ok(none);
     }
@@ -205,8 +205,8 @@ Result<bytes, io.Error> Dribble.read(int n) {
     return Result<bytes, io.Error>.Ok(one);
 }
 
-Result<int, io.Error> Dribble.write(bytes b) {
-    return Result<int, io.Error>.Ok(b.size());
+Result<int, io.Error> Dribble.write(bytes payload) {
+    return Result<int, io.Error>.Ok(payload.size());
 }
 
 Result<bool, io.Error> Dribble.close() {
@@ -300,12 +300,12 @@ void unit_advertisement() {
     normal.extend(GIT_wire.pkt_line((ID_B + " refs/tags/v1\n").to_bytes()));
     normal.extend(GIT_wire.FLUSH_PKT);
     match (GIT_wire.read_advertisement(io.buffer_of(normal))) {
-        case Ok(GIT_wire.Advertisement ad): {
-            check("wire: advertisement has three refs in order", ad.refs.size() == 3 && ad.refs[0].name == "HEAD" && ad.refs[2].id == ID_B, ad.refs.size().to_str() + " refs");
-            check("wire: advertisement capabilities come from the first line only", ad.capabilities.size() == 6 && ad.capabilities[1] == "side-band-64k", ad.capabilities.join(","));
-            check("wire: has_cap sees a bare and a valued capability", GIT_wire.has_cap(ad.capabilities, "ofs-delta") && GIT_wire.has_cap(ad.capabilities, "agent") && !GIT_wire.has_cap(ad.capabilities, "shallow"), ad.capabilities.join(","));
-            check("wire: cap_value gives symref's value", GIT_wire.cap_value(ad.capabilities, "symref").or("none") == "HEAD:refs/heads/main" && GIT_wire.cap_value(ad.capabilities, "ofs-delta").or("none") == "none", GIT_wire.cap_value(ad.capabilities, "symref").or("none"));
-            check("wire: object format defaults to sha1", ad.object_format == "sha1", ad.object_format);
+        case Ok(GIT_wire.Advertisement advertisement): {
+            check("wire: advertisement has three refs in order", advertisement.refs.size() == 3 && advertisement.refs[0].name == "HEAD" && advertisement.refs[2].id == ID_B, advertisement.refs.size().to_str() + " refs");
+            check("wire: advertisement capabilities come from the first line only", advertisement.capabilities.size() == 6 && advertisement.capabilities[1] == "side-band-64k", advertisement.capabilities.join(","));
+            check("wire: has_cap sees a bare and a valued capability", GIT_wire.has_cap(advertisement.capabilities, "ofs-delta") && GIT_wire.has_cap(advertisement.capabilities, "agent") && !GIT_wire.has_cap(advertisement.capabilities, "shallow"), advertisement.capabilities.join(","));
+            check("wire: cap_value gives symref's value", GIT_wire.cap_value(advertisement.capabilities, "symref").or("none") == "HEAD:refs/heads/main" && GIT_wire.cap_value(advertisement.capabilities, "ofs-delta").or("none") == "none", GIT_wire.cap_value(advertisement.capabilities, "symref").or("none"));
+            check("wire: object format defaults to sha1", advertisement.object_format == "sha1", advertisement.object_format);
         }
         case Err(GIT_wire.Error error): {
             check("wire: advertisement parses", false, error.to_str());
@@ -315,8 +315,8 @@ void unit_advertisement() {
     bytes empty = first_ref_line(GIT_wire.ZERO_ID, "capabilities^{}", "report-status delete-refs agent=git/2.45");
     empty.extend(GIT_wire.FLUSH_PKT);
     match (GIT_wire.read_advertisement(io.buffer_of(empty))) {
-        case Ok(GIT_wire.Advertisement ad): {
-            check("wire: an empty repository advertises no refs but its capabilities", ad.refs.size() == 0 && GIT_wire.has_cap(ad.capabilities, "report-status"), ad.refs.size().to_str() + " refs");
+        case Ok(GIT_wire.Advertisement advertisement): {
+            check("wire: an empty repository advertises no refs but its capabilities", advertisement.refs.size() == 0 && GIT_wire.has_cap(advertisement.capabilities, "report-status"), advertisement.refs.size().to_str() + " refs");
         }
         case Err(GIT_wire.Error error): {
             check("wire: an empty repository advertisement parses", false, error.to_str());
@@ -327,21 +327,21 @@ void unit_advertisement() {
     versioned.extend(first_ref_line(ID_A, "refs/heads/main", "side-band-64k"));
     versioned.extend(GIT_wire.FLUSH_PKT);
     match (GIT_wire.read_advertisement(io.buffer_of(versioned))) {
-        case Ok(GIT_wire.Advertisement ad): {
-            check("wire: a leading 'version 1' line is skipped", ad.refs.size() == 1 && ad.refs[0].name == "refs/heads/main" && GIT_wire.has_cap(ad.capabilities, "side-band-64k"), ad.refs.size().to_str() + " refs");
+        case Ok(GIT_wire.Advertisement advertisement): {
+            check("wire: a leading 'version 1' line is skipped", advertisement.refs.size() == 1 && advertisement.refs[0].name == "refs/heads/main" && GIT_wire.has_cap(advertisement.capabilities, "side-band-64k"), advertisement.refs.size().to_str() + " refs");
         }
         case Err(GIT_wire.Error error): {
             check("wire: a leading 'version 1' line is skipped", false, error.to_str());
         }
     }
-    bytes err_line = GIT_wire.pkt_line("ERR access denied\n".to_bytes());
-    check("wire: an ERR line is RemoteError", is_ad_error(GIT_wire.read_advertisement(io.buffer_of(err_line)), GIT_wire.Error.RemoteError), "other");
+    bytes error_line = GIT_wire.pkt_line("ERR access denied\n".to_bytes());
+    check("wire: an ERR line is RemoteError", is_ad_error(GIT_wire.read_advertisement(io.buffer_of(error_line)), GIT_wire.Error.RemoteError), "other");
     bytes sha256_ad = first_ref_line(ID_A64, "HEAD", "side-band-64k object-format=sha256");
     sha256_ad.extend(GIT_wire.pkt_line((ID_B64 + " refs/heads/main\n").to_bytes()));
     sha256_ad.extend(GIT_wire.FLUSH_PKT);
     match (GIT_wire.read_advertisement(io.buffer_of(sha256_ad))) {
-        case Ok(GIT_wire.Advertisement ad): {
-            check("wire: object-format=sha256 with 64-digit ids is read as sha256", ad.object_format == "sha256" && ad.refs.size() == 2 && ad.refs[1].id == ID_B64 && ad.refs[0].id == ID_A64, ad.object_format);
+        case Ok(GIT_wire.Advertisement advertisement): {
+            check("wire: object-format=sha256 with 64-digit ids is read as sha256", advertisement.object_format == "sha256" && advertisement.refs.size() == 2 && advertisement.refs[1].id == ID_B64 && advertisement.refs[0].id == ID_A64, advertisement.object_format);
         }
         case Err(GIT_wire.Error error): {
             check("wire: object-format=sha256 with 64-digit ids is read as sha256", false, error.to_str());
@@ -350,8 +350,8 @@ void unit_advertisement() {
     bytes sha256_empty = first_ref_line(ZERO64, "capabilities^{}", "side-band-64k object-format=sha256");
     sha256_empty.extend(GIT_wire.FLUSH_PKT);
     match (GIT_wire.read_advertisement(io.buffer_of(sha256_empty))) {
-        case Ok(GIT_wire.Advertisement ad): {
-            check("wire: an empty sha256 repository's capabilities^{} line is read", ad.refs.size() == 0 && ad.object_format == "sha256" && GIT_wire.zero_id(ad) == ZERO64, ad.refs.size().to_str());
+        case Ok(GIT_wire.Advertisement advertisement): {
+            check("wire: an empty sha256 repository's capabilities^{} line is read", advertisement.refs.size() == 0 && advertisement.object_format == "sha256" && GIT_wire.zero_id(advertisement) == ZERO64, advertisement.refs.size().to_str());
         }
         case Err(GIT_wire.Error error): {
             check("wire: an empty sha256 repository's capabilities^{} line is read", false, error.to_str());
@@ -369,8 +369,8 @@ void unit_advertisement() {
     bytes sha1_named = first_ref_line(ID_A, "refs/heads/main", "object-format=sha1");
     sha1_named.extend(GIT_wire.FLUSH_PKT);
     match (GIT_wire.read_advertisement(io.buffer_of(sha1_named))) {
-        case Ok(GIT_wire.Advertisement ad): {
-            check("wire: object-format=sha1 with 40-digit ids is read as sha1", ad.object_format == "sha1" && GIT_wire.zero_id(ad) == GIT_wire.ZERO_ID, ad.object_format);
+        case Ok(GIT_wire.Advertisement advertisement): {
+            check("wire: object-format=sha1 with 40-digit ids is read as sha1", advertisement.object_format == "sha1" && GIT_wire.zero_id(advertisement) == GIT_wire.ZERO_ID, advertisement.object_format);
         }
         case Err(GIT_wire.Error error): {
             check("wire: object-format=sha1 with 40-digit ids is read as sha1", false, error.to_str());
@@ -383,8 +383,8 @@ void unit_advertisement() {
     check("wire: an advertisement with no flush is Closed", is_ad_error(GIT_wire.read_advertisement(io.buffer_of(no_flush)), GIT_wire.Error.Closed), "other");
     GIT_wire.Stream dribble = Dribble(normal, 0);
     match (GIT_wire.read_advertisement(dribble)) {
-        case Ok(GIT_wire.Advertisement ad): {
-            check("wire: an advertisement read one byte at a time is the same", ad.refs.size() == 3 && ad.capabilities.size() == 6, ad.refs.size().to_str() + " refs");
+        case Ok(GIT_wire.Advertisement advertisement): {
+            check("wire: an advertisement read one byte at a time is the same", advertisement.refs.size() == 3 && advertisement.capabilities.size() == 6, advertisement.refs.size().to_str() + " refs");
         }
         case Err(GIT_wire.Error error): {
             check("wire: an advertisement read one byte at a time is the same", false, error.to_str());
@@ -392,8 +392,8 @@ void unit_advertisement() {
     }
     // The service name rides along.
     match (GIT_wire.read_advertisement(io.buffer_of(empty), service: "git-receive-pack")) {
-        case Ok(GIT_wire.Advertisement ad): {
-            check("wire: read_advertisement records the service", ad.service == "git-receive-pack", ad.service);
+        case Ok(GIT_wire.Advertisement advertisement): {
+            check("wire: read_advertisement records the service", advertisement.service == "git-receive-pack", advertisement.service);
         }
         case Err(GIT_wire.Error error): {
             check("wire: read_advertisement records the service", false, error.to_str());
@@ -477,8 +477,8 @@ void unit_demux() {
 }
 
 void unit_bodies() {
-    GIT_wire.Advertisement ad = advert(["side-band-64k", "ofs-delta", "multi_ack_detailed"]);
-    str body = text(GIT_wire.negotiation_body(ad, [ID_A, ID_B], [ID_C], "t/1"));
+    GIT_wire.Advertisement advertisement = advert(["side-band-64k", "ofs-delta", "multi_ack_detailed"]);
+    str body = text(GIT_wire.negotiation_body(advertisement, [ID_A, ID_B], [ID_C], "t/1"));
     str want_a = "want " + ID_A + " side-band-64k ofs-delta agent=t/1\n";
     str expected = hex4(want_a) + want_a + "0032want " + ID_B + "\n" + "0000" + "0032have " + ID_C + "\n" + "0009done\n";
     check("wire: negotiation_body is wants, flush, haves, done, with caps on the first want", body == expected, body);
@@ -515,9 +515,9 @@ void unit_bodies() {
     GIT_wire.Stream sink = io.buffer();
     List<str> no_wants = [];
     List<str> no_haves = [];
-    check("wire: fetch_pack with no want is NoWant", is_fetch_error(GIT_wire.fetch_pack(sink, ad, no_wants, no_haves), GIT_wire.Error.NoWant), "other");
-    check("wire: fetch_pack with a short want is BadName", is_fetch_error(GIT_wire.fetch_pack(sink, ad, ["abc"], no_haves), GIT_wire.Error.BadName), "other");
-    check("wire: fetch_pack with an uppercase have is BadName", is_fetch_error(GIT_wire.fetch_pack(sink, ad, [ID_A], ["ABCDEFABCDEFABCDEFABCDEFABCDEFABCDEFABCD"]), GIT_wire.Error.BadName), "other");
+    check("wire: fetch_pack with no want is NoWant", is_fetch_error(GIT_wire.fetch_pack(sink, advertisement, no_wants, no_haves), GIT_wire.Error.NoWant), "other");
+    check("wire: fetch_pack with a short want is BadName", is_fetch_error(GIT_wire.fetch_pack(sink, advertisement, ["abc"], no_haves), GIT_wire.Error.BadName), "other");
+    check("wire: fetch_pack with an uppercase have is BadName", is_fetch_error(GIT_wire.fetch_pack(sink, advertisement, [ID_A], ["ABCDEFABCDEFABCDEFABCDEFABCDEFABCDEFABCD"]), GIT_wire.Error.BadName), "other");
     GIT_wire.Advertisement plain = advert(["multi_ack"]);
     check("wire: fetch_pack without side-band-64k is NoSideBand", is_fetch_error(GIT_wire.fetch_pack(sink, plain, [ID_A], no_haves), GIT_wire.Error.NoSideBand), "other");
     match (sink.read(10)) {
@@ -672,7 +672,7 @@ Result<int, io.Error> FakeServer.write(bytes data) {
     return Result<int, io.Error>.Ok(data.size());
 }
 
-Result<bytes, io.Error> FakeServer.read(int n) {
+Result<bytes, io.Error> FakeServer.read(int count) {
     bytes out = [];
     if (outbox.size() == 0) {
         if (!is_done) {
@@ -682,7 +682,7 @@ Result<bytes, io.Error> FakeServer.read(int n) {
         }
         return Result<bytes, io.Error>.Ok(out);
     }
-    int take = n;
+    int take = count;
     if (take > outbox.size()) {
         take = outbox.size();
     }
@@ -781,12 +781,12 @@ List<str> make_ids(int count) {
 
 void run_duplex() {
     List<str> ids = make_ids(1000);
-    GIT_wire.Advertisement ad = advert(["multi_ack_detailed", "side-band-64k", "ofs-delta"]);
+    GIT_wire.Advertisement advertisement = advert(["multi_ack_detailed", "side-band-64k", "ofs-delta"]);
     // 1000 haves, every one known: 1000 ACK lines is ~57 KB of replies, over
     // the 32 KB the fake is allowed to hold, so only reading between rounds
     // gets through.
     FakeServer server = fake_server(32768, true, 0, ids);
-    match (GIT_wire.fetch_pack(server, ad, [ID_A], ids)) {
+    match (GIT_wire.fetch_pack(server, advertisement, [ID_A], ids)) {
         case Ok(GIT_wire.DemuxResult out): {
             check("duplex: 1000 known haves get a pack back", out.pack.hex() == "5041434b010203" && out.progress.starts_with("Enumerating"), out.pack.hex());
         }
@@ -800,12 +800,12 @@ void run_duplex() {
     check("duplex: the largest backlog was one round's ACKs", server.peak_outbox < 20000 && server.peak_outbox > 10000, server.peak_outbox.to_str());
     // The same server, fed the stateless body in a single write.
     FakeServer stateless = fake_server(32768, true, 0, ids);
-    Result<bool, GIT_wire.Error> wrote = GIT_wire.write_all(stateless, GIT_wire.negotiation_body(ad, [ID_A], ids, "t/1"));
+    Result<bool, GIT_wire.Error> wrote = GIT_wire.write_all(stateless, GIT_wire.negotiation_body(advertisement, [ID_A], ids, "t/1"));
     check("duplex: the detector trips on the stateless body written down a duplex stream", stateless.is_stalled, "peak " + stateless.peak_outbox.to_str());
     // Ready after 300 common haves: the second round's replies say so, and
     // the client stops there.
     FakeServer eager = fake_server(32768, true, 300, ids);
-    match (GIT_wire.fetch_pack(eager, ad, [ID_A], ids)) {
+    match (GIT_wire.fetch_pack(eager, advertisement, [ID_A], ids)) {
         case Ok(GIT_wire.DemuxResult out): {
             check("duplex: a ready server still delivers the pack", out.pack.size() == 7, out.pack.hex());
         }
@@ -817,7 +817,7 @@ void run_duplex() {
     check("duplex: no stall when stopping early", !eager.is_stalled, "stalled");
     // Unknown haves: NAK each round, no ACK lines.
     FakeServer strangers = fake_server(32768, true, 0, []);
-    match (GIT_wire.fetch_pack(strangers, ad, [ID_A], ids)) {
+    match (GIT_wire.fetch_pack(strangers, advertisement, [ID_A], ids)) {
         case Ok(GIT_wire.DemuxResult out): {
             check("duplex: haves the server does not know still end in a pack", out.pack.size() == 7, out.pack.hex());
         }
@@ -829,7 +829,7 @@ void run_duplex() {
     // No haves at all: the wants, one flush, done.
     List<str> none = [];
     FakeServer fresh = fake_server(32768, true, 0, none);
-    match (GIT_wire.fetch_pack(fresh, ad, [ID_A, ID_B], none)) {
+    match (GIT_wire.fetch_pack(fresh, advertisement, [ID_A, ID_B], none)) {
         case Ok(GIT_wire.DemuxResult out): {
             check("duplex: a clone (no haves) is wants, done, pack", out.pack.size() == 7 && fresh.have_count == 0 && fresh.flush_count == 0 && !fresh.is_stalled, out.pack.hex());
         }
@@ -859,8 +859,8 @@ GIT_wire.Stream connect_or_fail(str port_text) {
         fail("bad port " + port_text);
     }
     match (net.connect("127.0.0.1", port)) {
-        case Ok(net.Conn conn): {
-            return conn;
+        case Ok(net.Conn connection): {
+            return connection;
         }
         case Err(net.Error error): {
             fail("connect: " + error.to_str());
@@ -871,8 +871,8 @@ GIT_wire.Stream connect_or_fail(str port_text) {
 
 GIT_wire.Advertisement read_ad(GIT_wire.Stream stream, str service) {
     match (GIT_wire.read_advertisement(stream, service: service)) {
-        case Ok(GIT_wire.Advertisement ad): {
-            return ad;
+        case Ok(GIT_wire.Advertisement advertisement): {
+            return advertisement;
         }
         case Err(GIT_wire.Error error): {
             fail("advertisement: " + error.to_str());
@@ -883,9 +883,9 @@ GIT_wire.Advertisement read_ad(GIT_wire.Stream stream, str service) {
 
 void do_ls(str port_text, str service) {
     GIT_wire.Stream stream = connect_or_fail(port_text);
-    GIT_wire.Advertisement ad = read_ad(stream, service);
-    print("caps " + ad.capabilities.join(" "));
-    for (GIT_wire.RemoteRef remote_ref in ad.refs) {
+    GIT_wire.Advertisement advertisement = read_ad(stream, service);
+    print("caps " + advertisement.capabilities.join(" "));
+    for (GIT_wire.RemoteRef remote_ref in advertisement.refs) {
         print(remote_ref.id + "\t" + remote_ref.name);
     }
     Result<bool, GIT_wire.Error> said = GIT_wire.say_goodbye(stream);
@@ -894,12 +894,12 @@ void do_ls(str port_text, str service) {
 
 void do_fetch(str port_text, str gitdir, str out_path) {
     GIT_wire.Stream stream = connect_or_fail(port_text);
-    GIT_wire.Advertisement ad = read_ad(stream, "git-upload-pack");
-    List<str> wants = unique_ids(ad.refs);
+    GIT_wire.Advertisement advertisement = read_ad(stream, "git-upload-pack");
+    List<str> wants = unique_ids(advertisement.refs);
     List<str> haves = local_haves(gitdir);
     print("refs " + wants.size().to_str());
     print("haves " + haves.size().to_str());
-    match (GIT_wire.fetch_pack(stream, ad, wants, haves)) {
+    match (GIT_wire.fetch_pack(stream, advertisement, wants, haves)) {
         case Ok(GIT_wire.DemuxResult out): {
             if (out.has_remote_error) {
                 fail("remote: " + out.remote_error);
@@ -931,9 +931,9 @@ void do_push(str port_text, str gitdir, str refname, str old_id) {
         }
     }
     GIT_wire.Stream stream = connect_or_fail(port_text);
-    GIT_wire.Advertisement ad = read_ad(stream, "git-receive-pack");
+    GIT_wire.Advertisement advertisement = read_ad(stream, "git-receive-pack");
     List<str> known = [];
-    for (GIT_wire.RemoteRef remote_ref in ad.refs) {
+    for (GIT_wire.RemoteRef remote_ref in advertisement.refs) {
         known.push(remote_ref.id);
     }
     bytes pack = [];
@@ -952,7 +952,7 @@ void do_push(str port_text, str gitdir, str refname, str old_id) {
             fail(error.to_str());
         }
     }
-    match (GIT_wire.send_push(stream, ad, old_id, new_id, refname, pack)) {
+    match (GIT_wire.send_push(stream, advertisement, old_id, new_id, refname, pack)) {
         case Ok(GIT_wire.ReportStatus status): {
             Result<bool, io.Error> closed = stream.close();
             if (status.is_ok) {

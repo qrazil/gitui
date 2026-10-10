@@ -10,7 +10,7 @@ import GIT_status;
 import io;
 import os;
 
-List<str> argv = os.args();
+List<str> argv = os.arguments();
 if (argv.size() < 4) {
     io.eprint("usage: t_unmerged <gitdir> <worktree> porcelain|stages");
     os.exit(2);

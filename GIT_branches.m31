@@ -148,20 +148,20 @@ pub str map_through_fetch(List<str> refspecs, str merge) {
         }
         Option<int> colon = spec.index_of(":");
         match (colon) {
-            case Some(int at): {
-                str src = spec.substr(0, at);
-                str dst = spec.substr(at + 1, spec.size());
-                Option<int> star = src.index_of("*");
+            case Some(int colon_index): {
+                str source = spec.substr(0, colon_index);
+                str destination = spec.substr(colon_index + 1, spec.size());
+                Option<int> star = source.index_of("*");
                 match (star) {
-                    case Some(int s): {
-                        str head = src.substr(0, s);
-                        str tail = src.substr(s + 1, src.size());
+                    case Some(int star_index): {
+                        str head = source.substr(0, star_index);
+                        str tail = source.substr(star_index + 1, source.size());
                         if (merge.size() >= head.size() + tail.size() && merge.starts_with(head) && merge.ends_with(tail)) {
                             str middle = merge.substr(head.size(), merge.size() - tail.size());
-                            Option<int> dstar = dst.index_of("*");
+                            Option<int> dstar = destination.index_of("*");
                             match (dstar) {
-                                case Some(int d): {
-                                    return dst.substr(0, d) + middle + dst.substr(d + 1, dst.size());
+                                case Some(int destination_star_index): {
+                                    return destination.substr(0, destination_star_index) + middle + destination.substr(destination_star_index + 1, destination.size());
                                 }
                                 case None: {
                                 }
@@ -169,8 +169,8 @@ pub str map_through_fetch(List<str> refspecs, str merge) {
                         }
                     }
                     case None: {
-                        if (src == merge && dst != "") {
-                            return dst;
+                        if (source == merge && destination != "") {
+                            return destination;
                         }
                     }
                 }
@@ -320,7 +320,7 @@ pub Result<bool, Error> record_push(str gitdir, str branch, str remote, str id) 
     if (tracking_ref == "") {
         return Result<bool, Error>.Ok(false);
     }
-    match (GIT_refs.update(gitdir, tracking_ref, id, Option<str>.None, msg: "update by push")) {
+    match (GIT_refs.update(gitdir, tracking_ref, id, Option<str>.None, reflog_message: "update by push")) {
         case Ok: {
             return Result<bool, Error>.Ok(true);
         }
@@ -463,16 +463,16 @@ str rtrim(str line) {
 /// end, one final newline. "" when nothing is left.
 pub str clean_message(str raw) {
     List<str> lines = [];
-    bool pending_blank = false;
+    bool has_pending_blank = false;
     for (str line in text.lines(raw)) {
         str trimmed = rtrim(line);
         if (trimmed == "") {
-            pending_blank = lines.size() > 0;
+            has_pending_blank = lines.size() > 0;
             continue;
         }
-        if (pending_blank) {
+        if (has_pending_blank) {
             lines.push("");
-            pending_blank = false;
+            has_pending_blank = false;
         }
         lines.push(trimmed);
     }
@@ -527,7 +527,7 @@ pub Result<bool, Error> delete_tag(str gitdir, str name) {
     }
     str common = GIT_repository.common(gitdir);
     str loose = fs.join(common, full);
-    if (fs.exists(loose)) {
+    if (fs.is_present(loose)) {
         match (fs.remove(loose)) {
             case Ok: {
             }
@@ -537,25 +537,25 @@ pub Result<bool, Error> delete_tag(str gitdir, str name) {
         }
     }
     str packed = fs.join(common, "packed-refs");
-    if (fs.exists(packed)) {
+    if (fs.is_present(packed)) {
         match (io.read(packed)) {
             case Ok(str body): {
                 List<str> kept = [];
-                bool skipping = false;
-                bool changed = false;
+                bool is_skipping = false;
+                bool is_changed = false;
                 for (str line in text.lines(body)) {
-                    if (skipping && line.starts_with("^")) {
+                    if (is_skipping && line.starts_with("^")) {
                         continue;
                     }
-                    skipping = false;
+                    is_skipping = false;
                     if (line.ends_with(" " + full) && !line.starts_with("#") && !line.starts_with("^")) {
-                        skipping = true;
-                        changed = true;
+                        is_skipping = true;
+                        is_changed = true;
                         continue;
                     }
                     kept.push(line);
                 }
-                if (changed) {
+                if (is_changed) {
                     str next = kept.join("\n") + "\n";
                     str temp = packed + ".tmp" + random.system().hex(12);
                     match (io.write(temp, next)) {

@@ -10,7 +10,7 @@ import GIT_blame;
 import io;
 import os;
 
-List<str> argv = os.args();
+List<str> argv = os.arguments();
 if (argv.size() < 5) {
     io.eprint("usage: t_blame <gitdir> blame|sketch <rev> <path> [stop N]");
     os.exit(2);
@@ -30,18 +30,18 @@ if (argv.size() >= 7) {
 }
 match (GIT_blame.blame(argv[1], argv[3], argv[4], progress)) {
     case Ok(List<GIT_blame.Line> lines): {
-        int n = 1;
+        int number = 1;
         for (GIT_blame.Line line in lines) {
             str mark = "";
             if (line.boundary) {
                 mark = "^";
             }
             if (argv[2] == "sketch") {
-                print(mark + line.commit.substr(0, 7) + " " + line.orig_line.to_str() + " " + n.to_str() + " " + line.text.utf8().or("?"));
+                print(mark + line.commit.substr(0, 7) + " " + line.orig_line.to_str() + " " + number.to_str() + " " + line.text.utf8().or("?"));
             } else {
-                print(mark + line.commit + " " + line.orig_line.to_str() + " " + n.to_str());
+                print(mark + line.commit + " " + line.orig_line.to_str() + " " + number.to_str());
             }
-            n = n + 1;
+            number = number + 1;
         }
     }
     case Err(GIT_blame.Error error): {

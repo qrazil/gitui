@@ -396,7 +396,7 @@ Result<str, Error> contents(str gitdir, str name) {
             return Result<str, Error>.Ok(ref_text.trim());
         }
         case Err(_): {
-            if (!fs.exists(path)) {
+            if (!fs.is_present(path)) {
                 return Result<str, Error>.Err(Error.NotFound);
             }
             return Result<str, Error>.Err(Error.Io);
@@ -517,7 +517,7 @@ bool is_safe_name(str name) {
 /// the new commit has the old one's parents -- and is `update` for anything
 /// else. A failure to write the log never fails the update: the ref is the
 /// state, the log is the history of it, and git itself treats the two this way.
-pub Result<bool, Error> update(str gitdir, str name, str new_id, Option<str> expect_old, str msg = "") {
+pub Result<bool, Error> update(str gitdir, str name, str new_id, Option<str> expect_old, str reflog_message = "") {
     if (!is_safe_name(name)) {
         return Result<bool, Error>.Err(Error.Malformed);
     }
@@ -544,7 +544,7 @@ pub Result<bool, Error> update(str gitdir, str name, str new_id, Option<str> exp
         }
     }
     write_atomic(where_for(gitdir, name), new_id + "\n")?;
-    str message = msg;
+    str message = reflog_message;
     if (message == "") {
         message = inferred_message(gitdir, previous, new_id);
     }

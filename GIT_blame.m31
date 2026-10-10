@@ -174,28 +174,28 @@ Result<List<int>, Error> Engine.mapping(str parent_blob, str child_blob) {
         case None: {
         }
     }
-    List<bytes> a = file_lines(parent_blob)?;
-    List<bytes> b = file_lines(child_blob)?;
-    GIT_xdiff.Diff d = GIT_xdiff.diff_lines_indent(a, b);
-    List<int> map = [-1; b.size()];
-    int n1 = a.size();
-    int n2 = b.size();
-    int i1 = 0;
-    int i2 = 0;
-    while (i1 < n1 || i2 < n2) {
-        bool c1 = i1 < n1 && d.a_changed[i1];
-        bool c2 = i2 < n2 && d.b_changed[i2];
-        if (c1 || c2) {
-            while (i1 < n1 && d.a_changed[i1]) {
-                i1 = i1 + 1;
+    List<bytes> parent_lines = file_lines(parent_blob)?;
+    List<bytes> child_lines = file_lines(child_blob)?;
+    GIT_xdiff.Diff diff = GIT_xdiff.diff_lines_indent(parent_lines, child_lines);
+    List<int> map = [-1; child_lines.size()];
+    int parent_size = parent_lines.size();
+    int child_size = child_lines.size();
+    int parent_index = 0;
+    int child_index = 0;
+    while (parent_index < parent_size || child_index < child_size) {
+        bool is_parent_changed = parent_index < parent_size && diff.a_changed[parent_index];
+        bool is_child_changed = child_index < child_size && diff.b_changed[child_index];
+        if (is_parent_changed || is_child_changed) {
+            while (parent_index < parent_size && diff.a_changed[parent_index]) {
+                parent_index = parent_index + 1;
             }
-            while (i2 < n2 && d.b_changed[i2]) {
-                i2 = i2 + 1;
+            while (child_index < child_size && diff.b_changed[child_index]) {
+                child_index = child_index + 1;
             }
         } else {
-            map[i2] = i1;
-            i1 = i1 + 1;
-            i2 = i2 + 1;
+            map[child_index] = parent_index;
+            parent_index = parent_index + 1;
+            child_index = child_index + 1;
         }
     }
     mappings.set(key, map);
@@ -215,11 +215,11 @@ void Engine.hand_over(str commit, int final_at, int orig_at) {
     }
 }
 
-void Engine.own(Suspect suspect, int k, bool boundary) {
-    Line line = lines[suspect.final_index[k]];
+void Engine.own(Suspect suspect, int index, bool is_boundary) {
+    Line line = lines[suspect.final_index[index]];
     line.commit = suspect.commit;
-    line.orig_line = suspect.orig_index[k] + 1;
-    line.boundary = boundary;
+    line.orig_line = suspect.orig_index[index] + 1;
+    line.boundary = is_boundary;
     resolved = resolved + 1;
 }
 
@@ -227,8 +227,8 @@ Result<bool, Error> Engine.process(Suspect suspect) {
     GIT_object.Commit commit = commit(suspect.commit)?;
     int count = suspect.final_index.size();
     if (commit.parents.size() == 0) {
-        for (int k in 0 .. count) {
-            own(suspect, k, true);
+        for (int index in 0 .. count) {
+            own(suspect, index, true);
         }
         return Result<bool, Error>.Ok(true);
     }
@@ -238,8 +238,8 @@ Result<bool, Error> Engine.process(Suspect suspect) {
             mine = id;
         }
         case None: {
-            for (int k in 0 .. count) {
-                own(suspect, k, false);
+            for (int index in 0 .. count) {
+                own(suspect, index, false);
             }
             return Result<bool, Error>.Ok(true);
         }
@@ -250,34 +250,34 @@ Result<bool, Error> Engine.process(Suspect suspect) {
         parent_blobs.push(blob_id(parent_commit).or(""));
     }
     // a parent with exactly this file takes everything
-    for (int p in 0 .. parent_blobs.size()) {
-        if (parent_blobs[p] == mine) {
-            for (int k in 0 .. count) {
-                hand_over(commit.parents[p], suspect.final_index[k], suspect.orig_index[k]);
+    for (int parent_number in 0 .. parent_blobs.size()) {
+        if (parent_blobs[parent_number] == mine) {
+            for (int index in 0 .. count) {
+                hand_over(commit.parents[parent_number], suspect.final_index[index], suspect.orig_index[index]);
             }
             return Result<bool, Error>.Ok(true);
         }
     }
     List<bool> alive = [true; count];
-    for (int p in 0 .. parent_blobs.size()) {
-        if (parent_blobs[p] == "") {
+    for (int parent_number in 0 .. parent_blobs.size()) {
+        if (parent_blobs[parent_number] == "") {
             continue;
         }
-        List<int> map = mapping(parent_blobs[p], mine)?;
-        for (int k in 0 .. count) {
-            if (!alive[k]) {
+        List<int> map = mapping(parent_blobs[parent_number], mine)?;
+        for (int index in 0 .. count) {
+            if (!alive[index]) {
                 continue;
             }
-            int there = map[suspect.orig_index[k]];
+            int there = map[suspect.orig_index[index]];
             if (there >= 0) {
-                alive[k] = false;
-                hand_over(commit.parents[p], suspect.final_index[k], there);
+                alive[index] = false;
+                hand_over(commit.parents[parent_number], suspect.final_index[index], there);
             }
         }
     }
-    for (int k in 0 .. count) {
-        if (alive[k]) {
-            own(suspect, k, false);
+    for (int index in 0 .. count) {
+        if (alive[index]) {
+            own(suspect, index, false);
         }
     }
     return Result<bool, Error>.Ok(true);
@@ -307,10 +307,10 @@ pub Result<List<Line>, Error> blame(str gitdir, str rev, str path, Progress prog
     }
     List<bytes> text = engine.file_lines(blob)?;
     Suspect first = Suspect(tip, [], []);
-    for (int k in 0 .. text.size()) {
-        engine.lines.push(Line("", 0, path, text[k], false));
-        first.final_index.push(k);
-        first.orig_index.push(k);
+    for (int index in 0 .. text.size()) {
+        engine.lines.push(Line("", 0, path, text[index], false));
+        first.final_index.push(index);
+        first.orig_index.push(index);
     }
     int total = text.size();
     if (total == 0) {
@@ -324,9 +324,9 @@ pub Result<List<Line>, Error> blame(str gitdir, str rev, str path, Progress prog
         str next = "";
         int newest = -1;
         for (str id in engine.pending.keys()) {
-            GIT_object.Commit c = engine.commit(id)?;
-            if (c.committer.when > newest) {
-                newest = c.committer.when;
+            GIT_object.Commit candidate = engine.commit(id)?;
+            if (candidate.committer.when > newest) {
+                newest = candidate.committer.when;
                 next = id;
             }
         }

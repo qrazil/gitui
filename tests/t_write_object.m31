@@ -9,7 +9,7 @@ import GIT_object;
 import io;
 import os;
 
-List<str> argv = os.args();
+List<str> argv = os.arguments();
 if (argv.size() < 2) {
     io.eprint("usage: t_write_object <gitdir>");
     os.exit(2);
@@ -52,7 +52,7 @@ print(blob_id);
 print(tree_id);
 print(commit_id);
 // Write the blob a second time: this exercises the "already there" path
-// (`write_object`'s `fs.exists` check) and must answer the same name.
+// (`write_object`'s `fs.is_present` check) and must answer the same name.
 match (GIT_object.write_blob(git_directory, "hello from the write path\n".to_bytes())) {
     case Ok(str id): {
         if (id != blob_id) {

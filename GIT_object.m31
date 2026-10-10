@@ -331,7 +331,7 @@ pub Result<Object, Error> read(str gitdir, str id) {
     }
     str root = fs.join(GIT_repository.common(gitdir), "objects");
     str path = fs.join(fs.join(root, id.substr(0, 2)), id.substr(2, id.size()));
-    if (fs.exists(path)) {
+    if (fs.is_present(path)) {
         bytes stream = [];
         match (io.read_bytes(path)) {
             case Ok(bytes contents): {
@@ -1117,7 +1117,7 @@ Result<str, Error> write_object(str gitdir, str kind, bytes content) {
     str id = object_id(gitdir, kind, content);
     str directory = fs.join(fs.join(GIT_repository.common(gitdir), "objects"), id.substr(0, 2));
     str path = fs.join(directory, id.substr(2, id.size()));
-    if (fs.exists(path)) {
+    if (fs.is_present(path)) {
         return Result<str, Error>.Ok(id);
     }
     match (fs.makedirs(directory)) {

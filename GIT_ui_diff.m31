@@ -222,7 +222,7 @@ pub bool DiffLayer.did_stage_hunk(bytes relative_path, int hunk_index) {
     match (GIT_patch.apply_hunk(old, new, hunk_index)) {
         case Some(bytes content): {
             str full = fs.join(worktree, relative_path.utf8().or(""));
-            if (content.size() == 0 && !fs.exists(full)) {
+            if (content.size() == 0 && !fs.is_present(full)) {
                 return did_drop_index_entry(relative_path, "staged deletion of " + relative_path.utf8().or("<non-utf8>"));
             }
             return did_set_index_blob(relative_path, content, "staged hunk " + (hunk_index + 1).to_str() + " of " + relative_path.utf8().or("<non-utf8>"));

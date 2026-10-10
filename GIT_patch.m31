@@ -48,7 +48,7 @@
 // checks holds exactly: apply hunk 0 repeatedly and `old` becomes `new`;
 // revert hunk 0 repeatedly and `new` becomes `old`.
 
-import diff;
+import text.diff;
 import GIT_hunks;
 import GIT_xdiff;
 
@@ -230,18 +230,18 @@ bytes pick_lines(List<diff.Op> ops, List<bool> flags, bool is_applying) {
     int position = 0;
     while (position < ops.size()) {
         diff.Op operation = ops[position];
-        bool takes_line = true;
+        bool should_take_line = true;
         match (operation.kind) {
             case Keep: {
             }
             case Add: {
-                takes_line = flags[position] == is_applying;
+                should_take_line = flags[position] == is_applying;
             }
             case Remove: {
-                takes_line = flags[position] != is_applying;
+                should_take_line = flags[position] != is_applying;
             }
         }
-        if (takes_line) {
+        if (should_take_line) {
             out.extend(operation.line);
         }
         position = position + 1;

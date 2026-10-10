@@ -13,12 +13,12 @@
 //   <kind> <index> <start> err
 
 import GIT_zlib;
-import sha1digest;
+import crypto.sha1digest;
 import io;
 import os;
 import fs;
 
-List<str> argv = os.args();
+List<str> argv = os.arguments();
 if (argv.size() < 2) {
     io.eprint("usage: t_inflate_at <fixture-dir>");
     os.exit(2);

@@ -255,17 +255,17 @@ pub bool RebaseLayer.describe(GIT_rebase.Report report) {
     if (report.messages.size() > 0) {
         notes = " (" + report.messages.join("; ") + ")";
     }
-    str at = GIT_ui_core.short_id(report.stopped);
+    str stopped_id = GIT_ui_core.short_id(report.stopped);
     if (report.ending.eq(GIT_rebase.Ending.Finished)) {
         message = "rebase finished" + notes;
     } else if (report.ending.eq(GIT_rebase.Ending.UpToDate)) {
         message = "rebase: the current branch is up to date";
     } else if (report.ending.eq(GIT_rebase.Ending.Conflicts)) {
-        message = "rebase stopped on " + at + ": " + report.conflicts.size().to_str() + " path(s) conflict -- Enter on one to resolve, then r c" + notes;
+        message = "rebase stopped on " + stopped_id + ": " + report.conflicts.size().to_str() + " path(s) conflict -- Enter on one to resolve, then r c" + notes;
     } else if (report.ending.eq(GIT_rebase.Ending.Empty)) {
-        message = "rebase stopped on " + at + ": nothing is left to commit -- r c keeps going, r s skips it";
+        message = "rebase stopped on " + stopped_id + ": nothing is left to commit -- r c keeps going, r s skips it";
     } else if (report.ending.eq(GIT_rebase.Ending.Edit)) {
-        message = "rebase stopped at " + at + " to edit: change it, then r c";
+        message = "rebase stopped at " + stopped_id + " to edit: change it, then r c";
     } else if (report.ending.eq(GIT_rebase.Ending.Break)) {
         message = "rebase: break -- r c goes on";
     } else if (report.ending.eq(GIT_rebase.Ending.ExecFailed)) {
@@ -273,7 +273,7 @@ pub bool RebaseLayer.describe(GIT_rebase.Report report) {
     } else if (report.ending.eq(GIT_rebase.Ending.ExecDirty)) {
         message = "rebase: exec '" + report.command + "' left changes -- commit them, then r c";
     } else {
-        message = "rebase stopped on " + at + ": a message is needed";
+        message = "rebase stopped on " + stopped_id + ": a message is needed";
         return true;
     }
     return false;
@@ -378,9 +378,9 @@ pub void RebaseLayer.launch_rebase_editor() {
         remove_quietly(path);
         return;
     }
-    bool again = true;
-    while (again) {
-        again = false;
+    bool should_repeat = true;
+    while (should_repeat) {
+        should_repeat = false;
         if (!run_editor(path)) {
             message = message + " -- the rebase is stopped: r c asks again";
             break;
@@ -391,7 +391,7 @@ pub void RebaseLayer.launch_rebase_editor() {
                     case Ok(GIT_rebase.Report report): {
                         log_command("rebase --continue");
                         if (describe(report) && write_message_file()) {
-                            again = true;
+                            should_repeat = true;
                         }
                     }
                     case Err(GIT_sequencer.Error error): {
@@ -417,13 +417,13 @@ pub Option<str> RebaseLayer.take_edited_todo() {
     return Option<str>.Some(edited_todo);
 }
 
-pub void RebaseLayer.continue_rebase_now(bool skip) {
+pub void RebaseLayer.continue_rebase_now(bool should_skip) {
     str flag = "--continue";
-    if (skip) {
+    if (should_skip) {
         flag = "--skip";
     }
     Result<GIT_rebase.Report, GIT_sequencer.Error> result = GIT_rebase.continue_rebase(gitdir, worktree, Option<str>.None, GIT_rebase.Declining());
-    if (skip) {
+    if (should_skip) {
         result = GIT_rebase.skip(gitdir, worktree, GIT_rebase.Declining());
     }
     match (result) {
@@ -514,15 +514,15 @@ str label_of(str name) {
     return name;
 }
 
-str word_on_off(bool on) {
-    if (on) {
+str word_on_off(bool is_on) {
+    if (is_on) {
         return "on";
     }
     return "off";
 }
 
 void remove_quietly(str path) {
-    if (fs.exists(path)) {
+    if (fs.is_present(path)) {
         match (fs.remove(path)) {
             case Ok(_): {
             }
@@ -738,14 +738,14 @@ void TodoOverlay.set_verb(GIT_rebase_todo.Verb verb) {
 }
 
 void TodoOverlay.move_line(int delta) {
-    int to = cursor + delta;
-    if (to < 0 || to >= cmds.size()) {
+    int target_index = cursor + delta;
+    if (target_index < 0 || target_index >= cmds.size()) {
         return;
     }
     GIT_rebase_todo.Command held = cmds[cursor];
-    cmds[cursor] = cmds[to];
-    cmds[to] = held;
-    cursor = to;
+    cmds[cursor] = cmds[target_index];
+    cmds[target_index] = held;
+    cursor = target_index;
 }
 
 void TodoOverlay.go() {

@@ -37,7 +37,7 @@ import os;
 import GIT_pack_write;
 import GIT_refs;
 
-List<str> argv = os.args();
+List<str> argv = os.arguments();
 if (argv.size() < 2) {
     usage();
 }

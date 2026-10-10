@@ -20,7 +20,7 @@ import GIT_revparse;
 import io;
 import os;
 
-List<str> argv = os.args();
+List<str> argv = os.arguments();
 if (argv.size() < 4) {
     io.eprint("usage: t_revparse <gitdir> lines|object|commit|tree|range <file>");
     os.exit(2);
@@ -86,9 +86,9 @@ str revs(Result<GIT_revparse.Revs, GIT_revparse.Error> answer) {
 }
 
 List<str> specs = body.split("\n");
-for (int k in 0 .. specs.size()) {
-    str spec = specs[k];
-    if (k == specs.size() - 1 && spec == "") {
+for (int i in 0 .. specs.size()) {
+    str spec = specs[i];
+    if (i == specs.size() - 1 && spec == "") {
         continue;
     }
     if (mode == "lines") {

@@ -11,64 +11,64 @@
 
 import os;
 import io;
-import diff;
+import text.diff;
 import GIT_xdiff;
 
 void run() {
-    List<str> argv = os.args();
+    List<str> argv = os.arguments();
     if (argv.size() != 3) {
         print("usage: t_xdiff DIR COUNT");
         os.exit(1);
     }
-    str dir = argv[1];
+    str directory = argv[1];
     int count = argv[2].parse_int().or(0);
-    int c = 0;
-    while (c < count) {
-        str stem = dir + "/" + pad(c);
+    int counter = 0;
+    while (counter < count) {
+        str stem = directory + "/" + pad(counter);
         bytes base = read(stem + ".base");
         bytes ours = read(stem + ".ours");
         bytes theirs = read(stem + ".theirs");
         write(stem + ".dbo", script(base, ours));
         write(stem + ".dbt", script(base, theirs));
         write(stem + ".dot", script(ours, theirs));
-        c = c + 1;
+        counter = counter + 1;
     }
 }
 
 bytes script(bytes old, bytes new) {
     bytes out = [];
-    bool changed = false;
-    for (diff.Op op in GIT_xdiff.ops(GIT_xdiff.split_lines(old), GIT_xdiff.split_lines(new))) {
-        match (op.kind) {
+    bool is_changed = false;
+    for (diff.Op operation in GIT_xdiff.ops(GIT_xdiff.split_lines(old), GIT_xdiff.split_lines(new))) {
+        match (operation.kind) {
             case Keep: {
                 out.push(32);
             }
             case Add: {
                 out.push(43);
-                changed = true;
+                is_changed = true;
             }
             case Remove: {
                 out.push(45);
-                changed = true;
+                is_changed = true;
             }
         }
-        out.extend(op.line);
-        if (op.line[op.line.size() - 1] != 10) {
+        out.extend(operation.line);
+        if (operation.line[operation.line.size() - 1] != 10) {
             out.extend("\n\\ No newline at end of file\n".to_bytes());
         }
     }
-    if (!changed) {
+    if (!is_changed) {
         return [];
     }
     return out;
 }
 
-str pad(int n) {
-    str s = n.to_str();
-    while (s.size() < 5) {
-        s = "0" + s;
+str pad(int value) {
+    str text = value.to_str();
+    while (text.size() < 5) {
+        text = "0" + text;
     }
-    return s;
+    return text;
 }
 
 bytes read(str path) {
@@ -86,7 +86,7 @@ bytes read(str path) {
 
 void write(str path, bytes data) {
     match (io.write_bytes(path, data)) {
-        case Ok(int _n): {
+        case Ok(_): {
         }
         case Err(io.Error error): {
             print("cannot write " + path + ": " + error.to_str());

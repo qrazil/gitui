@@ -69,8 +69,8 @@
 
 import GIT_object;
 import GIT_wire;
-import http;
-import https;
+import net.http;
+import net.https;
 import io;
 import os;
 import tls;

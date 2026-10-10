@@ -13,7 +13,7 @@ import io;
 import GIT_hunks;
 import tui.TUI_diff_view;
 
-List<str> argv = os.args();
+List<str> argv = os.arguments();
 if (argv.size() != 3) {
     print("usage: t_hunks <old-file> <new-file>");
     os.exit(1);

@@ -20,10 +20,10 @@ import GIT_object;
 import io;
 import os;
 import fs;
-import sha1digest;
+import crypto.sha1digest;
 import date;
 
-List<str> argv = os.args();
+List<str> argv = os.arguments();
 if (argv.size() < 2) {
     io.eprint("usage: t_object <repo-or-gitdir>");
     os.exit(2);
@@ -126,7 +126,7 @@ bytes newline_bytes() {
 // deciding it.
 str gitdir(str path) {
     str inner = fs.join(path, ".git");
-    if (fs.is_dir(inner)) {
+    if (fs.is_directory(inner)) {
         return inner;
     }
     return path;

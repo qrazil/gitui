@@ -54,7 +54,7 @@ import io;
 import os;
 import tui.TUI_diff_view;
 
-List<str> argv = os.args();
+List<str> argv = os.arguments();
 if (argv.size() < 4) {
     io.eprint("usage: t_gitclient_ops <gitdir> <worktree> stage|unstage <path>");
     io.eprint("       t_gitclient_ops <gitdir> <worktree> commit");

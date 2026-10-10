@@ -18,7 +18,7 @@ import os;
 str gitdir = "";
 str worktree = "";
 List<str> rest = [];
-List<str> argv = os.args();
+List<str> argv = os.arguments();
 if (argv.size() < 4) {
     io.eprint("usage: t_stash <gitdir> <worktree> push|list|show|drop|apply|pop|branch ...");
     os.exit(2);
@@ -39,8 +39,8 @@ void fail(GIT_stash.Error error) {
 int number_of(List<str> words) {
     for (str word in words) {
         match (word.parse_int()) {
-            case Some(int n): {
-                return n;
+            case Some(int number): {
+                return number;
             }
             case None: {
             }
@@ -65,7 +65,7 @@ if (command == "push") {
             message = rest[i + 1];
         }
     }
-    match (GIT_stash.push(gitdir, worktree, include_untracked: has_flag(rest, "-u"), keep_index: has_flag(rest, "-k"), message: message)) {
+    match (GIT_stash.push(gitdir, worktree, should_include_untracked: has_flag(rest, "-u"), should_keep_index: has_flag(rest, "-k"), message: message)) {
         case Ok(GIT_stash.Saved saved): {
             print(saved.commit);
         }
@@ -78,7 +78,7 @@ if (command == "push") {
         print(label);
     }
 } else if (command == "show") {
-    match (GIT_stash.show(gitdir, number_of(rest), include_untracked: has_flag(rest, "-u"))) {
+    match (GIT_stash.show(gitdir, number_of(rest), should_include_untracked: has_flag(rest, "-u"))) {
         case Ok(bytes text): {
             io.File out = io.stdout();
             match (out.write(text)) {
@@ -103,12 +103,12 @@ if (command == "push") {
         }
     }
 } else if (command == "apply" || command == "pop") {
-    int n = number_of(rest);
-    bool with_index = has_flag(rest, "--index");
+    int number = number_of(rest);
+    bool should_restore_index = has_flag(rest, "--index");
     if (command == "apply") {
-        match (GIT_stash.resolve(gitdir, n)) {
+        match (GIT_stash.resolve(gitdir, number)) {
             case Ok(str id): {
-                match (GIT_stash.apply(gitdir, worktree, id, restore_index: with_index)) {
+                match (GIT_stash.apply(gitdir, worktree, id, should_restore_index: should_restore_index)) {
                     case Ok(GIT_stash.Applied done): {
                         print("applied " + done.written.to_str() + " " + done.removed.to_str() + " " + done.untracked.to_str());
                     }
@@ -122,7 +122,7 @@ if (command == "push") {
             }
         }
     } else {
-        match (GIT_stash.pop(gitdir, worktree, n, restore_index: with_index)) {
+        match (GIT_stash.pop(gitdir, worktree, number, should_restore_index: should_restore_index)) {
             case Ok(GIT_stash.Applied done): {
                 print("applied " + done.written.to_str() + " " + done.removed.to_str() + " " + done.untracked.to_str());
             }

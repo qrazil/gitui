@@ -97,13 +97,13 @@ pub void MergeLayer.settle_merge_picks() {
 
 /// `git merge [--no-ff | --ff-only] <spec>`: `spec` is a branch, `origin/main`,
 /// a tag or a commit id. The outcome is the status line.
-pub void MergeLayer.start_merge(str spec, GIT_merge.FastForward ff) {
-    GIT_merge.StartOpts opts = GIT_merge.StartOpts(ff: ff, style: GIT_merge.configured_style(gitdir));
+pub void MergeLayer.start_merge(str spec, GIT_merge.FastForward fast_forward) {
+    GIT_merge.StartOpts opts = GIT_merge.StartOpts(ff: fast_forward, style: GIT_merge.configured_style(gitdir));
     str flag = "";
-    if (ff.eq(GIT_merge.FastForward.Never)) {
+    if (fast_forward.eq(GIT_merge.FastForward.Never)) {
         flag = " --no-ff";
     }
-    if (ff.eq(GIT_merge.FastForward.Only)) {
+    if (fast_forward.eq(GIT_merge.FastForward.Only)) {
         flag = " --ff-only";
     }
     match (GIT_merge.start(gitdir, worktree, spec, opts)) {
@@ -193,9 +193,9 @@ pub void MergeLayer.open_resolve(str path) {
 
 /// True once after the editor ran on the file the view shows.
 pub bool MergeLayer.take_dirty() {
-    bool was = is_resolve_dirty;
+    bool was_dirty = is_resolve_dirty;
     is_resolve_dirty = false;
-    return was;
+    return was_dirty;
 }
 
 /// `e` in the view: ask the driver to run `$EDITOR` on `path` once the
@@ -250,7 +250,7 @@ pub void MergeLayer.launch_resolve_editor() {
         return;
     }
     str full = fs.join(worktree, path);
-    bool had_markers = markers_in(full) > 0;
+    bool did_have_markers = markers_in(full) > 0;
     str editor = GIT_ui_model.editor_for(gitdir);
     bool has_run = false;
     match (os.run([editor, full])) {
@@ -273,7 +273,7 @@ pub void MergeLayer.launch_resolve_editor() {
         }
     }
     is_resolve_dirty = true;
-    if (has_run && had_markers && markers_in(full) == 0) {
+    if (has_run && did_have_markers && markers_in(full) == 0) {
         if (stage_resolved(path)) {
             is_resolve_dirty = false;
             pop_overlay();
@@ -291,8 +291,8 @@ str describe(str spec, GIT_merge.Report report) {
     if (report.ending.eq(GIT_merge.Ending.Merged)) {
         return "merged " + spec + ": " + GIT_ui_core.short_id(report.commit);
     }
-    int n = report.conflicts.size();
-    return "merging " + spec + ": " + n.to_str() + " path(s) conflict -- Enter on one to resolve";
+    int conflict_count = report.conflicts.size();
+    return "merging " + spec + ": " + conflict_count.to_str() + " path(s) conflict -- Enter on one to resolve";
 }
 
 // --- the resolution view -----------------------------------------------------------
@@ -416,7 +416,7 @@ bool ResolveOverlay.load() {
             content = found;
         }
         case Err(io.Error error): {
-            if ((host.is_merging || host.is_sequencing) && !fs.exists(full())) {
+            if ((host.is_merging || host.is_sequencing) && !fs.is_present(full())) {
                 content = [];
             } else {
                 host.say("cannot read " + path + ": " + error.to_str());
@@ -431,9 +431,9 @@ bool ResolveOverlay.load() {
 void ResolveOverlay.parse() {
     segments = GIT_diff3.parse_conflicts(content);
     lines = GIT_ui_merge_model.layout(segments);
-    int n = GIT_diff3.count_conflicts(segments);
-    if (current >= n) {
-        current = n - 1;
+    int conflict_count = GIT_diff3.count_conflicts(segments);
+    if (current >= conflict_count) {
+        current = conflict_count - 1;
     }
     if (current < 0) {
         current = 0;
@@ -471,8 +471,8 @@ bool ResolveOverlay.write(bytes next) {
 }
 
 void ResolveOverlay.choose(GIT_diff3.Choice choice, str word) {
-    int n = count();
-    if (n == 0) {
+    int conflict_count = count();
+    if (conflict_count == 0) {
         choose_whole(word);
         return;
     }
@@ -480,10 +480,10 @@ void ResolveOverlay.choose(GIT_diff3.Choice choice, str word) {
         int seen = 0;
         for (GIT_diff3.Segment segment in segments) {
             match (segment) {
-                case Text(bytes _t): {
+                case Text(_): {
                 }
-                case Conflict(GIT_diff3.Conflict c): {
-                    if (seen == current && !c.has_base) {
+                case Conflict(GIT_diff3.Conflict conflict): {
+                    if (seen == current && !conflict.has_base) {
                         host.say("this file has no base text: set merge.conflictstyle=diff3 and merge again");
                         return;
                     }
@@ -555,16 +555,16 @@ void ResolveOverlay.undo() {
 }
 
 void ResolveOverlay.move(int delta) {
-    int n = count();
-    if (n == 0) {
+    int conflict_count = count();
+    if (conflict_count == 0) {
         return;
     }
     current = current + delta;
-    if (current >= n) {
+    if (current >= conflict_count) {
         current = 0;
     }
     if (current < 0) {
-        current = n - 1;
+        current = conflict_count - 1;
     }
     is_following = true;
 }
@@ -640,10 +640,10 @@ pub void ResolveOverlay.render(TUI_buffer.Buffer buffer, TUI_geometry.Rect area)
             history = [];
         }
     }
-    int n = count();
+    int conflict_count = count();
     str title = "resolve " + path;
-    if (n > 0) {
-        title = title + "  (conflict " + (current + 1).to_str() + " of " + n.to_str() + ")";
+    if (conflict_count > 0) {
+        title = title + "  (conflict " + (current + 1).to_str() + " of " + conflict_count.to_str() + ")";
     }
     TUI_geometry.Rect outer = GIT_ui_panel.frame(buffer, area, title);
     if (outer.height < 3) {
@@ -652,7 +652,7 @@ pub void ResolveOverlay.render(TUI_buffer.Buffer buffer, TUI_geometry.Rect area)
     // The panel covers the status line, so the last row repeats the message.
     TUI_geometry.Rect inner = TUI_geometry.Rect(outer.x, outer.y, outer.width, outer.height - 1);
     buffer.set_str(outer.x, outer.y + outer.height - 1, TUI_text.truncate(host.status_line(), outer.width), TUI_style.Style(attrs: TUI_style.DIM), max: outer.width);
-    if (n == 0) {
+    if (conflict_count == 0) {
         List<str> info = ["This path has no conflict markers.", ""];
         match (entry()) {
             case Some(GIT_status.Unmerged each): {

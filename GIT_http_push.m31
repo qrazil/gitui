@@ -62,8 +62,8 @@
 // operating system's roots or the PEM file `GITUI_HTTP_CA_FILE` names, and the
 // credentials only ever travel inside the encrypted connection.
 
-import base64;
-import http;
+import encoding.base64;
+import net.http;
 import GIT_http_fetch;
 import GIT_wire;
 import GIT_hash;

@@ -335,7 +335,7 @@ pub void OutlineLayer.discard_path(str kind, bytes relative_path) {
             }
             case None: {
                 GIT_ui_model.remove_entry(index, relative_path);
-                if (fs.exists(full) || fs.is_link(full)) {
+                if (fs.is_present(full) || fs.is_link(full)) {
                     match (fs.remove(full)) {
                         case Ok: {
                         }
@@ -373,7 +373,7 @@ pub bool OutlineLayer.did_write_worktree(bytes relative_path, int mode, bytes co
     str shown = relative_path.utf8().or("<non-utf8>");
     str full = fs.join(worktree, relative_path.utf8().or(""));
     str directory = GIT_ui_model.directory_of(full);
-    if (directory != "." && !fs.is_dir(directory)) {
+    if (directory != "." && !fs.is_directory(directory)) {
         match (fs.makedirs(directory)) {
             case Ok: {
             }
@@ -384,7 +384,7 @@ pub bool OutlineLayer.did_write_worktree(bytes relative_path, int mode, bytes co
         }
     }
     if (mode == 0o120000) {
-        if (fs.exists(full) || fs.is_link(full)) {
+        if (fs.is_present(full) || fs.is_link(full)) {
             match (fs.remove(full)) {
                 case Ok: {
                 }

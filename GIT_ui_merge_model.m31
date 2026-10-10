@@ -114,17 +114,17 @@ pub type Line {
 pub str display(bytes raw) {
     str shown = raw.utf8().or("<non-utf8 line>");
     List<str> kept = [];
-    for (int c in shown.chars()) {
-        if (c == '\n' || c == '\r') {
+    for (int character in shown.chars()) {
+        if (character == '\n' || character == '\r') {
             continue;
         }
-        if (c == '\t') {
+        if (character == '\t') {
             kept.push(" ");
             kept.push(" ");
             kept.push(" ");
             kept.push(" ");
         } else {
-            kept.push(str.from_chars([c]));
+            kept.push(str.from_chars([character]));
         }
     }
     return kept.join("");
@@ -157,16 +157,16 @@ pub List<Line> layout(List<GIT_diff3.Segment> segments) {
             case Text(bytes text): {
                 push_lines(out, text, LineKind.Plain, -1);
             }
-            case Conflict(GIT_diff3.Conflict c): {
-                push_lines(out, c.start_marker, LineKind.Marker, index);
-                push_lines(out, c.ours, LineKind.Ours, index);
-                if (c.has_base) {
-                    push_lines(out, c.base_marker, LineKind.Marker, index);
-                    push_lines(out, c.base, LineKind.Base, index);
+            case Conflict(GIT_diff3.Conflict conflict): {
+                push_lines(out, conflict.start_marker, LineKind.Marker, index);
+                push_lines(out, conflict.ours, LineKind.Ours, index);
+                if (conflict.has_base) {
+                    push_lines(out, conflict.base_marker, LineKind.Marker, index);
+                    push_lines(out, conflict.base, LineKind.Base, index);
                 }
-                push_lines(out, c.mid_marker, LineKind.Marker, index);
-                push_lines(out, c.theirs, LineKind.Theirs, index);
-                push_lines(out, c.end_marker, LineKind.Marker, index);
+                push_lines(out, conflict.mid_marker, LineKind.Marker, index);
+                push_lines(out, conflict.theirs, LineKind.Theirs, index);
+                push_lines(out, conflict.end_marker, LineKind.Marker, index);
                 index = index + 1;
             }
         }
@@ -186,11 +186,11 @@ pub int first_line_of(List<Line> lines, int index) {
 
 /// How many lines conflict `index` takes in `lines`.
 pub int length_of(List<Line> lines, int index) {
-    int n = 0;
+    int count = 0;
     for (Line line in lines) {
         if (line.conflict == index) {
-            n = n + 1;
+            count = count + 1;
         }
     }
-    return n;
+    return count;
 }
