@@ -278,6 +278,33 @@ if build t_rebase; then
         rb_flow "empty stop, continue" redund "-i main" rb_nothing continue
         rb_flow "empty stop, skip" redund "-i main" rb_nothing skip
         RB_PRE=rb_dirty_k rb_flow "dirty tree refuses a start" topic "main" rb_nothing abort
+
+        cat >"$WORK/rb_set.sh" <<'SH'
+#!/bin/sh
+printf 'new subject\n\nnew body\n' >"$1"
+SH
+        rb_decl() {
+            local r=$WORK/rb_decl_$1 g=$WORK/rb_decl_g
+            rb_twin "$WORK/rb_src" "$g"; rb_twin "$WORK/rb_src" "$r"
+            rb_git -C "$g" checkout -q topic; rb_git -C "$r" checkout -q topic
+            if [ "$4" = two ]; then
+                ( export RB_ED=false SEDSCRIPT="$2"; rb_env; git -C "$g" rebase -i main ) >/dev/null 2>&1
+                ( export RB_ED="sh $WORK/rb_set.sh"; rb_env; git -C "$g" rebase --continue ) >/dev/null 2>&1
+            else
+                ( export RB_ED="sh $WORK/rb_set.sh" SEDSCRIPT="$2"; rb_env; git -C "$g" rebase -i main ) >/dev/null 2>&1
+            fi
+            ( export SEDSCRIPT="$2" DECLINE=1; rb_ours "$r" start -i main ) >"$WORK/rb_decl.out" 2>&1
+            rb_ours "$r" continue -m $'new subject\n\nnew body\n' >>"$WORK/rb_decl.out" 2>&1
+            if [ "$(rb_state "$g")" != "$(rb_state "$r")" ]; then
+                bad "rebase: $3: state differs from git" "$(diff <(rb_state "$g") <(rb_state "$r") | head -20)" "$(head -3 "$WORK/rb_decl.out")"
+            else
+                rb_fsck "$r" "$3" && note "rebase: $3 (the caller supplies the message; state equals git's with the same message)"
+            fi
+        }
+        rb_only "no editor" && {
+            rb_decl reword 's/^pick \(.*\) t2$/reword \1 t2/' "no editor: reword stops, continue -m" one
+            rb_decl squash 's/^pick \(.*\) t2$/squash \1 t2/' "no editor: squash stops, continue -m" two
+        }
     }
 fi
 
