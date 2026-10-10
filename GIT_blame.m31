@@ -32,6 +32,7 @@
 import GIT_object;
 import GIT_pathtree;
 import GIT_refs;
+import GIT_revparse;
 import GIT_xdiff;
 
 pub enum Error {
@@ -39,6 +40,8 @@ pub enum Error {
     Object(GIT_object.Error);
     /// `path` is not a file at `rev`.
     NoSuchPath(str);
+    /// `rev` is not a revision, or not one that names a commit.
+    Rev(GIT_revparse.Error);
 }
 
 pub str Error.to_str() {
@@ -51,6 +54,9 @@ pub str Error.to_str() {
         }
         case NoSuchPath(str path): {
             return "no such path in the revision: " + path;
+        }
+        case Rev(GIT_revparse.Error error): {
+            return error.to_str();
         }
     }
 }
@@ -280,20 +286,12 @@ Result<bool, Error> Engine.process(Suspect suspect) {
 /// Blame `path` as of `rev`.
 pub Result<List<Line>, Error> blame(str gitdir, str rev, str path, Progress progress) {
     str tip = "";
-    match (GIT_refs.rev_parse(gitdir, rev)) {
+    match (GIT_revparse.commit_id(gitdir, rev)) {
         case Ok(str resolved): {
             tip = resolved;
         }
-        case Err(GIT_refs.Error error): {
-            return Result<List<Line>, Error>.Err(Error.Refs(error));
-        }
-    }
-    match (GIT_refs.peel(gitdir, rev, tip)) {
-        case Ok(str peeled): {
-            tip = peeled;
-        }
-        case Err(GIT_refs.Error error): {
-            return Result<List<Line>, Error>.Err(Error.Refs(error));
+        case Err(GIT_revparse.Error error): {
+            return Result<List<Line>, Error>.Err(Error.Rev(error));
         }
     }
     Engine engine = Engine(gitdir, path, []);

@@ -32,6 +32,7 @@ import GIT_object;
 import GIT_rebase;
 import GIT_rebase_todo;
 import GIT_refs;
+import GIT_revparse;
 import GIT_sequencer;
 import GIT_ui_core;
 import GIT_ui_merge;
@@ -178,7 +179,7 @@ pub void RebaseLayer.rebase_from(str spec) {
         return;
     }
     str id = "";
-    match (GIT_refs.rev_parse(gitdir, spec)) {
+    match (GIT_revparse.commit_id(gitdir, spec)) {
         case Ok(str found): {
             id = found;
         }

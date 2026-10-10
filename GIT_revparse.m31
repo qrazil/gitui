@@ -1,0 +1,1992 @@
+// git's revision grammar: a string a person typed becomes an object name.
+//
+//   GIT_revparse.object_id(gitdir, spec)  -> Result<str, Error>        what `git rev-parse --verify` names
+//   GIT_revparse.commit_id(gitdir, spec)  -> Result<str, Error>        the commit (tags peeled)
+//   GIT_revparse.tree_id(gitdir, spec)    -> Result<str, Error>        the tree (tags and commits peeled)
+//   GIT_revparse.rev_lines(gitdir, spec)  -> Result<List<str>, Error>  `git rev-parse <spec>`'s output lines
+//   GIT_revparse.rev_range(gitdir, spec)  -> Result<Revs, Error>       what `git rev-list <spec>` walks
+//   GIT_revparse.is_range(gitdir, spec)   -> Result<bool, Error>       whether `rev_lines` reads it as more than one name
+//
+// The module follows git's own `object-name.c` step for step, because the
+// grammar is a set of special cases whose order is part of its meaning (a
+// branch named `cafe` beats an object beginning `cafe`; `v1^{tree}` is read
+// from the right and `v1:path` from the left). `tests/test_revparse.sh`
+// holds it to real `git rev-parse` over a fixture repository and a fuzzer.
+//
+// --- supported -------------------------------------------------------------------
+//
+//   <40 hex>, <4..39 hex>        an object name, or an abbreviation of exactly one
+//                                (a type filter breaks a tie, as in git)
+//   name                         dwim: `name`, `refs/name`, `refs/tags/name`,
+//                                `refs/heads/name`, `refs/remotes/name`,
+//                                `refs/remotes/name/HEAD`; refs before abbreviations
+//   @                            HEAD
+//   rev^  rev^N  rev^0           parents; `^` is `^1`; `^0` peels to the commit
+//   rev~  rev~N                  N-th first-parent ancestor
+//   rev^{commit|tree|blob|tag}   peel until the type
+//   rev^{}  rev^{object}         peel tags / just check the object is there
+//   rev^{/text}                  youngest commit reachable from rev whose message matches
+//   name@{N}  @{N}               the N-th previous value in the reflog (`@{N}` is
+//                                the current branch's)
+//   name@{TIMESTAMP}             a Unix time of nine digits or more
+//   @{-N}                        the branch checked out N switches ago
+//   name@{upstream} @{u} @{push} the tracking branch (`@{push}` follows git's
+//                                `push.default`, `remote.<n>.push`, `pushRemote`)
+//   <tag>-<n>-g<hex>             `git describe` output (the hex part)
+//   rev:path  rev:               a tree entry of a commit or tree (`rev:` is the root tree)
+//   :path  :N:path  :./path      an index entry at stage N (0 to 3)
+//   :/text  :/!-text  :/!!text   the youngest commit, from HEAD and every ref, whose message matches
+//
+//   `rev_lines` (and `rev_range`) add the forms `rev-parse` itself understands: `A..B`,
+//   `A...B`, `^A`, `A^@`, `A^!` and `A^-N`.
+//
+// The text of `:/` and `^{/}` is a POSIX extended regular expression in git
+// (`regcomp` with `REG_EXTENDED`), matched against the whole message; it is
+// handed to `lib/regex` after a check. Literals, `.`, `[...]` with the POSIX
+// classes, `* + ?`, `{m,n}`, `|`, `( )`, `^` and `$` all work.
+//
+// --- not supported (an error that says so; never a wrong answer) ------------------
+//
+//   @{yesterday}, @{2.days.ago}  dates that are not a Unix time (git's `approxidate`)
+//   @{-N}@{u}                    a branch switch followed by another `@{...}`
+//   \< \> \b \w \d \1..\9        in `:/` patterns: any backslash before a letter or digit,
+//                                a GNU extension or a back-reference (the C libraries differ)
+//   a*+ *a {1                    stacked or leading quantifiers, a stray `{` and `)`
+//   [[=a=]] [[.x.]]              equivalence classes and collating symbols
+//   :../path  rev:../path        a path above the working tree root; `./` works
+//   remote.<n>.push              only fully qualified `refs/...` sources
+//   a commit message that is not UTF-8, in `:/` and `^{/}`: such a commit never matches
+//
+// The module does not use `core.disambiguate`, `core.warnAmbiguousRefs`, notes
+// refs or `GIT_NAMESPACE`.
+//
+// Errors are payload-free (docs/errors-decision.md §4); the spec is the
+// caller's own string, which it already has when it reports.
+
+import fs;
+import io;
+import regex;
+import text;
+import GIT_branches;
+import GIT_config;
+import GIT_graph;
+import GIT_index;
+import GIT_object;
+import GIT_refs;
+import GIT_reflog;
+import GIT_repository;
+
+/// Why a revision did not resolve.
+pub enum Error {
+    /// The text is empty, or one side of a suffix is.
+    Empty;
+    /// Nothing is named that. Also what a refused-by-git ref name comes to.
+    Unknown;
+    /// An abbreviation that more than one object begins with.
+    Ambiguous;
+    /// A suffix that is not in the grammar.
+    Syntax;
+    /// A commit was needed and this peels to something else.
+    NotACommit;
+    /// A tree was needed and this peels to something else.
+    NotATree;
+    /// `^N` beyond the commit's parents, or `~N` past the root.
+    NoSuchParent;
+    /// `^{type}` of an object that never becomes that type.
+    CannotPeel;
+    /// `@{u}`, `@{push}` or `@` on a detached HEAD, or for a branch that does not exist.
+    NotOnBranch;
+    /// `@{u}` for a branch with no upstream configured.
+    NoUpstream;
+    /// The upstream is configured but the remote's fetch refspecs do not store it anywhere.
+    NotTracked;
+    /// `@{push}` has no single answer.
+    NoPush;
+    /// `@{N}` past the start of the reflog.
+    ReflogShort;
+    /// `@{N}` on an empty reflog.
+    ReflogEmpty;
+    /// `rev:path` where the path is not in the tree.
+    NoSuchPath;
+    /// `:path` where the index has no such entry at that stage.
+    NotInIndex;
+    /// `:/text` where no commit matches.
+    NoMatch;
+    /// `:/text` where the text is not a valid pattern.
+    BadPattern;
+    /// `@{...}` with a date that is not a Unix time.
+    UnsupportedDate;
+    /// A pattern feature `lib/regex` has no equivalent for.
+    UnsupportedPattern;
+    /// A relative path that leaves the working tree.
+    UnsupportedPath;
+    /// A `remote.<n>.push` refspec that is not fully qualified.
+    UnsupportedPush;
+    /// An object could not be read.
+    Object;
+    /// A ref, a reflog, the index or the graph could not be read.
+    Io;
+}
+
+/// Whether the module refused because it does not implement the form, not
+/// because the form is wrong: git may well accept it.
+pub bool Error.is_unsupported() {
+    match (this) {
+        case UnsupportedDate: {
+            return true;
+        }
+        case UnsupportedPattern: {
+            return true;
+        }
+        case UnsupportedPath: {
+            return true;
+        }
+        case UnsupportedPush: {
+            return true;
+        }
+        case Empty: {
+            return false;
+        }
+        case Unknown: {
+            return false;
+        }
+        case Ambiguous: {
+            return false;
+        }
+        case Syntax: {
+            return false;
+        }
+        case NotACommit: {
+            return false;
+        }
+        case NotATree: {
+            return false;
+        }
+        case NoSuchParent: {
+            return false;
+        }
+        case CannotPeel: {
+            return false;
+        }
+        case NotOnBranch: {
+            return false;
+        }
+        case NoUpstream: {
+            return false;
+        }
+        case NotTracked: {
+            return false;
+        }
+        case NoPush: {
+            return false;
+        }
+        case ReflogShort: {
+            return false;
+        }
+        case ReflogEmpty: {
+            return false;
+        }
+        case NoSuchPath: {
+            return false;
+        }
+        case NotInIndex: {
+            return false;
+        }
+        case NoMatch: {
+            return false;
+        }
+        case BadPattern: {
+            return false;
+        }
+        case Object: {
+            return false;
+        }
+        case Io: {
+            return false;
+        }
+    }
+}
+
+pub str Error.to_str() {
+    match (this) {
+        case Empty: {
+            return "empty revision";
+        }
+        case Unknown: {
+            return "unknown revision or object name";
+        }
+        case Ambiguous: {
+            return "short object name is ambiguous: more than one object begins with it";
+        }
+        case Syntax: {
+            return "not a revision this understands";
+        }
+        case NotACommit: {
+            return "that is not a commit, and does not peel to one";
+        }
+        case NotATree: {
+            return "that is not a tree, and does not peel to one";
+        }
+        case NoSuchParent: {
+            return "the commit has no such parent or ancestor";
+        }
+        case CannotPeel: {
+            return "the object does not peel to that type";
+        }
+        case NotOnBranch: {
+            return "no such branch, or HEAD does not point to a branch";
+        }
+        case NoUpstream: {
+            return "no upstream configured for that branch";
+        }
+        case NotTracked: {
+            return "the upstream is not stored as a remote-tracking branch by the remote's fetch refspecs";
+        }
+        case NoPush: {
+            return "no single push destination for that branch";
+        }
+        case ReflogShort: {
+            return "the reflog does not go back that far";
+        }
+        case ReflogEmpty: {
+            return "the reflog is empty";
+        }
+        case NoSuchPath: {
+            return "no such path in that tree";
+        }
+        case NotInIndex: {
+            return "no such path in the index, at that stage";
+        }
+        case NoMatch: {
+            return "no commit's message matches";
+        }
+        case BadPattern: {
+            return "not a valid regular expression";
+        }
+        case UnsupportedDate: {
+            return "reflog dates are supported only as a Unix time (nine digits or more), not as text like 'yesterday'";
+        }
+        case UnsupportedPattern: {
+            return "that pattern uses something this cannot translate: a backslash before a letter or digit, a back-reference, stacked quantifiers, a stray brace, an equivalence class or a collating symbol";
+        }
+        case UnsupportedPath: {
+            return "a path above the working tree root is not supported";
+        }
+        case UnsupportedPush: {
+            return "remote.<name>.push with a source that is not a fully qualified ref is not supported";
+        }
+        case Object: {
+            return "the object could not be read";
+        }
+        case Io: {
+            return "a ref, reflog or the index could not be read";
+        }
+    }
+}
+
+/// Whether `rev_lines` reads `spec` as more than one name: `A..B`, `A...B`,
+/// `^A`, `A^@`, `A^!` or `A^-N`. What `cherry-pick` and `revert` ask, to
+/// tell a commit from a range.
+pub Result<bool, Error> is_range(str gitdir, str spec) {
+    if (spec.starts_with("^")) {
+        return Result<bool, Error>.Ok(true);
+    }
+    if (spec == "") {
+        return Result<bool, Error>.Err(Error.Empty);
+    }
+    match (difference(gitdir, spec)?) {
+        case Some(_): {
+            return Result<bool, Error>.Ok(true);
+        }
+        case None: {
+        }
+    }
+    match (shorthand(gitdir, spec)?) {
+        case Some(_): {
+            return Result<bool, Error>.Ok(true);
+        }
+        case None: {
+        }
+    }
+    return Result<bool, Error>.Ok(false);
+}
+
+/// What `git rev-list <spec>` walks: every commit reachable from `include`
+/// and not from `exclude`. Both hold commit names (tags already peeled).
+pub type Revs {
+    pub List<str> include;
+    pub List<str> exclude;
+}
+
+// The disambiguation filters of `get_oid`: what a short name is allowed to be
+// when more than one object begins with it.
+const int F_COMMITTISH = 1;
+const int F_TREEISH = 2;
+const int F_COMMIT = 4;
+
+// --- objects ---------------------------------------------------------------------
+
+Result<GIT_object.Object, Error> load(str gitdir, str id) {
+    match (GIT_object.read(gitdir, id)) {
+        case Ok(GIT_object.Object object): {
+            return Result<GIT_object.Object, Error>.Ok(object);
+        }
+        case Err(_): {
+            return Result<GIT_object.Object, Error>.Err(Error.Object);
+        }
+    }
+}
+
+// `deref_tag`: follow tags until something that is not one.
+Result<GIT_object.Object, Error> deref(str gitdir, str id) {
+    str current = id;
+    int depth = 0;
+    while (depth < 50) {
+        GIT_object.Object object = load(gitdir, current)?;
+        match (object.body) {
+            case Tag(GIT_object.Tag tag): {
+                current = tag.object;
+                depth = depth + 1;
+            }
+            case Blob: {
+                return Result<GIT_object.Object, Error>.Ok(object);
+            }
+            case Tree(_): {
+                return Result<GIT_object.Object, Error>.Ok(object);
+            }
+            case Commit(_): {
+                return Result<GIT_object.Object, Error>.Ok(object);
+            }
+        }
+    }
+    return Result<GIT_object.Object, Error>.Err(Error.CannotPeel);
+}
+
+// A commit, with its name.
+type Peeled {
+    str id;
+    GIT_object.Commit commit;
+}
+
+// `lookup_commit_reference`: tags peeled, then it must be a commit.
+Result<Peeled, Error> lookup_commit(str gitdir, str id) {
+    GIT_object.Object object = deref(gitdir, id)?;
+    match (object.body) {
+        case Commit(GIT_object.Commit commit): {
+            return Result<Peeled, Error>.Ok(Peeled(object.id, commit));
+        }
+        case Blob: {
+            return Result<Peeled, Error>.Err(Error.NotACommit);
+        }
+        case Tree(_): {
+            return Result<Peeled, Error>.Err(Error.NotACommit);
+        }
+        case Tag(_): {
+            return Result<Peeled, Error>.Err(Error.NotACommit);
+        }
+    }
+}
+
+// The tree a tree, a commit or a tag of either names.
+Result<str, Error> tree_of(str gitdir, str id) {
+    GIT_object.Object object = deref(gitdir, id)?;
+    match (object.body) {
+        case Tree(_): {
+            return Result<str, Error>.Ok(object.id);
+        }
+        case Commit(GIT_object.Commit commit): {
+            return Result<str, Error>.Ok(commit.tree);
+        }
+        case Blob: {
+            return Result<str, Error>.Err(Error.NotATree);
+        }
+        case Tag(_): {
+            return Result<str, Error>.Err(Error.NotATree);
+        }
+    }
+}
+
+bool is_null(str id) {
+    for (int i in 0 .. id.size()) {
+        if (id.byte_at(i) != '0') {
+            return false;
+        }
+    }
+    return true;
+}
+
+bool is_hex(str s) {
+    return s.size() > 0 && GIT_object.is_name(s.to_lower());
+}
+
+bool is_digit(int c) {
+    return c >= '0' && c <= '9';
+}
+
+bool is_alnum(int c) {
+    return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z');
+}
+
+// --- abbreviated names -----------------------------------------------------------
+
+// Does the object pass the type filter? A filter-less caller passes everything.
+bool passes(str gitdir, str id, int flags) {
+    match (deref(gitdir, id)) {
+        case Ok(GIT_object.Object peeled): {
+            match (load(gitdir, id)) {
+                case Ok(GIT_object.Object object): {
+                    if ((flags & F_COMMIT) != 0) {
+                        return object.kind() == "commit";
+                    }
+                    if ((flags & F_COMMITTISH) != 0) {
+                        return peeled.kind() == "commit";
+                    }
+                    if ((flags & F_TREEISH) != 0) {
+                        return peeled.kind() == "commit" || peeled.kind() == "tree";
+                    }
+                    return true;
+                }
+                case Err(_): {
+                    return false;
+                }
+            }
+        }
+        case Err(_): {
+            return false;
+        }
+    }
+}
+
+// `get_short_oid`: one object, or the one that passes the filter, or an error.
+Result<str, Error> short_oid(str gitdir, str prefix, int flags) {
+    List<str> hits = GIT_object.matching(gitdir, prefix);
+    if (hits.size() == 0) {
+        return Result<str, Error>.Err(Error.Unknown);
+    }
+    if (hits.size() == 1) {
+        return Result<str, Error>.Ok(hits[0]);
+    }
+    if (flags == 0) {
+        return Result<str, Error>.Err(Error.Ambiguous);
+    }
+    List<str> fit = [];
+    for (str id in hits) {
+        if (passes(gitdir, id, flags)) {
+            fit.push(id);
+        }
+    }
+    if (fit.size() == 1) {
+        return Result<str, Error>.Ok(fit[0]);
+    }
+    return Result<str, Error>.Err(Error.Ambiguous);
+}
+
+bool is_hex_char(int ch) {
+    return (ch >= '0' && ch <= '9') || (ch >= 'a' && ch <= 'f') || (ch >= 'A' && ch <= 'F');
+}
+
+// `ref_and_count_parts_valid`: `name` (the text before the `-g`) is a
+// well-formed ref name, a dash, and at least one hex digit.
+bool ref_and_count_valid(str name) {
+    int len = name.size();
+    if (len == 0 || !is_hex_char(name.byte_at(len - 1))) {
+        return false;
+    }
+    int at = len - 2;
+    while (at > 0) {
+        int ch = name.byte_at(at);
+        if (ch == '-') {
+            break;
+        }
+        if (!is_hex_char(ch)) {
+            return false;
+        }
+        at = at - 1;
+    }
+    if (name.byte_at(at) != '-') {
+        return false;
+    }
+    return refname_ok(name.substr(0, at));
+}
+
+// `<tag>-<n>-g<hex>`: scanning from the right, a `g` that follows a `-` and
+// a well-formed `<tag>-<n>` starts the abbreviation. git does not stop at
+// other non-hex characters, and keeps looking left when the head is no good.
+Result<str, Error> describe(str gitdir, str name, int flags) {
+    int at = name.size() - 1;
+    while (at >= 2) {
+        int ch = name.byte_at(at);
+        if (!is_hex_char(ch) && ch == 'g' && name.byte_at(at - 1) == '-' && ref_and_count_valid(name.substr(0, at - 1))) {
+            return short_oid(gitdir, name.substr(at + 1, name.size()), F_COMMIT);
+        }
+        at = at - 1;
+    }
+    return Result<str, Error>.Err(Error.Unknown);
+}
+
+// --- ref names -------------------------------------------------------------------
+
+// `check_refname_format` with one-level names allowed.
+bool refname_ok(str name) {
+    if (name.size() == 0 || name == "@" || name.starts_with("/") || name.ends_with("/") || name.ends_with(".")) {
+        return false;
+    }
+    if (name.contains("..") || name.contains("@{") || name.contains("//")) {
+        return false;
+    }
+    for (int i in 0 .. name.size()) {
+        int c = name.byte_at(i);
+        if (c < 32 || c == 127 || c == ' ' || c == '~' || c == '^' || c == ':' || c == '?' || c == '*' || c == '[' || c == '\\') {
+            return false;
+        }
+    }
+    for (str part in name.split("/")) {
+        if (part.starts_with(".") || part.ends_with(".lock")) {
+            return false;
+        }
+    }
+    return true;
+}
+
+// `ambiguous_path`: a name git will not even look up as a ref -- empty
+// components, a leading or trailing slash, a component of nothing but dots.
+bool ambiguous_path(str path) {
+    bool slash = true;
+    for (int i in 0 .. path.size()) {
+        int c = path.byte_at(i);
+        if (c == '/') {
+            if (slash) {
+                return true;
+            }
+            slash = true;
+        } else if (c != '.') {
+            slash = false;
+        }
+    }
+    return slash;
+}
+
+// A ref `dwim_ref` or `dwim_log` found: its name (the end of a symbolic
+// chain) and what it holds.
+type Found {
+    str name;
+    str id;
+}
+
+List<str> dwim_rules(str name) {
+    return [name, "refs/" + name, "refs/tags/" + name, "refs/heads/" + name, "refs/remotes/" + name, "refs/remotes/" + name + "/HEAD"];
+}
+
+// `repo_dwim_ref`: the first of the six places that holds a ref.
+Option<Found> dwim_ref(str gitdir, str name) {
+    str target = name;
+    if (name == "@") {
+        target = "HEAD";
+    }
+    for (str candidate in dwim_rules(target)) {
+        if (!refname_ok(candidate)) {
+            continue;
+        }
+        match (GIT_refs.resolve(gitdir, candidate)) {
+            case Ok(str id): {
+                match (GIT_refs.resolve_name(gitdir, candidate)) {
+                    case Ok(str real): {
+                        return Option<Found>.Some(Found(real, id));
+                    }
+                    case Err(_): {
+                        return Option<Found>.Some(Found(candidate, id));
+                    }
+                }
+            }
+            case Err(_): {
+            }
+        }
+    }
+    return Option<Found>.None;
+}
+
+// `repo_dwim_log`: the first of the six places that holds a ref that has a
+// reflog -- its own, or its symbolic target's. `Found.name` is the log's ref.
+Option<Found> dwim_log(str gitdir, str name) {
+    for (str candidate in dwim_rules(name)) {
+        if (!refname_ok(candidate)) {
+            continue;
+        }
+        match (GIT_refs.resolve(gitdir, candidate)) {
+            case Ok(str id): {
+                if (GIT_reflog.exists(gitdir, candidate)) {
+                    return Option<Found>.Some(Found(candidate, id));
+                }
+                match (GIT_refs.resolve_name(gitdir, candidate)) {
+                    case Ok(str real): {
+                        if (real != candidate && GIT_reflog.exists(gitdir, real)) {
+                            return Option<Found>.Some(Found(real, id));
+                        }
+                    }
+                    case Err(_): {
+                    }
+                }
+            }
+            case Err(_): {
+            }
+        }
+    }
+    return Option<Found>.None;
+}
+
+// --- reflogs ---------------------------------------------------------------------
+
+// `@{-N}`: where HEAD was N checkouts ago -- a branch name, or a full object
+// name for a detached HEAD. `None` when there have not been N switches.
+Option<str> nth_prior(str gitdir, int nth) {
+    match (GIT_reflog.read(gitdir, "HEAD")) {
+        case Ok(List<GIT_reflog.Entry> entries): {
+            int remaining = nth;
+            int i = entries.size() - 1;
+            while (i >= 0) {
+                str message = entries[i].message;
+                i = i - 1;
+                if (!message.starts_with("checkout: moving from ")) {
+                    continue;
+                }
+                str rest = message.substr(22, message.size());
+                match (rest.index_of(" to ")) {
+                    case Some(int to): {
+                        remaining = remaining - 1;
+                        if (remaining == 0) {
+                            return Option<str>.Some(rest.substr(0, to));
+                        }
+                    }
+                    case None: {
+                    }
+                }
+            }
+        }
+        case Err(_): {
+        }
+    }
+    return Option<str>.None;
+}
+
+// `read_ref_at`: the value `log_ref` had `nth` changes ago (when `nth` is not
+// negative), or at the Unix time `at_time`.
+// `current` is what the ref holds now: git leaves it as the answer when a
+// time is newer than the whole log.
+Result<str, Error> read_ref_at(str gitdir, str log_ref, str current, int at_time, int nth) {
+    List<GIT_reflog.Entry> entries = [];
+    match (GIT_reflog.read(gitdir, log_ref)) {
+        case Ok(List<GIT_reflog.Entry> found): {
+            entries = found;
+        }
+        case Err(_): {
+            return Result<str, Error>.Err(Error.Io);
+        }
+    }
+    int size = entries.size();
+    if (size == 0) {
+        return Result<str, Error>.Err(Error.ReflogEmpty);
+    }
+    if (nth >= 0) {
+        if (nth < size) {
+            return Result<str, Error>.Ok(entries[size - 1 - nth].new);
+        }
+        if (nth == size && !is_null(entries[0].old)) {
+            return Result<str, Error>.Ok(entries[0].old);
+        }
+        return Result<str, Error>.Err(Error.ReflogShort);
+    }
+    int i = size - 1;
+    while (i >= 0) {
+        if (entries[i].when <= at_time) {
+            // The first entry looked at has no newer neighbour to say what
+            // came after it; git then trusts the ref itself unless the time
+            // is exactly that of the entry.
+            if (i == size - 1 && entries[i].when != at_time) {
+                return Result<str, Error>.Ok(current);
+            }
+            return Result<str, Error>.Ok(entries[i].new);
+        }
+        i = i - 1;
+    }
+    if (!is_null(entries[0].old)) {
+        return Result<str, Error>.Ok(entries[0].old);
+    }
+    return Result<str, Error>.Ok(entries[0].new);
+}
+
+// --- @{upstream} and @{push} -----------------------------------------------------
+
+// The branch an `@{u}`/`@{push}` is about: the text before it, `HEAD` or
+// nothing for the current branch. It has to exist.
+Result<str, Error> branch_for(str gitdir, str text_before) {
+    if (text_before == "" || text_before == "HEAD") {
+        match (GIT_refs.head(gitdir)) {
+            case Ok(GIT_refs.Head head): {
+                match (head) {
+                    case Detached(_): {
+                        return Result<str, Error>.Err(Error.NotOnBranch);
+                    }
+                    case Born(str ref, _): {
+                        return Result<str, Error>.Ok(text.strip_prefix(ref, "refs/heads/"));
+                    }
+                    case Unborn(str ref): {
+                        return Result<str, Error>.Ok(text.strip_prefix(ref, "refs/heads/"));
+                    }
+                }
+            }
+            case Err(_): {
+                return Result<str, Error>.Err(Error.Io);
+            }
+        }
+    }
+    if (text_before.starts_with("@{")) {
+        return Result<str, Error>.Err(Error.UnsupportedDate);
+    }
+    if (!GIT_refs.has_ref(gitdir, "refs/heads/" + text_before)) {
+        return Result<str, Error>.Err(Error.NotOnBranch);
+    }
+    return Result<str, Error>.Ok(text_before);
+}
+
+// Where the remote's fetch refspecs store `remote_ref`, or `""`.
+str tracking_for(GIT_config.Config config, str remote, str remote_ref) {
+    if (remote == ".") {
+        return remote_ref;
+    }
+    return GIT_branches.map_through_fetch(config.get_all("remote", remote, "fetch"), remote_ref);
+}
+
+// `branch_get_upstream`: the remote-tracking ref a branch's upstream is kept in.
+Result<str, Error> upstream_ref(str gitdir, GIT_config.Config config, str branch) {
+    Option<str> remote = config.get("branch", branch, "remote");
+    Option<str> merge = config.get("branch", branch, "merge");
+    if (!remote.is_some() || !merge.is_some()) {
+        return Result<str, Error>.Err(Error.NoUpstream);
+    }
+    str kept = tracking_for(config, remote.or(""), merge.or(""));
+    if (kept == "") {
+        return Result<str, Error>.Err(Error.NotTracked);
+    }
+    return Result<str, Error>.Ok(kept);
+}
+
+// `apply_refspecs` over `remote.<n>.push`: where `refname` is pushed to.
+Result<str, Error> push_destination(List<str> specs, str refname) {
+    for (str raw in specs) {
+        str spec = raw;
+        if (spec.starts_with("+")) {
+            spec = spec.substr(1, spec.size());
+        }
+        if (spec.starts_with("^")) {
+            continue;
+        }
+        if (!spec.contains(":")) {
+            spec = spec + ":" + spec;
+        }
+        if (!spec.starts_with("refs/") && !spec.starts_with("*")) {
+            return Result<str, Error>.Err(Error.UnsupportedPush);
+        }
+        str dst = GIT_branches.map_through_fetch([spec], refname);
+        if (dst != "") {
+            return Result<str, Error>.Ok(dst);
+        }
+    }
+    return Result<str, Error>.Err(Error.NoPush);
+}
+
+// `branch_get_push`: the remote-tracking ref that pushing `branch` updates.
+Result<str, Error> push_ref(str gitdir, GIT_config.Config config, str branch) {
+    str refname = "refs/heads/" + branch;
+    str remote = config.get("branch", branch, "pushremote").or(config.get("remote", "", "pushdefault").or(config.get("branch", branch, "remote").or("origin")));
+    List<str> specs = config.get_all("remote", remote, "push");
+    if (specs.size() > 0) {
+        str dst = push_destination(specs, refname)?;
+        str kept = tracking_for(config, remote, dst);
+        if (kept == "") {
+            return Result<str, Error>.Err(Error.NoPush);
+        }
+        return Result<str, Error>.Ok(kept);
+    }
+    str direct = tracking_for(config, remote, refname);
+    if (config.get_bool("remote", remote, "mirror").or(false)) {
+        if (direct == "") {
+            return Result<str, Error>.Err(Error.NoPush);
+        }
+        return Result<str, Error>.Ok(direct);
+    }
+    str mode = GIT_config.push_default(gitdir);
+    if (mode == "nothing") {
+        return Result<str, Error>.Err(Error.NoPush);
+    }
+    if (mode == "upstream") {
+        return upstream_ref(gitdir, config, branch);
+    }
+    if (direct == "") {
+        return Result<str, Error>.Err(Error.NoPush);
+    }
+    if (mode == "simple") {
+        str up = upstream_ref(gitdir, config, branch)?;
+        if (up != direct) {
+            return Result<str, Error>.Err(Error.NoPush);
+        }
+    }
+    return Result<str, Error>.Ok(direct);
+}
+
+// `substitute_branch_name`: a name ending in `@{u}`, `@{upstream}` or
+// `@{push}` becomes the tracking ref it stands for; anything else is as it was.
+Result<str, Error> substitute(str gitdir, str name) {
+    str lower = name.to_lower();
+    List<str> marks = ["@{upstream}", "@{u}", "@{push}"];
+    for (str mark in marks) {
+        if (lower.ends_with(mark)) {
+            str branch = branch_for(gitdir, name.substr(0, name.size() - mark.size()))?;
+            GIT_config.Config config = GIT_config.effective(gitdir);
+            if (mark == "@{push}") {
+                return push_ref(gitdir, config, branch);
+            }
+            return upstream_ref(gitdir, config, branch);
+        }
+    }
+    return Result<str, Error>.Ok(name);
+}
+
+// --- one name, without a suffix chain ---------------------------------------------
+
+// `get_oid_basic`: a full object name, or a ref (with an `@{...}` suffix).
+Result<str, Error> basic(str gitdir, str name, int flags) {
+    int n = name.size();
+    if (n == GIT_object.hex_len(gitdir) && is_hex(name)) {
+        return Result<str, Error>.Ok(name.to_lower());
+    }
+    int len = n;
+    int reflog_len = 0;
+    bool log_spec = false;
+    int at = 0;
+    bool prior = false;
+    if (n > 0 && name.byte_at(n - 1) == '}') {
+        at = n - 4;
+        while (at >= 0) {
+            if (name.byte_at(at) == '@' && name.byte_at(at + 1) == '{') {
+                if (name.byte_at(at + 2) == '-') {
+                    if (at != 0) {
+                        return Result<str, Error>.Err(Error.Syntax);
+                    }
+                    prior = true;
+                    at = at - 1;
+                    continue;
+                }
+                str tail = name.substr(at, n).to_lower();
+                if (tail != "@{upstream}" && tail != "@{u}" && tail != "@{push}") {
+                    reflog_len = (n - 1) - (at + 2);
+                    log_spec = true;
+                    len = at;
+                }
+                break;
+            }
+            at = at - 1;
+        }
+    }
+    str base = name.substr(0, len);
+    if (len > 0 && ambiguous_path(base)) {
+        return Result<str, Error>.Err(Error.Unknown);
+    }
+    if (prior) {
+        // git reads up to the first `}` and ignores what follows when the
+        // branch switch was to a detached HEAD.
+        int brace = name.index_of("}").or(n - 1);
+        str number = name.substr(3, brace);
+        if (number == "" || !is_all_digits(number) || number.size() > 9) {
+            return Result<str, Error>.Err(Error.Syntax);
+        }
+        int nth = number.parse_int().or(0);
+        if (nth <= 0) {
+            return Result<str, Error>.Err(Error.Syntax);
+        }
+        match (nth_prior(gitdir, nth)) {
+            case Some(str was): {
+                if (was.size() == GIT_object.hex_len(gitdir) && is_hex(was)) {
+                    return Result<str, Error>.Ok(was.to_lower());
+                }
+                if (brace != n - 1) {
+                    return Result<str, Error>.Err(Error.Unknown);
+                }
+                return resolve_ref_name(gitdir, was);
+            }
+            case None: {
+                return Result<str, Error>.Err(Error.ReflogShort);
+            }
+        }
+    }
+    if (log_spec && reflog_len == 0) {
+        return Result<str, Error>.Err(Error.Unknown);
+    }
+    if (reflog_len > 0) {
+        Option<Found> source = Option<Found>.None;
+        if (len == 0) {
+            source = dwim_ref(gitdir, "HEAD");
+        } else {
+            source = dwim_log(gitdir, base);
+        }
+        match (source) {
+            case Some(Found found): {
+                str spec = name.substr(at + 2, n - 1);
+                int nth = -1;
+                int at_time = 0;
+                if (is_all_digits(spec)) {
+                    if (spec.size() > 17) {
+                        return Result<str, Error>.Err(Error.ReflogShort);
+                    }
+                    int value = spec.parse_int().or(0);
+                    if (value >= 100000000) {
+                        at_time = value;
+                    } else {
+                        nth = value;
+                    }
+                } else {
+                    return Result<str, Error>.Err(Error.UnsupportedDate);
+                }
+                return read_ref_at(gitdir, found.name, found.id, at_time, nth);
+            }
+            case None: {
+                return Result<str, Error>.Err(Error.Unknown);
+            }
+        }
+    }
+    return resolve_ref_name(gitdir, name);
+}
+
+bool is_all_digits(str s) {
+    if (s.size() == 0) {
+        return false;
+    }
+    for (int i in 0 .. s.size()) {
+        if (!is_digit(s.byte_at(i))) {
+            return false;
+        }
+    }
+    return true;
+}
+
+// `repo_dwim_ref` with branch substitution.
+Result<str, Error> resolve_ref_name(str gitdir, str name) {
+    str expanded = substitute(gitdir, name)?;
+    match (dwim_ref(gitdir, expanded)) {
+        case Some(Found found): {
+            return Result<str, Error>.Ok(found.id);
+        }
+        case None: {
+            return Result<str, Error>.Err(Error.Unknown);
+        }
+    }
+}
+
+// --- one name with a suffix chain ---------------------------------------------------
+
+// `peel_onion`: `<rev>^{<type>}`, read from the right. `Ok(None)` when the
+// name is not of that form, so the caller goes on to try it as something else.
+Result<Option<str>, Error> peel_onion(str gitdir, str name) {
+    int len = name.size();
+    if (len < 4 || name.byte_at(len - 1) != '}') {
+        return Result<Option<str>, Error>.Ok(Option<str>.None);
+    }
+    int sp = len - 1;
+    while (sp >= 1) {
+        if (name.byte_at(sp) == '{' && name.byte_at(sp - 1) == '^') {
+            break;
+        }
+        sp = sp - 1;
+    }
+    if (sp < 1) {
+        return Result<Option<str>, Error>.Ok(Option<str>.None);
+    }
+    str tail = name.substr(sp + 1, len);
+    int flags = 0;
+    if (tail == "commit}" || tail.starts_with("/")) {
+        flags = F_COMMITTISH;
+    } else if (tail == "tree}") {
+        flags = F_TREEISH;
+    } else if (tail != "tag}" && tail != "blob}" && tail != "object}" && tail != "}") {
+        return Result<Option<str>, Error>.Ok(Option<str>.None);
+    }
+    str outer = one(gitdir, name.substr(0, sp - 1), flags)?;
+    GIT_object.Object first = load(gitdir, outer)?;
+    if (tail == "}") {
+        GIT_object.Object peeled = deref(gitdir, outer)?;
+        return Result<Option<str>, Error>.Ok(Option<str>.Some(peeled.id));
+    }
+    if (tail == "object}") {
+        return Result<Option<str>, Error>.Ok(Option<str>.Some(first.id));
+    }
+    str want = "commit";
+    if (tail == "tag}") {
+        want = "tag";
+    } else if (tail == "tree}") {
+        want = "tree";
+    } else if (tail == "blob}") {
+        want = "blob";
+    }
+    GIT_object.Object found = peel_to(gitdir, first, want)?;
+    if (tail.starts_with("/")) {
+        List<Cand> list = [];
+        match (found.body) {
+            case Commit(GIT_object.Commit commit): {
+                list.push(Cand(found.id, commit.committer.when));
+            }
+            case Blob: {
+            }
+            case Tree(_): {
+            }
+            case Tag(_): {
+            }
+        }
+        str hit = oneline(gitdir, name.substr(sp + 2, len - 1), list)?;
+        return Result<Option<str>, Error>.Ok(Option<str>.Some(hit));
+    }
+    return Result<Option<str>, Error>.Ok(Option<str>.Some(found.id));
+}
+
+// `repo_peel_to_type`: step through tags, and from a commit to its tree,
+// until the type wanted. Anything else on the way is a failure.
+Result<GIT_object.Object, Error> peel_to(str gitdir, GIT_object.Object start, str want) {
+    GIT_object.Object current = start;
+    int depth = 0;
+    while (depth < 60) {
+        if (current.kind() == want) {
+            return Result<GIT_object.Object, Error>.Ok(current);
+        }
+        match (current.body) {
+            case Tag(GIT_object.Tag tag): {
+                current = load(gitdir, tag.object)?;
+            }
+            case Commit(GIT_object.Commit commit): {
+                current = load(gitdir, commit.tree)?;
+            }
+            case Blob: {
+                return Result<GIT_object.Object, Error>.Err(Error.CannotPeel);
+            }
+            case Tree(_): {
+                return Result<GIT_object.Object, Error>.Err(Error.CannotPeel);
+            }
+        }
+        depth = depth + 1;
+    }
+    return Result<GIT_object.Object, Error>.Err(Error.CannotPeel);
+}
+
+// `get_oid_1`: a name, then the `~` and `^` suffixes, then `^{...}`, then a
+// ref, then describe output, then an abbreviation -- the order matters.
+Result<str, Error> one(str gitdir, str name, int flags) {
+    int len = name.size();
+    if (len == 0) {
+        return Result<str, Error>.Err(Error.Empty);
+    }
+    int cp = len - 1;
+    int suffix = 0;
+    while (cp >= 0) {
+        int ch = name.byte_at(cp);
+        if (is_digit(ch)) {
+            cp = cp - 1;
+            continue;
+        }
+        if (ch == '~' || ch == '^') {
+            suffix = ch;
+        }
+        break;
+    }
+    if (suffix != 0) {
+        str digits = name.substr(cp + 1, len);
+        if (digits.size() > 9) {
+            return Result<str, Error>.Err(Error.NoSuchParent);
+        }
+        int num = 1;
+        if (digits.size() > 0) {
+            num = digits.parse_int().or(0);
+        }
+        str inner = one(gitdir, name.substr(0, cp), F_COMMITTISH)?;
+        Peeled start = lookup_commit(gitdir, inner)?;
+        if (suffix == '^') {
+            if (num == 0) {
+                return Result<str, Error>.Ok(start.id);
+            }
+            if (num > start.commit.parents.size()) {
+                return Result<str, Error>.Err(Error.NoSuchParent);
+            }
+            return Result<str, Error>.Ok(start.commit.parents[num - 1]);
+        }
+        Peeled current = start;
+        for (int step in 0 .. num) {
+            if (current.commit.parents.size() == 0) {
+                return Result<str, Error>.Err(Error.NoSuchParent);
+            }
+            current = lookup_commit(gitdir, current.commit.parents[0])?;
+        }
+        return Result<str, Error>.Ok(current.id);
+    }
+    // A failed `^{...}` does not end it: git goes on to read the whole name
+    // as a ref, where `master@{1}^{blob}` is a (sloppy) reflog date.
+    Option<Error> peel_failure = Option<Error>.None;
+    match (peel_onion(gitdir, name)) {
+        case Ok(Option<str> peeled): {
+            match (peeled) {
+                case Some(str id): {
+                    return Result<str, Error>.Ok(id);
+                }
+                case None: {
+                }
+            }
+        }
+        case Err(Error why): {
+            peel_failure = Option<Error>.Some(why);
+        }
+    }
+    Error failure = Error.Unknown;
+    match (basic(gitdir, name, flags)) {
+        case Ok(str id): {
+            return Result<str, Error>.Ok(id);
+        }
+        case Err(Error why): {
+            failure = why;
+            if (!why.is_unsupported()) {
+                failure = peel_failure.or(why);
+            }
+        }
+    }
+    match (describe(gitdir, name, flags)) {
+        case Ok(str id): {
+            return Result<str, Error>.Ok(id);
+        }
+        case Err(_): {
+        }
+    }
+    if (name.size() >= 4 && is_hex(name)) {
+        match (short_oid(gitdir, name, flags)) {
+            case Ok(str id): {
+                return Result<str, Error>.Ok(id);
+            }
+            case Err(_): {
+                if (GIT_object.matching(gitdir, name).size() > 1) {
+                    failure = Error.Ambiguous;
+                }
+            }
+        }
+    }
+    return Result<str, Error>.Err(failure);
+}
+
+// --- :/text and ^{/text} ---------------------------------------------------------------
+
+// A commit waiting to be looked at, with the date git orders them by.
+type Cand {
+    str id;
+    int when;
+}
+
+int Cand.cmp(Cand other) {
+    if (when > other.when) {
+        return -1;
+    }
+    if (when < other.when) {
+        return 1;
+    }
+    return 0;
+}
+
+// The commit an object name stands for, if it is one or peels to one.
+Option<Cand> as_cand(str gitdir, str id) {
+    match (deref(gitdir, id)) {
+        case Ok(GIT_object.Object object): {
+            match (object.body) {
+                case Commit(GIT_object.Commit commit): {
+                    return Option<Cand>.Some(Cand(object.id, commit.committer.when));
+                }
+                case Blob: {
+                    return Option<Cand>.None;
+                }
+                case Tree(_): {
+                    return Option<Cand>.None;
+                }
+                case Tag(_): {
+                    return Option<Cand>.None;
+                }
+            }
+        }
+        case Err(_): {
+            return Option<Cand>.None;
+        }
+    }
+}
+
+// `:/text` starts from HEAD and every ref. git inserts each at the head of a
+// list -- every ref in name order, then HEAD -- and then sorts by date with a
+// stable sort, so among equal dates HEAD comes first and the refs come in
+// reverse name order.
+Result<List<Cand>, Error> start_all(str gitdir) {
+    List<Cand> list = [];
+    match (GIT_refs.resolve(gitdir, "HEAD")) {
+        case Ok(str id): {
+            match (as_cand(gitdir, id)) {
+                case Some(Cand cand): {
+                    list.push(cand);
+                }
+                case None: {
+                }
+            }
+        }
+        case Err(_): {
+        }
+    }
+    List<GIT_refs.Ref> refs = [];
+    match (GIT_refs.all(gitdir)) {
+        case Ok(List<GIT_refs.Ref> found): {
+            refs = found;
+        }
+        case Err(_): {
+            return Result<List<Cand>, Error>.Err(Error.Io);
+        }
+    }
+    int at = refs.size() - 1;
+    while (at >= 0) {
+        match (as_cand(gitdir, refs[at].id)) {
+            case Some(Cand cand): {
+                list.push(cand);
+            }
+            case None: {
+            }
+        }
+        at = at - 1;
+    }
+    list.sort();
+    return Result<List<Cand>, Error>.Ok(list);
+}
+
+Result<regex.Regex, Error> compile_pattern(str pattern) {
+    match (regex.compile(pattern)) {
+        case Ok(regex.Regex compiled): {
+            return Result<regex.Regex, Error>.Ok(compiled);
+        }
+        case Err(_): {
+            return Result<regex.Regex, Error>.Err(Error.BadPattern);
+        }
+    }
+}
+
+// `get_oid_oneline`: walk from `start` (newest first, parents joining in date
+// order) and take the first commit whose message matches.
+Result<str, Error> oneline(str gitdir, str pattern, List<Cand> start) {
+    if (start.size() == 0) {
+        return Result<str, Error>.Err(Error.NoMatch);
+    }
+    bool negate = false;
+    str body = pattern;
+    if (body.starts_with("!")) {
+        if (body.starts_with("!!")) {
+            body = body.substr(1, body.size());
+        } else if (body.starts_with("!-")) {
+            negate = true;
+            body = body.substr(2, body.size());
+        } else {
+            return Result<str, Error>.Err(Error.Syntax);
+        }
+    }
+    str translated = ere_translate(body)?;
+    regex.Regex re = compile_pattern(translated)?;
+    Map<str, bool> seen = {};
+    List<Cand> queue = [];
+    for (Cand cand in start) {
+        seen.set(cand.id, true);
+        queue.push(cand);
+    }
+    int head = 0;
+    while (head < queue.size()) {
+        Cand current = queue[head];
+        head = head + 1;
+        Peeled loaded = lookup_commit(gitdir, current.id)?;
+        for (str parent in loaded.commit.parents) {
+            if (seen.contains(parent)) {
+                continue;
+            }
+            seen.set(parent, true);
+            match (as_cand(gitdir, parent)) {
+                case Some(Cand cand): {
+                    int place = head;
+                    while (place < queue.size() && queue[place].when >= cand.when) {
+                        place = place + 1;
+                    }
+                    queue.insert(place, cand);
+                }
+                case None: {
+                }
+            }
+        }
+        bool found = false;
+        match (loaded.commit.message.utf8()) {
+            case Some(str message): {
+                found = re.is_match(message);
+            }
+            case None: {
+            }
+        }
+        if (found != negate) {
+            return Result<str, Error>.Ok(current.id);
+        }
+    }
+    return Result<str, Error>.Err(Error.NoMatch);
+}
+
+// --- POSIX extended regular expressions, for lib/regex -------------------------------
+
+void put_char(List<int> out, int c) {
+    out.push(c);
+}
+
+// A literal character, escaped for lib/regex.
+void put_literal(List<int> out, int c) {
+    if (c < 128 && c > 32 && c != 127 && !is_alnum(c)) {
+        out.push('\\');
+    }
+    out.push(c);
+}
+
+// One character inside `[...]`.
+void put_member(List<int> out, int c) {
+    if (c == '\n') {
+        out.push('\\');
+        out.push('n');
+    } else if (c == '\t') {
+        out.push('\\');
+        out.push('t');
+    } else if (c == '\r') {
+        out.push('\\');
+        out.push('r');
+    } else {
+        put_literal(out, c);
+    }
+}
+
+// The ASCII ranges of a POSIX class, appended as (low, high) pairs.
+bool class_ranges(str name, List<int> lows, List<int> highs) {
+    List<int> flat = [];
+    if (name == "alpha") {
+        flat = ['A', 'Z', 'a', 'z'];
+    } else if (name == "digit") {
+        flat = ['0', '9'];
+    } else if (name == "alnum") {
+        flat = ['0', '9', 'A', 'Z', 'a', 'z'];
+    } else if (name == "upper") {
+        flat = ['A', 'Z'];
+    } else if (name == "lower") {
+        flat = ['a', 'z'];
+    } else if (name == "space") {
+        flat = [9, 13, 32, 32];
+    } else if (name == "blank") {
+        flat = [9, 9, 32, 32];
+    } else if (name == "punct") {
+        flat = [33, 47, 58, 64, 91, 96, 123, 126];
+    } else if (name == "xdigit") {
+        flat = ['0', '9', 'A', 'F', 'a', 'f'];
+    } else if (name == "print") {
+        flat = [32, 126];
+    } else if (name == "graph") {
+        flat = [33, 126];
+    } else if (name == "cntrl") {
+        flat = [0, 31, 127, 127];
+    } else {
+        return false;
+    }
+    int k = 0;
+    while (k < flat.size()) {
+        lows.push(flat[k]);
+        highs.push(flat[k + 1]);
+        k = k + 2;
+    }
+    return true;
+}
+
+// A bracket expression starting at `open`; the translation is appended to
+// `out` and the index just past the closing `]` comes back.
+Result<int, Error> bracket(List<int> src, int open, List<int> out) {
+    int n = src.size();
+    int i = open + 1;
+    bool negate = false;
+    if (i < n && src[i] == '^') {
+        negate = true;
+        i = i + 1;
+    }
+    List<int> lows = [];
+    List<int> highs = [];
+    bool first = true;
+    while (true) {
+        if (i >= n) {
+            return Result<int, Error>.Err(Error.BadPattern);
+        }
+        int c = src[i];
+        if (c == ']' && !first) {
+            i = i + 1;
+            break;
+        }
+        first = false;
+        if (c == '[' && i + 1 < n) {
+            int k = src[i + 1];
+            if (k == '=' || k == '.') {
+                return Result<int, Error>.Err(Error.UnsupportedPattern);
+            }
+            if (k == ':') {
+                int j = i + 2;
+                while (j + 1 < n && !(src[j] == ':' && src[j + 1] == ']')) {
+                    j = j + 1;
+                }
+                if (j + 1 >= n) {
+                    return Result<int, Error>.Err(Error.BadPattern);
+                }
+                if (!class_ranges(str.from_chars(src.slice(i + 2, j)), lows, highs)) {
+                    return Result<int, Error>.Err(Error.BadPattern);
+                }
+                i = j + 2;
+                continue;
+            }
+        }
+        int lo = c;
+        i = i + 1;
+        if (i + 1 < n && src[i] == '-' && src[i + 1] != ']') {
+            int hi = src[i + 1];
+            if (hi == '[' && i + 2 < n && (src[i + 2] == ':' || src[i + 2] == '=' || src[i + 2] == '.')) {
+                return Result<int, Error>.Err(Error.UnsupportedPattern);
+            }
+            i = i + 2;
+            if (hi < lo) {
+                return Result<int, Error>.Err(Error.BadPattern);
+            }
+            lows.push(lo);
+            highs.push(hi);
+        } else {
+            lows.push(lo);
+            highs.push(lo);
+        }
+    }
+    out.push('[');
+    if (negate) {
+        out.push('^');
+    }
+    for (int k in 0 .. lows.size()) {
+        put_member(out, lows[k]);
+        if (highs[k] != lows[k]) {
+            out.push('-');
+            put_member(out, highs[k]);
+        }
+    }
+    out.push(']');
+    return Result<int, Error>.Ok(i);
+}
+
+// git compiles `:/` and `^{/}` text with `regcomp` and `REG_EXTENDED`: a POSIX
+// extended regular expression, matched against the message as one string
+// (`^` and `$` are the ends of the message, `.` and `[^x]` match a newline).
+// This gives the same pattern in lib/regex's syntax, or an error for what
+// lib/regex has no equivalent of or what the C libraries disagree on.
+Result<str, Error> ere_translate(str pattern) {
+    List<int> src = pattern.chars();
+    List<int> out = [];
+    int n = src.size();
+    int i = 0;
+    // `start`: nothing to repeat yet (the pattern's start, after `(` or `|`).
+    bool start = true;
+    // The last thing was a quantifier.
+    bool quantified = false;
+    int depth = 0;
+    while (i < n) {
+        int c = src[i];
+        i = i + 1;
+        if (c == '\\') {
+            if (i >= n) {
+                return Result<str, Error>.Err(Error.BadPattern);
+            }
+            int d = src[i];
+            i = i + 1;
+            if (is_alnum(d) || d == '<' || d == '>' || d == '`' || d == '\'') {
+                // `\w \b \< \1` and friends: GNU extensions, back-references,
+                // and escapes that mean a different thing in each C library.
+                return Result<str, Error>.Err(Error.UnsupportedPattern);
+            }
+            put_literal(out, d);
+            start = false;
+            quantified = false;
+        } else if (c == '(') {
+            out.push('(');
+            depth = depth + 1;
+            start = true;
+            quantified = false;
+        } else if (c == ')') {
+            if (depth == 0) {
+                // glibc takes an unmatched `)` as itself.
+                put_literal(out, c);
+            } else {
+                out.push(')');
+                depth = depth - 1;
+            }
+            start = false;
+            quantified = false;
+        } else if (c == '|') {
+            out.push('|');
+            start = true;
+            quantified = false;
+        } else if (c == '*' || c == '+' || c == '?') {
+            if (start || quantified) {
+                return Result<str, Error>.Err(Error.UnsupportedPattern);
+            }
+            out.push(c);
+            quantified = true;
+        } else if (c == '{') {
+            int stop = i;
+            while (stop < n && src[stop] != '}') {
+                stop = stop + 1;
+            }
+            if (start || quantified || stop >= n) {
+                return Result<str, Error>.Err(Error.UnsupportedPattern);
+            }
+            str inner = str.from_chars(src.slice(i, stop));
+            List<str> parts = inner.split(",");
+            bool good = parts.size() <= 2 && is_all_digits(parts[0]);
+            if (good && parts.size() == 2 && parts[1] != "" && !is_all_digits(parts[1])) {
+                good = false;
+            }
+            if (!good) {
+                return Result<str, Error>.Err(Error.UnsupportedPattern);
+            }
+            out.push('{');
+            for (int ch in inner.chars()) {
+                out.push(ch);
+            }
+            out.push('}');
+            i = stop + 1;
+            quantified = true;
+        } else if (c == '[') {
+            i = bracket(src, i - 1, out)?;
+            start = false;
+            quantified = false;
+        } else if (c == '^' || c == '$' || c == '.') {
+            out.push(c);
+            start = c == '^';
+            quantified = false;
+        } else {
+            put_literal(out, c);
+            start = false;
+            quantified = false;
+        }
+    }
+    if (depth != 0) {
+        return Result<str, Error>.Err(Error.BadPattern);
+    }
+    return Result<str, Error>.Ok(str.from_chars(out));
+}
+
+// --- paths -----------------------------------------------------------------------------
+
+// `rev:path`: the entry of `treeish`'s tree at `path`. A trailing slash is
+// accepted after a directory; a gitlink can be named but not entered.
+Result<str, Error> tree_entry(str gitdir, str treeish, str path) {
+    str current = tree_of(gitdir, treeish)?;
+    if (path == "") {
+        return Result<str, Error>.Ok(current);
+    }
+    str rest = path;
+    while (true) {
+        GIT_object.Object object = load(gitdir, current)?;
+        List<GIT_object.Entry> entries = [];
+        match (object.body) {
+            case Tree(List<GIT_object.Entry> found): {
+                entries = found;
+            }
+            case Blob: {
+                return Result<str, Error>.Err(Error.NoSuchPath);
+            }
+            case Commit(_): {
+                return Result<str, Error>.Err(Error.NoSuchPath);
+            }
+            case Tag(_): {
+                return Result<str, Error>.Err(Error.NoSuchPath);
+            }
+        }
+        str part = rest;
+        bool more = false;
+        match (rest.index_of("/")) {
+            case Some(int slash): {
+                part = rest.substr(0, slash);
+                more = true;
+            }
+            case None: {
+            }
+        }
+        bytes wanted = part.to_bytes();
+        bool found = false;
+        GIT_object.Entry entry = GIT_object.Entry(0, wanted, "");
+        for (GIT_object.Entry candidate in entries) {
+            if (candidate.name == wanted) {
+                entry = candidate;
+                found = true;
+                break;
+            }
+        }
+        if (!found) {
+            return Result<str, Error>.Err(Error.NoSuchPath);
+        }
+        if (!more) {
+            return Result<str, Error>.Ok(entry.id);
+        }
+        if (!entry.is_tree()) {
+            return Result<str, Error>.Err(Error.NoSuchPath);
+        }
+        rest = rest.substr(part.size() + 1, rest.size());
+        if (rest == "") {
+            return Result<str, Error>.Ok(entry.id);
+        }
+        current = entry.id;
+    }
+}
+
+// A path that starts `./` or `../` is relative to the working directory,
+// which for this program is the root of the tree; anything else is as typed.
+Result<str, Error> relative(str path) {
+    if (!path.starts_with("./") && !path.starts_with("../")) {
+        return Result<str, Error>.Ok(path);
+    }
+    List<str> kept = [];
+    for (str part in path.split("/")) {
+        if (part == "." || part == "") {
+            continue;
+        }
+        if (part == "..") {
+            if (kept.size() == 0) {
+                return Result<str, Error>.Err(Error.UnsupportedPath);
+            }
+            kept.remove_at(kept.size() - 1);
+            continue;
+        }
+        kept.push(part);
+    }
+    str joined = kept.join("/");
+    if (joined != "" && path.ends_with("/")) {
+        joined = joined + "/";
+    }
+    return Result<str, Error>.Ok(joined);
+}
+
+// `:path` and `:N:path`: an index entry at one stage.
+Result<str, Error> index_lookup(str gitdir, int stage, str path) {
+    GIT_index.Index index = GIT_index.Index([]);
+    match (GIT_index.read(gitdir)) {
+        case Ok(GIT_index.Index found): {
+            index = found;
+        }
+        case Err(_): {
+            // No index file at all is an empty index; one that is there and
+            // will not parse is an error.
+            if (fs.exists(fs.join(GIT_repository.common(gitdir), "index"))) {
+                return Result<str, Error>.Err(Error.Io);
+            }
+        }
+    }
+    bytes wanted = path.to_bytes();
+    for (GIT_index.Entry entry in index.entries) {
+        if (entry.stage == stage && entry.path == wanted) {
+            return Result<str, Error>.Ok(entry.id);
+        }
+    }
+    return Result<str, Error>.Err(Error.NotInIndex);
+}
+
+// --- get_oid_with_context ----------------------------------------------------------------
+
+// The whole grammar: a name (`one`), or one of the forms that begin with `:`,
+// or `<rev>:<path>`.
+Result<str, Error> resolve(str gitdir, str name, int flags) {
+    Error failure = Error.Unknown;
+    match (one(gitdir, name, flags)) {
+        case Ok(str id): {
+            return Result<str, Error>.Ok(id);
+        }
+        case Err(Error why): {
+            failure = why;
+        }
+    }
+    int len = name.size();
+    if (len > 0 && name.byte_at(0) == ':') {
+        if (len > 2 && name.byte_at(1) == '/') {
+            List<Cand> list = start_all(gitdir)?;
+            return oneline(gitdir, name.substr(2, len), list);
+        }
+        int stage = 0;
+        str path = name.substr(1, len);
+        if (len >= 3 && name.byte_at(2) == ':' && name.byte_at(1) >= '0' && name.byte_at(1) <= '3') {
+            stage = name.byte_at(1) - '0';
+            path = name.substr(3, len);
+        }
+        return index_lookup(gitdir, stage, relative(path)?);
+    }
+    int depth = 0;
+    int cut = -1;
+    for (int i in 0 .. len) {
+        int c = name.byte_at(i);
+        if (c == '{') {
+            depth = depth + 1;
+        } else if (depth > 0 && c == '}') {
+            depth = depth - 1;
+        } else if (depth == 0 && c == ':') {
+            cut = i;
+            break;
+        }
+    }
+    if (cut < 0) {
+        return Result<str, Error>.Err(failure);
+    }
+    str treeish = one(gitdir, name.substr(0, cut), F_TREEISH)?;
+    return tree_entry(gitdir, treeish, relative(name.substr(cut + 1, len))?);
+}
+
+// --- rev-parse's own forms -----------------------------------------------------------------
+
+Result<Option<List<str>>, Error> none_found() {
+    return Result<Option<List<str>>, Error>.Ok(Option<List<str>>.None);
+}
+
+// A side that does not resolve sends `rev_lines` on to the plain forms,
+// unless the reason is that this module cannot tell: then that is the answer.
+Result<Option<List<str>>, Error> declined(Error why) {
+    if (why.is_unsupported()) {
+        return Result<Option<List<str>>, Error>.Err(why);
+    }
+    return none_found();
+}
+
+// `A..B` and `A...B` (an empty side is HEAD). `None` when `spec` is not one
+// or a side does not resolve, which sends the caller on to the plain forms.
+Result<Option<List<str>>, Error> difference(str gitdir, str spec) {
+    int dots = 0;
+    match (spec.index_of("..")) {
+        case Some(int at): {
+            dots = at;
+        }
+        case None: {
+            return none_found();
+        }
+    }
+    str left = spec.substr(0, dots);
+    int from = dots + 2;
+    bool symmetric = from < spec.size() && spec.byte_at(from) == '.';
+    if (symmetric) {
+        from = from + 1;
+    }
+    str right = spec.substr(from, spec.size());
+    if (left == "" && right == "" && !symmetric) {
+        // Just `..`: the parent directory, not a range.
+        return none_found();
+    }
+    if (right == "") {
+        right = "HEAD";
+    }
+    if (left == "") {
+        left = "HEAD";
+    }
+    str start = "";
+    str end = "";
+    match (resolve(gitdir, left, F_COMMITTISH)) {
+        case Ok(str id): {
+            start = id;
+        }
+        case Err(Error why): {
+            return declined(why);
+        }
+    }
+    match (resolve(gitdir, right, F_COMMITTISH)) {
+        case Ok(str id): {
+            end = id;
+        }
+        case Err(Error why): {
+            return declined(why);
+        }
+    }
+    List<str> out = [end];
+    if (!symmetric) {
+        out.push("^" + start);
+        return Result<Option<List<str>>, Error>.Ok(Option<List<str>>.Some(out));
+    }
+    out.push(start);
+    match (lookup_commit(gitdir, start)) {
+        case Ok(Peeled a): {
+            match (lookup_commit(gitdir, end)) {
+                case Ok(Peeled b): {
+                    match (GIT_graph.open(gitdir).merge_bases(a.id, b.id)) {
+                        case Ok(List<str> bases): {
+                            for (str base in bases) {
+                                out.push("^" + base);
+                            }
+                        }
+                        case Err(_): {
+                            return none_found();
+                        }
+                    }
+                }
+                case Err(_): {
+                    return none_found();
+                }
+            }
+        }
+        case Err(_): {
+            return none_found();
+        }
+    }
+    return Result<Option<List<str>>, Error>.Ok(Option<List<str>>.Some(out));
+}
+
+// `X^!`, `X^@` and `X^-N`. `None` when `spec` is not one of them.
+Result<Option<List<str>>, Error> shorthand(str gitdir, str spec) {
+    int at = 0;
+    bool include_rev = false;
+    bool include_parents = false;
+    int exclude = 0;
+    match (spec.index_of("^!")) {
+        case Some(int found): {
+            at = found;
+            include_rev = true;
+            if (found + 2 != spec.size()) {
+                return none_found();
+            }
+        }
+        case None: {
+            match (spec.index_of("^@")) {
+                case Some(int found): {
+                    at = found;
+                    include_parents = true;
+                    if (found + 2 != spec.size()) {
+                        return none_found();
+                    }
+                }
+                case None: {
+                    match (spec.index_of("^-")) {
+                        case Some(int found): {
+                            at = found;
+                            include_rev = true;
+                            exclude = 1;
+                            if (found + 2 < spec.size()) {
+                                str digits = spec.substr(found + 2, spec.size());
+                                if (!is_all_digits(digits) || digits.size() > 9) {
+                                    return none_found();
+                                }
+                                exclude = digits.parse_int().or(0);
+                                if (exclude == 0) {
+                                    return none_found();
+                                }
+                            }
+                        }
+                        case None: {
+                            return none_found();
+                        }
+                    }
+                }
+            }
+        }
+    }
+    str id = "";
+    match (resolve(gitdir, spec.substr(0, at), F_COMMITTISH)) {
+        case Ok(str found): {
+            id = found;
+        }
+        case Err(Error why): {
+            return declined(why);
+        }
+    }
+    List<str> parents = [];
+    match (lookup_commit(gitdir, id)) {
+        case Ok(Peeled found): {
+            parents = found.commit.parents;
+        }
+        case Err(_): {
+            return none_found();
+        }
+    }
+    if (exclude > 0 && exclude > parents.size()) {
+        return none_found();
+    }
+    List<str> out = [];
+    if (include_rev) {
+        out.push(id);
+    }
+    for (int k in 0 .. parents.size()) {
+        if (exclude > 0 && k + 1 != exclude) {
+            continue;
+        }
+        if (include_parents) {
+            out.push(parents[k]);
+        } else {
+            out.push("^" + parents[k]);
+        }
+    }
+    return Result<Option<List<str>>, Error>.Ok(Option<List<str>>.Some(out));
+}
+
+// --- the public face ------------------------------------------------------------------------
+
+/// What `git rev-parse --verify <spec>` names: the object, not peeled.
+pub Result<str, Error> object_id(str gitdir, str spec) {
+    return resolve(gitdir, spec, 0);
+}
+
+/// The commit `spec` names, or that a tag it names peels to.
+pub Result<str, Error> commit_id(str gitdir, str spec) {
+    str id = resolve(gitdir, spec, F_COMMITTISH)?;
+    Peeled found = lookup_commit(gitdir, id)?;
+    return Result<str, Error>.Ok(found.id);
+}
+
+/// The tree `spec` names, or that a commit or tag it names has.
+pub Result<str, Error> tree_id(str gitdir, str spec) {
+    str id = resolve(gitdir, spec, F_TREEISH)?;
+    return tree_of(gitdir, id);
+}
+
+/// What `git rev-parse <spec>` prints, one entry per line: `A..B`, `A...B`,
+/// `^A`, `A^@`, `A^!` and `A^-N` as well as everything `object` takes. A
+/// name that excludes starts with `^`. The names are not peeled, as in git.
+pub Result<List<str>, Error> rev_lines(str gitdir, str spec) {
+    if (spec == "") {
+        return Result<List<str>, Error>.Err(Error.Empty);
+    }
+    match (difference(gitdir, spec)?) {
+        case Some(List<str> found): {
+            return Result<List<str>, Error>.Ok(found);
+        }
+        case None: {
+        }
+    }
+    match (shorthand(gitdir, spec)?) {
+        case Some(List<str> found): {
+            return Result<List<str>, Error>.Ok(found);
+        }
+        case None: {
+        }
+    }
+    if (spec.starts_with("^")) {
+        str id = resolve(gitdir, spec.substr(1, spec.size()), 0)?;
+        return Result<List<str>, Error>.Ok(["^" + id]);
+    }
+    str id = resolve(gitdir, spec, 0)?;
+    return Result<List<str>, Error>.Ok([id]);
+}
+
+/// What `git rev-list <spec>` walks: the commits `lines` includes and the
+/// commits it excludes, tags peeled.
+pub Result<Revs, Error> rev_range(str gitdir, str spec) {
+    List<str> names = rev_lines(gitdir, spec)?;
+    List<str> include = [];
+    List<str> exclude = [];
+    for (str name in names) {
+        if (name.starts_with("^")) {
+            Peeled found = lookup_commit(gitdir, name.substr(1, name.size()))?;
+            exclude.push(found.id);
+        } else {
+            Peeled found = lookup_commit(gitdir, name)?;
+            include.push(found.id);
+        }
+    }
+    return Result<Revs, Error>.Ok(Revs(include, exclude));
+}

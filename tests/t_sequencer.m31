@@ -10,6 +10,7 @@
 
 import GIT_diff3;
 import GIT_merge;
+import GIT_revparse;
 import GIT_sequencer;
 import io;
 import os;
@@ -79,8 +80,14 @@ if (command == "pick" || command == "revert") {
             opts.mainline = argv[i + 1].parse_int().or(0);
             i = i + 1;
         } else {
-            if (argv[i].index_of("..").or(-1) >= 0) {
-                opts.as_range = true;
+            match (GIT_revparse.is_range(gitdir, argv[i])) {
+                case Ok(bool answer): {
+                    if (answer) {
+                        opts.as_range = true;
+                    }
+                }
+                case Err(_): {
+                }
             }
             specs.push(argv[i]);
         }

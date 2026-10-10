@@ -5,9 +5,12 @@
 // API
 // ---
 //   GIT_sequencer.expand(gitdir, verb, specs)       -> Result<List<str>, Error>
-//       `A..B` is the commits reachable from B and not from A: oldest first
-//       for a pick, newest first for a revert (as git);
-//       anything else one commit (tags are followed), in the order given.
+//       when any word is a range (`A..B`, `A...B`, `^A`, `C^@`, `C^!`:
+//       whatever `GIT_revparse.is_range` says) the words together are one
+//       revision list, and the commits it walks come oldest first for a
+//       pick, newest first for a revert (as git); otherwise each word is
+//       one commit (`GIT_revparse.commit_id`: `HEAD~2`, a tag,
+//       `topic^{/fix}`), in the order given.
 //   GIT_sequencer.start(gitdir, worktree, verb, ids, opts)
 //                                                   -> Result<Report, Error>
 //   GIT_sequencer.continue_sequence(gitdir, worktree) -> Result<Report, Error>
@@ -100,6 +103,7 @@ import GIT_merge;
 import GIT_object;
 import GIT_refs;
 import GIT_reflog;
+import GIT_revparse;
 import io;
 
 pub enum Verb {
@@ -862,7 +866,7 @@ pub Result<List<Item>, Error> read_todo(str gitdir, str dir) {
             token = rest.substr(0, cut);
             subject = rest.substr(cut + 1, rest.size()).trim();
         }
-        match (GIT_refs.rev_parse(gitdir, token)) {
+        match (GIT_revparse.commit_id(gitdir, token)) {
             case Ok(str found): {
                 out.push(Item(verb, found, subject));
             }
@@ -1002,65 +1006,86 @@ pub str banner(str gitdir) {
 
 // --- the commits to apply ----------------------------------------------------------------------------
 
+Error rev_failure(str spec, GIT_revparse.Error error) {
+    if (error.is_unsupported()) {
+        return Error.Unsupported(spec + ": " + error.to_str());
+    }
+    return Error.NotACommit(spec);
+}
+
 Result<str, Error> resolve_commit(str gitdir, str spec) {
-    match (GIT_refs.rev_parse(gitdir, spec)) {
-        case Ok(str found): {
-            match (GIT_refs.peel(gitdir, spec, found)) {
-                case Ok(str commit): {
-                    return Result<str, Error>.Ok(commit);
-                }
-                case Err(_): {
-                    return Result<str, Error>.Err(Error.NotACommit(spec));
-                }
-            }
+    match (GIT_revparse.commit_id(gitdir, spec)) {
+        case Ok(str commit): {
+            return Result<str, Error>.Ok(commit);
         }
-        case Err(_): {
-            return Result<str, Error>.Err(Error.NotACommit(spec));
+        case Err(GIT_revparse.Error error): {
+            return Result<str, Error>.Err(rev_failure(spec, error));
         }
     }
 }
 
-/// The commits `specs` name, in the order they are applied: `A..B` is what B
-/// has and A has not, oldest first for a pick and newest first for a revert (an empty side is HEAD); any other spec is
-/// one commit. Specs are not merged: a commit named twice is applied twice.
+/// The commits `specs` name, in the order they are applied. When any word is
+/// a range (`A..B` is what B has and A has not; an empty side is HEAD) the
+/// words together are one revision list, as in git, applied oldest first for
+/// a pick and newest first for a revert. When none is, each word is one commit
+/// and they are applied as given: a commit named twice is applied twice.
 pub Result<List<str>, Error> expand(str gitdir, Verb verb, List<str> specs) {
-    List<str> out = [];
+    // Git walks the words as one revision list when any of them is a range
+    // (a plain commit among them then stands for its whole history, a `^A`
+    // for what to leave out), and takes the commits one by one when none is.
+    bool walks = false;
     for (str spec in specs) {
-        int dots = spec.index_of("..").or(-1);
-        if (dots < 0) {
-            out.push(resolve_commit(gitdir, spec)?);
-            continue;
-        }
-        if (spec.substr(dots, spec.size()).starts_with("...")) {
-            return Result<List<str>, Error>.Err(Error.Unsupported("a symmetric range cannot be applied: " + spec));
-        }
-        str left = spec.substr(0, dots);
-        str right = spec.substr(dots + 2, spec.size());
-        if (left == "") {
-            left = "HEAD";
-        }
-        if (right == "") {
-            right = "HEAD";
-        }
-        str low = resolve_commit(gitdir, left)?;
-        str high = resolve_commit(gitdir, right)?;
-        match (GIT_graph.rev_list(gitdir, [high], [low])) {
-            case Ok(List<str> found): {
-                if (verb == Verb.Revert) {
-                    for (str id in found) {
-                        out.push(id);
-                    }
-                } else {
-                    int at = found.size();
-                    while (at > 0) {
-                        at = at - 1;
-                        out.push(found[at]);
-                    }
+        match (GIT_revparse.is_range(gitdir, spec)) {
+            case Ok(bool answer): {
+                if (answer) {
+                    walks = true;
                 }
             }
-            case Err(GIT_graph.Error error): {
-                return Result<List<str>, Error>.Err(Error.Merge(GIT_merge.Error.Graph(error)));
+            case Err(GIT_revparse.Error error): {
+                return Result<List<str>, Error>.Err(rev_failure(spec, error));
             }
+        }
+    }
+    List<str> out = [];
+    if (!walks) {
+        for (str spec in specs) {
+            out.push(resolve_commit(gitdir, spec)?);
+        }
+        return Result<List<str>, Error>.Ok(out);
+    }
+    List<str> include = [];
+    List<str> exclude = [];
+    for (str spec in specs) {
+        match (GIT_revparse.rev_range(gitdir, spec)) {
+            case Ok(GIT_revparse.Revs found): {
+                for (str id in found.include) {
+                    include.push(id);
+                }
+                for (str id in found.exclude) {
+                    exclude.push(id);
+                }
+            }
+            case Err(GIT_revparse.Error error): {
+                return Result<List<str>, Error>.Err(rev_failure(spec, error));
+            }
+        }
+    }
+    match (GIT_graph.rev_list(gitdir, include, exclude)) {
+        case Ok(List<str> found): {
+            if (verb == Verb.Revert) {
+                for (str id in found) {
+                    out.push(id);
+                }
+            } else {
+                int at = found.size();
+                while (at > 0) {
+                    at = at - 1;
+                    out.push(found[at]);
+                }
+            }
+        }
+        case Err(GIT_graph.Error error): {
+            return Result<List<str>, Error>.Err(Error.Merge(GIT_merge.Error.Graph(error)));
         }
     }
     return Result<List<str>, Error>.Ok(out);

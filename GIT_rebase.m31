@@ -60,6 +60,7 @@ import GIT_merge;
 import GIT_object;
 import GIT_rebase_todo;
 import GIT_refs;
+import GIT_revparse;
 import GIT_reflog;
 import GIT_sequencer;
 import GIT_stash;
@@ -502,18 +503,14 @@ bool config_flag(str gitdir, str key) {
 // --- the plan ---------------------------------------------------------------------------------
 
 Result<str, GIT_sequencer.Error> commit_named(str gitdir, str spec) {
-    match (GIT_refs.rev_parse(gitdir, spec)) {
-        case Ok(str found): {
-            match (GIT_refs.peel(gitdir, spec, found)) {
-                case Ok(str commit): {
-                    return Result<str, GIT_sequencer.Error>.Ok(commit);
-                }
-                case Err(_): {
-                    return Result<str, GIT_sequencer.Error>.Err(GIT_sequencer.Error.NotACommit(spec));
-                }
-            }
+    match (GIT_revparse.commit_id(gitdir, spec)) {
+        case Ok(str commit): {
+            return Result<str, GIT_sequencer.Error>.Ok(commit);
         }
-        case Err(_): {
+        case Err(GIT_revparse.Error error): {
+            if (error.is_unsupported()) {
+                return Result<str, GIT_sequencer.Error>.Err(GIT_sequencer.Error.Unsupported(spec + ": " + error.to_str()));
+            }
             return Result<str, GIT_sequencer.Error>.Err(GIT_sequencer.Error.NotACommit(spec));
         }
     }

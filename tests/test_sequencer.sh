@@ -221,6 +221,18 @@ if build t_sequencer; then
         sq_compare "range revert, newest first" revert "" "m1..m3"
         sq_compare "two commits reverted, the first conflicts" revert "" "m1 m3"
         sq_compare "range revert -n" revert "-n" "m1..m3"
+        # --- the revision grammar (GIT_revparse) in the words
+        sq_compare "pick of an ancestor of a branch, side~3" pick "" "side~3"
+        sq_compare "pick of an ancestor of a branch, conflict, side~2" pick "" "side~2"
+        sq_compare "pick of a first parent, t2^" pick "" "t2^"
+        sq_compare "pick by a message search, side^{/side 1}" pick "" "side^{/side 1}"
+        sq_compare "range from a suffixed revision, t4~3..t4" pick "" "t4~3..t4"
+        sq_compare "range with an empty right side is HEAD, t0.." pick "" "t0.."
+        sq_compare "range as ^A B" pick "" "^t0 t2"
+        sq_compare "one-commit range, t1^!" pick "" "t1^!"
+        sq_compare "symmetric difference, t2...t3" pick "" "t2...t3"
+        sq_compare "range revert from a suffixed revision, m3~2..m3" revert "" "m3~2..m3"
+        sq_compare "revert by ancestor, m3~1" revert "" "m3~1"
         # --- refusals
         sq_refuse "pick with a staged change elsewhere" pick "" t1 sq_stage_other
         sq_refuse "pick over a local edit of a touched file" pick "" t1 sq_edit_touched

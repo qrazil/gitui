@@ -23,6 +23,7 @@
 // outline has no selection.
 
 import GIT_merge;
+import GIT_revparse;
 import GIT_sequencer;
 import GIT_ui_core;
 import GIT_ui_prompt;
@@ -207,8 +208,14 @@ pub void RangeAsk.received(str purpose, str text) {
     for (str word in text.split(" ")) {
         if (word != "") {
             specs.push(word);
-            if (word.contains("..")) {
-                is_range = true;
+            match (GIT_revparse.is_range(host.gitdir, word)) {
+                case Ok(bool answer): {
+                    if (answer) {
+                        is_range = true;
+                    }
+                }
+                case Err(_): {
+                }
             }
         }
     }

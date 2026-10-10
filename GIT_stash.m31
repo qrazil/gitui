@@ -1090,6 +1090,9 @@ Error from_merge(GIT_merge.Error error) {
         case Status(_): {
             return Error.Failed(error.to_str());
         }
+        case Rev(_): {
+            return Error.Failed(error.to_str());
+        }
     }
 }
 

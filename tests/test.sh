@@ -392,6 +392,14 @@ source tests/test_rebase.sh
 
 source tests/test_ssh.sh
 
+# --- the revision grammar: GIT_revparse against git rev-parse, and its callers -----
+#
+# `test_revparse.sh` builds a fixture with merges, tags of every kind, clashing
+# names, upstreams, a reflog and a stash, draws expressions from the names that
+# are in it, and compares each answer with real git's.
+
+source tests/test_revparse.sh
+
 echo
 if [ $fail -eq 0 ]; then
     printf '\033[32mall %d checks passed\033[0m\n' "$pass"

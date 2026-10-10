@@ -1,0 +1,105 @@
+// Drives `GIT_revparse.m31` so `test_revparse.sh` can compare it with git.
+//
+//   ./t_revparse <gitdir> <mode> <file>
+//
+// `<file>` holds one revision expression per line (taken exactly, spaces
+// included). Per line the output is one line: `ok <names, space separated>`,
+// or `err <what>`. `<mode>` is
+//
+//   lines    `GIT_revparse.rev_lines` what `git rev-parse <spec> --` prints
+//   object   `GIT_revparse.object_id` `git rev-parse --verify <spec>`
+//   commit   `GIT_revparse.commit_id` `git rev-parse --verify <spec>^{commit}`
+//   tree     `GIT_revparse.tree_id` `git rev-parse --verify <spec>^{tree}`
+//   range    `GIT_revparse.rev_range` `git rev-list <spec>`'s start and stop points:
+//                                   `ok <include...> ^<exclude...>`
+//
+// A refusal for a form the module does not implement (not for a wrong
+// revision) prints `unsupported <what>`; the comparison with git skips those.
+
+import GIT_revparse;
+import io;
+import os;
+
+List<str> argv = os.args();
+if (argv.size() < 4) {
+    io.eprint("usage: t_revparse <gitdir> lines|object|commit|tree|range <file>");
+    os.exit(2);
+}
+str gitdir = argv[1];
+str mode = argv[2];
+str body = "";
+match (io.read(argv[3])) {
+    case Ok(str text): {
+        body = text;
+    }
+    case Err(_): {
+        io.eprint("cannot read " + argv[3]);
+        os.exit(2);
+    }
+}
+
+str failure(GIT_revparse.Error error) {
+    if (error.is_unsupported()) {
+        return "unsupported " + error.to_str();
+    }
+    return "err " + error.to_str();
+}
+
+str show(Result<List<str>, GIT_revparse.Error> answer) {
+    match (answer) {
+        case Ok(List<str> names): {
+            return "ok " + names.join(" ");
+        }
+        case Err(GIT_revparse.Error error): {
+            return failure(error);
+        }
+    }
+}
+
+str one_name(Result<str, GIT_revparse.Error> answer) {
+    match (answer) {
+        case Ok(str id): {
+            return "ok " + id;
+        }
+        case Err(GIT_revparse.Error error): {
+            return failure(error);
+        }
+    }
+}
+
+str revs(Result<GIT_revparse.Revs, GIT_revparse.Error> answer) {
+    match (answer) {
+        case Ok(GIT_revparse.Revs found): {
+            List<str> names = [];
+            for (str id in found.include) {
+                names.push(id);
+            }
+            for (str id in found.exclude) {
+                names.push("^" + id);
+            }
+            return "ok " + names.join(" ");
+        }
+        case Err(GIT_revparse.Error error): {
+            return failure(error);
+        }
+    }
+}
+
+List<str> specs = body.split("\n");
+for (int k in 0 .. specs.size()) {
+    str spec = specs[k];
+    if (k == specs.size() - 1 && spec == "") {
+        continue;
+    }
+    if (mode == "lines") {
+        print(show(GIT_revparse.rev_lines(gitdir, spec)));
+    } else if (mode == "object") {
+        print(one_name(GIT_revparse.object_id(gitdir, spec)));
+    } else if (mode == "commit") {
+        print(one_name(GIT_revparse.commit_id(gitdir, spec)));
+    } else if (mode == "tree") {
+        print(one_name(GIT_revparse.tree_id(gitdir, spec)));
+    } else {
+        print(revs(GIT_revparse.rev_range(gitdir, spec)));
+    }
+}

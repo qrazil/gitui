@@ -86,6 +86,7 @@ import GIT_index;
 import GIT_object;
 import GIT_refs;
 import GIT_reflog;
+import GIT_revparse;
 import GIT_status;
 import date;
 import fs;
@@ -125,6 +126,8 @@ pub enum Error {
     Graph(GIT_graph.Error);
     Checkout(GIT_checkout.Error);
     Status(GIT_status.Error);
+    /// The name given to `start` is not a revision that names a commit.
+    Rev(GIT_revparse.Error);
 }
 
 pub str Error.to_str() {
@@ -182,6 +185,9 @@ pub str Error.to_str() {
         }
         case Status(GIT_status.Error error): {
             return "status: " + error.to_str();
+        }
+        case Rev(GIT_revparse.Error error): {
+            return error.to_str();
         }
     }
 }
@@ -1472,23 +1478,16 @@ pub str head_ref_name(GIT_refs.Head head) {
     }
 }
 
-/// `git merge <spec>`: `spec` is anything `GIT_refs.rev_parse` takes (a branch,
-/// `origin/main`, a tag, a commit id). See `start_commit`.
+/// `git merge <spec>`: `spec` is anything `GIT_revparse.commit_id` takes (a
+/// branch, `origin/main`, a tag, a commit id, `topic~2`, ...). See `start_commit`.
 pub Result<Report, Error> start(str gitdir, str worktree, str spec, StartOpts opts) {
     str theirs = "";
-    match (GIT_refs.rev_parse(gitdir, spec)) {
+    match (GIT_revparse.commit_id(gitdir, spec)) {
         case Ok(str found): {
-            match (GIT_refs.peel(gitdir, spec, found)) {
-                case Ok(str commit): {
-                    theirs = commit;
-                }
-                case Err(_): {
-                    return Result<Report, Error>.Err(Error.NotACommit);
-                }
-            }
+            theirs = found;
         }
-        case Err(_): {
-            return Result<Report, Error>.Err(Error.NotACommit);
+        case Err(GIT_revparse.Error error): {
+            return Result<Report, Error>.Err(Error.Rev(error));
         }
     }
     return start_commit(gitdir, worktree, theirs, spec, opts);

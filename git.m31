@@ -43,6 +43,7 @@ import text;
 import GIT_object;
 import GIT_refs;
 import GIT_repository;
+import GIT_revparse;
 import GIT_log;
 
 args.Parser parser = args.Parser("ourgit", summary: "read-only git plumbing over loose objects");
@@ -51,14 +52,14 @@ args.Parser cat = parser.command("cat-file", "print an object's type, size or co
 cat.flag("type", help: "print the object's type word");
 cat.flag("size", help: "print the size of the object's content");
 cat.flag("pretty", help: "print the object itself (the default)");
-cat.positional("object", help: "an object name, or an unambiguous prefix of one", placeholder: "OBJECT");
+cat.positional("object", help: "a revision that names an object: an object name or a prefix of one, a ref, HEAD:path, ...", placeholder: "OBJECT");
 args.Parser list_command = parser.command("ls-tree", "list a tree's entries");
-list_command.positional("tree", help: "a tree, or a commit whose tree to list", placeholder: "TREE");
+list_command.positional("tree", help: "a tree, or anything that names one: a commit, a tag, HEAD~2, v1:dir", placeholder: "TREE");
 args.Parser log_command = parser.command("log", "commits reachable from a revision, newest commit date first");
 log_command.integer("max", help: "stop after this many commits", placeholder: "N");
-log_command.optional("rev", "HEAD", help: "where to start", placeholder: "REV");
-args.Parser rev_parse_command = parser.command("rev-parse", "the object name a revision resolves to");
-rev_parse_command.positional("rev", help: "a ref, or an object name", placeholder: "REV");
+log_command.optional("rev", "HEAD", help: "where to start: any revision that names a commit", placeholder: "REV");
+args.Parser rev_parse_command = parser.command("rev-parse", "the object names a revision resolves to");
+rev_parse_command.positional("rev", help: "a revision: a ref, an object name, HEAD~2, main^{tree}, v1:path, A..B, ...", placeholder: "REV");
 args.Parser refs_command = parser.command("refs", "every ref in the repository, with what it points at");
 List<str> argv = os.args();
 match (parser.parse(argv.slice(1, argv.size()))) {
@@ -135,12 +136,12 @@ int dispatch(args.Parser parser, args.Parsed parsed) {
 int cat_file(str git_directory, args.Parsed parsed_command) {
     str spec = parsed_command.positional("object");
     str id = "";
-    match (GIT_refs.rev_parse(git_directory, spec)) {
+    match (GIT_revparse.object_id(git_directory, spec)) {
         case Ok(str resolved): {
             id = resolved;
         }
-        case Err(GIT_refs.Error error): {
-            io.eprint(error.to_str());
+        case Err(GIT_revparse.Error error): {
+            io.eprint(spec + ": " + error.to_str());
             return 1;
         }
     }
@@ -178,56 +179,54 @@ int cat_file(str git_directory, args.Parsed parsed_command) {
 }
 
 int ls_tree(str git_directory, str spec) {
-    str id = "";
-    match (GIT_refs.rev_parse(git_directory, spec)) {
-        case Ok(str resolved): {
-            id = resolved;
+    // `git ls-tree` takes a tree-ish, so a commit means its tree and a tag is
+    // followed first: `GIT_revparse.tree_id` does both.
+    match (GIT_revparse.tree_id(git_directory, spec)) {
+        case Ok(str id): {
+            match (GIT_object.read(git_directory, id)) {
+                case Ok(GIT_object.Object object): {
+                    match (object.body) {
+                        case Tree(List<GIT_object.Entry> entries): {
+                            write(tree_text(entries));
+                            return 0;
+                        }
+                        case Commit: {
+                            io.eprint("not a tree object: " + spec);
+                            return 1;
+                        }
+                        case Blob: {
+                            io.eprint("not a tree object: " + spec);
+                            return 1;
+                        }
+                        case Tag: {
+                            io.eprint("not a tree object: " + spec);
+                            return 1;
+                        }
+                    }
+                }
+                case Err(GIT_object.Error error): {
+                    io.eprint(error.to_str());
+                    return 1;
+                }
+            }
         }
-        case Err(GIT_refs.Error error): {
-            io.eprint(error.to_str());
+        case Err(GIT_revparse.Error error): {
+            io.eprint(spec + ": " + error.to_str());
             return 1;
         }
     }
-    // `git ls-tree` takes a tree-ish, so a commit means its tree. A tag is
-    // peeled to a commit first, and then the same rule applies.
-    for (int hops in 0 .. 12) {
-        match (GIT_object.read(git_directory, id)) {
-            case Ok(GIT_object.Object object): {
-                match (object.body) {
-                    case Tree(List<GIT_object.Entry> entries): {
-                        write(tree_text(entries));
-                        return 0;
-                    }
-                    case Commit(GIT_object.Commit commit): {
-                        id = commit.tree;
-                    }
-                    case Tag(GIT_object.Tag tag): {
-                        id = tag.object;
-                    }
-                    case Blob: {
-                        io.eprint("not a tree object: " + spec);
-                        return 1;
-                    }
-                }
-            }
-            case Err(GIT_object.Error error): {
-                io.eprint(error.to_str());
-                return 1;
-            }
-        }
-    }
-    io.eprint("not a tree object: " + spec);
-    return 1;
 }
 
 int rev_parse(str git_directory, str spec) {
-    match (GIT_refs.rev_parse(git_directory, spec)) {
-        case Ok(str id): {
-            say(id);
+    match (GIT_revparse.rev_lines(git_directory, spec)) {
+        case Ok(List<str> names): {
+            for (str name in names) {
+                say(name);
+            }
             return 0;
         }
-        case Err(GIT_refs.Error error): {
-            io.eprint(error.to_str());
+        case Err(GIT_revparse.Error error): {
+            io.eprint(spec + ": " + error.to_str());
             return 1;
         }
     }

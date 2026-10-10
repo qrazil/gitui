@@ -497,6 +497,12 @@ pub Result<Object, Error> parse(str id, bytes plain) {
     return Result<Object, Error>.Err(Error.UnknownType);
 }
 
+/// How many hex digits a full object name has in this repository: 40 for
+/// SHA-1, the only format read so far.
+pub int hex_len(str gitdir) {
+    return 40;
+}
+
 /// Every object name beginning with `prefix` -- loose or packed -- sorted and
 /// deduplicated. Empty for a prefix that is not hex, is shorter than four
 /// digits, or matches nothing.

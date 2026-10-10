@@ -10,13 +10,14 @@
 // ---
 //   GIT_log.walk(gitdir, rev, limit)  -> Result<List<Entry>, Error>
 //
-// `rev` is anything `GIT_refs.rev_parse` accepts (a ref, a short or full object
-// name); `limit` stops after that many commits, newest committer date
+// `rev` is anything `GIT_revparse.commit_id` accepts (a ref, an object name or
+// an abbreviation, `HEAD~3`, `main^{/fix}`, `@{-1}`, ...); `limit` stops after that many commits, newest committer date
 // first, or walks everything reachable when negative -- `ourgit -log`'s own
 // `--max` and default.
 
 import GIT_object;
 import GIT_refs;
+import GIT_revparse;
 
 /// Why the walk could not run. Payload-free where the underlying error
 /// already says everything (docs/errors-decision.md §4); `NotACommit` names
@@ -25,6 +26,7 @@ pub enum Error {
     Refs(GIT_refs.Error);
     Object(GIT_object.Error);
     NotACommit(str);
+    Rev(GIT_revparse.Error);
 }
 
 pub str Error.to_str() {
@@ -37,6 +39,9 @@ pub str Error.to_str() {
         }
         case NotACommit(str id): {
             return "not a commit: " + id;
+        }
+        case Rev(GIT_revparse.Error error): {
+            return error.to_str();
         }
     }
 }
@@ -57,20 +62,12 @@ pub type Entry {
 /// than an arbitrary one.
 pub Result<List<Entry>, Error> walk(str gitdir, str rev, int limit) {
     str tip = "";
-    match (GIT_refs.rev_parse(gitdir, rev)) {
+    match (GIT_revparse.commit_id(gitdir, rev)) {
         case Ok(str resolved): {
             tip = resolved;
         }
-        case Err(GIT_refs.Error error): {
-            return Result<List<Entry>, Error>.Err(Error.Refs(error));
-        }
-    }
-    match (GIT_refs.peel(gitdir, rev, tip)) {
-        case Ok(str peeled): {
-            tip = peeled;
-        }
-        case Err(GIT_refs.Error error): {
-            return Result<List<Entry>, Error>.Err(Error.Refs(error));
+        case Err(GIT_revparse.Error error): {
+            return Result<List<Entry>, Error>.Err(Error.Rev(error));
         }
     }
     List<str> queue = [tip];

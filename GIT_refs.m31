@@ -22,10 +22,11 @@
 // --- what is NOT here --------------------------------------------------------
 //
 // The revision *grammar* -- `HEAD~3`, `main^2`, `v1^{commit}`, `@{upstream}`,
-// `:/message` -- is not implemented. `rev_parse` takes a ref, a short object
-// name, or a full one, and nothing else. The one peeling that is here is
-// `peel`, which follows an annotated tag to what it tags, because `log v1`
-// is otherwise a question with no answer.
+// `:/message` -- is `GIT_revparse.m31`, which every engine that takes a typed
+// revision calls. `rev_parse` here is the older, smaller question (a ref, a
+// short object name or a full one, and nothing else) and stays for callers
+// that already hold a plain name, like the outline's `HEAD`; `peel` follows
+// an annotated tag to what it tags.
 //
 // --- writing -------------------------------------------------------------
 //
@@ -219,6 +220,11 @@ pub Result<str, Error> resolve(str gitdir, str name) {
                 }
             }
         }
+        if (current == "FETCH_HEAD") {
+            // One line per fetched ref: `<id>\t[not-for-merge]\t<what>`. The
+            // first line's id is the one git reads.
+            raw = raw.split("\n")[0].split("\t")[0].trim();
+        }
         if (raw.starts_with("ref: ")) {
             current = raw.substr(5, raw.size()).trim();
             depth = depth + 1;
@@ -226,6 +232,34 @@ pub Result<str, Error> resolve(str gitdir, str name) {
             return Result<str, Error>.Ok(raw);
         } else {
             return Result<str, Error>.Err(Error.Malformed);
+        }
+    }
+    return Result<str, Error>.Err(Error.TooDeep);
+}
+
+/// The ref `name` finally stands for: `name` itself when it is a direct ref,
+/// the end of the chain when it is symbolic (`HEAD` on a branch is that
+/// branch's full name). `NotFound` when nothing is there or the chain ends in
+/// a ref that does not exist.
+pub Result<str, Error> resolve_name(str gitdir, str name) {
+    str current = name;
+    int depth = 0;
+    while (depth < 5) {
+        match (loose_ref(gitdir, current)) {
+            case Some(str raw): {
+                if (raw.starts_with("ref: ")) {
+                    current = raw.substr(5, raw.size()).trim();
+                    depth = depth + 1;
+                    continue;
+                }
+                return Result<str, Error>.Ok(current);
+            }
+            case None: {
+                if (packed(gitdir, current).is_some()) {
+                    return Result<str, Error>.Ok(current);
+                }
+                return Result<str, Error>.Err(Error.NotFound);
+            }
         }
     }
     return Result<str, Error>.Err(Error.TooDeep);

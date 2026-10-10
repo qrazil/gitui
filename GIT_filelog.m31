@@ -20,7 +20,7 @@
 import GIT_log;
 import GIT_object;
 import GIT_pathtree;
-import GIT_refs;
+import GIT_revparse;
 
 type Walker {
     str gitdir;
@@ -73,20 +73,12 @@ str Walker.signature(GIT_object.Commit commit) {
 /// The commits that changed `path` reachable from `rev`, newest first.
 pub Result<List<GIT_log.Entry>, GIT_log.Error> history(str gitdir, str rev, str path, int limit) {
     str tip = "";
-    match (GIT_refs.rev_parse(gitdir, rev)) {
+    match (GIT_revparse.commit_id(gitdir, rev)) {
         case Ok(str resolved): {
             tip = resolved;
         }
-        case Err(GIT_refs.Error error): {
-            return Result<List<GIT_log.Entry>, GIT_log.Error>.Err(GIT_log.Error.Refs(error));
-        }
-    }
-    match (GIT_refs.peel(gitdir, rev, tip)) {
-        case Ok(str peeled): {
-            tip = peeled;
-        }
-        case Err(GIT_refs.Error error): {
-            return Result<List<GIT_log.Entry>, GIT_log.Error>.Err(GIT_log.Error.Refs(error));
+        case Err(GIT_revparse.Error error): {
+            return Result<List<GIT_log.Entry>, GIT_log.Error>.Err(GIT_log.Error.Rev(error));
         }
     }
     Walker walker = Walker(gitdir, path);

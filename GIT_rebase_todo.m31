@@ -32,7 +32,7 @@ import fs;
 import GIT_graph;
 import GIT_merge;
 import GIT_object;
-import GIT_refs;
+import GIT_revparse;
 import GIT_sequencer;
 import GIT_udiff;
 
@@ -230,7 +230,7 @@ pub Result<List<Command>, GIT_sequencer.Error> parse_unchecked(str gitdir, str t
         if (token == "") {
             return refuse("'" + word + "' needs a commit");
         }
-        match (GIT_refs.rev_parse(gitdir, token)) {
+        match (GIT_revparse.commit_id(gitdir, token)) {
             case Ok(str found): {
                 match (GIT_merge.read_commit(gitdir, found)) {
                     case Ok(GIT_object.Commit commit): {
