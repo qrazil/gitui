@@ -17,6 +17,7 @@
 
 import GIT_checkout;
 import fs;
+import GIT_hash;
 import GIT_http_fetch;
 import GIT_http_push;
 import io;
@@ -42,6 +43,8 @@ pub enum Error {
     // nested value enum draws a -Wmissing-braces warning from the generated C.
     /// The fetch over ssh failed (`GIT_ssh_transport.m31`).
     Ssh(GIT_ssh_transport.Error);
+    /// The remote's object format is not this repository's.
+    FormatMismatch;
     /// The fetch failed (network, protocol, or a refused request).
     Fetch(GIT_http_fetch.Error);
     /// The fetched pack could not be read.
@@ -72,6 +75,9 @@ pub str Error.to_str() {
         }
         case NoRemoteBranch: {
             return "origin has no branch of that name";
+        }
+        case FormatMismatch: {
+            return "the remote's object format differs from this repository's (SHA-1 and SHA-256 repositories cannot exchange objects)";
         }
         case Fetch(GIT_http_fetch.Error error): {
             return "fetch failed: " + error.to_str();
@@ -117,6 +123,9 @@ pub bool Error.is_diverged() {
             return false;
         }
         case NoRemoteBranch: {
+            return false;
+        }
+        case FormatMismatch: {
             return false;
         }
         case Fetch(GIT_http_fetch.Error _e): {
@@ -238,6 +247,9 @@ pub Result<Outcome, Error> pull(str gitdir, str worktree, GIT_http_push.Remote r
         case Err(GIT_http_fetch.Error error): {
             return Result<Outcome, Error>.Err(Error.Fetch(error));
         }
+    }
+    if (advertisement.object_format != GIT_hash.name(GIT_hash.raw_len(gitdir))) {
+        return Result<Outcome, Error>.Err(Error.FormatMismatch);
     }
     str remote_tip = "";
     for (GIT_http_fetch.RemoteRef remote_ref in advertisement.refs) {

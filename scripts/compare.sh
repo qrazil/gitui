@@ -10,8 +10,8 @@
 # Two flags are pinned on git's side, and `git.m31`'s header says why:
 # `core.abbrev=7`, because git derives an abbreviation length from how many
 # objects a repository has, and `log.decorate=false`, because a repository
-# may have turned decoration on in its config and this program has no config
-# at all.
+# may have turned decoration on in its config and this program's CLI reads
+# no display configuration.
 set -uo pipefail
 
 OURS=$1
@@ -50,7 +50,7 @@ done
 
 # A short name, and the shortest unambiguous prefix git itself would print.
 head_id=$("${G[@]}" rev-parse HEAD)
-for len in 7 10 40; do
+for len in 7 10 40 "${#head_id}"; do
     short=${head_id:0:$len}
     ours -rev-parse "$short" > "$WORK/a" 2>&1
     "${G[@]}" rev-parse "$short" > "$WORK/b" 2>&1
@@ -138,13 +138,27 @@ done < "$WORK/refnames"
 # The MESSAGE is this program's own, so only the status is compared: a name
 # that is not there must fail, and must not trap.
 
-for junk in nosuchref 0000000000000000000000000000000000000000 zz ../../etc/passwd; do
+for junk in nosuchref zz ../../etc/passwd; do
     n=$((n + 1))
     if ours -rev-parse "$junk" >/dev/null 2>&1; then
         printf '\033[31mdiffer\033[0m rev-parse %s succeeded and should not have\n' "$junk"
         bad=$((bad + 1))
     fi
 done
+
+# A full-width name that no object has: git's rev-parse hands it back (it only
+# parses a full name, it does not look the object up), and `cat-file` fails.
+# Both must be the same here, whatever the repository's hash is.
+zero=$(printf '%0*d' "$("${G[@]}" rev-parse HEAD | awk '{print length($0)}')" 0)
+n=$((n + 1))
+"${G[@]}" rev-parse "$zero" > "$WORK/b" 2>&1
+ours -rev-parse "$zero" > "$WORK/a" 2>&1
+check "rev-parse of a full name no object has" "$WORK/a" "$WORK/b"
+n=$((n + 1))
+if ours -cat-file --type "$zero" >/dev/null 2>&1; then
+    printf '\033[31mdiffer\033[0m cat-file %s succeeded and should not have\n' "$zero"
+    bad=$((bad + 1))
+fi
 
 if [ $bad -eq 0 ]; then
     echo "     $n comparisons against git, all identical"

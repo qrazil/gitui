@@ -46,6 +46,7 @@
 // sets the time; otherwise it is now, in UTC.
 
 import GIT_config;
+import GIT_hash;
 import GIT_ident;
 import GIT_object;
 import GIT_repository;
@@ -55,8 +56,25 @@ import io;
 import os;
 import random;
 
-/// The id that stands for "no such ref" on either side of a line.
-pub const str ZERO = "0000000000000000000000000000000000000000";
+/// The id that stands for "no such ref" on either side of a line: as many
+/// zeros as an object name has in this repository.
+pub str zero(str gitdir) {
+    return GIT_hash.zero(GIT_hash.raw_len(gitdir));
+}
+
+/// Is `id` the all-zero id, in either hash? What an `old` or `new` is when the
+/// ref did not exist before or does not after.
+pub bool is_zero(str id) {
+    if (id.size() != 40 && id.size() != 64) {
+        return false;
+    }
+    for (int i in 0 .. id.size()) {
+        if (id.byte_at(i) != '0') {
+            return false;
+        }
+    }
+    return true;
+}
 
 /// Why a reflog could not be read or changed. Payload-free
 /// (docs/errors-decision.md §4).
@@ -124,8 +142,8 @@ bool is_safe_ref(str ref) {
     return true;
 }
 
-bool is_id(str id) {
-    return id.size() == 40 && GIT_object.is_name(id);
+bool is_id(str gitdir, str id) {
+    return GIT_object.is_full(gitdir, id);
 }
 
 // --- policy --------------------------------------------------------------------
@@ -248,13 +266,14 @@ pub Result<List<Entry>, Error> read(str gitdir, str ref) {
     if (!fs.exists(path)) {
         return Result<List<Entry>, Error>.Ok(out);
     }
+    int width = GIT_object.hex_len(gitdir);
     match (io.read(path)) {
         case Ok(str body): {
             for (str line in body.split("\n")) {
                 if (line == "") {
                     continue;
                 }
-                out.push(parse_line(line)?);
+                out.push(parse_line(line, width)?);
             }
             return Result<List<Entry>, Error>.Ok(out);
         }
@@ -264,16 +283,16 @@ pub Result<List<Entry>, Error> read(str gitdir, str ref) {
     }
 }
 
-Result<Entry, Error> parse_line(str line) {
-    if (line.size() < 83 || line.byte_at(40) != ' ' || line.byte_at(81) != ' ') {
+Result<Entry, Error> parse_line(str line, int width) {
+    if (line.size() < 2 * width + 3 || line.byte_at(width) != ' ' || line.byte_at(2 * width + 1) != ' ') {
         return Result<Entry, Error>.Err(Error.Malformed);
     }
-    str old = line.substr(0, 40);
-    str new = line.substr(41, 81);
-    if (!is_id(old) || !is_id(new)) {
+    str old = line.substr(0, width);
+    str new = line.substr(width + 1, 2 * width + 1);
+    if (!GIT_object.is_name(old) || !GIT_object.is_name(new)) {
         return Result<Entry, Error>.Err(Error.Malformed);
     }
-    str rest = line.substr(82, line.size());
+    str rest = line.substr(2 * width + 2, line.size());
     str message = "";
     str who = rest;
     match (rest.index_of("\t")) {
@@ -335,20 +354,20 @@ str format_line(str old, str new, GIT_object.Ident who, str msg) {
 
 /// Append one line to the log of `ref`, whether or not git would have logged
 /// this ref (`should_log` decides that; `append` obeys). `old`/`new` are
-/// forty-hex ids, `""` meaning "none" (forty zeros).
+/// full object names, `""` meaning "none" (all zeros).
 pub Result<bool, Error> append(str gitdir, str ref, str old, str new, GIT_object.Ident who, str msg) {
     if (!is_safe_ref(ref)) {
         return Result<bool, Error>.Err(Error.BadValue);
     }
     str from = old;
     if (from == "") {
-        from = ZERO;
+        from = zero(gitdir);
     }
     str to = new;
     if (to == "") {
-        to = ZERO;
+        to = zero(gitdir);
     }
-    if (!is_id(from) || !is_id(to)) {
+    if (!is_id(gitdir, from) || !is_id(gitdir, to)) {
         return Result<bool, Error>.Err(Error.BadValue);
     }
     str path = log_path(gitdir, ref);
@@ -424,7 +443,7 @@ pub Result<bool, Error> delete(str gitdir, str ref, int n, bool rewrite) {
         return Result<bool, Error>.Err(Error.NotFound);
     }
     str out = "";
-    str previous = ZERO;
+    str previous = zero(gitdir);
     for (int i in 0 .. entries.size()) {
         if (i == target) {
             continue;

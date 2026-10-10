@@ -7,6 +7,7 @@
 import GIT_branches;
 import GIT_refs;
 import GIT_ui_core;
+import GIT_ui_model;
 import GIT_ui_panel;
 import GIT_ui_prompt;
 import term;
@@ -181,7 +182,7 @@ pub void open(GIT_ui_core.Core core) {
     match (core.outline.current()) {
         case Some(TUI_outline.Row row): {
             if (row.node.id.starts_with("commit:") && !row.node.id.contains(":file:")) {
-                target = row.node.id.substr(7, 47);
+                target = GIT_ui_model.commit_in_row(row.node.id);
                 label = target.substr(0, 7);
             }
         }

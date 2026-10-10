@@ -219,7 +219,7 @@ PY
         else
             bad "wire: empty-repository advertisement" "$(cat "$wr_root/rls.out")"
         fi
-        wr_zero=0000000000000000000000000000000000000000
+        wr_zero=$(git -C "$wr_work" hash-object /dev/null | tr '0-9a-f' '0')
         wr_out=$("$WORK/t_wire" push "$wr_port" "$wr_work/.git" refs/heads/main "$wr_zero" 2>&1)
         if [ "$wr_out" = "ok refs/heads/main" ] &&
             [ "$(git -C "$wr_empty" rev-parse refs/heads/main)" = "$(git -C "$wr_work" rev-parse main)" ] &&

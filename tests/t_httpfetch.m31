@@ -17,15 +17,16 @@
 //       `gitdir` (`GIT_refs.all` + `GIT_log.walk`, exactly as `-log` walks) --
 //       the case where negotiation is expected to shrink the pack.
 //
-//   ./t_httpfetch verify <pack-file> <out-path>
+//   ./t_httpfetch verify <pack-file> <out-path> [sha1|sha256]
 //       Reads `pack-file` as plain bytes (no network, no server -- this is
 //       how a truncated or corrupted transfer is tested, per the task's own
 //       "simulate this at the test level") and calls `GIT_http_fetch.verify_pack`
-//       on them. Prints "ok <bytes> <objects>" or "error: <message>".
+//       on them, with the trailer width of the object format named (SHA-1 if none). Prints "ok <bytes> <objects>" or "error: <message>".
 //
 // Every command prints "error: <message>" to standard error and exits 1 on
 // failure; a successful command exits 0.
 
+import GIT_hash;
 import GIT_http_fetch;
 import GIT_log;
 import io;
@@ -44,7 +45,9 @@ if (cmd == "ls-remote" && argv.size() == 3) {
 } else if (cmd == "fetch" && argv.size() == 5) {
     do_fetch(argv[2], argv[3], argv[4]);
 } else if (cmd == "verify" && argv.size() == 4) {
-    do_verify(argv[2], argv[3]);
+    do_verify(argv[2], argv[3], "sha1");
+} else if (cmd == "verify" && argv.size() == 5) {
+    do_verify(argv[2], argv[3], argv[4]);
 } else {
     usage();
 }
@@ -53,7 +56,7 @@ void usage() {
     io.eprint("usage: t_httpfetch ls-remote <url>");
     io.eprint("       t_httpfetch clone <url> <out.pack>");
     io.eprint("       t_httpfetch fetch <url> <gitdir> <out.pack>");
-    io.eprint("       t_httpfetch verify <pack-file> <out-path>");
+    io.eprint("       t_httpfetch verify <pack-file> <out-path> [sha1|sha256]");
     os.exit(2);
 }
 
@@ -117,10 +120,14 @@ void run_fetch(str url, GIT_http_fetch.Advertisement advertisement, List<str> wa
     }
 }
 
-void do_verify(str pack_path, str out_path) {
+void do_verify(str pack_path, str out_path, str format_name) {
+    int raw = GIT_hash.raw_of_name(format_name);
+    if (raw == 0) {
+        fail("unknown object format " + format_name);
+    }
     match (io.read_bytes(pack_path)) {
         case Ok(bytes data): {
-            match (GIT_http_fetch.verify_pack(data, out_path)) {
+            match (GIT_http_fetch.verify_pack(data, out_path, raw: raw)) {
                 case Ok(GIT_http_fetch.Summary summary): {
                     print("ok " + summary.pack_bytes.to_str() + " " + summary.object_count.to_str());
                 }

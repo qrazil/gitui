@@ -56,7 +56,7 @@
 // See `GIT_wire.m31`. In short: this adapter sends the simplest legal round (no
 // `multi_ack`, one request, `done` at the end), the response is zero or more
 // `ACK`/`NAK` lines and then side-band-64k, and a pack is never written to
-// disk before its trailing SHA-1 has been checked. Band 2 (progress) and band
+// disk before its trailing checksum has been checked. Band 2 (progress) and band
 // 3 (a server error) are printed to standard error, as they always were, and
 // band 3 becomes `RemoteError`.
 //
@@ -121,8 +121,7 @@ pub enum Error {
     /// A pkt-line's length prefix names more bytes than actually arrived --
     /// a message cut off in the middle.
     Truncated;
-    /// The server's object format is not SHA-1. See `sha1digest.m31`'s own note on
-    /// why there is no second digest here.
+    /// The server's object format is neither `sha1` nor `sha256`.
     UnsupportedFormat;
     /// The ref advertisement does not offer `side-band-64k`, which this
     /// module requires -- see the module note.
@@ -178,7 +177,7 @@ pub str Error.to_str() {
             return "the message was cut off in the middle";
         }
         case UnsupportedFormat: {
-            return "the server's object format is not SHA-1";
+            return "the server's object format is neither sha1 nor sha256";
         }
         case NoSideBand: {
             return "the server did not offer side-band-64k, which this module requires";
@@ -199,7 +198,7 @@ pub str Error.to_str() {
             return "no want was given -- nothing to fetch";
         }
         case BadName: {
-            return "not a well-formed object name: 40 lowercase hex digits";
+            return "not a well-formed object name: 40 (SHA-1) or 64 (SHA-256) lowercase hex digits, as the server's format has";
         }
         case Io: {
             return "the pack could not be written to disk";
@@ -506,19 +505,22 @@ Result<GIT_wire.Packet, Error> wire_ok(Result<GIT_wire.Packet, GIT_wire.Error> r
 /// `advertisement` is the `Advertisement` `discover` already returned for this `url`:
 /// its capabilities decide what is asked for (`ofs-delta` only if offered;
 /// `side-band-64k` always, and `NoSideBand` if the server never offered it).
-/// Every `want` and `have` must be a 40-digit lowercase hex object name, and
-/// there must be at least one `want`.
+/// Every `want` and `have` must be a lowercase hex object name of the
+/// advertisement's width (40 digits for `sha1`, 64 for `sha256`), and there
+/// must be at least one `want`. Whether the advertised format is the local
+/// repository's is for the caller (`GIT_pull.pull`).
 pub Result<Summary, Error> fetch(str url, Advertisement advertisement, List<str> wants, List<str> haves, str out_path, str authorization = "") {
     if (wants.size() == 0) {
         return Result<Summary, Error>.Err(Error.NoWant);
     }
+    int id_width = GIT_wire.raw_of(wire_advertisement_of(advertisement)) * 2;
     for (str want in wants) {
-        if (!GIT_object.is_name(want) || want.size() != 40) {
+        if (!GIT_object.is_name(want) || want.size() != id_width) {
             return Result<Summary, Error>.Err(Error.BadName);
         }
     }
     for (str have in haves) {
-        if (!GIT_object.is_name(have) || have.size() != 40) {
+        if (!GIT_object.is_name(have) || have.size() != id_width) {
             return Result<Summary, Error>.Err(Error.BadName);
         }
     }
@@ -537,7 +539,7 @@ pub Result<Summary, Error> fetch(str url, Advertisement advertisement, List<str>
             request.set_body(body);
             match (exchange(request)) {
                 case Ok(http.Response response): {
-                    return after_pack_response(response, out_path);
+                    return after_pack_response(response, out_path, GIT_wire.raw_of(wire_advertisement_of(advertisement)));
                 }
                 case Err(http.Error failure): {
                     return Result<Summary, Error>.Err(error_of(failure));
@@ -550,7 +552,7 @@ pub Result<Summary, Error> fetch(str url, Advertisement advertisement, List<str>
     }
 }
 
-Result<Summary, Error> after_pack_response(http.Response response, str out_path) {
+Result<Summary, Error> after_pack_response(http.Response response, str out_path, int raw) {
     if (response.status() != 200) {
         return Result<Summary, Error>.Err(Error.Status);
     }
@@ -568,7 +570,7 @@ Result<Summary, Error> after_pack_response(http.Response response, str out_path)
                 io.eprint("remote: " + demux_result.remote_error);
                 return Result<Summary, Error>.Err(Error.RemoteError);
             }
-            return verify_pack(demux_result.pack, out_path);
+            return verify_pack(demux_result.pack, out_path, raw: raw);
         }
         case Err(GIT_wire.Error error): {
             return Result<Summary, Error>.Err(error_of_wire(error));
@@ -576,13 +578,14 @@ Result<Summary, Error> after_pack_response(http.Response response, str out_path)
     }
 }
 
-/// Check `pack`'s trailing 20-byte SHA-1 against the SHA-1 of everything
-/// before it (`GIT_wire.check_pack`), and only then write it to `out_path`.
+/// Check `pack`'s trailing checksum (`raw` octets: 20 for SHA-1, the default,
+/// 32 for SHA-256) against the hash of everything before it
+/// (`GIT_wire.check_pack`), and only then write it to `out_path`.
 /// Exposed on its own -- given bytes, not a URL -- so a truncated or
 /// corrupted transfer can be tested by handing this function a byte string
 /// that was never near a socket.
-pub Result<Summary, Error> verify_pack(bytes pack, str out_path) {
-    match (GIT_wire.verify_pack(pack, out_path)) {
+pub Result<Summary, Error> verify_pack(bytes pack, str out_path, int raw = 20) {
+    match (GIT_wire.verify_pack(pack, out_path, raw: raw)) {
         case Ok(GIT_wire.Summary summary): {
             return Result<Summary, Error>.Ok(Summary(summary.pack_bytes, summary.object_count));
         }

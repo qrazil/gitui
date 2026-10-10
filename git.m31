@@ -1,5 +1,6 @@
 // A read-only git plumbing client: `cat-file`, `ls-tree`, `log`, `rev-parse`
-// and `refs`, over loose objects only.
+// and `refs`, over loose objects and packfiles, in SHA-1 and SHA-256
+// repositories.
 //
 //   bash scripts/build.sh git.m31 -o ourgit
 //
@@ -31,8 +32,10 @@
 //   - abbreviated object names in a `Merge:` line are seven digits, where git
 //     derives a length from how many objects the repository has. The
 //     comparison runs git with `-c core.abbrev=7`.
-//   - there is no `.mailmap`, no `log.decorate`, no colour and no pager,
-//     because there is no configuration at all.
+//   - there is no `.mailmap`, no `log.decorate`, no colour and no pager:
+//     the repository's config is read for what makes a repository readable
+//     at all (`GIT_hash.m31`'s object format and extension check), and not
+//     for any of the choices about how output looks.
 
 import args;
 import io;
@@ -40,6 +43,7 @@ import os;
 import fs;
 import date;
 import text;
+import GIT_hash;
 import GIT_object;
 import GIT_refs;
 import GIT_repository;
@@ -104,6 +108,11 @@ int dispatch(args.Parser parser, args.Parsed parsed) {
                 }
             }
         }
+    }
+    str refusal = GIT_hash.refusal(git_directory);
+    if (refusal != "") {
+        io.eprint("fatal: " + refusal);
+        return 128;
     }
     List<args.Parsed> cmds = parsed.commands();
     if (cmds.size() == 0) {

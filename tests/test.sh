@@ -5,6 +5,8 @@
 #       the built-in fixtures
 #   M31_ROOT=/path/to/m31 bash tests/test.sh <repo> ...
 #       those, and each repository named
+#   TEST_HASH=sha256 M31_ROOT=/path/to/m31 bash tests/test.sh
+#       the same fixtures as SHA-256 repositories
 #
 # The oracles are Python's `hashlib` and `zlib` for the two codecs, a
 # from-scratch Python reader of the loose-object format for the layer above
@@ -24,6 +26,17 @@ set -uo pipefail
 cd "$(dirname "$0")/.."
 unset VISUAL GIT_EDITOR EDITOR GIT_SEQUENCE_EDITOR
 export LC_ALL=C TZ=UTC
+
+# TEST_HASH=sha256 runs every fixture as a SHA-256 repository: `git init` takes
+# its algorithm from GIT_DEFAULT_HASH (and `git clone` from the remote), so the
+# same checks run unchanged and the same oracles judge them. The default is
+# SHA-1, which is what a bare `bash tests/test.sh` has always run.
+TEST_HASH=${TEST_HASH:-sha1}
+case $TEST_HASH in
+    sha1|sha256) ;;
+    *) echo "TEST_HASH must be sha1 or sha256, not $TEST_HASH" >&2; exit 1 ;;
+esac
+export GIT_DEFAULT_HASH=$TEST_HASH
 
 if [ -z "${M31_ROOT:-}" ]; then
     echo "M31_ROOT is not set -- point it at a checkout of github.com/qrazil/m31" \
@@ -399,6 +412,15 @@ source tests/test_ssh.sh
 # are in it, and compares each answer with real git's.
 
 source tests/test_revparse.sh
+
+# --- SHA-256 repositories: objects, packs, the write path, the refusals, and a push
+# and a pull between repositories of the same and of different formats ----------
+#
+# `test_sha256.sh` builds `git init --object-format=sha256` fixtures whatever
+# `TEST_HASH` is. (`TEST_HASH=sha256 bash tests/test.sh` is the other half: every
+# fixture of every family above becomes a SHA-256 one.)
+
+source tests/test_sha256.sh
 
 echo
 if [ $fail -eq 0 ]; then

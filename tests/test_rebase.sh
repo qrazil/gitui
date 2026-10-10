@@ -104,7 +104,7 @@ rb_state() {
         for f in $(ls "$r/.git/rebase-merge" | grep -v '^patch$'); do
             echo "== rebase-merge/$f"
             case $f in
-                git-rebase-todo*|done) grep -v '^#' "$r/.git/rebase-merge/$f" | grep -v '^$' | sed 's/^\([a-z]* [0-9a-f]\{40\}\) # /\1 /' ;;
+                git-rebase-todo*|done) grep -v '^#' "$r/.git/rebase-merge/$f" | grep -v '^$' | sed 's/^\([a-z]* [0-9a-f]\{40,64\}\) # /\1 /' ;;
                 *) cat -A "$r/.git/rebase-merge/$f" ;;
             esac
         done

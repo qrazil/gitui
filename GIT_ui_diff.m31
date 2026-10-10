@@ -72,7 +72,7 @@ pub void DiffLayer.show_diff_current() {
                     case Some(GIT_ui_model.CommitFileDiff commit_file_diff): {
                         open_diff(row.node.label, GIT_ui_model.commit_blob(gitdir, commit_file_diff.old_id), GIT_ui_model.commit_blob(gitdir, commit_file_diff.new_id));
                         diff_section = "commit";
-                        diff_rev = row.node.id.substr(7, 47);
+                        diff_rev = GIT_ui_model.commit_in_row(row.node.id);
                         diff_path = commit_file_diff.path;
                     }
                     case None: {

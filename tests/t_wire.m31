@@ -30,11 +30,13 @@
 //       "ng <ref> <reason>" (exit 1); "error: <message>" on stderr, exit 1,
 //       when it could not happen.
 
+import GIT_hash;
 import GIT_log;
 import GIT_object;
 import GIT_pack_write;
 import GIT_refs;
 import sha1digest;
+import sha256;
 import GIT_wire;
 import io;
 import net;
@@ -158,6 +160,10 @@ bool is_report_error(Result<GIT_wire.ReportStatus, GIT_wire.Error> result, GIT_w
 const str ID_A = "1111111111111111111111111111111111111111";
 const str ID_B = "2222222222222222222222222222222222222222";
 const str ID_C = "3333333333333333333333333333333333333333";
+// 64-digit names, for a SHA-256 server.
+const str ID_A64 = "1111111111111111111111111111111111111111111111111111111111111111";
+const str ID_B64 = "2222222222222222222222222222222222222222222222222222222222222222";
+const str ZERO64 = "0000000000000000000000000000000000000000000000000000000000000000";
 
 // A byte string of pkt-lines (a line is not newline-terminated unless it says so) and a flush.
 bytes pkts(List<str> lines) {
@@ -330,9 +336,46 @@ void unit_advertisement() {
     }
     bytes err_line = GIT_wire.pkt_line("ERR access denied\n".to_bytes());
     check("wire: an ERR line is RemoteError", is_ad_error(GIT_wire.read_advertisement(io.buffer_of(err_line)), GIT_wire.Error.RemoteError), "other");
-    bytes sha256 = first_ref_line(ID_A, "refs/heads/main", "object-format=sha256");
-    sha256.extend(GIT_wire.FLUSH_PKT);
-    check("wire: object-format=sha256 is UnsupportedFormat", is_ad_error(GIT_wire.read_advertisement(io.buffer_of(sha256)), GIT_wire.Error.UnsupportedFormat), "other");
+    bytes sha256_ad = first_ref_line(ID_A64, "HEAD", "side-band-64k object-format=sha256");
+    sha256_ad.extend(GIT_wire.pkt_line((ID_B64 + " refs/heads/main\n").to_bytes()));
+    sha256_ad.extend(GIT_wire.FLUSH_PKT);
+    match (GIT_wire.read_advertisement(io.buffer_of(sha256_ad))) {
+        case Ok(GIT_wire.Advertisement ad): {
+            check("wire: object-format=sha256 with 64-digit ids is read as sha256", ad.object_format == "sha256" && ad.refs.size() == 2 && ad.refs[1].id == ID_B64 && ad.refs[0].id == ID_A64, ad.object_format);
+        }
+        case Err(GIT_wire.Error error): {
+            check("wire: object-format=sha256 with 64-digit ids is read as sha256", false, error.to_str());
+        }
+    }
+    bytes sha256_empty = first_ref_line(ZERO64, "capabilities^{}", "side-band-64k object-format=sha256");
+    sha256_empty.extend(GIT_wire.FLUSH_PKT);
+    match (GIT_wire.read_advertisement(io.buffer_of(sha256_empty))) {
+        case Ok(GIT_wire.Advertisement ad): {
+            check("wire: an empty sha256 repository's capabilities^{} line is read", ad.refs.size() == 0 && ad.object_format == "sha256" && GIT_wire.zero_id(ad) == ZERO64, ad.refs.size().to_str());
+        }
+        case Err(GIT_wire.Error error): {
+            check("wire: an empty sha256 repository's capabilities^{} line is read", false, error.to_str());
+        }
+    }
+    bytes sha256_short = first_ref_line(ID_A, "refs/heads/main", "object-format=sha256");
+    sha256_short.extend(GIT_wire.FLUSH_PKT);
+    check("wire: object-format=sha256 with a 40-digit id is BadAdvertisement", is_ad_error(GIT_wire.read_advertisement(io.buffer_of(sha256_short)), GIT_wire.Error.BadAdvertisement), "other");
+    bytes sha1_long = first_ref_line(ID_A64, "refs/heads/main", "object-format=sha1");
+    sha1_long.extend(GIT_wire.FLUSH_PKT);
+    check("wire: object-format=sha1 with a 64-digit id is BadAdvertisement", is_ad_error(GIT_wire.read_advertisement(io.buffer_of(sha1_long)), GIT_wire.Error.BadAdvertisement), "other");
+    bytes sha512_ad = first_ref_line(ID_A, "refs/heads/main", "object-format=sha512");
+    sha512_ad.extend(GIT_wire.FLUSH_PKT);
+    check("wire: object-format=sha512 is UnsupportedFormat", is_ad_error(GIT_wire.read_advertisement(io.buffer_of(sha512_ad)), GIT_wire.Error.UnsupportedFormat), "other");
+    bytes sha1_named = first_ref_line(ID_A, "refs/heads/main", "object-format=sha1");
+    sha1_named.extend(GIT_wire.FLUSH_PKT);
+    match (GIT_wire.read_advertisement(io.buffer_of(sha1_named))) {
+        case Ok(GIT_wire.Advertisement ad): {
+            check("wire: object-format=sha1 with 40-digit ids is read as sha1", ad.object_format == "sha1" && GIT_wire.zero_id(ad) == GIT_wire.ZERO_ID, ad.object_format);
+        }
+        case Err(GIT_wire.Error error): {
+            check("wire: object-format=sha1 with 40-digit ids is read as sha1", false, error.to_str());
+        }
+    }
     bytes short_id = GIT_wire.pkt_line("abc refs/heads/main\n".to_bytes());
     short_id.extend(GIT_wire.FLUSH_PKT);
     check("wire: a ref line with a short id is BadAdvertisement", is_ad_error(GIT_wire.read_advertisement(io.buffer_of(short_id)), GIT_wire.Error.BadAdvertisement), "other");
@@ -451,6 +494,23 @@ void unit_bodies() {
     expected_command.extend("0000".to_bytes());
     expected_command.extend(pack);
     check("wire: command_body is one NUL-capped command, a flush, then the raw pack", command == expected_command, text(command));
+    // The same in SHA-256: the format echoed on the first want and on the command.
+    List<GIT_wire.RemoteRef> no_refs = [];
+    GIT_wire.Advertisement ad256 = GIT_wire.Advertisement("", ["side-band-64k", "ofs-delta", "object-format=sha256"], no_refs, "sha256");
+    str body256 = text(GIT_wire.negotiation_body(ad256, [ID_A64, ID_B64], [ID_B64], "t/1"));
+    str want256 = "want " + ID_A64 + " side-band-64k ofs-delta object-format=sha256 agent=t/1\n";
+    str expected256 = hex4(want256) + want256 + "004awant " + ID_B64 + "\n" + "0000" + "004ahave " + ID_B64 + "\n" + "0009done\n";
+    check("wire: a sha256 negotiation_body echoes object-format on the first want", body256 == expected256, body256);
+    bytes command256 = GIT_wire.command_body(ZERO64, ID_A64, "refs/heads/main", pack, "t/1");
+    str line256 = ZERO64 + " " + ID_A64 + " refs/heads/main";
+    str caps256 = "report-status object-format=sha256 agent=t/1\n";
+    bytes expected_command256 = hex4_of(4 + line256.size() + 1 + caps256.size()).to_bytes();
+    expected_command256.extend(line256.to_bytes());
+    expected_command256.push(0);
+    expected_command256.extend(caps256.to_bytes());
+    expected_command256.extend("0000".to_bytes());
+    expected_command256.extend(pack);
+    check("wire: a sha256 command_body names the format in its capabilities", command256 == expected_command256, text(command256));
     // fetch_pack refuses before writing a byte.
     GIT_wire.Stream sink = io.buffer();
     List<str> no_wants = [];
@@ -523,8 +583,12 @@ void check_bad_report(str name, List<str> lines) {
     check(name, is_report_error(GIT_wire.parse_report(pkts(lines), "refs/heads/main"), GIT_wire.Error.BadReport), "other");
 }
 
+bytes empty_pack_content() {
+    return [80, 65, 67, 75, 0, 0, 0, 2, 0, 0, 0, 0];
+}
+
 bytes empty_pack() {
-    bytes content = [80, 65, 67, 75, 0, 0, 0, 2, 0, 0, 0, 0];
+    bytes content = empty_pack_content();
     bytes out = clone(content);
     out.extend(sha1digest.sum(content));
     return out;
@@ -549,6 +613,19 @@ void unit_pack() {
     bytes not_pack = clone(good);
     not_pack[0] = 'X';
     check("wire: check_pack without PACK is BadPack", is_int_error(GIT_wire.check_pack(not_pack), GIT_wire.Error.BadPack), "other");
+    bytes content256 = empty_pack_content();
+    bytes good256 = clone(content256);
+    good256.extend(sha256.sum(content256));
+    match (GIT_wire.check_pack(good256, raw: 32)) {
+        case Ok(int count): {
+            check("wire: check_pack(raw: 32) accepts a well-formed empty sha256 pack", count == 0, count.to_str());
+        }
+        case Err(GIT_wire.Error error): {
+            check("wire: check_pack(raw: 32) accepts a well-formed empty sha256 pack", false, error.to_str());
+        }
+    }
+    check("wire: a sha256 pack read as sha1 is ChecksumMismatch", is_int_error(GIT_wire.check_pack(good256), GIT_wire.Error.ChecksumMismatch), "other");
+    check("wire: check_pack(raw: 32) of a sha1-sized pack is Truncated", is_int_error(GIT_wire.check_pack(good, raw: 32), GIT_wire.Error.Truncated), "other");
     check("wire: check_pack of too few bytes is Truncated", is_int_error(GIT_wire.check_pack(good.substr(0, 31)), GIT_wire.Error.Truncated), "other");
 }
 
@@ -827,7 +904,7 @@ void do_fetch(str port_text, str gitdir, str out_path) {
             if (out.has_remote_error) {
                 fail("remote: " + out.remote_error);
             }
-            match (GIT_wire.verify_pack(out.pack, out_path)) {
+            match (GIT_wire.verify_pack(out.pack, out_path, raw: GIT_hash.raw_len(gitdir))) {
                 case Ok(GIT_wire.Summary summary): {
                     print("pack " + summary.pack_bytes.to_str() + " " + summary.object_count.to_str());
                 }

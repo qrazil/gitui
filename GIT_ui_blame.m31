@@ -64,7 +64,7 @@ pub Result<Target, str> target(GIT_ui_core.Core core) {
             if (id.starts_with("commit:") && id.contains(":file:")) {
                 match (core.file_diffs.get(id)) {
                     case Some(GIT_ui_model.CommitFileDiff found): {
-                        return Result<Target, str>.Ok(Target(id.substr(7, 47), found.path.utf8().or("")));
+                        return Result<Target, str>.Ok(Target(GIT_ui_model.commit_in_row(id), found.path.utf8().or("")));
                     }
                     case None: {
                     }

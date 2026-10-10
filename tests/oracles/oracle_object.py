@@ -18,7 +18,7 @@ of the decoders.
 
 --- packfiles, from scratch -----------------------------------------------
 
-`.idx` v2 only (fanout, sorted 20-octet names, CRC32 -- unused here, a 4-byte
+`.idx` v2 only (fanout, sorted 20- (SHA-1) or 32-octet (SHA-256) names, CRC32 -- unused here, a 4-byte
 offset per object with the large-offset table for the MSB-set case), the
 packfile's own variable-length type+size header, `OBJ_OFS_DELTA` (a backward
 offset from the object's own header, `+1`-folded 7-bit groups) and
@@ -34,9 +34,32 @@ answers in the language program -- the same primitive, a different
 implementation of it.
 """
 import hashlib
+import re
 import os
 import sys
 import zlib
+
+
+# Octets of an object name: 20 for SHA-1, 32 for a repository whose config says
+# `objectformat = sha256`. Set once by `main`; `sha1` and `20` below are the
+# *object name* algorithm and width, not the content digests printed in the
+# output (those are SHA-1 in both, as `t_object.m31` prints them).
+RAW = 20
+
+
+def name_hash(data):
+    return hashlib.sha256(data) if RAW == 32 else hashlib.sha1(data)
+
+
+def format_of(gd):
+    try:
+        with open(os.path.join(gd, "config")) as f:
+            text = f.read().lower()
+    except OSError:
+        return 20
+    if re.search(r"objectformat\s*=\s*sha256", text) and re.search(r"repositoryformatversion\s*=\s*1", text):
+        return 32
+    return 20
 
 
 def gitdir(path):
@@ -114,9 +137,9 @@ def entries(content):
         nul = content.find(b"\0", sp + 1)
         mode = int(content[at:sp], 8)
         name = content[sp + 1:nul]
-        oid = content[nul + 1:nul + 21].hex()
+        oid = content[nul + 1:nul + 1 + RAW].hex()
         out.append((mode, name, oid))
-        at = nul + 21
+        at = nul + 1 + RAW
     return out
 
 
@@ -127,7 +150,7 @@ def loose_names(od):
     for two in os.listdir(od):
         if len(two) == 2 and all(c in "0123456789abcdef" for c in two):
             for rest in os.listdir(os.path.join(od, two)):
-                if len(rest) == 38:
+                if len(rest) == 2 * RAW - 2:
                     names.append(two + rest)
     return names
 
@@ -170,12 +193,12 @@ class Idx:
         self.fanout = [int.from_bytes(data[8 + 4 * i:12 + 4 * i], "big") for i in range(256)]
         self.n = self.fanout[255]
         self.names_off = 8 + 1024
-        self.crc_off = self.names_off + 20 * self.n
+        self.crc_off = self.names_off + RAW * self.n
         self.off_off = self.crc_off + 4 * self.n
         self.large_off = self.off_off + 4 * self.n
 
     def all_ids(self):
-        return [self.data[self.names_off + 20 * i:self.names_off + 20 * i + 20].hex()
+        return [self.data[self.names_off + RAW * i:self.names_off + RAW * i + RAW].hex()
                 for i in range(self.n)]
 
     def offset_of(self, id20):
@@ -184,7 +207,7 @@ class Idx:
         hi = self.fanout[first]
         while lo < hi:
             mid = (lo + hi) // 2
-            got = self.data[self.names_off + mid * 20:self.names_off + mid * 20 + 20]
+            got = self.data[self.names_off + mid * RAW:self.names_off + mid * RAW + RAW]
             if got == id20:
                 return self._offset_at(mid)
             elif got < id20:
@@ -321,8 +344,8 @@ def resolve_offset(idxes, packs_bytes, pack_i, offset, loose_od):
             chain.append(delta)
             cur = base_off
         elif kind == 7:  # OBJ_REF_DELTA
-            base_sha = pack[cur + hdr_len:cur + hdr_len + 20]
-            delta, _ = inflate_at(pack, cur + hdr_len + 20)
+            base_sha = pack[cur + hdr_len:cur + hdr_len + RAW]
+            delta, _ = inflate_at(pack, cur + hdr_len + RAW)
             chain.append(delta)
             here = idx.offset_of(base_sha)
             if here is not None:
@@ -357,7 +380,9 @@ def resolve_id(idxes, packs_bytes, oid, loose_od):
 
 
 def main():
+    global RAW
     gd = gitdir(sys.argv[1])
+    RAW = format_of(gd)
     od = os.path.join(gd, "objects")
     names = set(loose_names(od))
 
@@ -380,7 +405,7 @@ def main():
     for oid in names:
         plain = loose_plain(od, oid)
         if plain is not None:
-            assert hashlib.sha1(plain).hexdigest() == oid, oid
+            assert name_hash(plain).hexdigest() == oid, oid
             nul = plain.index(b"\0")
             kind, size = plain[:nul].split(b" ")
             content = plain[nul + 1:]
@@ -388,7 +413,7 @@ def main():
             kind = kind.decode("ascii")
         else:
             kind, content = resolve_id(idxes, packs_bytes, oid, od)
-            assert hashlib.sha1(("%s %d\0" % (kind, len(content))).encode("ascii") + content).hexdigest() == oid, oid
+            assert name_hash(("%s %d\0" % (kind, len(content))).encode("ascii") + content).hexdigest() == oid, oid
         if kind == "blob":
             out.append("%s blob %d %s" % (oid, len(content), hashlib.sha1(content).hexdigest()))
         elif kind == "tree":

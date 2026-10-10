@@ -508,7 +508,7 @@ pub void RebaseLayer.offer_pull(str spec) {
 }
 
 str label_of(str name) {
-    if (name.size() == 40) {
+    if (GIT_object.is_name(name) && (name.size() == 40 || name.size() == 64)) {
         return GIT_ui_core.short_id(name);
     }
     return name;

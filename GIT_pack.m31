@@ -25,13 +25,14 @@
 // cumulative counts -- `fanout[b]` is how many of the pack's objects have a
 // first id-byte of `b` or less, so `fanout[255]` is the object count and
 // `fanout[first-1] .. fanout[first]` is the slice to binary-search for any id
-// starting with byte `first`); the sorted table of 20-byte object ids itself;
+// starting with byte `first`); the sorted table of the object ids themselves (20-octet SHA-1 or 32-octet
+// SHA-256, whichever the repository's `GIT_hash.m31` says);
 // a CRC32 per object (unused here -- nothing above this module asks for it,
-// and the final SHA-1 check in `GIT_object.parse` is the stronger guarantee
+// and the final hash check in `GIT_object.parse` is the stronger guarantee
 // anyway); a 4-byte offset per object, whose top bit, when set, is not part of
 // the offset but a flag: the low 31 bits are an INDEX into a trailing table of
 // 8-byte big-endian offsets, for any object living past 2 GB into the pack;
-// and finally the pack's own SHA-1 and the idx file's own, neither checked
+// and finally the pack's own checksum and the idx file's own, neither checked
 // here for the same reason the CRC32 is not.
 //
 // --- the packfile itself ------------------------------------------------------
@@ -53,7 +54,7 @@
 // a `+1` folded into every continuation (RFC-less and easy to get off by one
 // -- `resolve_offset` below has the arithmetic, and `tests/test.sh`'s
 // packed fixture is what proves it against real objects). `OBJ_REF_DELTA`
-// names its base by the base's own 20-byte id instead of an offset, which is
+// names its base by the base's own binary id (20 or 32 octets) instead of an offset, which is
 // how a THIN pack (one built assuming the receiver already has the base) can
 // delta against an object that is not in the pack at all -- see
 // `resolve_id`'s loose/other-pack fallback below.
@@ -77,19 +78,18 @@
 //
 // --- what is NOT here ---------------------------------------------------------
 //
-// Writing a packfile -- `README.md` and `docs/design.md`
-// ("Going remote") both name this as later, separate work, once `push` needs
-// it. Reading a pack's own trailing checksums (the CRC32 per object, the pack
-// and idx SHA-1s) is skipped for the reason the header above gives: the
+// Writing a packfile -- that is `GIT_pack_write.m31`, which `push` uses.
+// Reading a pack's own trailing checksums (the CRC32 per object, the pack
+// and idx checksums) is skipped for the reason the header above gives: the
 // content this module hands back is checked against the id it was asked for
-// by `GIT_object.parse`'s own SHA-1, which is the stronger and already-existing
+// by `GIT_object.parse`'s own hash, which is the stronger and already-existing
 // guarantee, and re-deriving a second one here would only be insurance on
 // insurance.
 
 import io;
 import fs;
 import GIT_repository;
-import sha1digest;
+import GIT_hash;
 import GIT_zlib;
 
 /// Why an object could not be read out of a `.idx`/`.pack` pair. Payload-free
@@ -201,7 +201,8 @@ type Raw {
 /// The trailing checksum is not checked here; `GIT_http_fetch.verify_pack` has
 /// already done that for anything it wrote.
 pub Result<List<Unpacked>, Error> read_pack(str gitdir, bytes pack) {
-    if (pack.size() < 32 || pack.substr(0, 4) != "PACK".to_bytes() || u32be(pack, 4) != 2) {
+    int raw_width = GIT_hash.raw_len(gitdir);
+    if (pack.size() < 12 + raw_width || pack.substr(0, 4) != "PACK".to_bytes() || u32be(pack, 4) != 2) {
         return Result<List<Unpacked>, Error>.Err(Error.BadPack);
     }
     int count = u32be(pack, 8);
@@ -235,11 +236,11 @@ pub Result<List<Unpacked>, Error> read_pack(str gitdir, bytes pack) {
                 return Result<List<Unpacked>, Error>.Err(Error.BadPack);
             }
         } else if (header.kind == 7) {
-            if (position + 20 > pack.size()) {
+            if (position + raw_width > pack.size()) {
                 return Result<List<Unpacked>, Error>.Err(Error.BadPack);
             }
-            base_id = pack.substr(position, position + 20);
-            position = position + 20;
+            base_id = pack.substr(position, position + raw_width);
+            position = position + raw_width;
         } else if (header.kind < 1 || header.kind > 4) {
             return Result<List<Unpacked>, Error>.Err(Error.BadPack);
         }
@@ -283,7 +284,7 @@ pub Result<List<Unpacked>, Error> read_pack(str gitdir, bytes pack) {
                 kind = resolved_base.kind;
                 content = apply_delta(resolved_base.content, raw.data)?;
             }
-            Unpacked unpacked = Unpacked(object_name(kind, content), kind, content);
+            Unpacked unpacked = Unpacked(object_name(raw_width, kind, content), kind, content);
             by_id.set(unpacked.id, unpacked);
             done[i] = Option<Unpacked>.Some(unpacked);
             left = left - 1;
@@ -322,14 +323,14 @@ pub Result<List<Unpacked>, Error> read_pack(str gitdir, bytes pack) {
     return Result<List<Unpacked>, Error>.Ok(out);
 }
 
-// An object's name: the SHA-1 of `<kind> <size>\0<content>`.
-str object_name(str kind, bytes content) {
+// An object's name: the hash of `<kind> <size>\0<content>`.
+str object_name(int raw_width, str kind, bytes content) {
     bytes framed = kind.to_bytes();
     framed.push(' ');
     framed.extend(content.size().to_str().to_bytes());
     framed.push(0);
     framed.extend(content);
-    return sha1digest.hex(framed);
+    return GIT_hash.hex(raw_width, framed);
 }
 
 /// Every object named by a `.idx` under `objects/pack/`, sorted and
@@ -341,11 +342,12 @@ str object_name(str kind, bytes content) {
 /// unreadable.
 pub Result<List<str>, Error> ids(str gitdir) {
     List<PackFile> packs = discover(gitdir);
+    int raw_width = GIT_hash.raw_len(gitdir);
     List<str> out = [];
     for (PackFile pack_file in packs) {
         match (io.read_bytes(pack_file.index_path)) {
             case Ok(bytes data): {
-                match (parse_index(data)) {
+                match (parse_index(data, raw_width)) {
                     case Ok(Idx pack_index): {
                         for (str id in pack_index.all_ids()) {
                             out.push(id);
@@ -420,7 +422,7 @@ List<PackFile> discover(str gitdir) {
 // every other object does, which is where the one check that matters happens.
 Option<Found> loose_raw(str gitdir, str id) {
     str root = fs.join(GIT_repository.common(gitdir), "objects");
-    str path = fs.join(fs.join(root, id.substr(0, 2)), id.substr(2, 40));
+    str path = fs.join(fs.join(root, id.substr(0, 2)), id.substr(2, id.size()));
     if (!fs.exists(path)) {
         return Option<Found>.None;
     }
@@ -484,13 +486,13 @@ Result<Found, Error> resolve_id(str gitdir, List<PackFile> packs, str id, int de
         case None: {
         }
     }
-    bytes id20 = hex_decode(id);
+    bytes raw_id = hex_decode(id);
     for (PackFile pack_file in packs) {
         match (io.read_bytes(pack_file.index_path)) {
             case Ok(bytes idata): {
-                match (parse_index(idata)) {
+                match (parse_index(idata, raw_id.size())) {
                     case Ok(Idx pack_index): {
-                        match (pack_index.offset_of(id20)) {
+                        match (pack_index.offset_of(raw_id)) {
                             case Some(int off): {
                                 match (io.read_bytes(pack_file.pack_path)) {
                                     case Ok(bytes packbytes): {
@@ -575,17 +577,18 @@ Result<Found, Error> resolve_offset(str gitdir, List<PackFile> packs, Idx pack_i
             chain.push(decoded.data);
             current = base_off;
         } else if (header.kind == 7) {
-            // OBJ_REF_DELTA: the base named by its own 20-byte id, which may
+            // OBJ_REF_DELTA: the base named by its own binary id, which may
             // or may not be in THIS pack (a thin pack leaves it out on
             // purpose) -- checked against `pack_index` first, since that is the
             // common case and stays inside this iterative loop; only a miss
             // falls back to `resolve_id`'s general search.
             int position = current + header.header_length;
-            if (position + 20 > pack.size()) {
+            int raw_width = pack_index.raw_width;
+            if (position + raw_width > pack.size()) {
                 return Result<Found, Error>.Err(Error.BadPack);
             }
-            bytes base_sha = pack.substr(position, position + 20);
-            GIT_zlib.Decoded decoded = inflate_pack_zlib(pack, position + 20)?;
+            bytes base_sha = pack.substr(position, position + raw_width);
+            GIT_zlib.Decoded decoded = inflate_pack_zlib(pack, position + raw_width)?;
             chain.push(decoded.data);
             bool is_base_done = false;
             match (pack_index.offset_of(base_sha)) {
@@ -831,16 +834,17 @@ type Idx {
     int names_off;
     int off_off;
     int large_off;
+    int raw_width;
 }
 
-/// The pack offset of `id20` (20 raw octets), by binary search within the
-/// fanout slice its first octet selects, or `None` if this `.idx` does not
-/// name it.
-Option<int> Idx.offset_of(bytes id20) {
-    if (id20.size() != 20) {
+/// The pack offset of `raw_id` (the binary name: 20 octets, or 32 in a
+/// SHA-256 repository), by binary search within the fanout slice its first
+/// octet selects, or `None` if this `.idx` does not name it.
+Option<int> Idx.offset_of(bytes raw_id) {
+    if (raw_id.size() != raw_width) {
         return Option<int>.None;
     }
-    int first = id20[0];
+    int first = raw_id[0];
     int low = 0;
     if (first > 0) {
         low = u32be(data, 8 + (first - 1) * 4);
@@ -848,7 +852,7 @@ Option<int> Idx.offset_of(bytes id20) {
     int high = u32be(data, 8 + first * 4);
     while (low < high) {
         int mid = low + (high - low) / 2;
-        int comparison = cmp20(data, names_off + mid * 20, id20);
+        int comparison = cmp_raw(data, names_off + mid * raw_width, raw_id);
         if (comparison == 0) {
             return Option<int>.Some(offset_at(mid));
         } else if (comparison < 0) {
@@ -885,13 +889,13 @@ List<str> Idx.all_ids() {
     List<str> out = [];
     int index = 0;
     while (index < entry_count) {
-        out.push(data.substr(names_off + index * 20, names_off + index * 20 + 20).hex());
+        out.push(data.substr(names_off + index * raw_width, names_off + (index + 1) * raw_width).hex());
         index = index + 1;
     }
     return out;
 }
 
-Result<Idx, Error> parse_index(bytes data) {
+Result<Idx, Error> parse_index(bytes data, int raw_width) {
     if (data.size() < 8) {
         return Result<Idx, Error>.Err(Error.BadIdx);
     }
@@ -911,16 +915,16 @@ Result<Idx, Error> parse_index(bytes data) {
         return Result<Idx, Error>.Err(Error.BadIdx);
     }
     int names_off = 8 + 1024;
-    int crc_off = names_off + 20 * entry_count;
+    int crc_off = names_off + raw_width * entry_count;
     int off_off = crc_off + 4 * entry_count;
     int large_off = off_off + 4 * entry_count;
-    // At least the trailing pack and idx checksums (20 octets each) must
+    // At least the trailing pack and idx checksums (one hash each) must
     // follow the small-offset table, whether or not any entry needs the
     // large-offset table between them.
-    if (large_off + 40 > data.size()) {
+    if (large_off + 2 * raw_width > data.size()) {
         return Result<Idx, Error>.Err(Error.BadIdx);
     }
-    return Result<Idx, Error>.Ok(Idx(data, entry_count, names_off, off_off, large_off));
+    return Result<Idx, Error>.Ok(Idx(data, entry_count, names_off, off_off, large_off, raw_width));
 }
 
 // --- small things the standard library does not have -------------------------
@@ -943,14 +947,14 @@ int u64be(bytes buffer, int offset) {
     return value;
 }
 
-// Lexicographic comparison of the 20 octets at `data[off .. off+20]` against
-// `id20`, negative/zero/positive -- `GIT_object.m31`'s `cmp_bytes` over a fixed
+// Lexicographic comparison of the octets at `data[off ..]` against `raw_id`,
+// negative/zero/positive -- `GIT_object.m31`'s `cmp_bytes` over a fixed
 // width and without the `bytes.substr` copy a general comparison would need,
 // since this runs once per binary-search step.
-int cmp20(bytes data, int off, bytes id20) {
+int cmp_raw(bytes data, int off, bytes raw_id) {
     int index = 0;
-    while (index < 20) {
-        int difference = data[off + index] - id20[index];
+    while (index < raw_id.size()) {
+        int difference = data[off + index] - raw_id[index];
         if (difference != 0) {
             return difference;
         }

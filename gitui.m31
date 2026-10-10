@@ -38,6 +38,7 @@
 import fs;
 import io;
 import os;
+import GIT_hash;
 import GIT_repository;
 import term;
 import tui.TUI_app;
@@ -55,6 +56,11 @@ if (argv.size() > 1) {
 str git_directory = GIT_repository.find(path);
 if (git_directory == "") {
     io.eprint("gitui: not a git repository (or any parent up to /): no .git directory");
+    return;
+}
+str refusal = GIT_hash.refusal(git_directory);
+if (refusal != "") {
+    io.eprint("gitui: " + refusal);
     return;
 }
 if (!term.is_terminal(0)) {

@@ -341,7 +341,7 @@ pub str patch_id(str gitdir, str id) {
                 case Ok(bytes diff): {
                     match (diff.utf8()) {
                         case Some(str text): {
-                            return normalised(text);
+                            return normalised(gitdir, text);
                         }
                         case None: {
                             return "";
@@ -359,7 +359,7 @@ pub str patch_id(str gitdir, str id) {
     }
 }
 
-str normalised(str text) {
+str normalised(str gitdir, str text) {
     str out = "";
     for (str line in text.split("\n")) {
         if (line.starts_with("index ") || line.starts_with("@@")) {
@@ -377,7 +377,7 @@ str normalised(str text) {
     if (out == "") {
         return "";
     }
-    return GIT_object.blob_id(out.to_bytes());
+    return GIT_object.blob_id(gitdir, out.to_bytes());
 }
 
 /// The commits of `upstream..head` as `pick`s, oldest first, merges and

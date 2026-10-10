@@ -940,7 +940,7 @@ pub Option<Pending> pending(str gitdir) {
     List<Verb> verbs = [Verb.Pick, Verb.Revert];
     for (Verb verb in verbs) {
         str text = read_text(fs.join(gitdir, head_file(verb))).trim();
-        if (text.size() == 40 && GIT_object.is_name(text)) {
+        if (GIT_object.is_full(gitdir, text)) {
             return Option<Pending>.Some(Pending(verb, text));
         }
     }
@@ -1398,7 +1398,7 @@ pub Result<Aborted, Error> abort(str gitdir, str worktree) {
     }
     Head head = read_head(gitdir)?;
     str start_id = read_text(fs.join(dir, "head")).trim();
-    if (start_id.size() != 40 || !GIT_object.is_name(start_id)) {
+    if (!GIT_object.is_full(gitdir, start_id)) {
         return Result<Aborted, Error>.Err(Error.BadState("head"));
     }
     str safety = read_text(fs.join(dir, "abort-safety")).trim();

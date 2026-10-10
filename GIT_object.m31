@@ -2,15 +2,17 @@
 // ones, read through exactly the same API.
 //
 // An object lives at `.git/objects/ab/cdef...` -- the first two hex digits of
-// its name are the directory, the other thirty-eight the file -- and the file
+// its name are the directory, the rest the file -- and the file
 // is one zlib stream whose plaintext is
 //
 //     <type> <size>\0<content>
 //
 // where `<type>` is `blob`, `tree`, `commit` or `tag` and `<size>` is the
-// decimal length of `<content>`. The object's NAME is the SHA-1 of that whole
-// plaintext, header included, which is why `sha1digest.m31` and `GIT_zlib.m31` had to
-// come first. Reading an object here always recomputes it: an object store is
+// decimal length of `<content>`. The object's NAME is the hash of that whole
+// plaintext, header included -- SHA-1, or SHA-256 in a repository that says
+// `extensions.objectFormat = sha256` (`GIT_hash.m31`); the name's own width,
+// 40 or 64 digits, says which, so the fan-out directory is still two digits
+// and the file the other 38 or 62. Reading an object here always recomputes it: an object store is
 // content-addressed or it is just a directory of files.
 //
 // Or it lives in a `.idx`/`.pack` pair under `.git/objects/pack/` instead --
@@ -18,7 +20,7 @@
 // when the loose file is not there. `GIT_pack.read` hands back the same `<kind>,
 // content` pair a loose read has by the time it reaches `parse`, so `read`
 // rebuilds the identical `<type> <size>\0<content>` plaintext and calls
-// `parse` on it exactly as for a loose object -- the SHA-1 check, the tree,
+// `parse` on it exactly as for a loose object -- the hash check, the tree,
 // commit and tag parsing below are shared between the two sources and cannot
 // drift apart, because there is only the one path through them.
 //
@@ -76,9 +78,8 @@
 // writes a loose object, never a pack, regardless of whether the repository
 // is otherwise packed. That is correct, not an oversight: git itself does the
 // same (a new object is always loose; only `git gc`/`repack` ever collapses
-// loose objects into a pack), and packfile *writing* is out of scope here for
-// the reason `docs/design.md`'s "Going remote" gives -- it is what `push`
-// needs, and `push` is later, separate work.
+// loose objects into a pack). Packfile writing is `GIT_pack_write.m31`, which
+// `push` uses; it builds a pack for the wire and never touches the object store.
 //
 // `GIT_object.loose(gitdir)` is deliberately unchanged by any of this: it answers
 // "every LOOSE object", exactly as its own doc comment always said, and
@@ -91,7 +92,7 @@
 import io;
 import fs;
 import GIT_repository;
-import sha1digest;
+import GIT_hash;
 import GIT_zlib;
 import GIT_pack;
 import random;
@@ -115,7 +116,7 @@ pub enum Error {
     UnknownType;
     /// The header's size and the content's length disagree.
     SizeMismatch;
-    /// The SHA-1 of the plaintext is not the name it was stored under.
+    /// The hash of the plaintext is not the name it was stored under.
     HashMismatch;
     /// A tree whose entries do not parse.
     BadTree;
@@ -153,7 +154,7 @@ pub str Error.to_str() {
             return "the object's header size and its content's length disagree";
         }
         case HashMismatch: {
-            return "the object's SHA-1 is not the name it was stored under: the store is corrupt";
+            return "the object's hash is not the name it was stored under: the store is corrupt";
         }
         case BadTree: {
             return "the tree's entries do not parse";
@@ -162,7 +163,7 @@ pub str Error.to_str() {
             return "the commit or tag's headers do not parse";
         }
         case BadName: {
-            return "not an object name: 4 to 40 hex digits";
+            return "not an object name: 4 to 40 hex digits (64 in a SHA-256 repository)";
         }
         case Ambiguous: {
             return "that short name is ambiguous: more than one loose object begins with it";
@@ -291,7 +292,7 @@ pub enum Body {
 
 /// An object, read and checked.
 pub type Object {
-    /// The full forty-digit name, which has been verified against the
+    /// The full name (40 digits, or 64 in SHA-256), which has been verified against the
     /// content: this is not what the caller asked for, it is what the content
     /// hashes to, and they are equal or this was never built.
     pub str id;
@@ -325,11 +326,11 @@ pub str Object.kind() {
 /// them has to know which of the two it was: `NotFound` means genuinely
 /// missing, not merely "not loose".
 pub Result<Object, Error> read(str gitdir, str id) {
-    if (!is_name(id) || id.size() != 40) {
+    if (!is_name(id) || !is_full_width(id)) {
         return Result<Object, Error>.Err(Error.BadName);
     }
     str root = fs.join(GIT_repository.common(gitdir), "objects");
-    str path = fs.join(fs.join(root, id.substr(0, 2)), id.substr(2, 40));
+    str path = fs.join(fs.join(root, id.substr(0, 2)), id.substr(2, id.size()));
     if (fs.exists(path)) {
         bytes stream = [];
         match (io.read_bytes(path)) {
@@ -458,7 +459,7 @@ Result<bool, Error> flatten_tree_into(str gitdir, str id, str prefix, Map<str, s
 /// object's zlib stream holds. `id` is the name it is expected to have, and
 /// the content is hashed and checked against it.
 pub Result<Object, Error> parse(str id, bytes plain) {
-    str actual = sha1digest.hex(plain);
+    str actual = GIT_hash.hex(raw_of_id(id), plain);
     if (actual != id) {
         return Result<Object, Error>.Err(Error.HashMismatch);
     }
@@ -498,16 +499,39 @@ pub Result<Object, Error> parse(str id, bytes plain) {
 }
 
 /// How many hex digits a full object name has in this repository: 40 for
-/// SHA-1, the only format read so far.
+/// SHA-1, 64 for SHA-256 (`GIT_hash.m31` says what decides it).
 pub int hex_len(str gitdir) {
-    return 40;
+    return GIT_hash.hex_len(gitdir);
+}
+
+/// Is `id` a full object name of this repository's format: lower-case hex,
+/// exactly `hex_len` digits. What guards a name that came from outside --
+/// a ref's content, the wire, a reflog line -- where `read` only needs the
+/// name to be the width of some format.
+pub bool is_full(str gitdir, str id) {
+    return id.size() == hex_len(gitdir) && is_name(id);
+}
+
+// Is `id` as wide as a full name of either format?
+bool is_full_width(str id) {
+    return id.size() == 40 || id.size() == 64;
+}
+
+// The octets of the binary form of `id`: 20 for a 40-digit name, 32 for 64.
+// A name of any other width has no format; it is read as SHA-1, so that the
+// hash it is checked against cannot match it.
+int raw_of_id(str id) {
+    if (id.size() == 64) {
+        return GIT_hash.SHA256_LEN;
+    }
+    return GIT_hash.SHA1_LEN;
 }
 
 /// Every object name beginning with `prefix` -- loose or packed -- sorted and
 /// deduplicated. Empty for a prefix that is not hex, is shorter than four
 /// digits, or matches nothing.
 ///
-/// A full forty-digit name is checked for on disk like any other prefix, so
+/// A full name is checked for on disk like any other prefix, so
 /// this answers "is it here" as well as "which is it". `rev_parse`'s DWIM
 /// (`GIT_refs.m31`) calls this for a short object name, so a packed repository's
 /// abbreviated hashes resolve exactly as a loose repository's do -- one more
@@ -515,7 +539,8 @@ pub int hex_len(str gitdir) {
 pub List<str> matching(str gitdir, str prefix) {
     List<str> hits = [];
     str lowered = prefix.to_lower();
-    if (!is_name(lowered) || lowered.size() < 4 || lowered.size() > 40) {
+    int width = hex_len(gitdir);
+    if (!is_name(lowered) || lowered.size() < 4 || lowered.size() > width) {
         return hits;
     }
     str two = lowered.substr(0, 2);
@@ -523,7 +548,7 @@ pub List<str> matching(str gitdir, str prefix) {
     match (fs.listdir(fs.join(fs.join(GIT_repository.common(gitdir), "objects"), two))) {
         case Ok(List<str> names): {
             for (str name in names) {
-                if (name.size() == 38 && name.starts_with(rest)) {
+                if (name.size() == width - 2 && name.starts_with(rest)) {
                     hits.push(two + name);
                 }
             }
@@ -556,7 +581,7 @@ pub List<str> matching(str gitdir, str prefix) {
 
 /// The one full name that begins with `prefix`, if there is exactly one.
 pub Result<str, Error> resolve(str gitdir, str prefix) {
-    if (!is_name(prefix.to_lower()) || prefix.size() < 4 || prefix.size() > 40) {
+    if (!is_name(prefix.to_lower()) || prefix.size() < 4 || prefix.size() > hex_len(gitdir)) {
         return Result<str, Error>.Err(Error.BadName);
     }
     List<str> hits = matching(gitdir, prefix);
@@ -584,6 +609,7 @@ pub Result<List<str>, Error> loose(str gitdir) {
         }
     }
     fanout.sort();
+    int tail = hex_len(gitdir) - 2;
     for (str two in fanout) {
         if (two.size() != 2 || !is_name(two)) {
             continue;
@@ -591,7 +617,7 @@ pub Result<List<str>, Error> loose(str gitdir) {
         match (fs.listdir(fs.join(root, two))) {
             case Ok(List<str> files): {
                 for (str file_name in files) {
-                    if (file_name.size() == 38 && is_name(file_name)) {
+                    if (file_name.size() == tail && is_name(file_name)) {
                         out.push(two + file_name);
                     }
                 }
@@ -635,13 +661,14 @@ pub Result<List<str>, Error> all(str gitdir) {
 
 // --- parsing the three structured bodies -------------------------------------
 
-// `<octal mode> <name>\0<20 raw octets>`, repeated to the end. No separator
+// `<octal mode> <name>\0<20 raw octets, or 32 in SHA-256>`, repeated to the end. No separator
 // between entries and no count at the front: the entry's own length is the
 // only thing that says where the next one starts, so a tree that is one octet
 // short is a tree that does not parse rather than a tree with a wrong last
 // entry.
 Result<List<Entry>, Error> tree_entries(str id, bytes content) {
     List<Entry> out = [];
+    int raw = raw_of_id(id);
     int position = 0;
     int length = content.size();
     while (position < length) {
@@ -657,11 +684,11 @@ Result<List<Entry>, Error> tree_entries(str id, bytes content) {
         if (nul < 0) {
             return Result<List<Entry>, Error>.Err(Error.BadTree);
         }
-        if (nul + 21 > length) {
+        if (nul + 1 + raw > length) {
             return Result<List<Entry>, Error>.Err(Error.BadTree);
         }
-        out.push(Entry(mode, content.substr(space_index + 1, nul), content.substr(nul + 1, nul + 21).hex()));
-        position = nul + 21;
+        out.push(Entry(mode, content.substr(space_index + 1, nul), content.substr(nul + 1, nul + 1 + raw).hex()));
+        position = nul + 1 + raw;
     }
     return Result<List<Entry>, Error>.Ok(out);
 }
@@ -695,11 +722,11 @@ Result<Commit, Error> commit_of(str id, bytes content) {
             extra.push(line);
         }
     }
-    if (tree.size() != 40 || !is_name(tree)) {
+    if (tree.size() != id.size() || !is_name(tree)) {
         return Result<Commit, Error>.Err(Error.BadHeaders);
     }
     for (str parent in parents) {
-        if (parent.size() != 40 || !is_name(parent)) {
+        if (parent.size() != id.size() || !is_name(parent)) {
             return Result<Commit, Error>.Err(Error.BadHeaders);
         }
     }
@@ -749,7 +776,7 @@ Result<Tag, Error> tag_of(str id, bytes content) {
             extra.push(line);
         }
     }
-    if (object.size() != 40 || !is_name(object)) {
+    if (object.size() != id.size() || !is_name(object)) {
         return Result<Tag, Error>.Err(Error.BadHeaders);
     }
     return Result<Tag, Error>.Ok(Tag(object, kind, name, extra, header.message, tagger));
@@ -1037,27 +1064,40 @@ bytes fold_header(bytes line) {
 // addressed, so a name already on disk is left alone: the bytes it holds are
 // already this object's, by construction, or the store was corrupt before
 // this call and rewriting it here would not fix that.
-/// The name an object of `kind` holding `content` has -- the SHA-1 of its
+/// The name an object of `kind` holding `content` has -- the hash of its
 /// `<kind> <size>\0<content>` plaintext -- without writing anything. This is
 /// what `GIT_status.m31` compares a working-tree file against its index entry
 /// with: an index entry's `id` is a BLOB name, so hashing the file's bytes
-/// alone (`sha1digest.hex(content)`) can never match it, and did not -- every file
+/// alone (`GIT_hash.hex(content)`) can never match it, and did not -- every file
 /// whose cached stat had gone stale (a `touch`, a `git read-tree`) was
 /// reported modified until something refreshed the index. `blob_id` is that
 /// comparison done right.
-pub str object_id(str kind, bytes content) {
+pub str object_id(str gitdir, str kind, bytes content) {
+    return object_id_raw(GIT_hash.raw_len(gitdir), kind, content);
+}
+
+/// `object_id`, for a caller that already knows the hash's width (20 or 32
+/// octets) and so need not look it up.
+pub str object_id_raw(int raw, str kind, bytes content) {
     bytes header = [];
     header.extend(kind.to_bytes());
     header.push(' ');
     header.extend(content.size().to_str().to_bytes());
     header.push(0);
     header.extend(content);
-    return sha1digest.hex(header);
+    return GIT_hash.hex(raw, header);
+}
+
+/// The name a blob holding `content` has in the format `like` is written in:
+/// an index entry's or a tree entry's `id`, which is in the repository's own
+/// format, says which hash to use without reading the config.
+pub str blob_id_like(str like, bytes content) {
+    return object_id_raw(raw_of_id(like), "blob", content);
 }
 
 /// `object_id("blob", content)`.
-pub str blob_id(bytes content) {
-    return object_id("blob", content);
+pub str blob_id(str gitdir, bytes content) {
+    return object_id(gitdir, "blob", content);
 }
 
 /// A loose object of any `kind` (`blob`, `tree`, `commit`, `tag`) holding
@@ -1074,9 +1114,9 @@ Result<str, Error> write_object(str gitdir, str kind, bytes content) {
     header.extend(content.size().to_str().to_bytes());
     header.push(0);
     header.extend(content);
-    str id = object_id(kind, content);
+    str id = object_id(gitdir, kind, content);
     str directory = fs.join(fs.join(GIT_repository.common(gitdir), "objects"), id.substr(0, 2));
-    str path = fs.join(directory, id.substr(2, 40));
+    str path = fs.join(directory, id.substr(2, id.size()));
     if (fs.exists(path)) {
         return Result<str, Error>.Ok(id);
     }
@@ -1129,9 +1169,9 @@ bytes mode_octal(int mode) {
     return out;
 }
 
-// 40 lowercase hex digits to the 20 octets they spell. Used only on strings
-// this module already trusts -- `sha1digest.hex`'s own output, or an `Entry.id`
-// that came from `tree_entries` parsing 20 raw octets in the first place --
+// Lowercase hex digits to the octets they spell, whatever the width. Used only
+// on strings this module already trusts -- `GIT_hash.hex`'s own output, or an
+// `Entry.id` that came from `tree_entries` parsing raw octets in the first place --
 // so an invalid digit cannot arise and is not checked for.
 bytes hex_decode(str hex_text) {
     bytes out = [];

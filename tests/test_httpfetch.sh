@@ -232,8 +232,9 @@ open(root + "/tiny.pack", "wb").write(data[:20])
 open(root + "/notpack.pack", "wb").write(b"NOTAPACKFILEATALL!!!!!!" + b"\x00" * 20)
 PY
         hf_corrupt_ok=1
+        hf_fmt=$(git -C "$hf_idx2" rev-parse --show-object-format)
         for hf_bad in truncated flipped tiny notpack; do
-            if "$WORK/t_httpfetch" verify "$hf_root/$hf_bad.pack" "$hf_root/out-$hf_bad.pack" \
+            if "$WORK/t_httpfetch" verify "$hf_root/$hf_bad.pack" "$hf_root/out-$hf_bad.pack" "$hf_fmt" \
                 >/dev/null 2>"$WORK/httpfetch-corrupt-$hf_bad.err"; then
                 hf_corrupt_ok=0
             fi
@@ -241,7 +242,7 @@ PY
                 hf_corrupt_ok=0
             fi
         done
-        if ! "$WORK/t_httpfetch" verify "$hf_clone_pack" "$hf_root/out-good.pack" \
+        if ! "$WORK/t_httpfetch" verify "$hf_clone_pack" "$hf_root/out-good.pack" "$hf_fmt" \
             >/dev/null 2>"$WORK/httpfetch-corrupt-good.err" ||
             ! cmp -s "$hf_clone_pack" "$hf_root/out-good.pack"; then
             hf_corrupt_ok=0

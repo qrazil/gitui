@@ -1078,7 +1078,7 @@ int worktree_state(str full, GIT_index.Entry entry) {
             }
             match (io.read_bytes(full)) {
                 case Ok(bytes content): {
-                    if (GIT_object.blob_id(content) == entry.id) {
+                    if (GIT_object.blob_id_like(entry.id, content) == entry.id) {
                         return 0;
                     }
                     return 2;

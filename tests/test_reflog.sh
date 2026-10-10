@@ -43,7 +43,7 @@ if build t_reflog; then
     rl_build_fixture "$rlx/r1" >"$WORK/reflog_fx.log" 2>&1 || bad "reflog: fixture" "$(tail -5 "$WORK/reflog_fx.log")"
     for ref in HEAD refs/heads/main refs/heads/feature; do
         want=$(cd "$rlx/r1" && git reflog show --format='%H %gs' "$ref" | tac)
-        got=$("$WORK/t_reflog" "$rlx/r1/.git" show "$ref" | sed 's/^[0-9a-f]\{40\} \([0-9a-f]\{40\}\) .*> [0-9]* [-+][0-9]* | /\1 /')
+        got=$("$WORK/t_reflog" "$rlx/r1/.git" show "$ref" | sed 's/^[0-9a-f]\{40,64\} \([0-9a-f]\{40,64\}\) .*> [0-9]* [-+][0-9]* | /\1 /')
         if [ "$want" = "$got" ]; then
             note "reflog: read $ref ($(printf '%s\n' "$want" | grep -c .) lines) matches git reflog show"
         else
@@ -68,8 +68,9 @@ if build t_reflog; then
     want="$rl_prev $rl_head Log_Tester <log@example.com> 1700000000 +0000	$want"
     [ "$last" = "$want" ] && note "reflog: appended line is byte-exact (ident, date from GIT_COMMITTER_DATE)" || bad "reflog: byte-exact" "want: $want" "got: $last"
     rl_run "$WORK/t_reflog" "$rlx/r1/.git" append refs/heads/created - "$rl_head" 'branch: Created from HEAD' >/dev/null
-    first=$(head -c 41 "$rlx/r1/.git/logs/refs/heads/created")
-    [ "$first" = "0000000000000000000000000000000000000000 " ] && note "reflog: no old id is forty zeros" || bad "reflog: zeros" "$first"
+    rl_zero=$(git -C "$rlx/r1" hash-object /dev/null | tr '0-9a-f' '0')
+    first=$(head -c $((${#rl_zero} + 1)) "$rlx/r1/.git/logs/refs/heads/created")
+    [ "$first" = "$rl_zero " ] && note "reflog: no old id is all zeros (${#rl_zero} of them)" || bad "reflog: zeros" "$first"
     if (cd "$rlx/r1" && git fsck --strict >/dev/null 2>&1 && git reflog exists refs/heads/created >/dev/null 2>&1 && git reflog show --all >/dev/null 2>&1); then
         note "reflog: fsck --strict and git reflog both accept the file"
     else

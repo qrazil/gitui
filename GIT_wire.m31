@@ -26,7 +26,7 @@
 //   GIT_wire.read_fetch_response(stream)   -> Result<DemuxResult, Error>   ACK/NAK lines, then side-band
 //   GIT_wire.command_body(old, new, refname, pack, agent) -> bytes
 //   GIT_wire.read_report(stream, refname)  -> Result<ReportStatus, Error>
-//   GIT_wire.check_pack(pack) / verify_pack(pack, out_path) -> pack integrity, and the atomic write
+//   GIT_wire.check_pack(pack, raw: 20) / verify_pack(pack, out_path, raw: 20) -> pack integrity, and the atomic write
 //
 // --- the interface ---------------------------------------------------------
 //
@@ -70,11 +70,25 @@
 //
 // --- what is NOT here ------------------------------------------------------
 //
-// Protocol v2, `shallow`/`deepen`, `include-tag`, `push-options`, sha256
-// repositories, and any socket, TLS, HTTP or ssh code.
+// Protocol v2 (and so its `object-format` argument of `ls-refs` and `fetch`),
+// `shallow`/`deepen`, `include-tag`, `push-options`, and any socket, TLS, HTTP
+// or ssh code.
+//
+// --- SHA-256 --------------------------------------------------------------------
+//
+// A v0 server names its object format in the capabilities of the first ref
+// line, `object-format=sha1` or `object-format=sha256`, and a server that says
+// nothing is SHA-1. The advertisement's ids are 40 or 64 digits accordingly --
+// which is why the capabilities of the first line are read before its id is --
+// and everything after (`want`, `have`, a push command, a pack's trailer) is
+// that width. A client echoes the format back: `object-format=<fmt>` among the
+// capabilities of the first `want` when the server offered one, and of a push
+// command whenever the format is not SHA-1 (a SHA-1 receive-pack takes its
+// silence for SHA-1). Whether the server's format is the *repository's* is for
+// the caller, which has a repository; this module has only the advertisement.
 
+import GIT_hash;
 import GIT_object;
-import sha1digest;
 import fs;
 import io;
 import random;
@@ -96,7 +110,7 @@ pub enum Error {
     Io;
     /// The ref advertisement is not shaped the way the protocol promises.
     BadAdvertisement;
-    /// The server's object format is not SHA-1.
+    /// The server's object format is neither `sha1` nor `sha256`.
     UnsupportedFormat;
     /// The server does not offer `side-band-64k`, which a fetch requires.
     NoSideBand;
@@ -108,11 +122,11 @@ pub enum Error {
     BadAck;
     /// The bytes meant to be a packfile do not begin with `PACK`.
     BadPack;
-    /// The pack's trailing SHA-1 does not match what precedes it.
+    /// The pack's trailing checksum does not match what precedes it.
     ChecksumMismatch;
     /// A fetch was given no `want`.
     NoWant;
-    /// A `want`, `have` or ref update's id is not 40 lowercase hex digits.
+    /// A `want`, `have` or ref update's id is not as many lowercase hex digits as the server's object format has (40 or 64).
     BadName;
     /// The server does not offer `report-status`, so a push could never be confirmed.
     NoReportStatus;
@@ -140,7 +154,7 @@ pub str Error.to_str() {
             return "the ref advertisement is not well-formed";
         }
         case UnsupportedFormat: {
-            return "the server's object format is not SHA-1";
+            return "the server's object format is neither sha1 nor sha256";
         }
         case NoSideBand: {
             return "the server did not offer side-band-64k, which this module requires";
@@ -164,7 +178,7 @@ pub str Error.to_str() {
             return "no want was given -- nothing to fetch";
         }
         case BadName: {
-            return "not a well-formed object name: 40 lowercase hex digits";
+            return "not a well-formed object name: 40 (SHA-1) or 64 (SHA-256) lowercase hex digits, as the server's format has";
         }
         case NoReportStatus: {
             return "the server does not offer report-status";
@@ -198,7 +212,8 @@ pub const bytes FLUSH_PKT = [48, 48, 48, 48];
 const bytes SP1 = [32];
 const bytes NUL1 = [0];
 const bytes LF1 = [10];
-/// The all-zero object id: "no such object" in a ref update.
+/// The all-zero SHA-1 object id: "no such object" in a ref update. `zero_id`
+/// is the one for an advertisement.
 pub const str ZERO_ID = "0000000000000000000000000000000000000000";
 
 // --- pkt-line framing --------------------------------------------------------
@@ -375,6 +390,8 @@ pub Result<Advertisement, Error> read_advertisement(Stream stream, str service =
     List<str> caps = [];
     List<RemoteRef> refs = [];
     bool is_first_ref = true;
+    str object_format = "sha1";
+    int id_width = 40;
     while (true) {
         Packet packet = read_pkt(stream)?;
         if (packet.is_flush) {
@@ -412,25 +429,38 @@ pub Result<Advertisement, Error> read_advertisement(Stream stream, str service =
                 case None: {
                 }
             }
+            for (str capability in caps) {
+                if (capability.starts_with("object-format=")) {
+                    object_format = capability.substr(14, capability.size());
+                }
+            }
+            if (GIT_hash.raw_of_name(object_format) == 0) {
+                return Result<Advertisement, Error>.Err(Error.UnsupportedFormat);
+            }
+            id_width = GIT_hash.raw_of_name(object_format) * 2;
         }
-        RemoteRef remote_ref = parse_ref_line(line)?;
+        RemoteRef remote_ref = parse_ref_line(line, id_width)?;
         if (remote_ref.name != "capabilities^{}") {
             refs.push(remote_ref);
         }
     }
-    str object_format = "sha1";
-    for (str capability in caps) {
-        if (capability.starts_with("object-format=")) {
-            object_format = capability.substr(14, capability.size());
-        }
-    }
-    if (object_format != "sha1") {
-        return Result<Advertisement, Error>.Err(Error.UnsupportedFormat);
-    }
     return Result<Advertisement, Error>.Ok(Advertisement(service, caps, refs, object_format));
 }
 
-Result<RemoteRef, Error> parse_ref_line(bytes line) {
+/// The all-zero object id in the advertisement's own format.
+pub str zero_id(Advertisement advertisement) {
+    return GIT_hash.zero(raw_of(advertisement));
+}
+
+/// Octets of an id in the advertisement's format: 32 for `sha256`, else 20.
+pub int raw_of(Advertisement advertisement) {
+    if (advertisement.object_format == "sha256") {
+        return GIT_hash.SHA256_LEN;
+    }
+    return GIT_hash.SHA1_LEN;
+}
+
+Result<RemoteRef, Error> parse_ref_line(bytes line, int id_width) {
     int space_index = 0;
     match (line.index_of(SP1)) {
         case Some(int found): {
@@ -440,11 +470,11 @@ Result<RemoteRef, Error> parse_ref_line(bytes line) {
             return Result<RemoteRef, Error>.Err(Error.BadAdvertisement);
         }
     }
-    if (space_index != 40) {
+    if (space_index != id_width) {
         return Result<RemoteRef, Error>.Err(Error.BadAdvertisement);
     }
     str id = "";
-    match (line.substr(0, 40).utf8()) {
+    match (line.substr(0, id_width).utf8()) {
         case Some(str found): {
             id = found;
         }
@@ -452,11 +482,11 @@ Result<RemoteRef, Error> parse_ref_line(bytes line) {
             return Result<RemoteRef, Error>.Err(Error.BadAdvertisement);
         }
     }
-    if (!GIT_object.is_name(id) || id.size() != 40) {
+    if (!GIT_object.is_name(id) || id.size() != id_width) {
         return Result<RemoteRef, Error>.Err(Error.BadAdvertisement);
     }
     str name = "";
-    match (line.substr(41, line.size()).utf8()) {
+    match (line.substr(id_width + 1, line.size()).utf8()) {
         case Some(str found): {
             name = found;
         }
@@ -510,17 +540,17 @@ pub type Summary {
     pub int object_count;
 }
 
-Result<bool, Error> check_names(List<str> wants, List<str> haves) {
+Result<bool, Error> check_names(List<str> wants, List<str> haves, int id_width) {
     if (wants.size() == 0) {
         return Result<bool, Error>.Err(Error.NoWant);
     }
     for (str want in wants) {
-        if (!GIT_object.is_name(want) || want.size() != 40) {
+        if (!GIT_object.is_name(want) || want.size() != id_width) {
             return Result<bool, Error>.Err(Error.BadName);
         }
     }
     for (str have in haves) {
-        if (!GIT_object.is_name(have) || have.size() != 40) {
+        if (!GIT_object.is_name(have) || have.size() != id_width) {
             return Result<bool, Error>.Err(Error.BadName);
         }
     }
@@ -536,6 +566,9 @@ bytes want_lines(Advertisement advertisement, List<str> wants, bool is_multi_ack
     use.push("side-band-64k");
     if (has_cap(advertisement.capabilities, "ofs-delta")) {
         use.push("ofs-delta");
+    }
+    if (has_cap(advertisement.capabilities, "object-format")) {
+        use.push("object-format=" + advertisement.object_format);
     }
     use.push("agent=" + agent);
     str first_caps = use.join(" ");
@@ -579,7 +612,7 @@ pub bytes negotiation_body(Advertisement advertisement, List<str> wants, List<st
 /// module note), `done`, then the side-band stream up to its flush. Refuses
 /// `NoWant`, `BadName` and `NoSideBand` before writing a byte.
 pub Result<DemuxResult, Error> fetch_pack(Stream stream, Advertisement advertisement, List<str> wants, List<str> haves, str agent = "m31-wire/1") {
-    check_names(wants, haves)?;
+    check_names(wants, haves, raw_of(advertisement) * 2)?;
     if (!has_cap(advertisement.capabilities, "side-band-64k")) {
         return Result<DemuxResult, Error>.Err(Error.NoSideBand);
     }
@@ -752,20 +785,21 @@ pub Result<DemuxResult, Error> demux(bytes body) {
 
 // --- pack verification --------------------------------------------------------------
 
-/// Check `pack`'s `PACK` magic and trailing 20-byte SHA-1 against everything
-/// before it, and return the object count from its header. `Truncated` if
-/// fewer than 32 bytes, `BadPack`, `ChecksumMismatch`.
-pub Result<int, Error> check_pack(bytes pack) {
-    if (pack.size() < 32) {
+/// Check `pack`'s `PACK` magic and its trailing checksum (`raw` octets: 20 for
+/// SHA-1, the default, 32 for SHA-256) against everything before it, and
+/// return the object count from its header. `Truncated` if shorter than the
+/// 12-octet header and the checksum, `BadPack`, `ChecksumMismatch`.
+pub Result<int, Error> check_pack(bytes pack, int raw = 20) {
+    if (pack.size() < 12 + raw) {
         return Result<int, Error>.Err(Error.Truncated);
     }
     if (pack[0] != 'P' || pack[1] != 'A' || pack[2] != 'C' || pack[3] != 'K') {
         return Result<int, Error>.Err(Error.BadPack);
     }
     int count = be32(pack, 8);
-    bytes content = pack.substr(0, pack.size() - 20);
-    bytes trailer = pack.substr(pack.size() - 20, pack.size());
-    if (sha1digest.sum(content) != trailer) {
+    bytes content = pack.substr(0, pack.size() - raw);
+    bytes trailer = pack.substr(pack.size() - raw, pack.size());
+    if (GIT_hash.digest(raw, content) != trailer) {
         return Result<int, Error>.Err(Error.ChecksumMismatch);
     }
     return Result<int, Error>.Ok(count);
@@ -773,8 +807,8 @@ pub Result<int, Error> check_pack(bytes pack) {
 
 /// `check_pack`, and only then the pack written to `out_path` -- a temporary
 /// file beside it, written whole, then renamed over.
-pub Result<Summary, Error> verify_pack(bytes pack, str out_path) {
-    int count = check_pack(pack)?;
+pub Result<Summary, Error> verify_pack(bytes pack, str out_path, int raw = 20) {
+    int count = check_pack(pack, raw: raw)?;
     match (write_atomic(out_path, pack)) {
         case Ok: {
             return Result<Summary, Error>.Ok(Summary(pack.size(), count));
@@ -841,7 +875,11 @@ pub bytes command_body(str old, str new, str refname, bytes pack, str agent) {
     bytes out = [];
     bytes line = (old + " " + new + " " + refname).to_bytes();
     line.push(0);
-    line.extend(("report-status agent=" + agent + "\n").to_bytes());
+    str format_cap = "";
+    if (old.size() == 64) {
+        format_cap = " object-format=sha256";
+    }
+    line.extend(("report-status" + format_cap + " agent=" + agent + "\n").to_bytes());
     out.extend(pkt_line(line));
     out.extend(FLUSH_PKT);
     out.extend(pack);
@@ -856,7 +894,8 @@ pub Result<ReportStatus, Error> send_push(Stream stream, Advertisement advertise
     if (!has_cap(advertisement.capabilities, "report-status")) {
         return Result<ReportStatus, Error>.Err(Error.NoReportStatus);
     }
-    if (!GIT_object.is_name(new) || new.size() != 40 || !GIT_object.is_name(old) || old.size() != 40 || !refname.starts_with("refs/")) {
+    int id_width = raw_of(advertisement) * 2;
+    if (!GIT_object.is_name(new) || new.size() != id_width || !GIT_object.is_name(old) || old.size() != id_width || !refname.starts_with("refs/")) {
         return Result<ReportStatus, Error>.Err(Error.BadName);
     }
     write_all(stream, command_body(old, new, refname, pack, agent))?;

@@ -23,9 +23,11 @@
 // outline has no selection.
 
 import GIT_merge;
+import GIT_object;
 import GIT_revparse;
 import GIT_sequencer;
 import GIT_ui_core;
+import GIT_ui_model;
 import GIT_ui_prompt;
 import term;
 import tui.TUI_app;
@@ -52,8 +54,8 @@ pub str commit_under_cursor(GIT_ui_core.Core core) {
             if (id.starts_with("branch:")) {
                 return id.substr(7, id.size());
             }
-            if (id.starts_with("commit:") && id.size() >= 47 && !id.contains(":file:")) {
-                return id.substr(7, 47);
+            if (id.starts_with("commit:") && !id.contains(":file:")) {
+                return GIT_ui_model.commit_in_row(id);
             }
         }
         case None: {
@@ -64,7 +66,7 @@ pub str commit_under_cursor(GIT_ui_core.Core core) {
 
 /// A commit id shortened, a branch name as it is.
 str label_of(str spec) {
-    if (spec.size() == 40) {
+    if (GIT_object.is_name(spec) && (spec.size() == 40 || spec.size() == 64)) {
         return GIT_ui_core.short_id(spec);
     }
     return spec;

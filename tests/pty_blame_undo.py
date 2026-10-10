@@ -68,7 +68,7 @@ def run(ctx):
     for line in out.split("\n"):
         if line.startswith("\t"):
             expected.append((cur[0], cur[1], line[1:]))
-        elif len(line.split(" ")[0]) == 40 and all(c in "0123456789abcdef" for c in line.split(" ")[0]):
+        elif len(line.split(" ")[0]) in (40, 64) and all(c in "0123456789abcdef" for c in line.split(" ")[0]):
             cur = [line.split(" ")[0], False]
         elif line == "boundary":
             cur[1] = True

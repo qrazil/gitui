@@ -333,7 +333,7 @@ pub Result<Status, Error> status(str gitdir, str worktree) {
                 }
                 match (io.read_bytes(full)) {
                     case Ok(bytes content): {
-                        if (GIT_object.blob_id(content) != entry.id) {
+                        if (GIT_object.blob_id_like(entry.id, content) != entry.id) {
                             unstaged.push(Delta(path.to_bytes(), Change.Modified));
                         }
                     }

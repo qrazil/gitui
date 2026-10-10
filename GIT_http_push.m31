@@ -66,6 +66,7 @@ import base64;
 import http;
 import GIT_http_fetch;
 import GIT_wire;
+import GIT_hash;
 import GIT_object;
 import os;
 import GIT_pack_write;
@@ -97,6 +98,9 @@ pub enum Error {
     NoReportStatus;
     /// A ref name or object id is not well-formed.
     BadName;
+    /// The server's object format is not this repository's (a SHA-1
+    /// repository and a SHA-256 server, or the other way round).
+    FormatMismatch;
     /// The remote URL is not one this client can use (not `http://` or
     /// `https://`, or not a URL at all).
     BadUrl;
@@ -142,6 +146,9 @@ pub str Error.to_str() {
         case NoReportStatus: {
             return "the server does not offer report-status";
         }
+        case FormatMismatch: {
+            return "the remote's object format differs from this repository's (SHA-1 and SHA-256 repositories cannot exchange objects)";
+        }
         case BadName: {
             return "not a well-formed ref name or object id";
         }
@@ -166,6 +173,7 @@ pub str Error.to_str() {
     }
 }
 
+/// The all-zero SHA-1 id; `push` uses the advertisement's own format.
 pub const str ZERO_ID = "0000000000000000000000000000000000000000";
 
 /// HTTP Basic credentials -- `password` is never placed in a `str` any
@@ -427,14 +435,17 @@ pub bool is_ancestor(str gitdir, str anc, str desc) {
 /// server itself refused (its `reason` says why); every `Err` is a push
 /// that never reached the server, or an answer this client could not read.
 pub Result<Report, Error> push(str gitdir, Remote remote, str refname, str new_id) {
-    if (!GIT_object.is_name(new_id) || new_id.size() != 40 || !refname.starts_with("refs/")) {
+    if (!GIT_object.is_name(new_id) || !GIT_object.is_full(gitdir, new_id) || !refname.starts_with("refs/")) {
         return Result<Report, Error>.Err(Error.BadName);
     }
     GIT_http_fetch.Advertisement advertisement = discover(remote)?;
+    if (advertisement.object_format != GIT_hash.name(GIT_hash.raw_len(gitdir))) {
+        return Result<Report, Error>.Err(Error.FormatMismatch);
+    }
     if (!GIT_wire.has_cap(advertisement.capabilities, "report-status")) {
         return Result<Report, Error>.Err(Error.NoReportStatus);
     }
-    str old = ZERO_ID;
+    str old = GIT_hash.zero(GIT_hash.raw_len(gitdir));
     List<str> known = [];
     Map<str, bool> seen = {};
     for (GIT_http_fetch.RemoteRef remote_ref in advertisement.refs) {
@@ -449,7 +460,7 @@ pub Result<Report, Error> push(str gitdir, Remote remote, str refname, str new_i
     if (old == new_id) {
         return Result<Report, Error>.Err(Error.UpToDate);
     }
-    if (old != ZERO_ID) {
+    if (old != GIT_hash.zero(GIT_hash.raw_len(gitdir))) {
         match (GIT_object.read(gitdir, old)) {
             case Ok(_): {
             }

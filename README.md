@@ -29,7 +29,8 @@ bash scripts/build-gitui.sh -o ourgitui    # not build.sh -- it is the one with 
 | file | what it is |
 |---|---|
 | `GIT_zlib.m31` | DEFLATE inflate (RFC 1951) and the zlib wrapper (RFC 1950), with Adler-32, from a mid-file offset as well as from the front |
-| `GIT_object.m31` | the object store: the header, the SHA-1 check, trees, commits, tags -- loose or, via `GIT_pack.m31`, packed, through the one `read` |
+| `GIT_hash.m31` | which hash a repository uses (SHA-1 or SHA-256): the format check, the widths, the digest, and the refusal of extensions this does not implement |
+| `GIT_object.m31` | the object store: the header, the hash check, trees, commits, tags -- loose or, via `GIT_pack.m31`, packed, through the one `read` |
 | `GIT_pack.m31` | packfiles: `.idx` v2, the pack's own object encoding, `OBJ_OFS_DELTA`/`OBJ_REF_DELTA` delta-chain resolution |
 | `GIT_refs.m31` | HEAD, `refs/**`, `packed-refs`, symbolic refs, `rev-parse`'s DWIM |
 | `GIT_repository.m31` | where the files are: `.git` as a file, and a linked worktree's `commondir` |
@@ -446,29 +447,81 @@ host and a missing CA file are all refused with nothing written, pushed or
 moved; and the redirect cases above, including the refused downgrade, plus
 the plain `http://` listener of the same server still working.
 
+## SHA-256 repositories (`GIT_hash.m31`)
+
+`git init --object-format=sha256` repositories work end to end; SHA-1 stays the
+default and is what every repository without the extension is. The format is
+read once from `extensions.objectFormat` (only when `core.repositoryFormatVersion`
+is 1, as git does), and then it is a width: 20 or 32 octets of binary id, 40 or
+64 digits of name. Where an id is in hand its own length says which algorithm
+it is, so a walk over ten thousand commits never rereads the config.
+
+What is algorithm-aware: object hashing and the loose store; packs and `.idx` v2
+(reading, and `GIT_pack_write.m31` writing) with 32-octet ids, `OBJ_REF_DELTA`
+bases and trailers; the index (32-octet entry ids and checksum); refs,
+`packed-refs`, the reflog and the stash; tree entries; revision parsing and
+abbreviations; diff, merge, blame, file history, rebase, cherry-pick/revert,
+undo and the watcher; and the wire.
+
+Wire: protocol v0/v1 only (this client has no protocol v2, so v2's
+`object-format` argument to `ls-refs` and `fetch` does not arise). The server
+advertises `object-format=<fmt>` among the first ref line's capabilities; the
+client echoes it on its first `want` and on a push command line when the format
+is `sha256`. Fetch, pull and push compare the advertised format with the
+repository's and **refuse a mismatch** (`the remote's object format differs from
+this repository's`), before anything is written or sent. This client has no
+`clone` or `init`: fetch and push work on a repository that already exists, so a
+SHA-256 repository is made by real git.
+
+Refused, by name, when the entry points open a repository (`GIT_hash.refusal`):
+a `core.repositoryFormatVersion` above 1; any extension git knows in a version 0
+repository (git dies there too: `repo version is 0, but v1-only extension
+found`); an `objectFormat` other than `sha1` or `sha256`; and in version 1 every
+extension this program does not implement: `compatObjectFormat`, `refStorage`
+(reftable), `partialClone`, `worktreeConfig`. `noop` and `preciousObjects` (a
+promise about `gc`, which this never runs) are accepted.
+
+Tested against real git: `tests/test_sha256.sh` builds SHA-256 fixtures (loose,
+`repack -ad`, `OBJ_REF_DELTA`), reads them with the Python object reader and the
+`compare.sh` command comparison, writes objects, index, refs and packs and has
+`git fsck --strict` and `git index-pack --strict` judge them, checks the
+refusals, and pushes and pulls through a real `git http-backend` between
+repositories of the same format and of different ones. And
+`TEST_HASH=sha256 bash tests/test.sh` runs **every** fixture of every test family
+as SHA-256 (it sets `GIT_DEFAULT_HASH` for the fixtures, and the oracles read the
+width from the repository), so the whole suite is run once per hash.
+
 ## Smaller things this does not do
 
-  - **The revision grammar.** `HEAD~3`, `main^2`, `v1^{tree}`, `@{upstream}`,
-    `:/message`. `rev-parse` takes a ref, a full object name or an
-    unambiguous prefix. `GIT_refs.peel` follows an annotated tag to its commit,
-    because `log v1` needs it.
-  - **Configuration.** No `.git/config` is read at all, so no `.mailmap`, no
-    `core.abbrev` (seven digits, fixed), no `log.decorate`, no
-    `core.quotePath` (on, as it is by default), no colour, no pager, no
-    `i18n.logOutputEncoding`.
-  - **Hunk-level diff against the working tree.** `GIT_status.m31` reports
-    whole-file staged/unstaged/untracked; `GIT_hunks.m31` can compute a
-    line-level diff between any two texts, but nothing yet wires the two
-    together into a `diff`-shaped view of the working tree, or `ls-files`.
-  - **Writing beyond what `gitui.m31` does.** The write path (index,
-    objects, refs) is real and checked against real `git`, but there is no
-    standalone write-side CLI — only the interactive client and the tests
-    exercise it today.
+Each of these was checked against the code when this section was written.
+
+  - **Rename detection** (accepted limit): diffs, merges and rebases treat a
+    rename as a delete and an add.
+  - **Date forms in the revision grammar.** `HEAD@{2.days.ago}` and
+    `@{yesterday}` are not understood; `HEAD@{N}`, `@{-N}`, `@{upstream}`,
+    `@{push}`, `:/text`, `^{type}`, `A..B`, `A...B`, `A^@` and the rest of
+    `GIT_revparse.m31` are (`docs/revisions-audit.md` says where each is used).
+  - **Configuration beyond what is listed.** `.git/config` is read, but only for
+    `core.bare`, `core.editor`, `core.logAllRefUpdates`, `user.name`/`email`,
+    `init.defaultBranch`, `merge.conflictStyle`, `commit.gpgSign`, `rerere.enabled`,
+    `rebase.*`, `branch.<name>.*`, `remote.<name>.*`, `remote.pushDefault`,
+    `push.default`, `push.autoSetupRemote`, `url.<base>.insteadOf`, and the
+    repository format keys. The read-only CLI (`git.m31`) pins the display
+    choices instead: abbreviations in a `Merge:` line are seven digits (no
+    `core.abbrev`; `compare.sh` runs git with `-c core.abbrev=7`), no
+    `log.decorate`, no `.mailmap`, `core.quotePath` as on by default, no colour,
+    no pager, no `i18n.logOutputEncoding`.
+  - **The read-only CLI's reach.** `git.m31` is `cat-file`, `ls-tree`, `log
+    [--max N] [<rev>]`, `rev-parse` and `refs`: no `--topo-order`, `--reverse`,
+    path limiting or `--graph` on `log` (the interactive client has a graph view
+    and a per-file history), no `ls-files`, no standalone write-side CLI; the
+    interactive client and the tests exercise the write path.
+  - **Index format v4** (path-prefix compression) is not read; versions 2 and 3
+    are, and a v4 index is refused rather than misread.
   - **The commit graph, bitmaps, alternates, replace refs, shallow clones,
-    submodules, SHA-256 repositories.** All ignored; a SHA-256 repository
-    would be refused by the length check rather than misread.
-  - **`git log`'s other orderings.** The walk is git's date-ordered queue.
-    `--topo-order`, `--reverse`, path limiting and `--graph` are not there.
+    submodules.** All ignored.
+  - **Protocol v2, `clone`, `init`.** The wire is v0/v1; the client fetches and
+    pushes into repositories that exist.
 
 ## Push (`GIT_pack_write.m31`, `GIT_http_push.m31`, `GIT_config.m31`)
 

@@ -186,7 +186,7 @@ Result<Stacks, Error> scan(str gitdir) {
         if (in_rebase && message.starts_with("rebase (finish)")) {
             in_rebase = false;
             stacks.redo.clear();
-            stacks.done.push(Unit(rebase_from, entry.new, message, false, "", "", rebase_from != GIT_reflog.ZERO && rebase_from != ""));
+            stacks.done.push(Unit(rebase_from, entry.new, message, false, "", "", !GIT_reflog.is_zero(rebase_from) && rebase_from != ""));
             continue;
         }
         if (in_rebase && message.starts_with("rebase")) {
@@ -201,7 +201,7 @@ Result<Stacks, Error> scan(str gitdir) {
             continue;
         }
         stacks.redo.clear();
-        stacks.done.push(Unit(entry.old, entry.new, message, is_checkout, labels[0], labels[1], entry.old != GIT_reflog.ZERO));
+        stacks.done.push(Unit(entry.old, entry.new, message, is_checkout, labels[0], labels[1], !GIT_reflog.is_zero(entry.old)));
     }
     return Result<Stacks, Error>.Ok(stacks);
 }

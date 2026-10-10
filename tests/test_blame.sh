@@ -98,7 +98,7 @@ bl_make() {
 }
 
 # the `<sha> <orig> <final>` headers of git's porcelain output
-bl_oracle() { (cd "$1" && git blame --porcelain "$2" -- "$3" | awk '/^[0-9a-f]{40} [0-9]+ [0-9]+/ {print $1, $2, $3}'); }
+bl_oracle() { (cd "$1" && git blame --porcelain "$2" -- "$3" | awk '/^[0-9a-f]{40,64} [0-9]+ [0-9]+/ {print $1, $2, $3}'); }
 
 if build t_blame; then
     for spec in "unique 11 25" "unique 12 40" "unique 13 60" "unique 14 90" "unique 15 40" "unique 16 70"; do
@@ -125,7 +125,7 @@ if build t_blame; then
         want=$(cd "$d" && git blame --porcelain HEAD -- sub/f.txt | grep -c '^boundary$')
         got=$("$WORK/t_blame" "$d/.git" blame HEAD sub/f.txt | grep -c '^\^')
         # git prints "boundary" once per commit, we mark every line
-        wantc=$(cd "$d" && git blame --porcelain HEAD -- sub/f.txt | awk '/^[0-9a-f]{40} [0-9]+ [0-9]+/ {sha=$1} /^boundary$/ {print sha}' | sort -u | wc -l)
+        wantc=$(cd "$d" && git blame --porcelain HEAD -- sub/f.txt | awk '/^[0-9a-f]{40,64} [0-9]+ [0-9]+/ {sha=$1} /^boundary$/ {print sha}' | sort -u | wc -l)
         gotc=$("$WORK/t_blame" "$d/.git" blame HEAD sub/f.txt | grep '^\^' | cut -d' ' -f1 | sort -u | wc -l)
         if [ "$wantc" = "$gotc" ]; then
             note "blame: seed $seed boundary commits agree ($gotc)"

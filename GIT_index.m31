@@ -2,7 +2,7 @@
 // re-reading the working tree.
 //
 // The index is a flat, sorted array of entries -- one per staged path, not a
-// tree -- each holding a blob's SHA-1 and a `stat(2)` snapshot from when it
+// tree -- each holding a blob's name and a `stat(2)` snapshot from when it
 // was staged. That snapshot is the whole reason the file exists: comparing a
 // working-tree file's size and mtime against it is far cheaper than reading
 // and hashing the file, and is safe precisely because a change to either
@@ -14,11 +14,12 @@
 //     "DIRC"  version:u32  count:u32          -- 12-byte header
 //     entry * count                            -- sorted by path, then stage
 //     extension *                              -- signature:4  size:u32  data
-//     sha1(everything above)                    -- 20-byte trailer
+//     hash(everything above)                    -- 20-byte trailer (32 in SHA-256)
 //
 // Each entry is ctime, mtime (seconds and nanoseconds, four fields), dev,
-// ino, mode, uid, gid, file size (nine 32-bit fields), the blob's 20-octet
-// SHA-1, a 16-bit flags word (assume-valid, extended, a 2-bit merge stage,
+// ino, mode, uid, gid, file size (nine 32-bit fields), the blob's name (20
+// octets in SHA-1, 32 in SHA-256: `GIT_hash.m31` says which repository is which,
+// and the same width is the trailer's), a 16-bit flags word (assume-valid, extended, a 2-bit merge stage,
 // a 12-bit name length), the path, and NUL padding out to a multiple of 8
 // octets counted from the start of the entry -- see `read_entry` for the
 // exact arithmetic, which is git's own and not a round number.
@@ -26,9 +27,9 @@
 // API
 // ---
 //   GIT_index.read(gitdir)         -> Result<Index, Error>
-//   GIT_index.parse(data)          -> Result<Index, Error>   (no I/O)
+//   GIT_index.parse(data, raw)     -> Result<Index, Error>   (no I/O; raw is 20 or 32)
 //   GIT_index.write(gitdir, ix)    -> Result<bool, Error>
-//   GIT_index.encode(ix)           -> bytes                  (no I/O)
+//   GIT_index.encode(ix, raw)      -> bytes                  (no I/O)
 //
 // --- what this does not have to get right ------------------------------------
 //
@@ -64,7 +65,7 @@
 import io;
 import fs;
 import GIT_repository;
-import sha1digest;
+import GIT_hash;
 import random;
 
 /// Why an index could not be read or believed. Payload-free
@@ -134,7 +135,7 @@ pub type Entry {
     pub int uid;
     pub int gid;
     pub int size;
-    /// The blob's 40-digit name.
+    /// The blob's name: 40 digits, or 64 in a SHA-256 repository.
     pub str id;
     /// 0 for an ordinary entry; 1, 2 or 3 name the three sides of a conflict
     /// not yet resolved: 1 the merge base, 2 "ours" (the side being merged
@@ -188,13 +189,14 @@ pub Result<Index, Error> read(str gitdir) {
             return Result<Index, Error>.Err(Error.Io);
         }
     }
-    return parse(data);
+    return parse(data, GIT_hash.raw_len(gitdir));
 }
 
 /// An index from its raw bytes -- no I/O, so a fixture or a test can hand
-/// this whatever it likes.
-pub Result<Index, Error> parse(bytes data) {
-    if (data.size() < 32) {
+/// this whatever it likes. `raw` is the octets of an object name: 20, or 32
+/// for a SHA-256 repository.
+pub Result<Index, Error> parse(bytes data, int raw) {
+    if (data.size() < 12 + raw) {
         return Result<Index, Error>.Err(Error.Truncated);
     }
     if (!(data[0] == 'D' && data[1] == 'I' && data[2] == 'R' && data[3] == 'C')) {
@@ -205,19 +207,19 @@ pub Result<Index, Error> parse(bytes data) {
         return Result<Index, Error>.Err(Error.BadVersion);
     }
     int count = be32(data, 8);
-    int end = data.size() - 20;
+    int end = data.size() - raw;
     if (end < 12) {
         return Result<Index, Error>.Err(Error.Truncated);
     }
     bytes body = data.substr(0, end);
     bytes want = data.substr(end, data.size());
-    if (sha1digest.sum(body).hex() != want.hex()) {
+    if (GIT_hash.digest(raw, body) != want) {
         return Result<Index, Error>.Err(Error.Checksum);
     }
     List<Entry> entries = [];
     int offset = 12;
     for (int i in 0 .. count) {
-        Parsed parsed = read_entry(data, offset, end)?;
+        Parsed parsed = read_entry(data, offset, end, raw)?;
         entries.push(parsed.entry);
         offset = parsed.next;
     }
@@ -241,8 +243,8 @@ type Parsed {
     int next;
 }
 
-Result<Parsed, Error> read_entry(bytes data, int offset, int end) {
-    if (offset + 62 > end) {
+Result<Parsed, Error> read_entry(bytes data, int offset, int end, int raw) {
+    if (offset + 42 + raw > end) {
         return Result<Parsed, Error>.Err(Error.Truncated);
     }
     int ctime_s = be32(data, offset);
@@ -255,12 +257,12 @@ Result<Parsed, Error> read_entry(bytes data, int offset, int end) {
     int uid = be32(data, offset + 28);
     int gid = be32(data, offset + 32);
     int size = be32(data, offset + 36);
-    bytes id = data.substr(offset + 40, offset + 60);
-    int flags = be16(data, offset + 60);
+    bytes id = data.substr(offset + 40, offset + 40 + raw);
+    int flags = be16(data, offset + 40 + raw);
     int stage = flags >> 12 & 0x3;
     bool is_assume_valid = flags & 0x8000 != 0;
     bool is_extended = flags & 0x4000 != 0;
-    int path_start = offset + 62;
+    int path_start = offset + 42 + raw;
     if (is_extended) {
         path_start = path_start + 2;
     }
@@ -314,7 +316,7 @@ pub Entry from_stat(bytes path, fs.Stat stat, bool is_link, str blob_id) {
 /// mid-write leaves the old one intact -- the same discipline `GIT_refs.m31` uses
 /// for a ref.
 pub Result<bool, Error> write(str gitdir, Index index) {
-    bytes out = encode(index);
+    bytes out = encode(index, GIT_hash.raw_len(gitdir));
     str path = fs.join(GIT_repository.common(gitdir), "index");
     random.System rnd = random.system();
     str temp = path + ".tmp" + rnd.hex(12);
@@ -339,7 +341,7 @@ pub Result<bool, Error> write(str gitdir, Index index) {
 /// so a test can check this against a fixture byte for byte without touching
 /// a filesystem. Entries are sorted into the format's own order first
 /// (`Entry.cmp`); a caller need not have sorted them.
-pub bytes encode(Index index) {
+pub bytes encode(Index index, int raw) {
     List<Entry> sorted = clone(index.entries);
     sorted.sort();
     bytes out = [];
@@ -349,7 +351,7 @@ pub bytes encode(Index index) {
     for (Entry entry in sorted) {
         encode_entry(out, entry);
     }
-    bytes sum = sha1digest.sum(out);
+    bytes sum = GIT_hash.digest(raw, out);
     out.extend(sum);
     return out;
 }
@@ -426,7 +428,7 @@ int find(bytes haystack, int octet, int from, int upto) {
     return -1;
 }
 
-// 40 lowercase hex digits to the 20 octets they spell -- `GIT_object.m31`'s own
+// Lowercase hex digits to the octets they spell -- `GIT_object.m31`'s own
 // helper, needed here too and not shared, the way `find`/`ascii`/`decimal`
 // are each written out per module rather than pulled into a shared utility.
 bytes hex_decode(str text) {

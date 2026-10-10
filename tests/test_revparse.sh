@@ -12,9 +12,9 @@
 
 rpx="$WORK/revparse_fx"
 mkdir -p "$rpx"
-# The formats the fixture is built in; the SHA-256 half is added by the
-# SHA-256 checks, which need the object format to be understood everywhere.
-RP_FORMATS=${RP_FORMATS:-sha1}
+# The formats the fixture is built in, both always. The first one also serves
+# the callers' checks further down.
+RP_FORMATS=${RP_FORMATS:-sha1 sha256}
 
 # git as the fixture saw it: no user or system configuration
 rp_env() { env GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1 "$@"; }

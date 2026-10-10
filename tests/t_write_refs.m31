@@ -8,6 +8,7 @@
 // `commit-a` and `commit-b` must both already exist in the repository -- the
 // program only writes refs, never objects.
 
+import GIT_hash;
 import GIT_refs;
 import io;
 import os;
@@ -40,7 +41,7 @@ match (GIT_refs.update_symbolic(git_directory, "HEAD", "refs/heads/newbranch")) 
 }
 // A compare-and-swap against the WRONG current value must fail, and leave
 // the branch exactly where it was.
-match (GIT_refs.update(git_directory, "refs/heads/newbranch", second_id, Option<str>.Some("0000000000000000000000000000000000000000"))) {
+match (GIT_refs.update(git_directory, "refs/heads/newbranch", second_id, Option<str>.Some(GIT_hash.zero(GIT_hash.raw_len(git_directory))))) {
     case Ok: {
         print("cas-wrong ok (should have been a Mismatch)");
     }

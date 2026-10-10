@@ -731,16 +731,39 @@ pub Option<GIT_object.Entry> find_in_tree(str gitdir, str tree_id, bytes path) {
     }
 }
 
+/// The object name inside a `commit:<id>` row id or any row id built on one
+/// (`commit:<id>:files`, `commit:<id>:file:<path>`): everything after the
+/// prefix up to the next `:`, 40 digits in a SHA-1 repository and 64 in a
+/// SHA-256 one, so a caller never has to know which. `""` for a row id that
+/// is not a commit's.
+pub str commit_in_row(str id) {
+    if (!id.starts_with("commit:")) {
+        return "";
+    }
+    str rest = id.substr(7, id.size());
+    match (rest.index_of(":")) {
+        case Some(int colon): {
+            return rest.substr(0, colon);
+        }
+        case None: {
+            return rest;
+        }
+    }
+}
+
 /// The commit a row id belongs to, if it is a commit's own section row or
 /// its "Files changed" subsection -- the two rows whose unfolding is what
-/// first needs that commit's file list. `commit:<40 hex>` or
-/// `commit:<40 hex>:files`; every other id (a file row, an author/date/
+/// first needs that commit's file list. `commit:<id>` or
+/// `commit:<id>:files`; every other id (a file row, an author/date/
 /// message leaf, any other section) answers `None`.
 pub Option<str> commit_id_of_unfoldable(str id) {
-    if (!id.starts_with("commit:") || id.size() < 47) {
+    if (!id.starts_with("commit:")) {
         return Option<str>.None;
     }
-    str cid = id.substr(7, 47);
+    str cid = commit_in_row(id);
+    if (cid.size() != 40 && cid.size() != 64) {
+        return Option<str>.None;
+    }
     if (id == "commit:" + cid || id == "commit:" + cid + ":files") {
         return Option<str>.Some(cid);
     }

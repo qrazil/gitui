@@ -1040,7 +1040,7 @@ pub List<str> merge_heads(str gitdir) {
         case Ok(str text): {
             for (str line in text.split("\n")) {
                 str id = line.trim();
-                if (id.size() == 40 && GIT_object.is_name(id)) {
+                if (GIT_object.is_full(gitdir, id)) {
                     out.push(id);
                 }
             }

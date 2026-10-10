@@ -1,0 +1,210 @@
+// Which hash a repository names its objects with, and the one place the
+// answer is turned into widths and digests.
+//
+//   GIT_hash.refusal(gitdir)    -> str    "" when this program can work in the
+//                                         repository, else the reason it cannot
+//   GIT_hash.raw_len(gitdir)    -> int    20 (SHA-1) or 32 (SHA-256): octets of a binary id
+//   GIT_hash.hex_len(gitdir)    -> int    40 or 64: digits of an object name
+//   GIT_hash.digest(raw, data)  -> bytes  the hash of `data`, `raw` octets long
+//   GIT_hash.hex(raw, data)     -> str    the same, in lower case hex
+//   GIT_hash.zero(raw)          -> str    the all-zero name: no object
+//   GIT_hash.name(raw)          -> str    `sha1` or `sha256`, as `extensions.objectFormat` and
+//                                         the wire protocol's `object-format` spell them
+//   GIT_hash.raw_of_name(name)  -> int    the inverse; 0 for a name that is neither
+//
+// --- what decides the format -------------------------------------------------
+//
+// `extensions.objectFormat` in the repository's own `config` (the shared one,
+// in a linked worktree), and only when `core.repositoryFormatVersion` is 1:
+// git ignores every extension in a version 0 repository, so for the *width* a
+// version 0 file that says `objectFormat = sha256` is a SHA-1 repository --
+// but git then dies on it ("v1-only extension found"), and so does `refusal`.
+// The default is SHA-1.
+//
+// The width is an `int` of octets and not an enum because an enum has no `==`
+// and the width is what every caller needs: the length to read from a tree
+// entry, a pack's `.idx` name table, the index, the trailer of a pack.
+//
+// Most readers do not call `raw_len` at all. An object name carries its own
+// width -- 40 digits is SHA-1, 64 is SHA-256 -- and a function that was handed
+// a name (`GIT_object.read`, `tree_entries`, `commit_of`) takes the algorithm
+// from that, which costs nothing on the hot path of a walk over ten thousand
+// commits. `raw_len` is for the callers that have no name yet: hashing new
+// content, naming the zero id, an index or a pack on disk, a short prefix.
+// What guards a name that came from outside (a ref's content, the wire, a
+// reflog line) is `GIT_object.is_full`, which holds it to this repository's
+// width, so a 64-digit name in a SHA-1 repository is refused where it enters.
+//
+// --- what is refused -----------------------------------------------------------
+//
+// `refusal` is for the entry points (`git`, `gitui`) to call once, after
+// finding the repository. It names a repository format version above 1, an
+// extension git defines in a version 0 repository (git dies on that too), an
+// `objectFormat` that is neither `sha1` nor `sha256`, and every extension in
+// a version 1 repository this program does not implement, because working in
+// one anyway is how a repository gets damaged:
+//
+//   noop, objectFormat   handled
+//   preciousObjects      a promise about `gc` and `prune`, which this program never runs
+//   anything else        refused: `compatObjectFormat` (every object would need both names),
+//                        `refStorage` (reftable is not read), `partialClone` (missing objects
+//                        would have to be fetched on demand), `worktreeConfig`, and a name git
+//                        has not defined
+//
+// git refuses an unknown extension the same way, with its own wording.
+
+import GIT_config;
+import sha1digest;
+import sha256;
+
+pub const int SHA1_LEN = 20;
+pub const int SHA256_LEN = 32;
+
+/// Octets of a binary object id in this repository.
+pub int raw_len(str gitdir) {
+    match (GIT_config.load(gitdir)) {
+        case Ok(GIT_config.Config config): {
+            return raw_of_config(config);
+        }
+        case Err(_): {
+            return SHA1_LEN;
+        }
+    }
+}
+
+/// Digits of an object name in this repository.
+pub int hex_len(str gitdir) {
+    return raw_len(gitdir) * 2;
+}
+
+// The version-1 gate: `objectFormat` counts only in a repository whose
+// `core.repositoryFormatVersion` is 1.
+int raw_of_config(GIT_config.Config config) {
+    if (version_of(config) != 1) {
+        return SHA1_LEN;
+    }
+    match (config.get("extensions", "", "objectformat")) {
+        case Some(str value): {
+            if (value.to_lower() == "sha256") {
+                return SHA256_LEN;
+            }
+            return SHA1_LEN;
+        }
+        case None: {
+            return SHA1_LEN;
+        }
+    }
+}
+
+int version_of(GIT_config.Config config) {
+    match (config.get("core", "", "repositoryformatversion")) {
+        case Some(str text): {
+            match (text.trim().parse_int()) {
+                case Some(int number): {
+                    return number;
+                }
+                case None: {
+                    return -1;
+                }
+            }
+        }
+        case None: {
+            return 0;
+        }
+    }
+}
+
+/// `""` when this program can work in the repository, otherwise one line
+/// saying why not. See the header for what is refused.
+pub str refusal(str gitdir) {
+    match (GIT_config.load(gitdir)) {
+        case Ok(GIT_config.Config config): {
+            return refusal_of(config);
+        }
+        case Err(_): {
+            return "";
+        }
+    }
+}
+
+str refusal_of(GIT_config.Config config) {
+    int version = version_of(config);
+    if (version < 0 || version > 1) {
+        return "unsupported repository format version " + config.get("core", "", "repositoryformatversion").or("") + " (this program reads versions 0 and 1)";
+    }
+    if (version == 0) {
+        // git dies on an extension it knows in a version 0 repository, where
+        // the extension would otherwise be silently ignored -- and a SHA-256
+        // repository read as SHA-1 is a repository read wrongly.
+        for (str key in config.keys_of("extensions", "")) {
+            if (is_known_extension(key)) {
+                return "repo version is 0, but v1-only extension found: " + key;
+            }
+        }
+        return "";
+    }
+    for (str key in config.keys_of("extensions", "")) {
+        if (key == "noop" || key == "preciousobjects") {
+            continue;
+        }
+        if (key == "objectformat") {
+            str value = config.get("extensions", "", "objectformat").or("");
+            if (value.to_lower() != "sha1" && value.to_lower() != "sha256") {
+                return "unsupported object format `" + value + "` (extensions.objectFormat is sha1 or sha256)";
+            }
+            continue;
+        }
+        return "unsupported repository extension `" + key + "` (extensions." + key + " is set in this repository's config, and this program does not implement it)";
+    }
+    return "";
+}
+
+// The extensions git defines and refuses in a version 0 repository (`noop` is
+// its own test of the mechanism and is accepted anywhere).
+bool is_known_extension(str key) {
+    return key == "objectformat" || key == "compatobjectformat" || key == "refstorage" || key == "partialclone" || key == "worktreeconfig" || key == "preciousobjects";
+}
+
+/// `data`'s hash, `raw` octets long (20 or 32).
+pub bytes digest(int raw, bytes data) {
+    if (raw == SHA256_LEN) {
+        return sha256.sum(data);
+    }
+    return sha1digest.sum(data);
+}
+
+/// `digest`, as lower-case hex.
+pub str hex(int raw, bytes data) {
+    if (raw == SHA256_LEN) {
+        return sha256.hex(data);
+    }
+    return sha1digest.hex(data);
+}
+
+/// The name of no object: as many `0` digits as an object name has.
+pub str zero(int raw) {
+    str out = "";
+    for (int i in 0 .. raw * 2) {
+        out = out + "0";
+    }
+    return out;
+}
+
+/// `sha1` or `sha256`.
+pub str name(int raw) {
+    if (raw == SHA256_LEN) {
+        return "sha256";
+    }
+    return "sha1";
+}
+
+/// 20 for `sha1`, 32 for `sha256`, 0 for anything else.
+pub int raw_of_name(str format_name) {
+    if (format_name == "sha1") {
+        return SHA1_LEN;
+    }
+    if (format_name == "sha256") {
+        return SHA256_LEN;
+    }
+    return 0;
+}

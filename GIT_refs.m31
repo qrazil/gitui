@@ -31,7 +31,7 @@
 // --- writing -------------------------------------------------------------
 //
 // `update` writes a ref -- `refs/heads/<name>`, `HEAD` detached, or any other
-// full ref name -- to a 40-digit object name, and `update_symbolic` writes
+// full ref name -- to a full object name (40 digits, 64 in a SHA-256 repository), and `update_symbolic` writes
 // `HEAD` (or any ref) as `ref: <target>`. Both write a temporary file beside
 // the real one and rename it over, exactly as `GIT_object.m31`'s writers do:
 // never a direct in-place write, so a crash mid-write leaves the old ref
@@ -81,7 +81,7 @@ pub enum Error {
     NotACommit;
     /// `update`'s `expect_old` did not match the ref's current value.
     Mismatch;
-    /// A value handed to a write is not a well-formed 40-digit object name.
+    /// A value handed to a write is not a well-formed object name for this repository's hash.
     BadValue;
 }
 
@@ -112,7 +112,7 @@ pub str Error.to_str() {
             return "compare-and-swap failed: the ref's current value is not the one expected";
         }
         case BadValue: {
-            return "not a well-formed object name: 40 hex digits";
+            return "not a well-formed object name: 40 hex digits (64 in a SHA-256 repository)";
         }
     }
 }
@@ -179,7 +179,7 @@ pub Result<Head, Error> head(str gitdir) {
         str id = resolve(gitdir, target)?;
         return Result<Head, Error>.Ok(Head.Born(target, id));
     }
-    if (GIT_object.is_name(raw) && raw.size() == 40) {
+    if (GIT_object.is_full(gitdir, raw)) {
         return Result<Head, Error>.Ok(Head.Detached(raw));
     }
     return Result<Head, Error>.Err(Error.Malformed);
@@ -228,7 +228,7 @@ pub Result<str, Error> resolve(str gitdir, str name) {
         if (raw.starts_with("ref: ")) {
             current = raw.substr(5, raw.size()).trim();
             depth = depth + 1;
-        } else if (GIT_object.is_name(raw) && raw.size() == 40) {
+        } else if (GIT_object.is_full(gitdir, raw)) {
             return Result<str, Error>.Ok(raw);
         } else {
             return Result<str, Error>.Err(Error.Malformed);
@@ -464,16 +464,17 @@ List<Ref> packed_all(str gitdir) {
             return out;
         }
     }
+    int width = GIT_object.hex_len(gitdir);
     for (str line in text.lines(body)) {
         if (line.size() == 0 || line.starts_with("#") || line.starts_with("^")) {
             continue;
         }
         int space_index = line.index_of(" ").or(-1);
-        if (space_index != 40) {
+        if (space_index != width) {
             continue;
         }
-        str id = line.substr(0, 40);
-        str name = line.substr(41, line.size()).trim();
+        str id = line.substr(0, width);
+        str name = line.substr(width + 1, line.size()).trim();
         if (!GIT_object.is_name(id) || name.size() == 0) {
             continue;
         }
@@ -520,7 +521,7 @@ pub Result<bool, Error> update(str gitdir, str name, str new_id, Option<str> exp
     if (!is_safe_name(name)) {
         return Result<bool, Error>.Err(Error.Malformed);
     }
-    if (!GIT_object.is_name(new_id) || new_id.size() != 40) {
+    if (!GIT_object.is_full(gitdir, new_id)) {
         return Result<bool, Error>.Err(Error.BadValue);
     }
     str previous = "";
