@@ -69,11 +69,12 @@ def atom():
 
 
 nums = ["", "0", "1", "2", "3", "4", "10", "99"]
+# no empty alternatives: POSIX regcomp on macOS rejects them, glibc accepts them
 patterns = ["c2", "second", "merge", "c[0-9]", "^c", "^m", "x$", "wip", "WIP", "body", "more text",
             "f[12]", "conf", "left", "o[12]", "octopus", "a1", "b1", "base", "inner", "nothing-like-this",
             "c.*5", "c5|c6", "(c|s)[1-9]", "c{1}", "c{1,2}", "c{2,}", "[[:digit:]]$", "[[:upper:]]", "a+", "c?3",
             ".", "", "*c", "c*", "^$", "e$", "[a-c][0-9]", "[^a-z ][0-9]", "c4.", "s1", "index on", "tie",
-            "(c)", "()", "(|c)", "c||s", "c|", "c\\.", "c\\(", "[]c]", "[^]c]", "[a-]", "[[:alpha:]-]",
+            "(c)", "()", "(c|s)c", "c|s|1", "c|[0-9]", "c\\.", "c\\(", "[]c]", "[^]c]", "[a-]", "[[:alpha:]-]",
             "c{", "c{x}", "(c", "c)", "c**", "c+?", "\\d", "\\bc", "[c-a]", "[[:foo:]]", "^c.$", "\\n"]
 suffixes = [
     lambda: "^" + rng.choice(nums),
