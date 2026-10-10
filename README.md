@@ -76,6 +76,9 @@ bash scripts/build-gitui.sh -o ourgitui    # not build.sh -- it is the one with 
 | `GIT_ui_merge.m31`, `GIT_ui_merge_model.m31` | the merge layer: the `m` menu and branch picker, the abort prompt, the conflict-resolution view, the "Unmerged paths" outline section and the MERGING banner (the model is pure and unit-testable) |
 | `GIT_sequencer.m31` | `git cherry-pick` and `git revert` with git's own on-disk state: `expand` (`A..B`, tags followed), `start`, `continue_sequence`, `skip`, `abort`, `quit`, over `GIT_merge.merge_with_base`; writes CHERRY_PICK_HEAD / REVERT_HEAD, MERGE_MSG, AUTO_MERGE, `.git/sequencer/{head,abort-safety,todo,opts}` and the reflog lines git writes, so either tool can finish what the other started. Also exports the per-step pieces (`apply_step`, `finish_step`, `read_todo`/`write_todo`, `read_options`/`write_options`, `reset_to`, `clear_step_state`) for a rebase driver that keeps its own state directory |
 | `GIT_ui_sequencer.m31` | the `A` (cherry-pick) and `V` (revert) menus, the range prompt, the continue / skip / abort / quit menu, and the CHERRY-PICKING / REVERTING banner (the banner text is in `GIT_ui_merge_model.m31`) |
+| `GIT_rebase.m31` | `git rebase` and `rebase -i` over `GIT_sequencer`'s step pieces, with git's own `.git/rebase-merge/` state (`head-name`, `onto`, `orig-head`, `git-rebase-todo`, `done`, `message`, `stopped-sha`, `author-script`, `amend`, `rewritten-list` and the rest), so `git rebase --continue` can finish what we started and the other way round. `plan` (upstream, `--onto`, `--root`, `--keep-base`, fast-forward and up-to-date detection, commits already upstream dropped by patch-id, `--autosquash` reordering), `start` (`--autostash`, empty-commit handling), `continue_rebase`, `skip`, `abort`, `quit`, `edit_todo`, `state`, `banner`; writes REBASE_HEAD and the reflog lines git writes (`rebase (start)`, `(pick)`, `(reword)`, `(squash)`, `(finish)`, ...). Messages and the todo go through an `Editor` (`Verbatim` and `Declining` are the two stock ones) |
+| `GIT_rebase_todo.m31` | the todo list: `Command` (pick, reword, edit, squash, fixup, drop, exec, break), `parse`/`format` as git writes it, abbreviations, `editor_text` with git's comment block |
+| `GIT_ui_rebase.m31` | the rebase layer: the `r` menu and its pickers, the todo editor overlay, the abort prompt, the in-progress menu, the `$EDITOR` handoff for a message or the whole list, and the pull offer |
 | `GIT_pull.m31` | fast-forward-only pull: fetches over smart HTTP (`GIT_http_fetch.m31`), unpacks the pack with `GIT_pack.read_pack`, refuses a dirty tree and anything but a fast-forward, then `GIT_checkout.m31` moves the working tree and the ref |
 | `tests/test.sh` | all of the above (sources the `tests/test_*.sh` files next to it) |
 | `docs/FRICTION.md` | **the other half of this**: what the language made hard, and what it made easy |
@@ -117,8 +120,8 @@ text, and checked against real `git apply --cached` byte for byte
 (`test_gitui.sh`). `P` opens a push which-key; `p` pushes the current branch to the
 same-named branch on `origin` over smart HTTP, fast-forward only (see
 "Push" below). `F` opens a pull which-key; `p` fast-forwards the current branch
-from `origin` (see "Pull" below). Merge and rebase are each a named,
-deliberate gap in `docs/design.md`, not an oversight here.
+from `origin` (see "Pull" below). Merge and rebase are described under "Merge"
+and "Rebase" below.
 
 Discarding and amending, both checked against the real git command each
 stands in for (`test_discard_amend.sh`): `x` on a path row asks first
@@ -244,6 +247,9 @@ the top one takes every key.
 | `c` | outline | commit overlay: `e` edit, `f` finish, `A` amend, `a` abort |
 | `b` | outline | branch overlay: `c` check out, `/` fuzzy-pick a branch, `n` new, `a` abort |
 | `m` | outline | merge overlay: `f` merge (fast-forward when possible), `n` always make a merge commit, `o` fast-forward only, each fuzzy-picking a branch; while merging `c` continue (commit), `a` abort (asks first) |
+| `r` | outline | rebase menu: `r` onto a branch you pick (its upstream first), `i` interactively (todo editor first), `h` interactively from the commit under the cursor, `o` `--onto` (new base, then the branch to cut at), `s` / `a` toggle `--autosquash` / `--autostash` (they follow `rebase.autoSquash` / `rebase.autoStash` until toggled); while a rebase is under way the same key opens `c` continue, `s` skip, `a` abort (asks first), `q` quit, `e` edit the todo |
+| `j` `k` `p` `r` `e` `s` `f` `d` `J` `K` `E` `Enter` `Esc` | todo editor | move; set the verb of the line (pick, reword, edit, squash, fixup, drop); move the line down / up; `E` edits the whole list in `$EDITOR` (the only way to add `exec` and `break`); `Enter` starts the rebase (or saves the list mid-rebase), `Esc` cancels. A list that starts with squash or fixup is refused |
+| `y` `r` | pull, after a diverged fetch | merge / rebase the fetched branch; `pull.rebase=true` (or `branch.<n>.rebase`) rebases without asking, `interactive` opens the todo editor |
 | `A` / `V` | outline | cherry-pick / revert the commit under the cursor (a Commits row, or a Branches row for that branch's tip): `p` now, `x` cherry-pick `-x`, `n` `-n` (apply, do not commit), `k` keep a pick that comes out empty, `r` type a range (`A..B` or commits; `R` with `-x`), `1` / `2` a merge commit against its first / second parent |
 | `c` `s` `a` `q` | `A` / `V` while a pick or revert is under way | continue (commit the resolved step), skip it, abort (asks first), quit (forget the state, keep the files) |
 | `Enter` | outline, on an unmerged path | open the resolution view |
@@ -259,7 +265,7 @@ the top one takes every key.
 | `u` | push menu (`P`) | push and set `origin/<branch>` as the upstream (`git push -u`); every push also moves `refs/remotes/origin/<branch>` ("update by push") |
 | `/` | outline (log included) | search; smart-case: all lower case ignores case, a capital matches exactly. `Enter` runs it, `Esc` cancels |
 | `n` / `N` | outline (log included) | next / previous match, wrapping |
-| `g` / `R` | outline | re-read the repository (`r` is no longer bound) |
+| `g` / `R` | outline | re-read the repository |
 | `J` / `w` | outline | show the jump list / give it the keys |
 | `@` | everywhere | command log: every write the client made (`add`, `update-ref`, `checkout`, ...), newest at the bottom; `j`/`k`/`g`/`G` scroll |
 | `?` | everywhere | key help for every scope, generated from the key table |
@@ -501,7 +507,7 @@ each object is written loose with `GIT_object.write`. The pull is then refused w
 the working tree or index is dirty, when HEAD is detached or unborn, when the
 remote has no such branch, and when the local tip is not an ancestor of the
 remote one (`not a fast-forward; merge/rebase not supported yet`); in `ourgitui`
-that last refusal offers to merge `origin/<branch>` instead (see Merge). The fetched
+that last refusal offers to merge or rebase onto `origin/<branch>` instead (see Merge and Rebase). The fetched
 objects are kept in that case, and `refs/remotes/origin/<branch>` is updated so
 there is something to merge.
 
@@ -549,6 +555,42 @@ and `merge.ff` / merge drivers; submodules conflict and keep ours.
 `test_merge.sh` runs every case on twin repositories, one merged by git and one
 by us, and compares HEAD, index, status, working tree, state files and reflogs;
 `pty_merge.py` drives the screens under a real pty.
+
+## Rebase (`GIT_rebase.m31`, `GIT_rebase_todo.m31`, `GIT_ui_rebase.m31`)
+
+`r` in `ourgitui` opens the rebase menu (see Keys). A rebase onto a branch whose
+upstream is already behind HEAD is a no-op and says so; one that can fast-forward
+does, as git does; commits already upstream (same patch-id, looked back 1000 commits)
+are left out. `-i` and `h` open the todo editor before anything is touched: `p`, `r`,
+`e`, `s`, `f`, `d` set the verb, `J` / `K` reorder, `E` hands the list to `$EDITOR`.
+`reword` and `squash` open `$EDITOR` (`vi` if unset) on the message when they come up.
+
+A conflict stops with REBASE_HEAD, stages 1/2/3 and markers, the `REBASING n/m`
+banner and the same "Unmerged paths" section and resolution view as a merge;
+resolve, stage and `r c` to go on. An `edit` or `break` stops with the commit
+applied: change things, stage them and `r c` (the commit is amended when something is
+staged). While a rebase is under way, commit, branch, merge, pull, undo, stash and
+cherry-pick/revert refuse with a message. `Z` undoes a finished rebase as one step.
+`.git/rebase-merge/` is git's format, so `git rebase --continue|--skip|--abort` finish
+a rebase started here and the other way round (a rebase git started is recognised on
+startup).
+
+`test_rebase.sh` compares our rebase with git's on twin repositories (working tree,
+index, refs, every reflog line, every file under `rebase-merge/`, commit ids, `git fsck
+--strict`) for plain, `--onto`, `--root`, `--keep-base`, interactive, edit, reword,
+squash and fixup chains, drop, reorder, exec, break, autosquash, autostash, already
+upstream, empty commits, and every conflict flow in all four git/ours pairings of start and
+finish; `pty_rebase.py` drives the screens.
+
+Not done: `label`, `reset`, `merge` and `update-ref` todo lines (refused with a clear
+error), `fixup -C` / `-c`, `amend!` commits, the `<branch>` positional (check the
+branch out first), merge commits in the range (`--rebase-merges`), `--reschedule-failed-exec`,
+`--signoff`, `--strategy`, `-X`, the post-rewrite hook and `notes.rewriteRef`, the `patch` file in
+`rebase-merge/`, the status comment block git adds to a squash/reword message (the message itself is
+identical), shift-arrow line moves in the todo editor (`J` / `K`), quick fixup / squash /
+reword / drop actions on a log row, the commit overlay at an `edit` stop (stage, then `r c`),
+`pull.rebase=merges` (it asks), and tags in the rebase picker (branches only). `skip` does not
+refuse when a path you edited and staged at a stop would be discarded.
 
 ## Cherry-pick and revert (`GIT_sequencer.m31`, `GIT_ui_sequencer.m31`)
 
