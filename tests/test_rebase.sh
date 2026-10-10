@@ -280,3 +280,24 @@ if build t_rebase; then
         RB_PRE=rb_dirty_k rb_flow "dirty tree refuses a start" topic "main" rb_nothing abort
     }
 fi
+
+# The rebase screens under a real pty (`pty_rebase.py`): the menu, the todo editor, the
+# conflict flow, abort, skip, quit, the banner, reword and squash through $EDITOR, autostash,
+# a pull that rebases, and git/UI interop both ways, each compared with `git rebase`.
+# It builds its own fixtures under `$WORK/pty_rebase`.
+if rb_only "pty"; then
+    if [ -f "$WORK/gitui" ] || bash scripts/build-gitui.sh -o "$WORK/gitui_rebase" >"$WORK/gitui_rebase_build.log" 2>&1; then
+        [ -f "$WORK/gitui" ] && rb_bin="$WORK/gitui" || rb_bin="$WORK/gitui_rebase"
+        if command -v python3 >/dev/null; then
+            if rb_out=$(python3 tests/pty_rebase.py "$rb_bin" "$WORK/pty_rebase" 2>&1); then
+                note "rebase pty: $(echo "$rb_out" | grep -c '^ok') rebase-screen checks passed under a real pty"
+            else
+                bad "rebase pty" "$rb_out"
+            fi
+        else
+            echo "rebase pty: skipped, no python3" >&2
+        fi
+    else
+        bad "rebase pty: scripts/build-gitui.sh" "$(cat "$WORK/gitui_rebase_build.log")"
+    fi
+fi

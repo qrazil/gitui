@@ -366,6 +366,13 @@ source tests/test_wire.sh
 
 source tests/test_remote.sh
 
+# --- rebase and rebase -i: the engine against git, then the screens ---------------
+#
+# `test_rebase.sh` replays every flow in twin fixtures with real git (all four
+# git/ours pairings of start and continue) and drives the UI under a pty.
+
+source tests/test_rebase.sh
+
 echo
 if [ $fail -eq 0 ]; then
     printf '\033[32mall %d checks passed\033[0m\n' "$pass"

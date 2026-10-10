@@ -187,22 +187,23 @@ pub void RebaseLayer.rebase_from(str spec) {
             return;
         }
     }
-    bool is_root = false;
+    str parent = "";
     match (GIT_merge.read_commit(gitdir, id)) {
         case Ok(GIT_object.Commit commit): {
-            is_root = commit.parents.size() == 0;
+            if (commit.parents.size() > 0) {
+                parent = commit.parents[0];
+            }
         }
         case Err(_): {
             message = "rebase: " + spec + " is not a commit";
             return;
         }
     }
-    str line = "rebase -i " + GIT_ui_core.short_id(id) + "^";
-    if (is_root) {
+    if (parent == "") {
         begin_rebase(GIT_rebase.PlanOpts(root: true, interactive: true, autosquash: is_autosquash()), "rebase -i --root");
         return;
     }
-    begin_rebase(GIT_rebase.PlanOpts(upstream: id + "^", interactive: true, autosquash: is_autosquash()), line);
+    begin_rebase(GIT_rebase.PlanOpts(upstream: parent, interactive: true, autosquash: is_autosquash()), "rebase -i " + GIT_ui_core.short_id(id) + "^");
 }
 
 /// Plan a rebase; an interactive one opens the todo list, the rest start.
@@ -222,7 +223,7 @@ pub void RebaseLayer.begin_rebase(GIT_rebase.PlanOpts popts, str line) {
                     message = "rebase -i: no commits to rebase";
                     return;
                 }
-                str title = "rebase -i onto " + plan.onto_name + " (" + plan.commands.size().to_str() + " commits)";
+                str title = "rebase -i onto " + label_of(plan.onto_name) + " (" + plan.commands.size().to_str() + " commits)";
                 push_overlay(TodoOverlay(this, plan.commands, Option<GIT_rebase.Plan>.Some(plan), opts, line, title));
                 return;
             }
@@ -505,18 +506,19 @@ pub void RebaseLayer.offer_pull(str spec) {
     push_overlay(PullAsk(this, spec));
 }
 
+str label_of(str name) {
+    if (name.size() == 40) {
+        return GIT_ui_core.short_id(name);
+    }
+    return name;
+}
+
 str word_on_off(bool on) {
     if (on) {
         return "on";
     }
     return "off";
 }
-
-// --- opening ------------------------------------------------------------------------
-
-// --- starting -----------------------------------------------------------------------
-
-// --- the editor handoff ------------------------------------------------------------------
 
 void remove_quietly(str path) {
     if (fs.exists(path)) {
@@ -528,10 +530,6 @@ void remove_quietly(str path) {
         }
     }
 }
-
-// --- the rebase under way ------------------------------------------------------------------
-
-// --- pull -----------------------------------------------------------------------------------
 
 /// merge, or rebase onto the fetched tip.
 type PullAsk {
@@ -568,8 +566,6 @@ pub List<GIT_ui_core.Hint> PullAsk.hints() {
     return GIT_ui_core.hints_for(GIT_ui_core.SCOPE_PULL_ASK);
 }
 
-// --- the menus ----------------------------------------------------------------------------------
-
 type RebaseMenu {
     RebaseLayer host;
     str target;
@@ -579,16 +575,18 @@ pub TUI_app.Action RebaseMenu.handle_key(term.Code code) {
     match (GIT_ui_core.lookup(GIT_ui_core.SCOPE_REBASE, code)) {
         case Some(str cmd): {
             if (cmd == GIT_ui_core.CMD_AUTOSQUASH) {
-                host.autosquash_pref = 1;
-                if (host.is_autosquash() && host.autosquash_pref == 1) {
+                if (host.is_autosquash()) {
                     host.autosquash_pref = 0;
+                } else {
+                    host.autosquash_pref = 1;
                 }
                 return TUI_app.Action.Redraw;
             }
             if (cmd == GIT_ui_core.CMD_AUTOSTASH) {
-                host.autostash_pref = 1;
-                if (host.is_autostash() && host.autostash_pref == 1) {
+                if (host.is_autostash()) {
                     host.autostash_pref = 0;
+                } else {
+                    host.autostash_pref = 1;
                 }
                 return TUI_app.Action.Redraw;
             }
@@ -692,8 +690,6 @@ pub void AbortAsk.render(TUI_buffer.Buffer buffer, TUI_geometry.Rect area) {
 pub List<GIT_ui_core.Hint> AbortAsk.hints() {
     return GIT_ui_core.hints_for(GIT_ui_core.SCOPE_MERGE_ASK);
 }
-
-// --- the todo list ----------------------------------------------------------------------------------
 
 /// The list being edited. `plan` is set for a new rebase and `None` for the
 /// commands left in one under way.
