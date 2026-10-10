@@ -13,8 +13,9 @@
 //
 // --- as git, and where not ----------------------------------------------------------
 //
-//   - A todo line is `<verb> <commit> [<subject>]`, `exec <command>` or
-//     `break`; the verbs have their one-letter forms; `#` lines and blank lines
+//   - A todo line is `<verb> <commit> [# <subject>]`, `exec <command>` or
+//     `break`; git 2.55 writes the subject as a comment, so do we (older git
+//     ignores whatever follows the commit, and a bare subject is read too); the verbs have their one-letter forms; `#` lines and blank lines
 //     are skipped. `label`, `reset`, `merge`, `update-ref` and `fixup -C/-c`
 //     are refused with a plain message, not guessed at.
 //   - The commits of a new list are those of `upstream..head` without merges,
@@ -222,6 +223,9 @@ pub Result<List<Command>, GIT_sequencer.Error> parse_unchecked(str gitdir, str t
         if (cut >= 0) {
             token = rest.substr(0, cut);
             subject = rest.substr(cut + 1, rest.size()).trim();
+            if (subject.starts_with("#")) {
+                subject = subject.substr(1, subject.size()).trim();
+            }
         }
         if (token == "") {
             return refuse("'" + word + "' needs a commit");
@@ -272,7 +276,10 @@ str line_of(Command cmd, str id_text) {
     if (cmd.verb == Verb.Exec) {
         return "exec " + cmd.text;
     }
-    return (cmd.verb.word() + " " + id_text + " " + cmd.text).trim();
+    if (cmd.text == "") {
+        return cmd.verb.word() + " " + id_text;
+    }
+    return cmd.verb.word() + " " + id_text + " # " + cmd.text;
 }
 
 /// The lines git keeps in its state files: full ids.

@@ -37,10 +37,10 @@ gr_make() {
                     [ $p2 -ne $p1 ] && args+=(-p "${ids[$p2]}")
                 fi
             fi
-            ids+=("$(git commit-tree "${args[@]}" -m "c$i" "$tree")")
+            ids+=("$(git commit-tree ${args[@]+"${args[@]}"} -m "c$i" "$tree")")
             i=$((i + 1))
         done
-        printf '%s\n' "${ids[@]}" >ids
+        printf "%s\n" ${ids[@]+"${ids[@]}"} >ids
         git update-ref refs/heads/main "${ids[$((count - 1))]}"
     )
 }

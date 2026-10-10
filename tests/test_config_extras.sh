@@ -162,7 +162,20 @@ CFG
         fi
     }
     r=$cx_home/work/r1
-    cx_editor_case "nothing set: vi" "$r"
+    # With nothing set git falls back on the default its build was configured
+    # with (`vi` unless DEFAULT_EDITOR said otherwise: Debian and Ubuntu build
+    # with `editor`), which a program cannot ask for except through `git var`.
+    cx_default_editor=$(ce git -C "$r" var GIT_EDITOR 2>&1)
+    if [ "$cx_default_editor" = vi ]; then
+        cx_editor_case "nothing set: vi" "$r"
+    else
+        got=$(ce "$WORK/t_config_extras" "$r/.git" editor 2>&1)
+        if [ "$got" = vi ]; then
+            note "config editor: nothing set: vi (this git was built with the default '$cx_default_editor')"
+        else
+            bad "config editor: nothing set" "ours: $got" "git's build default is '$cx_default_editor'; ours must be vi"
+        fi
+    fi
     cx_editor_case "EDITOR only" "$r" EDITOR=ed
     cx_editor_case "VISUAL beats EDITOR" "$r" EDITOR=ed VISUAL=visualed
     cx_git -C "$r" config core.editor coreed
@@ -183,7 +196,7 @@ CFG
         rm -rf "$d"
         CX_GLOBAL="$gfile" cx_git init -q "$d"
         local i
-        for i in "${cx_sets[@]}"; do
+        for i in ${cx_sets[@]+"${cx_sets[@]}"}; do
             local k=${i%% *} v=${i#* }
             if [ "$k" = "$i" ]; then printf '[%s]\n\t%s\n' "${k%%.*}" "${k#*.}" >>"$d/.git/config"; else CX_GLOBAL="$gfile" cx_git -C "$d" config "$k" "$v"; fi
         done

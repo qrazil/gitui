@@ -710,19 +710,17 @@ Result<List<Event>, Error> scan(str body) {
     str section = "";
     str subsection = "";
     bool is_in_section = false;
-    int line_start = 0;
-    bool is_fresh_line = true;
     while (position < body.size()) {
-        if (is_fresh_line) {
-            line_start = position;
-        }
-        is_fresh_line = true;
-        int c = body.byte_at(position);
-        if (is_blank_char(c)) {
+        // Every token's event starts where its line (or, after a header, its
+        // key) starts: before the indentation, which the edits replace.
+        int line_start = position;
+        while (position < body.size() && is_blank_char(body.byte_at(position))) {
             position = position + 1;
-            is_fresh_line = false;
-            continue;
         }
+        if (position >= body.size()) {
+            break;
+        }
+        int c = body.byte_at(position);
         if (c == '\n') {
             position = position + 1;
             events.push(blank_event(KIND_BLANK, line_start, position));
@@ -767,9 +765,7 @@ Result<List<Event>, Error> scan(str body) {
                 continue;
             }
             // A key on the header's line: the entry starts at the key.
-            line_start = rest;
             position = rest;
-            is_fresh_line = false;
             continue;
         }
         if (!is_in_section) {

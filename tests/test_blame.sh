@@ -23,6 +23,7 @@ bl_make() {
     git init -q -b main "$dir"
     (
         set -e
+        set +u  # bash 3.2 (macOS) calls "${empty_array[@]}" unbound
         cd "$dir"
         export GIT_AUTHOR_NAME=Blame_Tester GIT_AUTHOR_EMAIL=b@example.com GIT_COMMITTER_NAME=Blame_Tester GIT_COMMITTER_EMAIL=b@example.com
         RANDOM=$seed
@@ -40,7 +41,7 @@ bl_make() {
         commit_edit() {
             local f=sub/f.txt
             [ -f $f ] || : >$f
-            mapfile -t L <$f
+            L=(); while IFS= read -r bl_line; do L+=("$bl_line"); done <$f
             local n=${#L[@]} p k i
             case $((RANDOM % 5)) in
             0 | 1)

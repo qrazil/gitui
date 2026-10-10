@@ -7,6 +7,8 @@
 
 stx="$WORK/stash_fx"
 mkdir -p "$stx"
+# `sed -i` that BSD sed (macOS) also takes: it needs a suffix, and GNU's -i takes none
+st_sed() { sed -i.bak "$1" "$2" && rm -f "$2.bak"; }
 st_env() { env GIT_AUTHOR_NAME=Stash_Tester GIT_AUTHOR_EMAIL=stash@example.com GIT_COMMITTER_NAME=Stash_Tester GIT_COMMITTER_EMAIL=stash@example.com GIT_AUTHOR_DATE='1700000000 +0000' GIT_COMMITTER_DATE='1700000000 +0000' "$@"; }
 st_git() { local d=$1; shift; st_env git -C "$d" "$@"; }
 st_ours() { local d=$1; shift; st_env "$WORK/t_stash" "$d/.git" "$d" "$@"; }
@@ -33,8 +35,8 @@ st_fixture() {
         printf 'no newline' >nonl.txt
         git add .; git commit -q -m 'base commit: with a colon'
         printf 'second\n' >>b.txt; git add b.txt; git commit -q -m 'second'
-        sed -i 's/^two$/TWO/' a.txt; git add a.txt
-        sed -i 's/^nine$/NINE/' a.txt
+        st_sed 's/^two$/TWO/' a.txt; git add a.txt
+        st_sed 's/^nine$/NINE/' a.txt
         printf 'bee\nsecond\nthird\n' >b.txt
         rm dir/c.txt
         chmod 644 run.sh
@@ -55,7 +57,7 @@ st_state() {
     git -C "$d" status --porcelain=v1 -uall
     git -C "$d" ls-files -s
     git -C "$d" stash list
-    (cd "$d" && find . -path ./.git -prune -o -type f -printf '%m %p\n' | LC_ALL=C sort | while read -r mode p; do echo "$mode $p $(sha1sum <"$p" | cut -c1-12)"; done)
+    (cd "$d" && find . -path ./.git -prune -o -type f -print | LC_ALL=C sort | while read -r p; do echo "$(stat -c %a "$p") $p $(sha1sum <"$p" | cut -c1-12)"; done)
     cat "$d/.git/logs/refs/stash" 2>/dev/null
 }
 
@@ -203,15 +205,15 @@ if build t_stash; then
     # Each case: both copies get the same stash (made by git) and the same new HEAD commit;
     # git applies/pops on one, we do on the other; state, AUTO_MERGE, exit status and the
     # kept (or dropped) stash must be the same.
-    st_head_clean() { sed -i 's/^eight$/EIGHT/' a.txt; git add a.txt; git commit -q -m 'head: clean hunk'; }
-    st_head_conflict() { sed -i 's/^two$/deux/' a.txt; git add a.txt; git commit -q -m 'head: conflicting hunk'; }
+    st_head_clean() { st_sed 's/^eight$/EIGHT/' a.txt; git add a.txt; git commit -q -m 'head: clean hunk'; }
+    st_head_conflict() { st_sed 's/^two$/deux/' a.txt; git add a.txt; git commit -q -m 'head: conflicting hunk'; }
     st_head_many() {
-        sed -i 's/^two$/deux/' a.txt; printf 'head-b\n' >>b.txt; printf 'head edit\n' >del.txt
+        st_sed 's/^two$/deux/' a.txt; printf 'head-b\n' >>b.txt; printf 'head edit\n' >del.txt
         git rm -q dir/c.txt; printf 'head new\n' >new.txt; chmod 755 nonl.txt; git add -A; git commit -q -m 'head: many'
     }
     st_head_mode() { chmod 755 b.txt; printf 'head-b\n' >>b.txt; git add b.txt; git commit -q -m 'head: mode and append'; }
     st_head_deleted() { git rm -q b.txt; git commit -q -m 'head: deletes the file the stash edited'; }
-    st_head_staged() { sed -i 's/^eight$/EIGHT/' a.txt; git add a.txt; }
+    st_head_staged() { st_sed 's/^eight$/EIGHT/' a.txt; git add a.txt; }
     for variant in "clean:plain:" "conflict:plain:" "many:plain:" "mode:plain:" "deleted:plain:" "conflict:untracked:-u" "many:untracked:-u" "clean:keep:-k" "staged:plain:"; do
         scen=${variant%%:*}; rest=${variant#*:}; name=${rest%%:*}; flags=${rest#*:}
         for cmd in apply pop; do
@@ -220,7 +222,7 @@ if build t_stash; then
                 st_pair "$tag"
                 for r in git ours; do
                     st_git "$stx/$tag-$r" stash push -q $flags >/dev/null 2>&1
-                    (cd "$stx/$tag-$r" && st_env bash -c "$(declare -f st_head_$scen); st_head_$scen") >/dev/null 2>&1
+                    (cd "$stx/$tag-$r" && st_env bash -c "$(declare -f st_sed st_head_$scen); st_head_$scen") >/dev/null 2>&1
                 done
                 st_git "$stx/$tag-git" stash $cmd -q $idx >"$WORK/mg.git.out" 2>&1; r1=$?
                 pre=$(st_state "$stx/$tag-ours")
@@ -251,7 +253,7 @@ if build t_stash; then
     st_pair mgfin
     for r in git ours; do
         st_git "$stx/mgfin-$r" stash push -q >/dev/null 2>&1
-        (cd "$stx/mgfin-$r" && st_env bash -c "$(declare -f st_head_conflict); st_head_conflict") >/dev/null 2>&1
+        (cd "$stx/mgfin-$r" && st_env bash -c "$(declare -f st_sed st_head_conflict); st_head_conflict") >/dev/null 2>&1
     done
     st_ours "$stx/mgfin-ours" pop 0 >/dev/null 2>&1
     [ "$(git -C "$stx/mgfin-ours" stash list | wc -l)" = 1 ] && note "stash pop: a conflicted pop keeps the stash" || bad "stash pop conflicted: stash dropped"

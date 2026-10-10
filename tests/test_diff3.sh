@@ -11,10 +11,10 @@
 #                 give the same bytes and the same number of conflicts
 #                 (`oracles/oracle_diff3.py`). `Level.Zealous` has no
 #                 merge-file switch, so a few hundred of the triples are also
-#                 merged by a real `git merge -s recursive` in disposable
-#                 repositories (`oracles/oracle_zealous.py`; Myers like
-#                 merge-file, where the default `ort` strategy diffs with
-#                 histogram).
+#                 merged by a real `git merge -s recursive -X diff-algorithm=myers`
+#                 in disposable repositories (`oracles/oracle_zealous.py`; Myers
+#                 like merge-file -- the strategies' default differs between git
+#                 versions).
 #
 # Sourced from `test.sh`, on the same terms as `test_patch.sh`: no `set`, no
 # `cd`, no `trap` here, and `$WORK`, `$LANGC`, `$M31_ROOT`,
@@ -51,9 +51,9 @@ if build t_diff3; then
             mkdir -p "$WORK/diff3-repos"
             if python3 tests/oracles/oracle_zealous.py "$d3_dir" 200 "$WORK/diff3-repos" >"$WORK/diff3.zeal" 2>"$WORK/diff3.err" \
                && grep -q ', 0 failed$' "$WORK/diff3.zeal"; then
-                note "diff3 Level.Zealous vs git merge -s recursive: $(tail -1 "$WORK/diff3.zeal")"
+                note "diff3 Level.Zealous vs git merge -s recursive -X diff-algorithm=myers: $(tail -1 "$WORK/diff3.zeal")"
             else
-                bad "diff3 Level.Zealous vs git merge -s recursive" "$(head -8 "$WORK/diff3.zeal")" "$(head -5 "$WORK/diff3.err")"
+                bad "diff3 Level.Zealous vs git merge -s recursive -X diff-algorithm=myers" "$(head -8 "$WORK/diff3.zeal")" "$(head -5 "$WORK/diff3.err")"
             fi
             rm -rf "$WORK/diff3-repos"
         fi

@@ -104,7 +104,7 @@ def build(root, name):
 
 def twin(fx, root, name):
     dest = os.path.join(root, name)
-    shutil.copytree(fx, dest)
+    P.copy_repo(fx, dest)
     return dest
 
 

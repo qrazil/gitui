@@ -6,8 +6,9 @@
 `git merge-file` runs the merge at the level that also joins conflicts with
 no letter or digit between them, `git merge` one below it; a real merge in a
 disposable repository under SCRATCH is how the second is checked.  The merge is
-`-s recursive`: it diffs with Myers like merge-file does, where the default
-strategy (ort) diffs with histogram.
+`-s recursive -X diff-algorithm=myers`: Myers is what merge-file diffs with,
+and the strategies' own default is not stable across git versions (git 2.55
+made `recursive` an alias of `ort`, which diffs with histogram by default).
 Per case: init, commit base on `main`, branch `theirs` with theirs' file,
 `main` with ours', `git merge theirs`; the file left in the work tree (conflict
 markers and all) is compared with .mz after its `HEAD` marker label is renamed
@@ -54,7 +55,7 @@ def main():
         put(repo, theirs)
         git(repo, "checkout", "-q", "main")
         put(repo, ours)
-        git(repo, "merge", "-q", "--no-edit", "-s", "recursive", "theirs", check=False)
+        git(repo, "merge", "-q", "--no-edit", "-s", "recursive", "-X", "diff-algorithm=myers", "theirs", check=False)
         got = open(os.path.join(repo, "f"), "rb").read()
         got = got.replace(b"<<<<<<< HEAD", b"<<<<<<< ours")
         want = open(stem + ".mz", "rb").read()

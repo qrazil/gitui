@@ -23,7 +23,7 @@ rb_ours() { ( rb_env; "$WORK/t_rebase" "$1/.git" "$1" "${@:2}" ); }
 
 cat >"$WORK/rb_seded.sh" <<'SH'
 #!/bin/sh
-[ -n "$SEDSCRIPT" ] && sed -i -e "$SEDSCRIPT" "$1"
+[ -n "$SEDSCRIPT" ] && sed -i.bak -e "$SEDSCRIPT" "$1" && rm -f "$1.bak"
 exit 0
 SH
 
@@ -104,7 +104,7 @@ rb_state() {
         for f in $(ls "$r/.git/rebase-merge" | grep -v '^patch$'); do
             echo "== rebase-merge/$f"
             case $f in
-                git-rebase-todo*|done) grep -v '^#' "$r/.git/rebase-merge/$f" | grep -v '^$' ;;
+                git-rebase-todo*|done) grep -v '^#' "$r/.git/rebase-merge/$f" | grep -v '^$' | sed 's/^\([a-z]* [0-9a-f]\{40\}\) # /\1 /' ;;
                 *) cat -A "$r/.git/rebase-merge/$f" ;;
             esac
         done

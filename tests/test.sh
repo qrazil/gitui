@@ -22,7 +22,8 @@
 # `.m31-deps/`.
 set -uo pipefail
 cd "$(dirname "$0")/.."
-unset VISUAL GIT_EDITOR
+unset VISUAL GIT_EDITOR EDITOR GIT_SEQUENCE_EDITOR
+export LC_ALL=C TZ=UTC
 
 if [ -z "${M31_ROOT:-}" ]; then
     echo "M31_ROOT is not set -- point it at a checkout of github.com/qrazil/m31" \
@@ -41,6 +42,17 @@ fi
 LANGC=${LANGC:-./m31c}
 WORK=$(mktemp -d)
 trap 'rm -rf "$WORK"' EXIT
+
+# Hosts without GNU coreutils (macOS) get small stand-ins for the few GNU tools
+# the checks lean on; a missing `sha1sum` would otherwise make a comparison of
+# two empty strings pass.
+shims="$WORK/shims"
+mkdir -p "$shims"
+for shim_tool in sha1sum md5sum tac; do
+    command -v "$shim_tool" >/dev/null 2>&1 || cp "tests/shims/$shim_tool" "$shims/$shim_tool"
+done
+stat -c %a / >/dev/null 2>&1 || cp tests/shims/stat "$shims/stat"
+PATH="$shims:$PATH"
 pass=0
 fail=0
 

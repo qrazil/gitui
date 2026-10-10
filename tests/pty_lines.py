@@ -31,7 +31,7 @@ sys.path.insert(0, os.path.join(HERE, "oracles"))
 
 import oracle_lines  # noqa: E402
 import pty_e2e  # noqa: E402
-from pty_e2e import GIT_ENV, Session, git, make_fixture  # noqa: E402
+from pty_e2e import GIT_ENV, Session, copy_repo, git, make_fixture  # noqa: E402
 
 failures = 0
 lock = threading.Lock()
@@ -124,7 +124,7 @@ def run_case(binpath, root, case, view, action):
     built = build(root, name, case, view)
     fx, section = built
     oracle = fx + "-oracle"
-    shutil.copytree(fx, oracle)
+    copy_repo(fx, oracle)
     keys = "/lines.txt\r" + "d" + "j" * low
     if high > low:
         keys += "v" + "j" * (high - low)

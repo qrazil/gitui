@@ -21,7 +21,7 @@ from concurrent.futures import ThreadPoolExecutor
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 
-from pty_e2e import CLIENT_ENV, Session  # noqa: E402
+from pty_e2e import CLIENT_ENV, Session, copy_repo, quiet_repo  # noqa: E402
 
 ENV = dict(CLIENT_ENV)
 for who in ("AUTHOR", "COMMITTER"):
@@ -57,6 +57,7 @@ def fixture(root, name):
     fx = os.path.join(root, name)
     os.makedirs(fx)
     run(fx, "init", "-q", "-b", "main")
+    quiet_repo(fx)
     write(fx + "/a.txt", b"one\ntwo\nthree\nfour\nfive\nsix\nseven\neight\nnine\nten\n")
     write(fx + "/b.txt", b"bee\n")
     write(fx + "/dir/c.txt", b"see\n")
@@ -110,8 +111,8 @@ def pair(root, name, prepare=None):
     """Two identical fixtures (-ours driven by ourgitui, -git by git); `prepare(fx)` runs on both."""
     base = fixture(root, name + "-src")
     ours, theirs = os.path.join(root, name + "-ours"), os.path.join(root, name + "-git")
-    shutil.copytree(base, ours)
-    shutil.copytree(base, theirs)
+    copy_repo(base, ours)
+    copy_repo(base, theirs)
     shutil.rmtree(base)
     if prepare:
         prepare(ours)

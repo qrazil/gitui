@@ -196,7 +196,10 @@ class Session:
         return self.screen.text()
 
     def send(self, keys):
-        os.write(self.master, keys.encode())
+        try:
+            os.write(self.master, keys.encode())
+        except OSError:
+            pass  # the child has gone (macOS reports EIO, Linux does not)
         time.sleep(0.2)
         return self.drain()
 
@@ -213,10 +216,23 @@ class Session:
         return self.proc.returncode
 
 
+def quiet_repo(fx):
+    """No background `git maintenance` / `gc --auto` in a fixture: it is detached,
+    takes `objects/maintenance.lock` and would race the copy `copy_repo` makes."""
+    subprocess.run(["git", "config", "gc.auto", "0"], cwd=fx, check=True)
+    subprocess.run(["git", "config", "maintenance.auto", "false"], cwd=fx, check=True)
+
+
+def copy_repo(src, dst):
+    """A byte-for-byte copy of a fixture repository, lock files left behind."""
+    shutil.copytree(src, dst, ignore=shutil.ignore_patterns("*.lock"))
+
+
 def make_fixture(root, name):
     fx = os.path.join(root, name)
     os.makedirs(fx)
     subprocess.run(["git", "init", "-q", "-b", "main", "."], cwd=fx, check=True)
+    quiet_repo(fx)
     return fx
 
 
@@ -1237,17 +1253,17 @@ def main():
         f.write("x\n")
     s24.send("g")
     check("refresh: g re-reads the repository and shows a file created behind its back", "via_g.txt" in s24.text(), s24.text())
-    with open(os.path.join(fx24, "via_R.txt"), "w") as f:
+    with open(os.path.join(fx24, "via_upper_R.txt"), "w") as f:
         f.write("x\n")
     s24.send("R")
-    check("refresh: R still refreshes", "via_R.txt" in s24.text(), s24.text())
-    with open(os.path.join(fx24, "via_r.txt"), "w") as f:
+    check("refresh: R still refreshes", "via_upper_R.txt" in s24.text(), s24.text())
+    with open(os.path.join(fx24, "via_lower_r.txt"), "w") as f:
         f.write("x\n")
     s24.send("r")
     check("refresh: r opens the rebase menu, not a refresh", "autosquash" in s24.text(), s24.text())
     s24.send("\x1b")
     s24.send("g")
-    check("refresh: g then picks it up", "via_r.txt" in s24.text(), s24.text())
+    check("refresh: g then picks it up", "via_lower_r.txt" in s24.text(), s24.text())
     s24.quit()
 
     # The generic fuzzy picker, through the branch overlay's `/`.
