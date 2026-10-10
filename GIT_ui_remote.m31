@@ -360,7 +360,7 @@ pub TUI_app.Action HostTrustOverlay.handle_key(term.Code code) {
 }
 
 pub void HostTrustOverlay.render(TUI_buffer.Buffer buffer, TUI_geometry.Rect area) {
-    TUI_menu.WhichKey which_key = TUI_menu.WhichKey("host key " + pending.fingerprint + " not known", [TUI_menu.Item("host", pending.spec()), TUI_menu.Item("y", "trust and add to known_hosts (" + pending.known_hosts + ")"), TUI_menu.Item("N", "any other key: do not trust")]);
+    TUI_menu.WhichKey which_key = TUI_menu.WhichKey("host key " + pending.fingerprint() + " not known", [TUI_menu.Item("host", pending.spec()), TUI_menu.Item("y", "trust and add to known_hosts (" + pending.known_hosts + ")"), TUI_menu.Item("N", "any other key: do not trust")]);
     which_key.render(buffer, area);
 }
 

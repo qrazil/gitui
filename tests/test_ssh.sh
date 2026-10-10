@@ -53,6 +53,12 @@ ss_g() { git -c user.name=Tester -c user.email=t@example.com -c init.defaultBran
 
 # Run t_ssh as a user with a throwaway home. $ss_kh and $ss_id, when set,
 # are the GITUI_SSH_KNOWN_HOSTS / GITUI_SSH_IDENTITY overrides.
+# sshd gives a session its own short PATH (/usr/bin:/bin on macOS), which does
+# not hold a Homebrew or hand-built git; hand it the directories git's two
+# server programs were found in.
+ss_session_path="$(dirname "$(command -v git-upload-pack)"):$(dirname "$(command -v git-receive-pack)"):/usr/bin:/bin:/usr/sbin:/sbin"
+case "$ss_session_path" in *" "*) ss_session_path="/usr/bin:/bin:/usr/sbin:/sbin" ;; esac
+
 ss_t() {
     local -a e=(HOME="$ss_home")
     [ -n "${ss_kh:-}" ] && e+=(GITUI_SSH_KNOWN_HOSTS="$ss_kh")
@@ -175,7 +181,7 @@ Ciphers chacha20-poly1305@openssh.com
 PubkeyAuthentication yes
 PasswordAuthentication no
 KbdInteractiveAuthentication no
-SetEnv GIT_TRACE_PACKET=$ss_root/trace.log
+SetEnv GIT_TRACE_PACKET=$ss_root/trace.log PATH=$ss_session_path
 EOF
         "$ss_sshd" -f "$ss_root/sshd_config" -D -e >"$ss_root/sshd.log" 2>&1 &
         ss_pid=$!

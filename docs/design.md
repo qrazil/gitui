@@ -215,6 +215,32 @@ reported as a generic network failure; everything else still maps to `Http`.
 on the same origin up to five times, `http` to `https` on the same host is
 followed, `https` to `http` never is.
 
+## ssh remotes, 2026-10-10
+
+SSH was "held" above until m31 v0.3.3 shipped an ssh client (`sshclient`,
+`sshhosts`, `sshkey`, `sshauth`, `sshexec`) validated against OpenSSH. gitui
+adds the transport on top of it (`GIT_ssh_transport.m31`): an exec channel
+running `git-upload-pack` / `git-receive-pack` is wrapped as a `GIT_wire.Stream`,
+so the v0 conversation `GIT_wire.m31` holds over HTTP runs unchanged, minus the
+`# service=` preamble. `GIT_remote.m31` supplies the pure parts (URLs,
+`insteadOf`, the `~/.ssh/config` subset); `GIT_pull.pull_ssh` and the push in
+`GIT_ui_remote.m31` choose the transport from the `origin` URL.
+
+Decisions: (1) trust on first use is the user's, never the program's: an
+unknown host is `Error.UnknownHost(PendingHost)` carrying the key the server
+presented (`ssh.presented_host_key`), the UI asks, and only `y` records it
+(`sshhosts.add`, hashed when `HashKnownHosts yes` applies to the host). A
+changed key is a refusal with no override from the UI. (2) The library call has
+no read timeout, so gitui first connects and waits up to 15 s for the server's
+banner (an ssh server speaks first), bounding a silent server. A watchdog thread
+was rejected: m31 has no select or cancel, and the program waits for every
+spawned thread, so a parked or sleeping watchdog would stall exit. A server that
+sends the banner and then stalls, or a TCP connect that never answers, is not
+bounded. (3) The environment overrides
+`GITUI_SSH_IDENTITY` and `GITUI_SSH_KNOWN_HOSTS` exist for the tests and for
+unusual setups; nothing reads a password from anywhere, and an encrypted key or
+a missing key ends in a message that names `https://` as the alternative.
+
 ## What this deliberately does not decide yet
 
   - Exact keybindings (mnemonic, one key per base verb, is the only

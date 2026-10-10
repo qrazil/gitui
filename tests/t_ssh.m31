@@ -41,7 +41,10 @@ import GIT_ssh_transport;
 import GIT_wire;
 import fs;
 import io;
+import net;
 import os;
+import ssh;
+import sshhosts;
 
 List<str> argv = os.args();
 if (argv.size() < 2) {
@@ -83,7 +86,7 @@ void fail(str message) {
 void report(GIT_ssh_transport.Error error) {
     match (error.pending_host()) {
         case Some(GIT_ssh_transport.PendingHost pending): {
-            print("unknown-host " + pending.fingerprint);
+            print("unknown-host " + pending.fingerprint());
             os.exit(3);
         }
         case None: {
@@ -121,24 +124,99 @@ void check(str name, bool is_good, str detail) {
     }
 }
 
+// trust_host appends one line that sshhosts reads back for the very host and
+// port, and does not run into a last line that lacks its newline.
+void unit_trust(str name, GIT_ssh_transport.PendingHost pending, str seed_end) {
+    if (seed_end == "" && !fs.exists(pending.known_hosts)) {
+        match (io.write(pending.known_hosts, sshhosts.plain_line("other.example", 22, pending.key))) {
+            case Ok(_): {
+            }
+            case Err(_): {
+            }
+        }
+    }
+    match (GIT_ssh_transport.trust_host(pending)) {
+        case Ok(_): {
+        }
+        case Err(GIT_ssh_transport.Error error): {
+            check("trust_host: " + name, false, error.to_str());
+            return;
+        }
+    }
+    match (sshhosts.load(pending.known_hosts)) {
+        case Ok(sshhosts.KnownHosts hosts): {
+            match (hosts.keys_for(pending.host, pending.port)) {
+                case Ok(List<bytes> keys): {
+                    check("trust_host: " + name + " is read back", keys.size() == 1 && keys[0] == pending.key.key, "wrong key list");
+                }
+                case Err(sshhosts.Error why): {
+                    check("trust_host: " + name + " is read back", false, why.to_str());
+                }
+            }
+            check("trust_host: " + name + " is not another port's", pending.port == 22 || hosts.keys_for(pending.host, 22).is_err(), "found for port 22");
+        }
+        case Err(sshhosts.Error why): {
+            check("trust_host: " + name + " parses", false, why.to_str());
+        }
+    }
+}
+
+// A listener that accepts and never speaks: the probe must give up.
+bool unit_silent_server() {
+    match (net.listen("127.0.0.1", 0)) {
+        case Ok(net.Listener listener): {
+            int port = listener.local().port();
+            Result<ssh.HostKey, str> got = GIT_ssh_transport.probe_host_key("127.0.0.1", port, 400);
+            match (listener.close()) {
+                case Ok(_): {
+                }
+                case Err(_): {
+                }
+            }
+            match (got) {
+                case Ok(_): {
+                    return false;
+                }
+                case Err(str why): {
+                    return why.contains("within");
+                }
+            }
+        }
+        case Err(_): {
+            return false;
+        }
+    }
+}
+
 // --- unit ---------------------------------------------------------------------
 
 void run_unit() {
     check("host_spec: port 22 is the bare name", GIT_ssh_transport.host_spec("Example.COM", 22) == "example.com", GIT_ssh_transport.host_spec("Example.COM", 22));
     check("host_spec: other ports are [host]:port", GIT_ssh_transport.host_spec("127.0.0.1", 2222) == "[127.0.0.1]:2222", GIT_ssh_transport.host_spec("127.0.0.1", 2222));
-    check("fingerprint_of: SHA256 of nothing, unpadded", GIT_ssh_transport.fingerprint_of([]) == "SHA256:47DEQpj8HBSa+/TImW+5JCeuQeRkm5NMpJWZG3hSuFU", GIT_ssh_transport.fingerprint_of([]));
-    GIT_ssh_transport.PendingHost plain = GIT_ssh_transport.PendingHost("example.org", 2200, "SHA256:x", "ssh-ed25519", "AAAAC3NzaC1lZDI1NTE5AAAAIK", "/tmp/kh", false);
-    str plain_line = GIT_ssh_transport.known_hosts_line(plain, [1, 2, 3]);
-    check("known_hosts_line: plain", plain_line == "[example.org]:2200 ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIK", plain_line);
-    check("known_hosts_line: plain is found again", GIT_remote.known_hosts_find(plain_line + "\n", "example.org", 2200).size() == 1, "not found");
-    check("known_hosts_line: plain is not another port's", GIT_remote.known_hosts_find(plain_line + "\n", "example.org", 22).size() == 0, "found for port 22");
-    GIT_ssh_transport.PendingHost hashed = GIT_ssh_transport.PendingHost("example.org", 22, "SHA256:x", "ssh-ed25519", "AAAAC3NzaC1lZDI1NTE5AAAAIK", "/tmp/kh", true);
-    bytes salt = [9, 8, 7, 6, 5, 4, 3, 2, 1, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10];
-    str hashed_line = GIT_ssh_transport.known_hosts_line(hashed, salt);
-    check("known_hosts_line: hashed starts |1|", hashed_line.starts_with("|1|"), hashed_line);
-    check("known_hosts_line: hashed hides the name", !hashed_line.contains("example"), hashed_line);
-    check("known_hosts_line: hashed is found again", GIT_remote.known_hosts_find(hashed_line + "\n", "example.org", 22).size() == 1, "not found");
-    check("known_hosts_line: hashed is not another host's", GIT_remote.known_hosts_find(hashed_line + "\n", "example.net", 22).size() == 0, "found for another host");
+    // A host key as the library hands it over: algorithm, wire blob, raw key.
+    bytes raw = [];
+    for (int i in 0 .. 32) {
+        raw.push(i);
+    }
+    bytes blob = [0, 0, 0, 11];
+    blob.extend("ssh-ed25519".to_bytes());
+    blob.push(0);
+    blob.push(0);
+    blob.push(0);
+    blob.push(32);
+    blob.extend(raw);
+    ssh.HostKey key = ssh.HostKey("ssh-ed25519", blob, raw);
+    GIT_ssh_transport.PendingHost plain = GIT_ssh_transport.PendingHost("Example.org", 2200, key, "", false);
+    check("PendingHost.fingerprint is the library's", plain.fingerprint() == key.fingerprint() && plain.fingerprint().starts_with("SHA256:"), plain.fingerprint());
+    check("PendingHost.prompt shows the fingerprint", plain.prompt().contains(plain.fingerprint()), plain.prompt());
+    check("PendingHost.spec: [host]:port, lower-case", plain.spec() == "[example.org]:2200", plain.spec());
+    // trust_host through sshhosts.add, into files under the throwaway $HOME.
+    str dir = fs.join(os.env("HOME").or("/nonexistent"), "unit-known-hosts");
+    unit_trust("plain", GIT_ssh_transport.PendingHost("Example.org", 2200, key, fs.join(dir, "plain"), false), "\n");
+    unit_trust("plain, no trailing newline", GIT_ssh_transport.PendingHost("example.org", 22, key, fs.join(dir, "bare"), false), "");
+    unit_trust("hashed", GIT_ssh_transport.PendingHost("example.org", 22, key, fs.join(dir, "hashed"), true), "\n");
+    unit_trust("a nested missing directory", GIT_ssh_transport.PendingHost("example.org", 22, key, fs.join(fs.join(dir, "a/b"), "kh"), false), "\n");
+    check("probe_host_key: a server that says nothing times out", unit_silent_server(), "no timeout");
     str config = "Host *.corp\n  HashKnownHosts yes\nHost plain\n  HashKnownHosts no\nHost *\n  HashKnownHosts no\n";
     check("hashes_known_hosts: glob host block", GIT_ssh_transport.hashes_known_hosts(config, "git.corp"), "not hashed");
     check("hashes_known_hosts: first value wins", !GIT_ssh_transport.hashes_known_hosts("Host *\n  HashKnownHosts no\nHost *\n  HashKnownHosts yes\n", "x"), "later value won");
@@ -310,7 +388,7 @@ void do_trust(str url) {
                 case Some(GIT_ssh_transport.PendingHost pending): {
                     match (GIT_ssh_transport.trust_host(pending)) {
                         case Ok(_): {
-                            print("trusted " + pending.fingerprint + " " + pending.known_hosts);
+                            print("trusted " + pending.fingerprint() + " " + pending.known_hosts);
                         }
                         case Err(GIT_ssh_transport.Error why): {
                             fail(why.to_str());

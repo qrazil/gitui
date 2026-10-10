@@ -60,7 +60,7 @@ bash scripts/build-gitui.sh -o ourgitui    # not build.sh -- it is the one with 
 | `GIT_http_fetch.m31` | git's smart-HTTP protocol, v0 fetch/clone only: pkt-line framing, the ref advertisement, want/have negotiation, side-band-64k demultiplexing, and pack checksum verification, over `lib/https.m31` (`http://` and `https://`) |
 | `GIT_wire.m31` | the transport-independent half of git's wire protocol over a duplex `Stream { read(n), write(bytes), close() }`: pkt-lines, the advertisement, want/have negotiation in rounds of at most 256 haves with the ACKs read between rounds (no write/write deadlock on a long-lived channel), side-band demultiplexing, pack verification, and the receive-pack command and report-status; `GIT_http_fetch.m31` and `GIT_http_push.m31` are now HTTP adapters over it |
 | `GIT_remote.m31` | where a remote lives: URL parsing (https, http, `ssh://`, scp-like, local) checked against the argv git hands to ssh, `url.<base>.insteadOf` / `pushInsteadOf` rewriting, `sq_quote` and the `git-upload-pack` / `git-receive-pack` command, a pure `~/.ssh/config` subset resolver, pure `known_hosts` matching (plain, `[host]:port`, wildcard, hashed via HMAC-SHA1, markers surfaced), no I/O; the ssh transport that uses it is `GIT_ssh_transport.m31` |
-| `GIT_ssh_transport.m31` | git over ssh: an exec channel of the m31 ssh client (`lib/sshclient.m31`) as a `GIT_wire.Stream` running `git-upload-pack` / `git-receive-pack` (a v0 conversation with no `# service=` preamble), `~/.ssh/config` and `known_hosts` handling, the unknown-host probe, `trust_host`; `GIT_pull.pull_ssh` and `GIT_ui_remote.m31`'s `HostTrustOverlay` sit on top of it |
+| `GIT_ssh_transport.m31` | git over ssh: an exec channel of the m31 ssh client (`lib/sshclient.m31`) as a `GIT_wire.Stream` running `git-upload-pack` / `git-receive-pack` (a v0 conversation with no `# service=` preamble), `~/.ssh/config` and `known_hosts` handling, the unknown-host probe (`ssh.presented_host_key`, banner wait bounded by 15 s), `trust_host` (`sshhosts.add`); `GIT_pull.pull_ssh` and `GIT_ui_remote.m31`'s `HostTrustOverlay` sit on top of it |
 | `GIT_pack_write.m31` | writes packfiles (whole objects, stored-zlib) and computes the object set a push must send, like `git rev-list --objects tips ^known` |
 | `GIT_http_push.m31` | smart-HTTP v0 push (`git-receive-pack`): fast-forward-only, `report-status`, HTTP Basic auth from the URL's userinfo or `GITUI_HTTP_USER`/`GITUI_HTTP_PASSWORD` |
 | `GIT_config.m31` | `.git/config` in full: every section/subsection/key, multi-valued keys, system/global/local layering with `include`/`includeIf` (`gitdir:`, `gitdir/i:`, `onbranch:`) followed, defaults for `commit.gpgsign`, `pull.rebase`, `push.default`, `init.defaultBranch` and `rerere.enabled`, and safe in-place `set`/`add`/`unset` that keep the rest of the file byte for byte |
@@ -396,9 +396,9 @@ needs the same `OBJ_OFS_DELTA`/`OBJ_REF_DELTA` machinery stage 2 (above) is
 for, and duplicating an incomplete piece of that here was explicitly out of
 scope. Turning a fetched pack into a repository this program can `log` or
 `cat-file` is therefore stage 2's own follow-up, not a gap in this file.
-SSH and protocol v2 are named, separate gaps, not oversights: v0 is
-universally supported as a fallback even where v2 is preferred, and
-`https://` is supported (see "HTTPS" below).
+Protocol v2 is a named, separate gap, not an oversight: v0 is universally
+supported as a fallback even where v2 is preferred. `https://` (see "HTTPS"
+below) and `ssh://` (see "Remotes over ssh" below) are supported.
 
 ## HTTPS (`GIT_http_fetch.exchange`)
 
@@ -485,7 +485,8 @@ Authentication is HTTP Basic, from `http://user:pass@host/...` in the remote
 URL or, when the URL carries none, `GITUI_HTTP_USER`/`GITUI_HTTP_PASSWORD`.
 The userinfo is stripped from the URL before anything is displayed, and the
 password is never part of any message or error. Remotes may be `http://` or
-`https://` (see "HTTPS" below).
+`https://` (see "HTTPS" below), or ssh (see "Remotes over ssh" below, where the
+credential is a key, not a password).
 
 `test_push.sh` uses real git as the oracle: every pack `packwrite` writes is
 accepted by `git index-pack --strict` and read back through `GIT_pack.m31`; the
@@ -656,13 +657,22 @@ What is read, and from where:
 
 Host keys. A host that is not in known_hosts stops before anything is sent: the
 status line and a confirm overlay say `host key SHA256:... not known; trust and
-add to known_hosts? (y/N)`. `y` appends the key (plain, or hashed when
-`HashKnownHosts yes` applies to that host) and runs the push or pull again; any
-other key cancels with nothing written. The fingerprint is from a short
-handshake that only reads the server's key; the real connection then verifies
-the server's signature against the file, so that step cannot be used to slip a
-different key in. A key that differs from the one known_hosts records is a hard
-refusal -- no overlay, no way to accept it from the UI; fix known_hosts by hand.
+add to known_hosts? (y/N)`. Nothing is ever trusted silently: `y` is the only
+way in. It appends the key (plain, or hashed when `HashKnownHosts yes` applies
+to that host in `~/.ssh/config`) through the m31 library's `sshhosts.add` and
+runs the push or pull again; any other key cancels with nothing written. The
+fingerprint comes from `ssh.presented_host_key`, a short handshake on a second
+connection that checks the server's signature and reads its key, nothing else;
+that call has no timeout of its own, so gitui first waits up to 15 s for the
+server's banner and reports `no host key from ... within 15 s` for a server that
+accepts the connection and says nothing (a server that sends the banner and then
+stalls is not bounded). The real connection then enforces the
+key the file holds, so the probe cannot be used to slip a different key in. A
+`@revoked` entry for the presented key is a refusal, not a prompt. A key that
+differs from the one known_hosts records is a hard refusal -- no overlay, no way
+to accept it from the UI, the fingerprint it presented in the message; fix
+known_hosts by hand. A known_hosts file that does not exist yet is created, with
+its directory, on the first `y`.
 
 Keys and passwords. There is no terminal for a prompt, so an encrypted key, a
 missing key and a key the server refuses all end in a plain message that names
@@ -672,8 +682,8 @@ authentication.
 Limitations: ed25519 only (host keys and user keys; RSA/ECDSA are not
 negotiated), unencrypted OpenSSH-format keys only, one algorithm suite
 (curve25519-sha256 with chacha20-poly1305), no ssh-agent, no rekeying
-(the library never rekeys; transfers were tested up to about 7 MB), the `ssh_config` subset above (`Match`, `Include`,
-`ProxyJump`, `UserKnownHostsFile`, `HostKeyAlias` and the rest are ignored), no
+(the library never rekeys; transfers were tested up to about 7 MB), the
+`ssh_config` subset above (`Match`, `Include`, `ProxyJump`, `UserKnownHostsFile`, `HostKeyAlias` and the rest are ignored), no
 `/etc/ssh/ssh_known_hosts`, and, like push and pull over HTTP, the operation is
 synchronous: the screen does not repaint while it runs. `~/.ssh/known_hosts`
 is only ever appended to, never edited.
@@ -681,7 +691,9 @@ is only ever appended to, never edited.
 `test_ssh.sh` runs a disposable OpenSSH `sshd` (throwaway host and user keys, an
 ephemeral port, a throwaway `$HOME`; the real `~/.ssh` is never touched) that
 serves the real `git-upload-pack` / `git-receive-pack`, and SKIPs with a
-message if `sshd` or git's server programs are absent. Refs are compared with
+visible note if `sshd`, `ssh-keygen` or git's server programs are absent (macOS
+has `/usr/sbin/sshd`; the fixture starts it as an ordinary user process on a
+high port). Refs are compared with
 `git ls-remote` and repositories judged by `git fsck --strict` /
 `git index-pack --strict`: fast-forward pull, a new branch, a fast-forward
 push, both non-fast-forward refusals, `ssh://` and alias URLs, a nonstandard

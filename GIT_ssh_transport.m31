@@ -10,6 +10,7 @@
 //   Upload.fetch(wants, haves, f)  -> the verified pack written to `f`
 //   connect_receive(target)        -> Receive  (advertisement read)
 //   Receive.push(gitdir, ref, id)  -> PushResult
+//   probe_host_key(host, port, ms) -> the key the server presents (bounded wait)
 //   trust_host(pending)            -> appends the unknown host's key to known_hosts
 //
 // --- trust -----------------------------------------------------------------------
@@ -22,12 +23,12 @@
 // check against `known_hosts`. A host whose key differs from the recorded one
 // is `Error.HostKeyChanged`, a refusal with no way to override from here.
 //
-// The library's errors do not say which key a server presented, so for the
-// prompt (and the "changed" message) `probe_host_key` runs the first half of
-// the handshake itself, over the library's public packet functions: version
-// exchange, KEXINIT, ECDH init, and read the reply's host-key blob. It
-// authenticates nothing and trusts nothing; what the user approves is then
-// verified in full -- signature included -- by the real connection.
+// The prompt and the "changed" message show the key the server presented,
+// which the connect errors do not carry, so `probe_host_key` asks the ssh
+// library for it (`ssh.presented_host_key`: the key exchange only, signature
+// checked, nothing trusted, no credentials sent) on a second connection,
+// bounded by a 15 s timeout of gitui's own. What the user approves is then
+// enforced by the real connection, which refuses any other key.
 //
 // --- what is not here --------------------------------------------------------------
 //
@@ -46,36 +47,34 @@ import GIT_object;
 import GIT_pack_write;
 import GIT_remote;
 import GIT_wire;
-import base64;
 import fs;
 import io;
 import net;
 import os;
-import random;
-import sha256;
 import ssh;
 import sshauth;
 import sshclient;
 import sshexec;
 import sshhosts;
 import sshkey;
-import x25519;
 
 /// A host whose key is not in known_hosts yet, as the server presented it.
 pub type PendingHost {
     pub str host;
     pub int port;
-    /// `SHA256:<unpadded base64>`, as `ssh-keygen -lf` prints it.
-    pub str fingerprint;
-    pub str key_type;
-    pub str key_base64;
+    pub ssh.HostKey key;
     pub str known_hosts;
     pub bool is_hashed;
 }
 
+/// `SHA256:<unpadded base64>`, as `ssh-keygen -lf` prints it.
+pub str PendingHost.fingerprint() {
+    return key.fingerprint();
+}
+
 /// The question the UI puts to the user.
 pub str PendingHost.prompt() {
-    return "host key " + fingerprint + " not known; trust and add to known_hosts? (y/N)";
+    return "host key " + fingerprint() + " not known; trust and add to known_hosts? (y/N)";
 }
 
 /// `host` or `[host]:port`, the name known_hosts files spell a host by.
@@ -406,228 +405,90 @@ pub str host_spec(str host, int port) {
     return "[" + name + "]:" + port.to_str();
 }
 
-/// The line `trust_host` appends for `pending`: plain, or hashed
-/// (`|1|salt|hmac`) with the given 20-byte `salt`.
-pub str known_hosts_line(PendingHost pending, bytes salt) {
-    str names = pending.spec();
-    if (pending.is_hashed) {
-        bytes mac = GIT_remote.hmac_sha1(salt, names.to_bytes());
-        names = "|1|" + base64.encode(salt) + "|" + base64.encode(mac);
-    }
-    return names + " " + pending.key_type + " " + pending.key_base64;
-}
-
 /// Record `pending`'s key in known_hosts (creating the file and its directory
 /// if need be). Plain by default, hashed under `HashKnownHosts yes`.
 pub Result<bool, Error> trust_host(PendingHost pending) {
-    str path = pending.known_hosts;
-    str directory = "";
-    int cut = path.size() - 1;
-    while (cut > 0 && path.byte_at(cut) != '/') {
-        cut = cut - 1;
-    }
-    if (cut > 0) {
-        directory = path.substr(0, cut);
-    }
-    if (directory != "" && !fs.exists(directory)) {
-        match (fs.makedirs(directory)) {
-            case Ok(_): {
-            }
-            case Err(_): {
-                return Result<bool, Error>.Err(Error.KnownHosts("could not create " + directory));
-            }
-        }
-    }
-    str prefix = "";
-    if (fs.exists(path)) {
-        str current = read_text(path);
-        if (current != "" && !current.ends_with("\n")) {
-            prefix = "\n";
-        }
-    }
-    bytes salt = random.system().octets(20);
-    match (io.append(path, prefix + known_hosts_line(pending, salt) + "\n")) {
+    match (sshhosts.add(pending.known_hosts, pending.host, pending.port, pending.key, pending.is_hashed)) {
         case Ok(_): {
             return Result<bool, Error>.Ok(true);
         }
-        case Err(_): {
-            return Result<bool, Error>.Err(Error.KnownHosts("could not append to " + path));
+        case Err(sshhosts.Error why): {
+            return Result<bool, Error>.Err(Error.KnownHosts(pending.known_hosts + ": " + why.to_str()));
         }
     }
 }
 
 // --- the host-key probe --------------------------------------------------------------
 
-/// `SHA256:` and the unpadded base64 of the SHA-256 of the key blob.
-pub str fingerprint_of(bytes blob) {
-    str encoded = base64.encode(sha256.sum(blob));
-    while (encoded.ends_with("=")) {
-        encoded = encoded.substr(0, encoded.size() - 1);
-    }
-    return "SHA256:" + encoded;
-}
+/// How long the probe waits for a server before giving up.
+pub const int PROBE_TIMEOUT_MS = 15000;
 
-Result<bytes, str> read_exact(net.Conn conn, int n) {
-    bytes out = [];
-    while (out.size() < n) {
-        match (conn.read(n - out.size())) {
-            case Ok(bytes chunk): {
-                if (chunk.size() == 0) {
-                    return Result<bytes, str>.Err("the server closed the connection");
-                }
-                out.extend(chunk);
-            }
-            case Err(io.Error why): {
-                return Result<bytes, str>.Err("the connection failed");
-            }
-        }
-    }
-    return Result<bytes, str>.Ok(out);
-}
-
-Result<bytes, str> recv_plain(net.Conn conn) {
-    bytes head = read_exact(conn, 4)?;
-    int size = (head[0] << 24) | (head[1] << 16) | (head[2] << 8) | head[3];
-    if (size < 1 || size > 35000) {
-        return Result<bytes, str>.Err("a malformed packet arrived");
-    }
-    bytes rest = read_exact(conn, size)?;
-    bytes whole = clone(head);
-    whole.extend(rest);
-    match (ssh.parse_plain_packet(whole, 0)) {
-        case Ok(ssh.RawPacket packet): {
-            return Result<bytes, str>.Ok(packet.payload);
-        }
-        case Err(ssh.Error why): {
-            return Result<bytes, str>.Err(why.to_str());
-        }
-    }
-}
-
-Result<bool, str> send_plain(net.Conn conn, bytes payload, random.System rng) {
-    match (conn.write(ssh.encode_plain_packet(payload, rng))) {
-        case Ok(_): {
-            return Result<bool, str>.Ok(true);
-        }
-        case Err(_): {
-            return Result<bool, str>.Err("the connection failed");
-        }
-    }
-}
-
-/// The host-key blob (`string "ssh-ed25519", string key`) the server at
-/// `host:port` presents during key exchange. Nothing is authenticated here:
-/// the real connection verifies whatever the user then approves.
-pub Result<bytes, str> probe_host_key(str host, int port) {
-    net.Conn conn = connect_plain(host, port)?;
-    Result<bytes, str> outcome = probe_on(conn);
-    match (conn.close()) {
-        case Ok(_): {
-        }
-        case Err(_): {
-        }
-    }
-    return outcome;
-}
-
-Result<net.Conn, str> connect_plain(str host, int port) {
+/// The host key the server at `host`:`port` presents (`ssh.presented_host_key`)
+/// -- or the reason there is none.
+///
+/// The library call has no read timeout, so a server that accepts the
+/// connection and then says nothing would hang it. An ssh server speaks first
+/// (its identification line), so this first connects and waits up to
+/// `timeout_ms` for those bytes, then lets the library make its own
+/// connection. That bounds a silent server; one that sends the banner and
+/// stalls afterwards is not bounded (no timeout in `ssh.presented_host_key`),
+/// and neither is the TCP connect itself. A watchdog thread would bound both
+/// but would keep the process from exiting until it ended, since a spawned
+/// thread is waited for.
+pub Result<ssh.HostKey, str> probe_host_key(str host, int port, int timeout_ms) {
     match (net.connect(host, port)) {
-        case Ok(net.Conn conn): {
-            match (conn.set_read_timeout(15000)) {
-                case Ok(_): {
+        case Ok(net.Conn c): {
+            Result<bool, net.Error> spoke = c.wait(timeout_ms);
+            match (c.close()) {
+                case Ok(bool closed): {
                 }
-                case Err(_): {
+                case Err(io.Error e): {
                 }
             }
-            return Result<net.Conn, str>.Ok(conn);
+            match (spoke) {
+                case Ok(bool heard): {
+                    if (!heard) {
+                        return Result<ssh.HostKey, str>.Err("no host key from " + host_spec(host, port) + " within " + (timeout_ms / 1000).to_str() + " s");
+                    }
+                }
+                case Err(net.Error why): {
+                    return Result<ssh.HostKey, str>.Err("could not read the host key of " + host_spec(host, port) + ": " + why.to_str());
+                }
+            }
         }
         case Err(net.Error why): {
-            return Result<net.Conn, str>.Err("could not connect to " + host + ":" + port.to_str() + ": " + why.to_str());
+            return Result<ssh.HostKey, str>.Err("could not connect to " + host_spec(host, port) + ": " + why.to_str());
         }
     }
-}
-
-Result<bytes, str> probe_on(net.Conn conn) {
-    random.System rng = random.system();
-    bytes crlf = [13, 10];
-    match (conn.write("SSH-2.0-m31_0.1\r\n".to_bytes())) {
-        case Ok(_): {
-        }
-        case Err(_): {
-            return Result<bytes, str>.Err("the connection failed");
-        }
-    }
-    int tries = 0;
-    bool greeted = false;
-    while (!greeted) {
-        tries = tries + 1;
-        if (tries > 20) {
-            return Result<bytes, str>.Err("the server sent no ssh version line");
-        }
-        match (conn.read_until(crlf, 255)) {
-            case Ok(bytes line): {
-                if (line.starts_with("SSH-2.".to_bytes())) {
-                    greeted = true;
-                } else if (line.starts_with("SSH-".to_bytes()) || !line.ends_with(crlf)) {
-                    return Result<bytes, str>.Err("the server does not speak ssh protocol 2");
-                }
-            }
-            case Err(_): {
-                return Result<bytes, str>.Err("the connection failed");
-            }
-        }
-    }
-    send_plain(conn, ssh.build_client_kexinit(rng), rng)?;
-    bytes theirs = recv_plain(conn)?;
-    match (ssh.parse_kexinit(theirs)) {
-        case Ok(ssh.KexInit server): {
-            match (ssh.check_server_kexinit(server)) {
-                case Ok: {
-                }
-                case Err(ssh.Error why): {
-                    return Result<bytes, str>.Err("no common ssh algorithms (this client offers curve25519-sha256 and ssh-ed25519 only): " + why.to_str());
-                }
-            }
+    match (ssh.presented_host_key(host, port)) {
+        case Ok(ssh.HostKey key): {
+            return Result<ssh.HostKey, str>.Ok(key);
         }
         case Err(ssh.Error why): {
-            return Result<bytes, str>.Err(why.to_str());
-        }
-    }
-    bytes secret = rng.octets(32);
-    send_plain(conn, ssh.build_kex_ecdh_init(x25519.base_point(secret)), rng)?;
-    bytes reply = recv_plain(conn)?;
-    if (reply.size() < 1 || reply[0] != 31) {
-        return Result<bytes, str>.Err("the key exchange reply was not understood");
-    }
-    match (ssh.parse_string(reply, 1)) {
-        case Ok(ssh.Field blob): {
-            match (ssh.parse_host_key_blob(blob.value)) {
-                case Ok(_): {
-                    return Result<bytes, str>.Ok(blob.value);
-                }
-                case Err(ssh.Error why): {
-                    return Result<bytes, str>.Err("the server's host key is not ssh-ed25519: " + why.to_str());
-                }
-            }
-        }
-        case Err(ssh.Error why): {
-            return Result<bytes, str>.Err(why.to_str());
+            return Result<ssh.HostKey, str>.Err("could not read the host key of " + host_spec(host, port) + ": " + why.to_str());
         }
     }
 }
 
 // What the unknown-host error carries: probe the server and describe its key.
 Result<sshclient.Session, Error> unknown_host(Target target) {
-    match (probe_host_key(target.host, target.port)) {
-        case Ok(bytes blob): {
+    match (probe_host_key(target.host, target.port, PROBE_TIMEOUT_MS)) {
+        case Ok(ssh.HostKey key): {
             // sshhosts only drops a revoked key that is also listed as good;
             // a bare `@revoked` line for the very key presented is still a refusal.
-            for (GIT_remote.HostKey listed in GIT_remote.known_hosts_find(read_text(target.known_hosts), target.host, target.port)) {
-                if (listed.marker == "revoked" && listed.key == base64.encode(blob)) {
-                    return Result<sshclient.Session, Error>.Err(Error.HostKeyRevoked);
+            if (fs.exists(target.known_hosts)) {
+                match (sshhosts.load(target.known_hosts)) {
+                    case Ok(sshhosts.KnownHosts hosts): {
+                        if (hosts.is_revoked(target.host, target.port, key)) {
+                            return Result<sshclient.Session, Error>.Err(Error.HostKeyRevoked);
+                        }
+                    }
+                    case Err(sshhosts.Error why): {
+                        return Result<sshclient.Session, Error>.Err(Error.KnownHosts(target.known_hosts + ": " + why.to_str()));
+                    }
                 }
             }
-            return Result<sshclient.Session, Error>.Err(Error.UnknownHost(PendingHost(target.host, target.port, fingerprint_of(blob), "ssh-ed25519", base64.encode(blob), target.known_hosts, target.is_hashed)));
+            return Result<sshclient.Session, Error>.Err(Error.UnknownHost(PendingHost(target.host, target.port, key, target.known_hosts, target.is_hashed)));
         }
         case Err(str why): {
             return Result<sshclient.Session, Error>.Err(Error.Connect(why));
@@ -665,9 +526,9 @@ Result<sshclient.Session, Error> open_session(Target target) {
                     case Connect(ssh.Error why): {
                         if (why.to_str() == ssh.Error.HostKeyMismatch.to_str()) {
                             str presented = "";
-                            match (probe_host_key(target.host, target.port)) {
-                                case Ok(bytes blob): {
-                                    presented = fingerprint_of(blob);
+                            match (probe_host_key(target.host, target.port, PROBE_TIMEOUT_MS)) {
+                                case Ok(ssh.HostKey offered): {
+                                    presented = offered.fingerprint();
                                 }
                                 case Err(_): {
                                 }

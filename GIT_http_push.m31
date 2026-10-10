@@ -146,7 +146,7 @@ pub str Error.to_str() {
             return "not a well-formed ref name or object id";
         }
         case BadUrl: {
-            return "the remote URL is not usable (only http:// and https:// are supported)";
+            return "the remote URL is not usable (only http://, https:// and ssh remotes are supported)";
         }
         case UpToDate: {
             return "everything up to date";
