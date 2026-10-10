@@ -1,0 +1,369 @@
+// Drives `GIT_ssh_transport.m31` (and `GIT_pull.pull_ssh`) for `test_ssh.sh`.
+// Every command takes the remote as a URL (`ssh://`, scp-like, or an ssh_config
+// alias) and resolves it exactly as the UI does: `GIT_remote.parse` then
+// `GIT_ssh_transport.target_for`, which reads `$HOME/.ssh/config` and the
+// `GITUI_SSH_KNOWN_HOSTS` / `GITUI_SSH_IDENTITY` overrides.
+//
+//   ./t_ssh unit
+//       Checks with no server: known_hosts spellings, plain and hashed lines
+//       (the hashed one read back by `known_hosts_find`), fingerprints,
+//       `HashKnownHosts`, and `target_for` against the ssh_config in $HOME.
+//       Prints "ok <name>" or "FAIL <name>: <detail>" per check.
+//
+//   ./t_ssh ls <url>
+//       The ref advertisement of `git-upload-pack`: "<id>\t<name>" per ref.
+//
+//   ./t_ssh fetch <url> <gitdir> <out.pack>
+//       Fetches every advertised id with `have`s from every commit reachable
+//       from every ref in <gitdir>, over the one duplex channel. Prints
+//       "refs <n>", "haves <n>", "pack <bytes> <objects>".
+//
+//   ./t_ssh push <url> <gitdir> <refname>
+//       Pushes <refname>'s local value. Prints "ok <ref>", or "ng <ref>
+//       <reason>" (exit 1), or "refused <why>" (exit 1) before sending.
+//
+//   ./t_ssh pull <url> <gitdir> <worktree>
+//       `GIT_pull.pull_ssh`. Prints "pulled <old> <new> <objects>" or "up to
+//       date <id>".
+//
+//   ./t_ssh trust <url>
+//       Records an unknown host's key in known_hosts, as the UI's `y` does.
+//       Prints "trusted <fingerprint> <path>".
+//
+// An unknown host prints "unknown-host <fingerprint>" and exits 3; any other
+// failure prints "error: <message>" to standard error and exits 1.
+
+import GIT_log;
+import GIT_pull;
+import GIT_refs;
+import GIT_remote;
+import GIT_ssh_transport;
+import GIT_wire;
+import fs;
+import io;
+import os;
+
+List<str> argv = os.args();
+if (argv.size() < 2) {
+    usage();
+}
+str cmd = argv[1];
+if (cmd == "unit" && argv.size() == 2) {
+    run_unit();
+} else if (cmd == "ls" && argv.size() == 3) {
+    do_ls(argv[2]);
+} else if (cmd == "fetch" && argv.size() == 5) {
+    do_fetch(argv[2], argv[3], argv[4]);
+} else if (cmd == "push" && argv.size() == 5) {
+    do_push(argv[2], argv[3], argv[4]);
+} else if (cmd == "pull" && argv.size() == 5) {
+    do_pull(argv[2], argv[3], argv[4]);
+} else if (cmd == "trust" && argv.size() == 3) {
+    do_trust(argv[2]);
+} else {
+    usage();
+}
+
+void usage() {
+    io.eprint("usage: t_ssh unit");
+    io.eprint("       t_ssh ls <url>");
+    io.eprint("       t_ssh fetch <url> <gitdir> <out.pack>");
+    io.eprint("       t_ssh push <url> <gitdir> <refname>");
+    io.eprint("       t_ssh pull <url> <gitdir> <worktree>");
+    io.eprint("       t_ssh trust <url>");
+    os.exit(2);
+}
+
+void fail(str message) {
+    io.eprint("error: " + message);
+    os.exit(1);
+}
+
+// What a failed connection prints, and the exit code that tells the shell.
+void report(GIT_ssh_transport.Error error) {
+    match (error.pending_host()) {
+        case Some(GIT_ssh_transport.PendingHost pending): {
+            print("unknown-host " + pending.fingerprint);
+            os.exit(3);
+        }
+        case None: {
+        }
+    }
+    fail(error.to_str());
+}
+
+GIT_ssh_transport.Target target_of(str url) {
+    match (GIT_remote.parse(url)) {
+        case Ok(GIT_remote.Remote remote): {
+            match (GIT_ssh_transport.target_for(remote)) {
+                case Ok(GIT_ssh_transport.Target target): {
+                    return target;
+                }
+                case Err(GIT_ssh_transport.Error error): {
+                    report(error);
+                }
+            }
+        }
+        case Err(GIT_remote.Error error): {
+            fail("url: " + error.to_str());
+        }
+    }
+    return GIT_ssh_transport.Target("", 0, "", "", [], "", false);
+}
+
+// --- reporting -----------------------------------------------------------------
+
+void check(str name, bool is_good, str detail) {
+    if (is_good) {
+        print("ok " + name);
+    } else {
+        print("FAIL " + name + ": " + detail);
+    }
+}
+
+// --- unit ---------------------------------------------------------------------
+
+void run_unit() {
+    check("host_spec: port 22 is the bare name", GIT_ssh_transport.host_spec("Example.COM", 22) == "example.com", GIT_ssh_transport.host_spec("Example.COM", 22));
+    check("host_spec: other ports are [host]:port", GIT_ssh_transport.host_spec("127.0.0.1", 2222) == "[127.0.0.1]:2222", GIT_ssh_transport.host_spec("127.0.0.1", 2222));
+    check("fingerprint_of: SHA256 of nothing, unpadded", GIT_ssh_transport.fingerprint_of([]) == "SHA256:47DEQpj8HBSa+/TImW+5JCeuQeRkm5NMpJWZG3hSuFU", GIT_ssh_transport.fingerprint_of([]));
+    GIT_ssh_transport.PendingHost plain = GIT_ssh_transport.PendingHost("example.org", 2200, "SHA256:x", "ssh-ed25519", "AAAAC3NzaC1lZDI1NTE5AAAAIK", "/tmp/kh", false);
+    str plain_line = GIT_ssh_transport.known_hosts_line(plain, [1, 2, 3]);
+    check("known_hosts_line: plain", plain_line == "[example.org]:2200 ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIK", plain_line);
+    check("known_hosts_line: plain is found again", GIT_remote.known_hosts_find(plain_line + "\n", "example.org", 2200).size() == 1, "not found");
+    check("known_hosts_line: plain is not another port's", GIT_remote.known_hosts_find(plain_line + "\n", "example.org", 22).size() == 0, "found for port 22");
+    GIT_ssh_transport.PendingHost hashed = GIT_ssh_transport.PendingHost("example.org", 22, "SHA256:x", "ssh-ed25519", "AAAAC3NzaC1lZDI1NTE5AAAAIK", "/tmp/kh", true);
+    bytes salt = [9, 8, 7, 6, 5, 4, 3, 2, 1, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10];
+    str hashed_line = GIT_ssh_transport.known_hosts_line(hashed, salt);
+    check("known_hosts_line: hashed starts |1|", hashed_line.starts_with("|1|"), hashed_line);
+    check("known_hosts_line: hashed hides the name", !hashed_line.contains("example"), hashed_line);
+    check("known_hosts_line: hashed is found again", GIT_remote.known_hosts_find(hashed_line + "\n", "example.org", 22).size() == 1, "not found");
+    check("known_hosts_line: hashed is not another host's", GIT_remote.known_hosts_find(hashed_line + "\n", "example.net", 22).size() == 0, "found for another host");
+    str config = "Host *.corp\n  HashKnownHosts yes\nHost plain\n  HashKnownHosts no\nHost *\n  HashKnownHosts no\n";
+    check("hashes_known_hosts: glob host block", GIT_ssh_transport.hashes_known_hosts(config, "git.corp"), "not hashed");
+    check("hashes_known_hosts: first value wins", !GIT_ssh_transport.hashes_known_hosts("Host *\n  HashKnownHosts no\nHost *\n  HashKnownHosts yes\n", "x"), "later value won");
+    check("hashes_known_hosts: other host", !GIT_ssh_transport.hashes_known_hosts(config, "plain"), "hashed");
+    check("hashes_known_hosts: top-level setting", GIT_ssh_transport.hashes_known_hosts("HashKnownHosts yes\n", "anything"), "not hashed");
+    check("hashes_known_hosts: default is no", !GIT_ssh_transport.hashes_known_hosts("", "anything"), "hashed");
+    // target_for, against $HOME/.ssh/config as the shell arranged it.
+    unit_target("ssh://bob@h.example:2022/srv/r.git", "h.example", 2022, "bob", "/srv/r.git");
+    unit_target("bob@h.example:srv/r.git", "h.example", 22, "bob", "srv/r.git");
+    unit_target("alias:repo.git", "10.9.8.7", 4222, "aliasuser", "repo.git");
+    unit_target("ssh://other@alias/x", "10.9.8.7", 4222, "other", "/x");
+    match (GIT_remote.parse("alias:repo.git")) {
+        case Ok(GIT_remote.Remote remote): {
+            match (GIT_ssh_transport.target_for(remote)) {
+                case Ok(GIT_ssh_transport.Target target): {
+                    check("target_for: config IdentityFile first", target.identities.size() >= 1 && target.identities[0].ends_with("alias_key"), target.identities.join(","));
+                    check("target_for: default key is last", target.identities[target.identities.size() - 1].ends_with("/.ssh/id_ed25519"), target.identities.join(","));
+                }
+                case Err(GIT_ssh_transport.Error error): {
+                    check("target_for: identities", false, error.to_str());
+                }
+            }
+        }
+        case Err(GIT_remote.Error error): {
+            check("target_for: identities", false, error.to_str());
+        }
+    }
+    match (GIT_remote.parse("https://example.org/x.git")) {
+        case Ok(GIT_remote.Remote remote): {
+            match (GIT_ssh_transport.target_for(remote)) {
+                case Ok(_): {
+                    check("target_for: refuses a non-ssh remote", false, "accepted https");
+                }
+                case Err(_): {
+                    check("target_for: refuses a non-ssh remote", true, "");
+                }
+            }
+        }
+        case Err(GIT_remote.Error error): {
+            check("target_for: refuses a non-ssh remote", false, error.to_str());
+        }
+    }
+}
+
+void unit_target(str url, str host, int port, str user, str path) {
+    match (GIT_remote.parse(url)) {
+        case Ok(GIT_remote.Remote remote): {
+            match (GIT_ssh_transport.target_for(remote)) {
+                case Ok(GIT_ssh_transport.Target target): {
+                    str got = target.user + "@" + target.host + ":" + target.port.to_str() + " " + target.path;
+                    str want = user + "@" + host + ":" + port.to_str() + " " + path;
+                    check("target_for: " + url, got == want, "got " + got + ", want " + want);
+                }
+                case Err(GIT_ssh_transport.Error error): {
+                    check("target_for: " + url, false, error.to_str());
+                }
+            }
+        }
+        case Err(GIT_remote.Error error): {
+            check("target_for: " + url, false, "parse: " + error.to_str());
+        }
+    }
+}
+
+// --- against a real sshd --------------------------------------------------------
+
+void do_ls(str url) {
+    match (GIT_ssh_transport.connect_upload(target_of(url))) {
+        case Ok(GIT_ssh_transport.Upload upload): {
+            for (GIT_wire.RemoteRef remote_ref in upload.advertisement.refs) {
+                print(remote_ref.id + "\t" + remote_ref.name);
+            }
+            upload.finish();
+        }
+        case Err(GIT_ssh_transport.Error error): {
+            report(error);
+        }
+    }
+}
+
+void do_fetch(str url, str gitdir, str out_path) {
+    match (GIT_ssh_transport.connect_upload(target_of(url))) {
+        case Ok(GIT_ssh_transport.Upload upload): {
+            List<str> wants = unique_ids(upload.advertisement.refs);
+            List<str> haves = local_haves(gitdir);
+            print("refs " + wants.size().to_str());
+            print("haves " + haves.size().to_str());
+            match (upload.fetch(wants, haves, out_path)) {
+                case Ok(GIT_wire.Summary summary): {
+                    print("pack " + summary.pack_bytes.to_str() + " " + summary.object_count.to_str());
+                }
+                case Err(GIT_ssh_transport.Error error): {
+                    fail(error.to_str());
+                }
+            }
+        }
+        case Err(GIT_ssh_transport.Error error): {
+            report(error);
+        }
+    }
+}
+
+void do_push(str url, str gitdir, str refname) {
+    str new_id = "";
+    match (GIT_refs.resolve(gitdir, refname)) {
+        case Ok(str resolved): {
+            new_id = resolved;
+        }
+        case Err(GIT_refs.Error error): {
+            fail("resolve " + refname + ": " + error.to_str());
+        }
+    }
+    match (GIT_ssh_transport.connect_receive(target_of(url))) {
+        case Ok(GIT_ssh_transport.Receive receive): {
+            match (receive.push(gitdir, refname, new_id)) {
+                case Ok(GIT_ssh_transport.PushResult result): {
+                    if (result.remote != "") {
+                        io.eprint(result.remote);
+                    }
+                    if (result.is_ok) {
+                        print("ok " + refname);
+                    } else {
+                        print("ng " + refname + " " + result.reason);
+                        os.exit(1);
+                    }
+                }
+                case Err(GIT_ssh_transport.Error error): {
+                    print("refused " + error.to_str());
+                    os.exit(1);
+                }
+            }
+        }
+        case Err(GIT_ssh_transport.Error error): {
+            report(error);
+        }
+    }
+}
+
+void do_pull(str url, str gitdir, str worktree) {
+    match (GIT_pull.pull_ssh(gitdir, worktree, target_of(url))) {
+        case Ok(GIT_pull.Outcome outcome): {
+            if (outcome.has_moved) {
+                print("pulled " + outcome.old_id + " " + outcome.new_id + " " + outcome.objects.to_str());
+            } else {
+                print("up to date " + outcome.old_id);
+            }
+        }
+        case Err(GIT_pull.Error error): {
+            match (error.ssh_error()) {
+                case Some(GIT_ssh_transport.Error inner): {
+                    report(inner);
+                }
+                case None: {
+                    fail(error.to_str());
+                }
+            }
+        }
+    }
+}
+
+void do_trust(str url) {
+    match (GIT_ssh_transport.connect_upload(target_of(url))) {
+        case Ok(GIT_ssh_transport.Upload upload): {
+            upload.finish();
+            fail("the host was already trusted");
+        }
+        case Err(GIT_ssh_transport.Error error): {
+            match (error.pending_host()) {
+                case Some(GIT_ssh_transport.PendingHost pending): {
+                    match (GIT_ssh_transport.trust_host(pending)) {
+                        case Ok(_): {
+                            print("trusted " + pending.fingerprint + " " + pending.known_hosts);
+                        }
+                        case Err(GIT_ssh_transport.Error why): {
+                            fail(why.to_str());
+                        }
+                    }
+                }
+                case None: {
+                    report(error);
+                }
+            }
+        }
+    }
+}
+
+List<str> unique_ids(List<GIT_wire.RemoteRef> advertised) {
+    Map<str, bool> seen = {};
+    List<str> out = [];
+    for (GIT_wire.RemoteRef remote_ref in advertised) {
+        // A peeled tag (`v1^{}`) is listed for ls-remote's sake only.
+        if (remote_ref.name.ends_with("^{}")) {
+            continue;
+        }
+        if (!seen.contains(remote_ref.id)) {
+            seen.set(remote_ref.id, true);
+            out.push(remote_ref.id);
+        }
+    }
+    return out;
+}
+
+// Every commit reachable from every local ref, newest first per ref.
+List<str> local_haves(str gitdir) {
+    Map<str, bool> seen = {};
+    List<str> out = [];
+    match (GIT_refs.all(gitdir)) {
+        case Ok(List<GIT_refs.Ref> all): {
+            for (GIT_refs.Ref git_ref in all) {
+                match (GIT_log.walk(gitdir, git_ref.name, -1)) {
+                    case Ok(List<GIT_log.Entry> entries): {
+                        for (GIT_log.Entry entry in entries) {
+                            if (!seen.contains(entry.id)) {
+                                seen.set(entry.id, true);
+                                out.push(entry.id);
+                            }
+                        }
+                    }
+                    case Err: {
+                    }
+                }
+            }
+        }
+        case Err: {
+        }
+    }
+    return out;
+}

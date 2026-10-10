@@ -24,6 +24,7 @@ import GIT_object;
 import GIT_pack;
 import GIT_refs;
 import GIT_repository;
+import GIT_ssh_transport;
 import GIT_status;
 
 pub enum Error {
@@ -37,6 +38,10 @@ pub enum Error {
     Status;
     /// The remote does not have the current branch.
     NoRemoteBranch;
+    // `Ssh` precedes `Fetch` on purpose: a boxed enum whose first payload is a
+    // nested value enum draws a -Wmissing-braces warning from the generated C.
+    /// The fetch over ssh failed (`GIT_ssh_transport.m31`).
+    Ssh(GIT_ssh_transport.Error);
     /// The fetch failed (network, protocol, or a refused request).
     Fetch(GIT_http_fetch.Error);
     /// The fetched pack could not be read.
@@ -70,6 +75,9 @@ pub str Error.to_str() {
         }
         case Fetch(GIT_http_fetch.Error error): {
             return "fetch failed: " + error.to_str();
+        }
+        case Ssh(GIT_ssh_transport.Error error): {
+            return error.to_str();
         }
         case Unpack(GIT_pack.Error error): {
             return "unpacking the fetched objects failed: " + error.to_str();
@@ -114,6 +122,9 @@ pub bool Error.is_diverged() {
         case Fetch(GIT_http_fetch.Error _e): {
             return false;
         }
+        case Ssh(GIT_ssh_transport.Error _e): {
+            return false;
+        }
         case Unpack(GIT_pack.Error _e): {
             return false;
         }
@@ -129,6 +140,39 @@ pub bool Error.is_diverged() {
     }
 }
 
+/// The ssh transport's own error, when that is what this is (the UI turns an
+/// unknown host into a question instead of a message).
+pub Option<GIT_ssh_transport.Error> Error.ssh_error() {
+    match (this) {
+        case Ssh(GIT_ssh_transport.Error error): {
+            return Option<GIT_ssh_transport.Error>.Some(error);
+        }
+        case Detached: {
+        }
+        case Unborn: {
+        }
+        case Dirty: {
+        }
+        case Status: {
+        }
+        case NoRemoteBranch: {
+        }
+        case Write: {
+        }
+        case NonFastForward: {
+        }
+        case Fetch(_): {
+        }
+        case Unpack(_): {
+        }
+        case Checkout(_): {
+        }
+        case Refs(_): {
+        }
+    }
+    return Option<GIT_ssh_transport.Error>.None;
+}
+
 /// What a successful pull did.
 pub type Outcome {
     /// False when the branch already had the remote's tip (or more).
@@ -138,8 +182,14 @@ pub type Outcome {
     pub int objects;
 }
 
-/// Pull the current branch of `gitdir` from `r`, fast-forward only.
-pub Result<Outcome, Error> pull(str gitdir, str worktree, GIT_http_push.Remote remote) {
+/// Where the current branch stands before a pull: its ref and its tip.
+type Start {
+    str refname;
+    str old;
+}
+
+// The checks that need no network: HEAD is a born branch, the tree is clean.
+Result<Start, Error> start(str gitdir, str worktree) {
     str refname = "";
     str old = "";
     match (GIT_refs.head(gitdir)) {
@@ -150,27 +200,35 @@ pub Result<Outcome, Error> pull(str gitdir, str worktree, GIT_http_push.Remote r
                     old = id;
                 }
                 case Unborn(str name): {
-                    return Result<Outcome, Error>.Err(Error.Unborn);
+                    return Result<Start, Error>.Err(Error.Unborn);
                 }
                 case Detached(str id): {
-                    return Result<Outcome, Error>.Err(Error.Detached);
+                    return Result<Start, Error>.Err(Error.Detached);
                 }
             }
         }
         case Err(GIT_refs.Error error): {
-            return Result<Outcome, Error>.Err(Error.Refs(error));
+            return Result<Start, Error>.Err(Error.Refs(error));
         }
     }
     match (GIT_status.status(gitdir, worktree)) {
         case Ok(GIT_status.Status status): {
             if (status.staged.size() > 0 || status.unstaged.size() > 0) {
-                return Result<Outcome, Error>.Err(Error.Dirty);
+                return Result<Start, Error>.Err(Error.Dirty);
             }
         }
         case Err(_): {
-            return Result<Outcome, Error>.Err(Error.Status);
+            return Result<Start, Error>.Err(Error.Status);
         }
     }
+    return Result<Start, Error>.Ok(Start(refname, old));
+}
+
+/// Pull the current branch of `gitdir` from `r`, fast-forward only.
+pub Result<Outcome, Error> pull(str gitdir, str worktree, GIT_http_push.Remote remote) {
+    Start from = start(gitdir, worktree)?;
+    str refname = from.refname;
+    str old = from.old;
     str authz = GIT_http_push.auth_header(remote);
     GIT_http_fetch.Advertisement advertisement = GIT_http_fetch.Advertisement("", [], [], "");
     match (GIT_http_fetch.discover(remote.url, authorization: authz)) {
@@ -201,6 +259,12 @@ pub Result<Outcome, Error> pull(str gitdir, str worktree, GIT_http_push.Remote r
             }
         }
     }
+    return fast_forward(gitdir, worktree, refname, old, remote_tip, objects);
+}
+
+// Move the branch to `remote_tip` if it descends from `old`: the part of a
+// pull the transport does not change.
+Result<Outcome, Error> fast_forward(str gitdir, str worktree, str refname, str old, str remote_tip, int objects) {
     if (remote_tip == old || GIT_http_push.is_ancestor(gitdir, remote_tip, old)) {
         return Result<Outcome, Error>.Ok(Outcome(false, old, old, objects));
     }
@@ -245,6 +309,44 @@ void store_tracking(str gitdir, str refname, str remote_tip) {
     }
 }
 
+/// `pull`, over ssh (`GIT_ssh_transport.m31`): the advertisement and the fetch
+/// share one connection, so the exchange is not `discover` then `fetch`.
+pub Result<Outcome, Error> pull_ssh(str gitdir, str worktree, GIT_ssh_transport.Target target) {
+    Start from = start(gitdir, worktree)?;
+    GIT_ssh_transport.Upload upload = ssh_failed(GIT_ssh_transport.connect_upload(target))?;
+    str remote_tip = upload.tip(from.refname);
+    if (remote_tip == "") {
+        upload.finish();
+        return Result<Outcome, Error>.Err(Error.NoRemoteBranch);
+    }
+    int objects = 0;
+    if (has_object(gitdir, remote_tip)) {
+        upload.finish();
+    } else {
+        str temp = fs.join(GIT_repository.common(gitdir), "pull-fetch.tmp");
+        match (upload.fetch([remote_tip], local_haves(gitdir), temp)) {
+            case Ok(_): {
+            }
+            case Err(GIT_ssh_transport.Error error): {
+                return Result<Outcome, Error>.Err(Error.Ssh(error));
+            }
+        }
+        objects = unpack_file(gitdir, temp)?;
+    }
+    return fast_forward(gitdir, worktree, from.refname, from.old, remote_tip, objects);
+}
+
+Result<GIT_ssh_transport.Upload, Error> ssh_failed(Result<GIT_ssh_transport.Upload, GIT_ssh_transport.Error> attempt) {
+    match (attempt) {
+        case Ok(GIT_ssh_transport.Upload upload): {
+            return Result<GIT_ssh_transport.Upload, Error>.Ok(upload);
+        }
+        case Err(GIT_ssh_transport.Error error): {
+            return Result<GIT_ssh_transport.Upload, Error>.Err(Error.Ssh(error));
+        }
+    }
+}
+
 bool has_object(str gitdir, str id) {
     match (GIT_object.read(gitdir, id)) {
         case Ok(_): {
@@ -256,9 +358,8 @@ bool has_object(str gitdir, str id) {
     }
 }
 
-// Fetch `want` (with every local ref tip as a `have`), unpack the pack into
-// loose objects, and delete the pack file. The count of objects written.
-Result<int, Error> fetch_into(str gitdir, GIT_http_push.Remote remote, GIT_http_fetch.Advertisement advertisement, str want, str authz) {
+// Every local ref tip, once each, at most 64 of them: what we `have`.
+List<str> local_haves(str gitdir) {
     List<str> haves = [];
     Map<str, bool> seen = {};
     match (GIT_refs.all(gitdir)) {
@@ -273,6 +374,13 @@ Result<int, Error> fetch_into(str gitdir, GIT_http_push.Remote remote, GIT_http_
         case Err(_): {
         }
     }
+    return haves;
+}
+
+// Fetch `want` (with every local ref tip as a `have`), unpack the pack into
+// loose objects, and delete the pack file. The count of objects written.
+Result<int, Error> fetch_into(str gitdir, GIT_http_push.Remote remote, GIT_http_fetch.Advertisement advertisement, str want, str authz) {
+    List<str> haves = local_haves(gitdir);
     str temp = fs.join(GIT_repository.common(gitdir), "pull-fetch.tmp");
     match (GIT_http_fetch.fetch(remote.url, advertisement, [want], haves, temp, authorization: authz)) {
         case Ok(_): {
@@ -281,6 +389,11 @@ Result<int, Error> fetch_into(str gitdir, GIT_http_push.Remote remote, GIT_http_
             return Result<int, Error>.Err(Error.Fetch(error));
         }
     }
+    return unpack_file(gitdir, temp);
+}
+
+// Read the pack in `temp`, delete it, write its objects as loose objects.
+Result<int, Error> unpack_file(str gitdir, str temp) {
     bytes raw = [];
     match (io.read_bytes(temp)) {
         case Ok(bytes contents): {

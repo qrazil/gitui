@@ -59,7 +59,8 @@ bash scripts/build-gitui.sh -o ourgitui    # not build.sh -- it is the one with 
 | `gitui.m31` | the interactive client's thin driver: parses a path, runs `TUI_app.Loop` |
 | `GIT_http_fetch.m31` | git's smart-HTTP protocol, v0 fetch/clone only: pkt-line framing, the ref advertisement, want/have negotiation, side-band-64k demultiplexing, and pack checksum verification, over `lib/https.m31` (`http://` and `https://`) |
 | `GIT_wire.m31` | the transport-independent half of git's wire protocol over a duplex `Stream { read(n), write(bytes), close() }`: pkt-lines, the advertisement, want/have negotiation in rounds of at most 256 haves with the ACKs read between rounds (no write/write deadlock on a long-lived channel), side-band demultiplexing, pack verification, and the receive-pack command and report-status; `GIT_http_fetch.m31` and `GIT_http_push.m31` are now HTTP adapters over it |
-| `GIT_remote.m31` | where a remote lives: URL parsing (https, http, `ssh://`, scp-like, local) checked against the argv git hands to ssh, `url.<base>.insteadOf` / `pushInsteadOf` rewriting, `sq_quote` and the `git-upload-pack` / `git-receive-pack` command, a pure `~/.ssh/config` subset resolver, pure `known_hosts` matching (plain, `[host]:port`, wildcard, hashed via HMAC-SHA1, markers surfaced), no I/O and no ssh transport yet |
+| `GIT_remote.m31` | where a remote lives: URL parsing (https, http, `ssh://`, scp-like, local) checked against the argv git hands to ssh, `url.<base>.insteadOf` / `pushInsteadOf` rewriting, `sq_quote` and the `git-upload-pack` / `git-receive-pack` command, a pure `~/.ssh/config` subset resolver, pure `known_hosts` matching (plain, `[host]:port`, wildcard, hashed via HMAC-SHA1, markers surfaced), no I/O; the ssh transport that uses it is `GIT_ssh_transport.m31` |
+| `GIT_ssh_transport.m31` | git over ssh: an exec channel of the m31 ssh client (`lib/sshclient.m31`) as a `GIT_wire.Stream` running `git-upload-pack` / `git-receive-pack` (a v0 conversation with no `# service=` preamble), `~/.ssh/config` and `known_hosts` handling, the unknown-host probe, `trust_host`; `GIT_pull.pull_ssh` and `GIT_ui_remote.m31`'s `HostTrustOverlay` sit on top of it |
 | `GIT_pack_write.m31` | writes packfiles (whole objects, stored-zlib) and computes the object set a push must send, like `git rev-list --objects tips ^known` |
 | `GIT_http_push.m31` | smart-HTTP v0 push (`git-receive-pack`): fast-forward-only, `report-status`, HTTP Basic auth from the URL's userinfo or `GITUI_HTTP_USER`/`GITUI_HTTP_PASSWORD` |
 | `GIT_config.m31` | `.git/config` in full: every section/subsection/key, multi-valued keys, system/global/local layering with `include`/`includeIf` (`gitdir:`, `gitdir/i:`, `onbranch:`) followed, defaults for `commit.gpgsign`, `pull.rebase`, `push.default`, `init.defaultBranch` and `rerere.enabled`, and safe in-place `set`/`add`/`unset` that keep the rest of the file byte for byte |
@@ -626,3 +627,67 @@ and non-UTF-8 commit messages. A first step that fails
 with an error (a local change in the way) leaves nothing behind, where git
 leaves the sequencer directory and then calls the operation "already in
 progress".
+
+## Remotes over ssh (`GIT_ssh_transport.m31`)
+
+When `origin` is an ssh URL -- `ssh://[user@]host[:port]/path`, `user@host:path`,
+or an alias from `~/.ssh/config` (after `url.<base>.insteadOf` /
+`pushInsteadOf`) -- `F p` and `P p` run `git-upload-pack` / `git-receive-pack`
+on the server over the m31 ssh client, with the same fast-forward-only rules,
+status messages and working-tree checks as over HTTP. The path is single-quoted
+for the remote shell (`GIT_remote.sq_quote`), so spaces and quotes in it are
+safe. The conversation is git's v0 protocol straight on the channel, with no
+`# service=` line; `GIT_wire.fetch_pack` sends at most 256 `have`s per round
+and reads the server's replies between rounds, so a long history cannot
+deadlock against the ssh window (2 MiB; flow control is the library's). The
+remote's stderr is kept and shown as `remote: ...`.
+
+What is read, and from where:
+
+  - **Where to connect.** `~/.ssh/config` through `GIT_remote.ssh_config_resolve`:
+    `Host` patterns, `HostName`, `User`, `Port`, `IdentityFile`. The user
+    defaults to `$USER`, the port to 22.
+  - **Which key.** The config's `IdentityFile`s in order, then
+    `~/.ssh/id_ed25519`; each that exists is tried until the server accepts one.
+    `GITUI_SSH_IDENTITY=<file>` replaces that list with the one file.
+  - **Which hosts.** `~/.ssh/known_hosts`; `GITUI_SSH_KNOWN_HOSTS=<file>` names
+    another. Plain, `[host]:port` and hashed entries match; `@revoked` is
+    honoured.
+
+Host keys. A host that is not in known_hosts stops before anything is sent: the
+status line and a confirm overlay say `host key SHA256:... not known; trust and
+add to known_hosts? (y/N)`. `y` appends the key (plain, or hashed when
+`HashKnownHosts yes` applies to that host) and runs the push or pull again; any
+other key cancels with nothing written. The fingerprint is from a short
+handshake that only reads the server's key; the real connection then verifies
+the server's signature against the file, so that step cannot be used to slip a
+different key in. A key that differs from the one known_hosts records is a hard
+refusal -- no overlay, no way to accept it from the UI; fix known_hosts by hand.
+
+Keys and passwords. There is no terminal for a prompt, so an encrypted key, a
+missing key and a key the server refuses all end in a plain message that names
+`https://` remotes as the alternative; there is no password or passphrase
+authentication.
+
+Limitations: ed25519 only (host keys and user keys; RSA/ECDSA are not
+negotiated), unencrypted OpenSSH-format keys only, one algorithm suite
+(curve25519-sha256 with chacha20-poly1305), no ssh-agent, no rekeying
+(the library never rekeys; transfers were tested up to about 7 MB), the `ssh_config` subset above (`Match`, `Include`,
+`ProxyJump`, `UserKnownHostsFile`, `HostKeyAlias` and the rest are ignored), no
+`/etc/ssh/ssh_known_hosts`, and, like push and pull over HTTP, the operation is
+synchronous: the screen does not repaint while it runs. `~/.ssh/known_hosts`
+is only ever appended to, never edited.
+
+`test_ssh.sh` runs a disposable OpenSSH `sshd` (throwaway host and user keys, an
+ephemeral port, a throwaway `$HOME`; the real `~/.ssh` is never touched) that
+serves the real `git-upload-pack` / `git-receive-pack`, and SKIPs with a
+message if `sshd` or git's server programs are absent. Refs are compared with
+`git ls-remote` and repositories judged by `git fsck --strict` /
+`git index-pack --strict`: fast-forward pull, a new branch, a fast-forward
+push, both non-fast-forward refusals, `ssh://` and alias URLs, a nonstandard
+port, a path with spaces and quotes, a 7 MB / 4200-object fetch and push
+(bigger than the ssh window), 800 unknown `have`s in several rounds (counted
+in the server's own packet trace), a wrong key, an encrypted key, a missing
+key, an unknown host refused then trusted (plain and hashed, read back by
+`ssh-keygen -F`), a changed and a revoked host key; `pty_ssh.py` then drives
+the real client through the confirm overlay.

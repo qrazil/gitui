@@ -386,6 +386,12 @@ source tests/test_remote.sh
 
 source tests/test_rebase.sh
 
+# `test_ssh.sh` runs a disposable sshd (throwaway keys, ephemeral port, a
+# throwaway $HOME; the real ~/.ssh is never touched) and kills it by PID. It
+# SKIPs, saying why, when sshd or git's server programs are missing.
+
+source tests/test_ssh.sh
+
 echo
 if [ $fail -eq 0 ]; then
     printf '\033[32mall %d checks passed\033[0m\n' "$pass"
