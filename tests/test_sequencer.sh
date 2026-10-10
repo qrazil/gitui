@@ -136,7 +136,7 @@ sq_stage_other() { echo "staged" >>"$1/k"; git -C "$1" add k; }
 sq_edit_touched() { echo "local edit" >>"$1/g"; }
 sq_edit_g_new() { echo "mine" >"$1/g"; }
 sq_unrelated_edit() { echo "local edit" >>"$1/k"; echo untracked >"$1/scratch.txt"; }
-sq_detach() { git -C "$1" checkout -q --detach; }
+sq_detach() { sq_git -C "$1" checkout -q --detach; }
 sq_resolve() { printf 'a\nb\nresolved\nd\ne\nf\ng\nH\n' >"$1/f"; git -C "$1" add -A; }
 
 # sq_flow <label> <verb> <flags> <specs> <action>: git and ours each start the
