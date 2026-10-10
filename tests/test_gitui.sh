@@ -402,13 +402,13 @@ if [ -x "$WORK/t_gitclient_ops" ]; then
     fi
 
     msg=$("$WORK/t_gitclient_ops" "$hfx/.git" "$hfx" unstage_hunk new.txt 0 2>&1)
-    if git -C "$hfx" status --short | grep -q '^?? new.txt$'; then
+    if git -C "$hfx" status --short | grep '^?? new.txt$' >/dev/null; then
         note "gitui hunk: unstaging the only hunk of a new file is git's 'unstage addition' -- untracked again"
     else
         bad "gitui hunk: unstage addition" "$(git -C "$hfx" status --short)" "msg: $msg"
     fi
     msg=$("$WORK/t_gitclient_ops" "$hfx/.git" "$hfx" stage_hunk gone.txt 0 2>&1)
-    if git -C "$hfx" status --short | grep -q '^D  gone.txt$'; then
+    if git -C "$hfx" status --short | grep '^D  gone.txt$' >/dev/null; then
         note "gitui hunk: staging the only hunk of a file gone from disk is git's 'stage deletion'"
     else
         bad "gitui hunk: stage deletion" "$(git -C "$hfx" status --short)" "msg: $msg"

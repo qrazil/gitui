@@ -331,7 +331,7 @@ def main():
 
     fx = fixture(root, "edit2", {"f": BASE}, {"f": THEIRS_TWO}, {"f": TWO})
     ed2 = os.path.join(root, "ed_partial.sh")
-    editor_script(ed2, "sed -i 's/OURS1/EDITED1/' \"$1\"")
+    editor_script(ed2, "sed -i.bak 's/OURS1/EDITED1/' \"$1\" && rm -f \"$1.bak\"")
     s = P.Session(binpath, fx, env=P.env_with_editor(ed2))
     open_merge_picker(s, "f", "side")
     cursor_to(s, "UU  f")

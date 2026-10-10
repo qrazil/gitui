@@ -149,7 +149,7 @@ PY
         printf 'hello\000world\000more\n' >bin.dat
     ) >"$WORK/hunks-bin.log" 2>&1 || bad "binary fixture repository" "$(tail -5 "$WORK/hunks-bin.log")"
 
-    if git -C "$bindir" diff --no-color 2>/dev/null | grep -q '^Binary files'; then
+    if git -C "$bindir" diff --no-color 2>/dev/null | grep '^Binary files' >/dev/null; then
         git -C "$bindir" show HEAD:bin.dat >"$hdir/bin_old.dat"
         cp "$bindir/bin.dat" "$hdir/bin_new.dat"
         got=$("$t_hunks" "$hdir/bin_old.dat" "$hdir/bin_new.dat")

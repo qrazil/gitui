@@ -261,7 +261,7 @@ if build t_stash; then
         printf 'resolved\n' >"$stx/mgfin-$r/a.txt"; st_git "$stx/mgfin-$r" add a.txt
     done
     st_git "$stx/mgfin-ours" stash drop -q >/dev/null 2>&1
-    git -C "$stx/mgfin-ours" ls-files -u | grep -q . && bad "stash pop conflict: add did not clear the unmerged entries" || note "stash pop conflict: git add resolves what we left; git stash drop drops the kept stash"
+    git -C "$stx/mgfin-ours" ls-files -u | grep . >/dev/null && bad "stash pop conflict: add did not clear the unmerged entries" || note "stash pop conflict: git add resolves what we left; git stash drop drops the kept stash"
     st_fsck "$stx/mgfin-ours" && note "stash pop conflict: fsck clean after resolving" || bad "stash pop conflict: fsck"
 
     # --- drop: the reflog stack as git rewrites it ------------------------------------
@@ -291,7 +291,7 @@ if build t_stash; then
     out=$(st_ours "$stx/branch-ours" branch topic 0 2>&1); r2=$?
     if [ $r1 -eq 0 ] && [ $r2 -eq 0 ]; then
         st_check "stash branch: branch, HEAD, index, worktree and stack equal git's" "$stx/branch-git" "$stx/branch-ours"
-        git -C "$stx/branch-ours" reflog show --format=%gs HEAD | grep -qx 'checkout: moving from main to topic' && note "stash branch: the HEAD reflog has git's checkout line" || bad "stash branch: HEAD reflog" "$(git -C "$stx/branch-ours" reflog show --format=%gs HEAD | head -3)"
+        git -C "$stx/branch-ours" reflog show --format=%gs HEAD | grep -x 'checkout: moving from main to topic' >/dev/null && note "stash branch: the HEAD reflog has git's checkout line" || bad "stash branch: HEAD reflog" "$(git -C "$stx/branch-ours" reflog show --format=%gs HEAD | head -3)"
         st_fsck "$stx/branch-ours" || bad "stash branch: fsck"
     else bad "stash branch" "git rc=$r1 ours rc=$r2 $out"; fi
     out=$(st_ours "$stx/branch-ours" branch topic 0 2>&1); [ $? -ne 0 ] && note "stash branch: an existing branch name is refused" || bad "stash branch: existing name"

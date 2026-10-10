@@ -47,7 +47,7 @@ if build t_write_object; then
         want_ls=$(printf '100644 blob %s\tnew.txt' "$blob_id")
         [ "$(git -C "$wfx" ls-tree "$tree_id")" = "$want_ls" ] || ok=0
         [ "$(git -C "$wfx" cat-file -t "$commit_id")" = "commit" ] || ok=0
-        git -C "$wfx" cat-file -p "$commit_id" | grep -qx "tree $tree_id" || ok=0
+        git -C "$wfx" cat-file -p "$commit_id" | grep -x "tree $tree_id" >/dev/null || ok=0
         fsck_out=$(git -C "$wfx" fsck --full 2>&1)
         # The only thing `fsck` should say is that the commit we just wrote
         # is unreachable from any ref -- expected, since nothing points at it

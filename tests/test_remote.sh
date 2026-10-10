@@ -353,8 +353,10 @@ KHEOF
         # before it looks it up; `ssh-keygen -F` does not (a hashed entry would
         # never match "PLAIN.Example.COM"), so the oracle is asked the way ssh asks.
         rm_kh_theirs() { # file host port
-            local name=${2,,}
-            [ "$3" != "" ] && [ "$3" != 0 ] && [ "$3" != 22 ] && name="[${2,,}]:$3"
+            local host name
+            host=$(printf %s "$2" | tr 'A-Z' 'a-z')
+            name=$host
+            [ "$3" != "" ] && [ "$3" != 0 ] && [ "$3" != 22 ] && name="[$host]:$3"
             ssh-keygen -F "$name" -f "$1" 2>/dev/null | python3 -c '
 import sys
 line_no = None

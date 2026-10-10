@@ -52,6 +52,7 @@ for shim_tool in sha1sum md5sum tac; do
     command -v "$shim_tool" >/dev/null 2>&1 || cp "tests/shims/$shim_tool" "$shims/$shim_tool"
 done
 stat -c %a / >/dev/null 2>&1 || cp tests/shims/stat "$shims/stat"
+[ "$(echo x | wc -l)" = 1 ] || cp tests/shims/wc "$shims/wc"
 PATH="$shims:$PATH"
 pass=0
 fail=0
