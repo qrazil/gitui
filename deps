@@ -1,4 +1,4 @@
-# gitui project file (m31 v0.2.0+): this directory is the project root.
+# gitui project file: this directory is the project root.
 name gitui
 version 0.5.0
-tui https://github.com/qrazil/tui 0cae2e7a83df54b107bf33c4babeada19bac875c
+tui https://github.com/qrazil/tui 8edfea1f69e66a430e39066a96f1f370780dc76f
