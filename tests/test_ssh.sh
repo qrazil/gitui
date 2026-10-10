@@ -181,6 +181,8 @@ Ciphers chacha20-poly1305@openssh.com
 PubkeyAuthentication yes
 PasswordAuthentication no
 KbdInteractiveAuthentication no
+MaxStartups 1000
+LoginGraceTime 60
 SetEnv GIT_TRACE_PACKET=$ss_root/trace.log PATH=$ss_session_path
 EOF
         "$ss_sshd" -f "$ss_root/sshd_config" -D -e >"$ss_root/sshd.log" 2>&1 &
@@ -222,6 +224,7 @@ fi
 
 if [ "${ss_up:-0}" = 1 ]; then
     note "ssh: disposable sshd on 127.0.0.1:$ss_port, real ssh client logs in"
+    ss_fail0=$fail
 
     ss_kh="$ss_root/known_hosts"
     ss_id="$ss_root/user_key"
@@ -549,6 +552,10 @@ PY
     fi
 fi
 
+if [ "${ss_up:-0}" = 1 ] && [ "$fail" -gt "${ss_fail0:-$fail}" ]; then
+    printf 'ssh diagnostics: sshd alive=%s, log tail:\n' "$(kill -0 "$ss_pid" 2>/dev/null && echo yes || echo no)"
+    tail -25 "$ss_root/sshd.log" | sed 's/^/     /'
+fi
 ss_stop
 [ -n "${ss_watch:-}" ] && kill "$ss_watch" >/dev/null 2>&1
 fi
