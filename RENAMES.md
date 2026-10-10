@@ -157,7 +157,7 @@ separate `TUI_ROOT` checkout, since `deps` pins tui.
 
 # 0.5.0: m31 0.4.0 layout and naming
 
-Branch `feat/m31-0.4.0`, from master 6313d91 (0.5.0). gitui is built with m31
+Branch `feat/m31-0.4.0`, from master 6313d91. gitui is built with m31
 v0.4.0, which groups the standard library into folders and makes `m31c lint` a
 gate. `m31c lint .` reports no findings and `m31c fmt --check -r .` is clean;
 behaviour, the command line and the key bindings are unchanged.
