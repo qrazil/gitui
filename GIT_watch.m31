@@ -8,7 +8,7 @@
 //   * every tracked file's size and mtime (up to `FILE_CAP` of them; the
 //     index is only re-read when its own stat changes)
 //   * the mtime of every directory of the worktree that is not ignored (up to
-//     `DIR_CAP`): adding, removing or renaming a file changes its directory's
+//     `DIRECTORY_CAP`): adding, removing or renaming a file changes its directory's
 //     mtime, which is how a new untracked file is seen without reading
 //     anything. A changed directory is listed again, so a new subdirectory is
 //     picked up and watched too.
@@ -27,7 +27,7 @@ import GIT_index;
 import io;
 
 pub const int FILE_CAP = 4000;
-pub const int DIR_CAP = 3000;
+pub const int DIRECTORY_CAP = 3000;
 
 pub type Watcher {
     pub str gitdir;
@@ -38,7 +38,7 @@ pub type Watcher {
     List<str> tracked = [];
     // Watched directories (relative, "" is the root) and their mtimes.
     List<str> dirs = [];
-    Map<str, int> dir_mtime = {};
+    Map<str, int> directory_mtime = {};
     Option<GIT_ignore.Ignore> ignore = Option<GIT_ignore.Ignore>.None;
     str ignore_sig = "";
     bool is_dirs_changed = false;
@@ -90,7 +90,7 @@ str Watcher.fingerprint() {
         }
         index_sig = parts[0];
         dirs = [];
-        dir_mtime = {};
+        directory_mtime = {};
         scan("");
     }
     int shown = 0;
@@ -139,8 +139,8 @@ bool Watcher.is_skipped(str relative) {
 
 // Record directory `relative` (if new) and every directory under it.
 void Watcher.scan(str relative) {
-    if (!dir_mtime.contains(relative)) {
-        if (dirs.size() >= DIR_CAP) {
+    if (!directory_mtime.contains(relative)) {
+        if (dirs.size() >= DIRECTORY_CAP) {
             return;
         }
         dirs.push(relative);
@@ -149,7 +149,7 @@ void Watcher.scan(str relative) {
     if (relative != "") {
         full = fs.join(worktree, relative);
     }
-    dir_mtime.set(relative, dir_stamp(full));
+    directory_mtime.set(relative, directory_stamp(full));
     scan_children(relative);
 }
 
@@ -164,17 +164,17 @@ void Watcher.poll_dirs() {
         if (relative != "") {
             full = fs.join(worktree, relative);
         }
-        int now = dir_stamp(full);
-        match (dir_mtime.get(relative)) {
+        int now = directory_stamp(full);
+        match (directory_mtime.get(relative)) {
             case Some(int before): {
                 if (now == -1) {
                     is_dirs_changed = true;
-                    dir_mtime.remove(relative);
+                    directory_mtime.remove(relative);
                 } else {
                     kept.push(relative);
                     if (now != before) {
                         is_dirs_changed = true;
-                        dir_mtime.set(relative, now);
+                        directory_mtime.set(relative, now);
                         scan_children(relative);
                     }
                 }
@@ -207,7 +207,7 @@ void Watcher.scan_children(str relative) {
                     child = relative + "/" + name;
                 }
                 str child_full = fs.join(worktree, child);
-                if (!dir_mtime.contains(child) && fs.is_directory(child_full) && !fs.is_link(child_full) && !is_skipped(child)) {
+                if (!directory_mtime.contains(child) && fs.is_directory(child_full) && !fs.is_link(child_full) && !is_skipped(child)) {
                     scan(child);
                 }
             }
@@ -237,7 +237,7 @@ str stamp(str path) {
 }
 
 // The mtime of a directory, -1 when it is gone.
-int dir_stamp(str path) {
+int directory_stamp(str path) {
     match (fs.stat(path)) {
         case Ok(fs.Stat found): {
             return found.mtime_ns;

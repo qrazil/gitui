@@ -19,7 +19,7 @@ import tui.TUI_widget;
 /// What the loop asks while idle.
 pub interface Ticker {
     /// Called once per timed-out read. True: something changed, redraw.
-    bool tick();
+    bool did_change_on_tick();
 }
 
 pub Result<int, term.Error> run(TUI_app.Loop loop, TUI_widget.Widget view, TUI_app.Handler on_event, Ticker ticker) {
@@ -60,7 +60,7 @@ pub Result<int, term.Error> run(TUI_app.Loop loop, TUI_widget.Widget view, TUI_a
                                 }
                             }
                             case Timeout: {
-                                if (ticker.tick()) {
+                                if (ticker.did_change_on_tick()) {
                                     should_redraw = true;
                                 }
                             }

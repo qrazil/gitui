@@ -20,7 +20,7 @@ type Stopper {
     int limit;
 }
 
-bool Stopper.step(int resolved, int total, int commits) {
+bool Stopper.should_continue(int resolved, int total, int commits) {
     return commits < limit;
 }
 
@@ -33,7 +33,7 @@ match (GIT_blame.blame(argv[1], argv[3], argv[4], progress)) {
         int number = 1;
         for (GIT_blame.Line line in lines) {
             str mark = "";
-            if (line.boundary) {
+            if (line.is_boundary) {
                 mark = "^";
             }
             if (argv[2] == "sketch") {

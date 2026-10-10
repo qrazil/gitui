@@ -168,7 +168,7 @@ pub List<str> Config.get_all(str section, str subsection, str key) {
 }
 
 /// Is the key there at all, with or without a value?
-pub bool Config.has(str section, str subsection, str key) {
+pub bool Config.has_key(str section, str subsection, str key) {
     for (Entry entry in entries) {
         if (is_match(entry, section, subsection, key)) {
             return true;
@@ -436,13 +436,13 @@ bool is_include(Entry entry, str gitdir, str file) {
     }
     str condition = entry.subsection;
     if (condition.starts_with("gitdir:")) {
-        return gitdir_matches(condition.substr(7, condition.size()), gitdir, file, false);
+        return is_matching_gitdir(condition.substr(7, condition.size()), gitdir, file, false);
     }
     if (condition.starts_with("gitdir/i:")) {
-        return gitdir_matches(condition.substr(9, condition.size()), gitdir, file, true);
+        return is_matching_gitdir(condition.substr(9, condition.size()), gitdir, file, true);
     }
     if (condition.starts_with("onbranch:")) {
-        return GIT_ignore.path_glob(trailing_wildcard(condition.substr(9, condition.size())), head_branch(gitdir));
+        return GIT_ignore.is_path_glob_match(trailing_wildcard(condition.substr(9, condition.size())), head_branch(gitdir));
     }
     return false;
 }
@@ -457,7 +457,7 @@ str include_target(str value, str file) {
     return fs.join(dirname(file), value);
 }
 
-bool gitdir_matches(str raw, str gitdir, str file, bool should_fold_case) {
+bool is_matching_gitdir(str raw, str gitdir, str file, bool should_fold_case) {
     str pattern = raw;
     if (pattern.starts_with("~/")) {
         pattern = os.env("HOME").or("") + pattern.substr(1, pattern.size());
@@ -469,9 +469,9 @@ bool gitdir_matches(str raw, str gitdir, str file, bool should_fold_case) {
     pattern = trailing_wildcard(pattern);
     str target = absolute(gitdir);
     if (should_fold_case) {
-        return GIT_ignore.path_glob(pattern.to_lower(), target.to_lower());
+        return GIT_ignore.is_path_glob_match(pattern.to_lower(), target.to_lower());
     }
-    return GIT_ignore.path_glob(pattern, target);
+    return GIT_ignore.is_path_glob_match(pattern, target);
 }
 
 str trailing_wildcard(str pattern) {
@@ -539,11 +539,11 @@ str absolute(str path) {
 
 /// `commit.gpgsign`: this client does not sign, so a `true` here is a reason
 /// to refuse to commit, not to commit unsigned.
-pub bool commit_gpgsign(str gitdir) {
+pub bool is_commit_gpgsign_enabled(str gitdir) {
     return effective(gitdir).get_bool("commit", "", "gpgsign").or(false);
 }
 
-/// The message a refusal for `commit_gpgsign` carries.
+/// The message a refusal for `is_commit_gpgsign_enabled` carries.
 pub const str GPGSIGN_REFUSAL = "commit.gpgsign is true and this client does not sign commits; run `git config commit.gpgsign false`, or commit with git itself";
 
 /// `branch.<name>.rebase` over `pull.rebase`, as `git pull` reads them:
@@ -588,7 +588,7 @@ pub str push_default(str gitdir) {
 }
 
 /// `push.autoSetupRemote`, false when unset.
-pub bool push_auto_setup_remote(str gitdir) {
+pub bool is_push_auto_setup_remote_enabled(str gitdir) {
     return effective(gitdir).get_bool("push", "", "autosetupremote").or(false);
 }
 
@@ -603,9 +603,9 @@ pub str init_default_branch(str gitdir) {
 
 /// `rerere.enabled`; when it is not set at all, git turns rerere on exactly
 /// when `rr-cache` exists in the repository.
-pub bool rerere_enabled(str gitdir) {
+pub bool is_rerere_enabled(str gitdir) {
     Config config = effective(gitdir);
-    if (config.has("rerere", "", "enabled")) {
+    if (config.has_key("rerere", "", "enabled")) {
         return config.get_bool("rerere", "", "enabled").or(false);
     }
     return fs.is_directory(fs.join(GIT_repository.common(gitdir), "rr-cache"));

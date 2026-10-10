@@ -628,7 +628,7 @@ pub str rewrite_gitdir(str gitdir, str url, bool is_push) {
 
 /// Does `pattern` (`*` any run, `?` any one character, nothing else special)
 /// match all of `text`, byte for byte?
-pub bool glob_matches(str pattern, str text) {
+pub bool is_glob_match(str pattern, str text) {
     List<int> pattern_chars = pattern.chars();
     List<int> text_chars = text.chars();
     int pattern_index = 0;
@@ -660,7 +660,7 @@ pub bool glob_matches(str pattern, str text) {
 // A pattern list (already split) against `text`: a hit on a `!pattern`
 // vetoes the lot, otherwise one plain hit is enough. `known_hosts` folds
 // case (host names do); `ssh_config` `Host` lines do not.
-bool list_matches(List<str> patterns, str text, bool is_folded) {
+bool is_list_match(List<str> patterns, str text, bool is_folded) {
     bool is_matched = false;
     str subject = text;
     if (is_folded) {
@@ -672,10 +672,10 @@ bool list_matches(List<str> patterns, str text, bool is_folded) {
             pattern = raw.to_lower();
         }
         if (pattern.starts_with("!")) {
-            if (glob_matches(pattern.substr(1, pattern.size()), subject)) {
+            if (is_glob_match(pattern.substr(1, pattern.size()), subject)) {
                 return false;
             }
-        } else if (glob_matches(pattern, subject)) {
+        } else if (is_glob_match(pattern, subject)) {
             is_matched = true;
         }
     }
@@ -768,7 +768,7 @@ pub SshTarget ssh_config_resolve(str text, str host, str user, int port) {
                 str keyword = option[0];
                 List<str> arguments = option.slice(1, option.size());
                 if (keyword == "host") {
-                    is_applying = list_matches(arguments, host, false);
+                    is_applying = is_list_match(arguments, host, false);
                 } else if (keyword == "match") {
                     is_applying = false;
                 } else if (is_applying && arguments.size() > 0) {
@@ -863,7 +863,7 @@ str host_string(str host, int port) {
 }
 
 // Does the hashed entry `|1|salt|hash` name `subject`?
-bool hashed_matches(str entry, str subject) {
+bool is_hashed_match(str entry, str subject) {
     List<str> parts = entry.split("|");
     if (parts.size() != 4 || parts[1] != "1") {
         return false;
@@ -929,9 +929,9 @@ pub List<HostKey> known_hosts_find(str text, str host, int port) {
         }
         bool is_matching = false;
         if (fields[0].starts_with("|")) {
-            is_matching = hashed_matches(fields[0], subject);
+            is_matching = is_hashed_match(fields[0], subject);
         } else {
-            is_matching = list_matches(fields[0].split(","), subject, true);
+            is_matching = is_list_match(fields[0].split(","), subject, true);
         }
         if (is_matching) {
             out.push(HostKey(fields[1], fields[2], marker, number));

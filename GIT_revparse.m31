@@ -430,7 +430,7 @@ bool is_alnum(int character) {
 // --- abbreviated names -----------------------------------------------------------
 
 // Does the object pass the type filter? A filter-less caller passes everything.
-bool passes(str gitdir, str id, int flags) {
+bool is_passing_filter(str gitdir, str id, int flags) {
     match (deref(gitdir, id)) {
         case Ok(GIT_object.Object peeled): {
             match (load(gitdir, id)) {
@@ -458,7 +458,7 @@ bool passes(str gitdir, str id, int flags) {
 }
 
 // `get_short_oid`: one object, or the one that passes the filter, or an error.
-Result<str, Error> short_oid(str gitdir, str prefix, int flags) {
+Result<str, Error> short_object_id(str gitdir, str prefix, int flags) {
     List<str> hits = GIT_object.matching(gitdir, prefix);
     if (hits.size() == 0) {
         return Result<str, Error>.Err(Error.Unknown);
@@ -471,7 +471,7 @@ Result<str, Error> short_oid(str gitdir, str prefix, int flags) {
     }
     List<str> fit = [];
     for (str id in hits) {
-        if (passes(gitdir, id, flags)) {
+        if (is_passing_filter(gitdir, id, flags)) {
             fit.push(id);
         }
     }
@@ -487,7 +487,7 @@ bool is_hex_char(int character) {
 
 // `ref_and_count_parts_valid`: `name` (the text before the `-g`) is a
 // well-formed ref name, a dash, and at least one hex digit.
-bool ref_and_count_valid(str name) {
+bool is_valid_ref_and_count(str name) {
     int length = name.size();
     if (length == 0 || !is_hex_char(name.byte_at(length - 1))) {
         return false;
@@ -506,7 +506,7 @@ bool ref_and_count_valid(str name) {
     if (name.byte_at(index) != '-') {
         return false;
     }
-    return refname_ok(name.substr(0, index));
+    return is_valid_refname(name.substr(0, index));
 }
 
 // `<tag>-<n>-g<hex>`: scanning from the right, a `g` that follows a `-` and
@@ -516,8 +516,8 @@ Result<str, Error> describe(str gitdir, str name, int flags) {
     int index = name.size() - 1;
     while (index >= 2) {
         int character = name.byte_at(index);
-        if (!is_hex_char(character) && character == 'g' && name.byte_at(index - 1) == '-' && ref_and_count_valid(name.substr(0, index - 1))) {
-            return short_oid(gitdir, name.substr(index + 1, name.size()), F_COMMIT);
+        if (!is_hex_char(character) && character == 'g' && name.byte_at(index - 1) == '-' && is_valid_ref_and_count(name.substr(0, index - 1))) {
+            return short_object_id(gitdir, name.substr(index + 1, name.size()), F_COMMIT);
         }
         index = index - 1;
     }
@@ -527,7 +527,7 @@ Result<str, Error> describe(str gitdir, str name, int flags) {
 // --- ref names -------------------------------------------------------------------
 
 // `check_refname_format` with one-level names allowed.
-bool refname_ok(str name) {
+bool is_valid_refname(str name) {
     if (name.size() == 0 || name == "@" || name.starts_with("/") || name.ends_with("/") || name.ends_with(".")) {
         return false;
     }
@@ -548,9 +548,9 @@ bool refname_ok(str name) {
     return true;
 }
 
-// `ambiguous_path`: a name git will not even look up as a ref -- empty
+// `is_ambiguous_path`: a name git will not even look up as a ref -- empty
 // components, a leading or trailing slash, a component of nothing but dots.
-bool ambiguous_path(str path) {
+bool is_ambiguous_path(str path) {
     bool is_after_slash = true;
     for (int i in 0 .. path.size()) {
         int character = path.byte_at(i);
@@ -584,7 +584,7 @@ Option<Found> dwim_ref(str gitdir, str name) {
         target = "HEAD";
     }
     for (str candidate in dwim_rules(target)) {
-        if (!refname_ok(candidate)) {
+        if (!is_valid_refname(candidate)) {
             continue;
         }
         match (GIT_refs.resolve(gitdir, candidate)) {
@@ -609,17 +609,17 @@ Option<Found> dwim_ref(str gitdir, str name) {
 // reflog -- its own, or its symbolic target's. `Found.name` is the log's ref.
 Option<Found> dwim_log(str gitdir, str name) {
     for (str candidate in dwim_rules(name)) {
-        if (!refname_ok(candidate)) {
+        if (!is_valid_refname(candidate)) {
             continue;
         }
         match (GIT_refs.resolve(gitdir, candidate)) {
             case Ok(str id): {
-                if (GIT_reflog.exists(gitdir, candidate)) {
+                if (GIT_reflog.has_log(gitdir, candidate)) {
                     return Option<Found>.Some(Found(candidate, id));
                 }
                 match (GIT_refs.resolve_name(gitdir, candidate)) {
                     case Ok(str real): {
-                        if (real != candidate && GIT_reflog.exists(gitdir, real)) {
+                        if (real != candidate && GIT_reflog.has_log(gitdir, real)) {
                             return Option<Found>.Some(Found(real, id));
                         }
                     }
@@ -856,7 +856,7 @@ Result<str, Error> substitute(str gitdir, str name) {
 // `get_oid_basic`: a full object name, or a ref (with an `@{...}` suffix).
 Result<str, Error> basic(str gitdir, str name, int flags) {
     int name_size = name.size();
-    if (name_size == GIT_object.hex_len(gitdir) && is_hex(name)) {
+    if (name_size == GIT_object.hex_length(gitdir) && is_hex(name)) {
         return Result<str, Error>.Ok(name.to_lower());
     }
     int length = name_size;
@@ -888,7 +888,7 @@ Result<str, Error> basic(str gitdir, str name, int flags) {
         }
     }
     str base = name.substr(0, length);
-    if (length > 0 && ambiguous_path(base)) {
+    if (length > 0 && is_ambiguous_path(base)) {
         return Result<str, Error>.Err(Error.Unknown);
     }
     if (is_prior) {
@@ -905,7 +905,7 @@ Result<str, Error> basic(str gitdir, str name, int flags) {
         }
         match (nth_prior(gitdir, nth)) {
             case Some(str was): {
-                if (was.size() == GIT_object.hex_len(gitdir) && is_hex(was)) {
+                if (was.size() == GIT_object.hex_length(gitdir) && is_hex(was)) {
                     return Result<str, Error>.Ok(was.to_lower());
                 }
                 if (brace != name_size - 1) {
@@ -1160,7 +1160,7 @@ Result<str, Error> one(str gitdir, str name, int flags) {
         }
     }
     if (name.size() >= 4 && is_hex(name)) {
-        match (short_oid(gitdir, name, flags)) {
+        match (short_object_id(gitdir, name, flags)) {
             case Ok(str id): {
                 return Result<str, Error>.Ok(id);
             }
@@ -1365,7 +1365,7 @@ void put_member(List<int> out, int character) {
 }
 
 // The ASCII ranges of a POSIX class, appended as (low, high) pairs.
-bool class_ranges(str name, List<int> lows, List<int> highs) {
+bool did_append_class_ranges(str name, List<int> lows, List<int> highs) {
     List<int> flat = [];
     if (name == "alpha") {
         flat = ['A', 'Z', 'a', 'z'];
@@ -1439,7 +1439,7 @@ Result<int, Error> bracket(List<int> source, int open, List<int> out) {
                 if (class_end + 1 >= source_size) {
                     return Result<int, Error>.Err(Error.BadPattern);
                 }
-                if (!class_ranges(str.from_chars(source.slice(index + 2, class_end)), lows, highs)) {
+                if (!did_append_class_ranges(str.from_chars(source.slice(index + 2, class_end)), lows, highs)) {
                     return Result<int, Error>.Err(Error.BadPattern);
                 }
                 index = class_end + 2;

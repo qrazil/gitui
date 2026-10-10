@@ -192,16 +192,16 @@ bytes band(int channel, bytes data) {
 // A stream that gives back one byte per read -- the shortest reads a socket may.
 type Dribble {
     bytes data;
-    int at;
+    int position;
 }
 
 Result<bytes, io.Error> Dribble.read(int count) {
-    if (at >= data.size() || count <= 0) {
+    if (position >= data.size() || count <= 0) {
         bytes none = [];
         return Result<bytes, io.Error>.Ok(none);
     }
-    bytes one = [data[at]];
-    at = at + 1;
+    bytes one = [data[position]];
+    position = position + 1;
     return Result<bytes, io.Error>.Ok(one);
 }
 
@@ -904,7 +904,7 @@ void do_fetch(str port_text, str gitdir, str out_path) {
             if (out.has_remote_error) {
                 fail("remote: " + out.remote_error);
             }
-            match (GIT_wire.verify_pack(out.pack, out_path, raw: GIT_hash.raw_len(gitdir))) {
+            match (GIT_wire.verify_pack(out.pack, out_path, raw: GIT_hash.raw_length(gitdir))) {
                 case Ok(GIT_wire.Summary summary): {
                     print("pack " + summary.pack_bytes.to_str() + " " + summary.object_count.to_str());
                 }

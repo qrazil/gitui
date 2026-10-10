@@ -500,16 +500,16 @@ pub Result<Object, Error> parse(str id, bytes plain) {
 
 /// How many hex digits a full object name has in this repository: 40 for
 /// SHA-1, 64 for SHA-256 (`GIT_hash.m31` says what decides it).
-pub int hex_len(str gitdir) {
-    return GIT_hash.hex_len(gitdir);
+pub int hex_length(str gitdir) {
+    return GIT_hash.hex_length(gitdir);
 }
 
 /// Is `id` a full object name of this repository's format: lower-case hex,
-/// exactly `hex_len` digits. What guards a name that came from outside --
+/// exactly `hex_length` digits. What guards a name that came from outside --
 /// a ref's content, the wire, a reflog line -- where `read` only needs the
 /// name to be the width of some format.
 pub bool is_full(str gitdir, str id) {
-    return id.size() == hex_len(gitdir) && is_name(id);
+    return id.size() == hex_length(gitdir) && is_name(id);
 }
 
 // Is `id` as wide as a full name of either format?
@@ -522,9 +522,9 @@ bool is_full_width(str id) {
 // hash it is checked against cannot match it.
 int raw_of_id(str id) {
     if (id.size() == 64) {
-        return GIT_hash.SHA256_LEN;
+        return GIT_hash.SHA256_LENGTH;
     }
-    return GIT_hash.SHA1_LEN;
+    return GIT_hash.SHA1_LENGTH;
 }
 
 /// Every object name beginning with `prefix` -- loose or packed -- sorted and
@@ -539,7 +539,7 @@ int raw_of_id(str id) {
 pub List<str> matching(str gitdir, str prefix) {
     List<str> hits = [];
     str lowered = prefix.to_lower();
-    int width = hex_len(gitdir);
+    int width = hex_length(gitdir);
     if (!is_name(lowered) || lowered.size() < 4 || lowered.size() > width) {
         return hits;
     }
@@ -581,7 +581,7 @@ pub List<str> matching(str gitdir, str prefix) {
 
 /// The one full name that begins with `prefix`, if there is exactly one.
 pub Result<str, Error> resolve(str gitdir, str prefix) {
-    if (!is_name(prefix.to_lower()) || prefix.size() < 4 || prefix.size() > hex_len(gitdir)) {
+    if (!is_name(prefix.to_lower()) || prefix.size() < 4 || prefix.size() > hex_length(gitdir)) {
         return Result<str, Error>.Err(Error.BadName);
     }
     List<str> hits = matching(gitdir, prefix);
@@ -609,7 +609,7 @@ pub Result<List<str>, Error> loose(str gitdir) {
         }
     }
     fanout.sort();
-    int tail = hex_len(gitdir) - 2;
+    int tail = hex_length(gitdir) - 2;
     for (str two in fanout) {
         if (two.size() != 2 || !is_name(two)) {
             continue;
@@ -1073,7 +1073,7 @@ bytes fold_header(bytes line) {
 /// reported modified until something refreshed the index. `blob_id` is that
 /// comparison done right.
 pub str object_id(str gitdir, str kind, bytes content) {
-    return object_id_raw(GIT_hash.raw_len(gitdir), kind, content);
+    return object_id_raw(GIT_hash.raw_length(gitdir), kind, content);
 }
 
 /// `object_id`, for a caller that already knows the hash's width (20 or 32

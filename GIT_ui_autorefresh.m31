@@ -30,7 +30,7 @@ pub type AutoRefresh {
     pub int reloads = 0;
 }
 
-pub bool AutoRefresh.tick() {
+pub bool AutoRefresh.did_change_on_tick() {
     idle = idle + 1;
     if (idle < POLL_TICKS) {
         return false;

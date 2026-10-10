@@ -59,7 +59,7 @@ import random;
 /// The id that stands for "no such ref" on either side of a line: as many
 /// zeros as an object name has in this repository.
 pub str zero(str gitdir) {
-    return GIT_hash.zero(GIT_hash.raw_len(gitdir));
+    return GIT_hash.zero(GIT_hash.raw_length(gitdir));
 }
 
 /// Is `id` the all-zero id, in either hash? What an `old` or `new` is when the
@@ -126,7 +126,7 @@ pub str log_path(str gitdir, str ref) {
 }
 
 /// Does this ref have a log file already?
-pub bool exists(str gitdir, str ref) {
+pub bool has_log(str gitdir, str ref) {
     return fs.is_present(log_path(gitdir, ref));
 }
 
@@ -150,7 +150,7 @@ bool is_id(str gitdir, str id) {
 
 /// Would git log an update to this ref? See the header.
 pub bool should_log(str gitdir, str ref) {
-    if (exists(gitdir, ref)) {
+    if (has_log(gitdir, ref)) {
         return true;
     }
     str setting = GIT_config.get(gitdir, "core", "", "logallrefupdates").or("").to_lower();
@@ -266,7 +266,7 @@ pub Result<List<Entry>, Error> read(str gitdir, str ref) {
     if (!fs.is_present(path)) {
         return Result<List<Entry>, Error>.Ok(out);
     }
-    int width = GIT_object.hex_len(gitdir);
+    int width = GIT_object.hex_length(gitdir);
     match (io.read(path)) {
         case Ok(str body): {
             for (str line in body.split("\n")) {

@@ -218,5 +218,5 @@ void run_unit() {
     check("remote: pushInsteadOf on push only", GIT_remote.rewrite(config, "https://h/org/r", true) == "ssh://git@h/org/r" && GIT_remote.rewrite(config, "https://h/org/r", false) == "https://h/org/r", GIT_remote.rewrite(config, "https://h/org/r", true));
     check("remote: no rule leaves the url", GIT_remote.rewrite(config, "/srv/r", false) == "/srv/r", "changed");
     check("remote: hmac rfc2202 case 2", GIT_remote.hmac_sha1("Jefe".to_bytes(), "what do ya want for nothing?".to_bytes()).hex() == "effcdf6ae5eb2fa2d27416d5f184df9c259a7c79", GIT_remote.hmac_sha1("Jefe".to_bytes(), "what do ya want for nothing?".to_bytes()).hex());
-    check("remote: glob", GIT_remote.glob_matches("*.example.com", "a.example.com") && !GIT_remote.glob_matches("*.example.com", "a.EXAMPLE.com") && !GIT_remote.glob_matches("a?c", "abbc"), "glob");
+    check("remote: glob", GIT_remote.is_glob_match("*.example.com", "a.example.com") && !GIT_remote.is_glob_match("*.example.com", "a.EXAMPLE.com") && !GIT_remote.is_glob_match("a?c", "abbc"), "glob");
 }

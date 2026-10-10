@@ -71,14 +71,14 @@ pub bool RebaseLayer.is_autosquash() {
     if (autosquash_pref >= 0) {
         return autosquash_pref == 1;
     }
-    return GIT_rebase.default_autosquash(gitdir);
+    return GIT_rebase.is_autosquash_default(gitdir);
 }
 
 pub bool RebaseLayer.is_autostash() {
     if (autostash_pref >= 0) {
         return autostash_pref == 1;
     }
-    return GIT_rebase.default_autostash(gitdir);
+    return GIT_rebase.is_autostash_default(gitdir);
 }
 
 /// `r`: the menu for a new rebase, or the one for the rebase under way.
@@ -148,7 +148,7 @@ pub void RebaseLayer.settle_rebase_picks() {
     }
     match (take_pick(GIT_ui_core.PICK_REBASE_INTERACTIVE)) {
         case Some(str spec): {
-            begin_rebase(GIT_rebase.PlanOpts(upstream: spec, interactive: true, autosquash: is_autosquash()), "rebase -i " + spec);
+            begin_rebase(GIT_rebase.PlanOpts(upstream: spec, is_interactive: true, should_autosquash: is_autosquash()), "rebase -i " + spec);
         }
         case None: {
         }
@@ -201,10 +201,10 @@ pub void RebaseLayer.rebase_from(str spec) {
         }
     }
     if (parent == "") {
-        begin_rebase(GIT_rebase.PlanOpts(root: true, interactive: true, autosquash: is_autosquash()), "rebase -i --root");
+        begin_rebase(GIT_rebase.PlanOpts(is_root: true, is_interactive: true, should_autosquash: is_autosquash()), "rebase -i --root");
         return;
     }
-    begin_rebase(GIT_rebase.PlanOpts(upstream: parent, interactive: true, autosquash: is_autosquash()), "rebase -i " + GIT_ui_core.short_id(id) + "^");
+    begin_rebase(GIT_rebase.PlanOpts(upstream: parent, is_interactive: true, should_autosquash: is_autosquash()), "rebase -i " + GIT_ui_core.short_id(id) + "^");
 }
 
 /// Plan a rebase; an interactive one opens the todo list, the rest start.
@@ -218,8 +218,8 @@ pub void RebaseLayer.begin_rebase(GIT_rebase.PlanOpts popts, str line) {
     }
     match (GIT_rebase.plan(gitdir, popts)) {
         case Ok(GIT_rebase.Plan plan): {
-            GIT_rebase.StartOpts opts = GIT_rebase.StartOpts(interactive: popts.interactive, autostash: is_autostash());
-            if (popts.interactive) {
+            GIT_rebase.StartOpts opts = GIT_rebase.StartOpts(is_interactive: popts.is_interactive, should_autostash: is_autostash());
+            if (popts.is_interactive) {
                 if (plan.commands.size() == 0) {
                     message = "rebase -i: no commits to rebase";
                     return;
@@ -250,7 +250,7 @@ pub void RebaseLayer.run_start(GIT_rebase.Plan plan, List<GIT_rebase_todo.Comman
 }
 
 /// Say where a report left the rebase; true when it needs a message typed.
-pub bool RebaseLayer.describe(GIT_rebase.Report report) {
+pub bool RebaseLayer.needs_message_after_describing(GIT_rebase.Report report) {
     str notes = "";
     if (report.messages.size() > 0) {
         notes = " (" + report.messages.join("; ") + ")";
@@ -280,15 +280,15 @@ pub bool RebaseLayer.describe(GIT_rebase.Report report) {
 }
 
 pub void RebaseLayer.report_on(GIT_rebase.Report report) {
-    if (describe(report)) {
+    if (needs_message_after_describing(report)) {
         want_message_editor();
     }
 }
 
 /// The message the stopped step proposes, in `commit_message_path`.
-pub bool RebaseLayer.write_message_file() {
+pub bool RebaseLayer.did_write_message_file() {
     str text = "";
-    match (io.read(fs.join(GIT_rebase.state_dir(gitdir), "message"))) {
+    match (io.read(fs.join(GIT_rebase.state_directory(gitdir), "message"))) {
         case Ok(str found): {
             text = found;
         }
@@ -307,7 +307,7 @@ pub bool RebaseLayer.write_message_file() {
 }
 
 pub void RebaseLayer.want_message_editor() {
-    if (!write_message_file()) {
+    if (!did_write_message_file()) {
         return;
     }
     rebase_edit_purpose = "message";
@@ -332,7 +332,7 @@ pub void RebaseLayer.want_todo_editor(str text) {
 }
 
 /// Run `$EDITOR` on `path`; false, with the reason in the status line, unless it exited 0.
-pub bool RebaseLayer.run_editor(str path) {
+pub bool RebaseLayer.did_run_editor(str path) {
     str editor = GIT_ui_model.editor_for(gitdir);
     match (os.run([editor, path])) {
         case Ok(os.ExitStatus exit_status): {
@@ -364,7 +364,7 @@ pub void RebaseLayer.launch_rebase_editor() {
     rebase_edit_purpose = "";
     rebase_edit_path = "";
     if (purpose == "todo") {
-        if (run_editor(path)) {
+        if (did_run_editor(path)) {
             match (io.read(path)) {
                 case Ok(str text): {
                     edited_todo = text;
@@ -381,7 +381,7 @@ pub void RebaseLayer.launch_rebase_editor() {
     bool should_repeat = true;
     while (should_repeat) {
         should_repeat = false;
-        if (!run_editor(path)) {
+        if (!did_run_editor(path)) {
             message = message + " -- the rebase is stopped: r c asks again";
             break;
         }
@@ -390,7 +390,7 @@ pub void RebaseLayer.launch_rebase_editor() {
                 match (GIT_rebase.continue_rebase(gitdir, worktree, Option<str>.Some(text), GIT_rebase.Declining())) {
                     case Ok(GIT_rebase.Report report): {
                         log_command("rebase --continue");
-                        if (describe(report) && write_message_file()) {
+                        if (needs_message_after_describing(report) && did_write_message_file()) {
                             should_repeat = true;
                         }
                     }
@@ -501,7 +501,7 @@ pub void RebaseLayer.offer_pull(str spec) {
         return;
     }
     if (how == "interactive") {
-        begin_rebase(GIT_rebase.PlanOpts(upstream: spec, interactive: true, autosquash: is_autosquash()), "rebase -i " + spec);
+        begin_rebase(GIT_rebase.PlanOpts(upstream: spec, is_interactive: true, should_autosquash: is_autosquash()), "rebase -i " + spec);
         return;
     }
     push_overlay(PullAsk(this, spec));
@@ -748,7 +748,7 @@ void TodoOverlay.move_line(int delta) {
     cursor = target_index;
 }
 
-void TodoOverlay.go() {
+void TodoOverlay.confirm() {
     if (cmds.size() == 0) {
         host.say("the list is empty: Esc cancels (a rebase with nothing in it is an abort)");
         return;
@@ -813,7 +813,7 @@ pub TUI_app.Action TodoOverlay.handle_key(term.Code code) {
                 host.want_todo_editor(GIT_rebase_todo.editor_text(host.gitdir, cmds, "the commits", "the new base"));
             }
             if (cmd == GIT_ui_core.CMD_SUBMIT) {
-                go();
+                confirm();
             }
             return TUI_app.Action.Redraw;
         }

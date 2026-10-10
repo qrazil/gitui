@@ -48,16 +48,16 @@ void run() {
                 write(stem + ".ops", "BINARY".to_bytes());
             }
             case Lines(List<diff.Op> ops): {
-                write(stem + ".applied", orNone(GIT_patch.apply_lines(old, ops, selected)));
-                write(stem + ".reverted", orNone(GIT_patch.revert_lines(new, ops, selected)));
+                write(stem + ".applied", or_none(GIT_patch.apply_lines(old, ops, selected)));
+                write(stem + ".reverted", or_none(GIT_patch.revert_lines(new, ops, selected)));
                 write(stem + ".ops", listing(ops));
                 if (fs.is_present(stem + ".stale")) {
                     // a text the ops were not made from, and an index no op has: both None
                     bytes stale = read(stem + ".stale");
-                    write(stem + ".stale_applied", orNone(GIT_patch.apply_lines(stale, ops, selected)));
-                    write(stem + ".stale_reverted", orNone(GIT_patch.revert_lines(stale, ops, selected)));
+                    write(stem + ".stale_applied", or_none(GIT_patch.apply_lines(stale, ops, selected)));
+                    write(stem + ".stale_reverted", or_none(GIT_patch.revert_lines(stale, ops, selected)));
                     List<int> far = [ops.size()];
-                    write(stem + ".far", orNone(GIT_patch.apply_lines(old, ops, far)));
+                    write(stem + ".far", or_none(GIT_patch.apply_lines(old, ops, far)));
                 }
             }
         }
@@ -65,7 +65,7 @@ void run() {
     }
 }
 
-bytes orNone(Option<bytes> result) {
+bytes or_none(Option<bytes> result) {
     match (result) {
         case Some(bytes data): {
             return data;

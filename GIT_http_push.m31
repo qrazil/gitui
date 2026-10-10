@@ -439,13 +439,13 @@ pub Result<Report, Error> push(str gitdir, Remote remote, str refname, str new_i
         return Result<Report, Error>.Err(Error.BadName);
     }
     GIT_http_fetch.Advertisement advertisement = discover(remote)?;
-    if (advertisement.object_format != GIT_hash.name(GIT_hash.raw_len(gitdir))) {
+    if (advertisement.object_format != GIT_hash.name(GIT_hash.raw_length(gitdir))) {
         return Result<Report, Error>.Err(Error.FormatMismatch);
     }
     if (!GIT_wire.has_cap(advertisement.capabilities, "report-status")) {
         return Result<Report, Error>.Err(Error.NoReportStatus);
     }
-    str old = GIT_hash.zero(GIT_hash.raw_len(gitdir));
+    str old = GIT_hash.zero(GIT_hash.raw_length(gitdir));
     List<str> known = [];
     Map<str, bool> seen = {};
     for (GIT_http_fetch.RemoteRef remote_ref in advertisement.refs) {
@@ -460,7 +460,7 @@ pub Result<Report, Error> push(str gitdir, Remote remote, str refname, str new_i
     if (old == new_id) {
         return Result<Report, Error>.Err(Error.UpToDate);
     }
-    if (old != GIT_hash.zero(GIT_hash.raw_len(gitdir))) {
+    if (old != GIT_hash.zero(GIT_hash.raw_length(gitdir))) {
         match (GIT_object.read(gitdir, old)) {
             case Ok(_): {
             }

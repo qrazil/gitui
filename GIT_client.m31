@@ -459,7 +459,7 @@ TUI_app.Action State.run_outline_command(str cmd, str name) {
     if (cmd == GIT_ui_core.CMD_NEXT) {
         GIT_ui_search.jump(core(), true, false);
     }
-    if (cmd == GIT_ui_core.CMD_PREV) {
+    if (cmd == GIT_ui_core.CMD_PREVIOUS) {
         GIT_ui_search.jump(core(), false, false);
     }
     if (cmd == GIT_ui_core.CMD_PICK) {

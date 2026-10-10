@@ -250,7 +250,7 @@ pub Result<Outcome, Error> pull(str gitdir, str worktree, GIT_http_push.Remote r
             return Result<Outcome, Error>.Err(Error.Fetch(error));
         }
     }
-    if (advertisement.object_format != GIT_hash.name(GIT_hash.raw_len(gitdir))) {
+    if (advertisement.object_format != GIT_hash.name(GIT_hash.raw_length(gitdir))) {
         return Result<Outcome, Error>.Err(Error.FormatMismatch);
     }
     str remote_tip = "";
@@ -328,7 +328,7 @@ void store_tracking(str gitdir, str refname, str remote_tip) {
 pub Result<Outcome, Error> pull_ssh(str gitdir, str worktree, GIT_ssh_transport.Target target) {
     Start from = start(gitdir, worktree)?;
     GIT_ssh_transport.Upload upload = ssh_failed(GIT_ssh_transport.connect_upload(target))?;
-    if (upload.advertisement.object_format != GIT_hash.name(GIT_hash.raw_len(gitdir))) {
+    if (upload.advertisement.object_format != GIT_hash.name(GIT_hash.raw_length(gitdir))) {
         upload.finish();
         return Result<Outcome, Error>.Err(Error.FormatMismatch);
     }

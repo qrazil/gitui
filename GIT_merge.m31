@@ -19,7 +19,7 @@
 //   GIT_merge.start_commit(gitdir, worktree, theirs_id, spec, opts)
 //   GIT_merge.continue_merge(gitdir, worktree, message)        -> Result<Report, Error>
 //   GIT_merge.abort_merge(gitdir, worktree)                    -> Result<bool, Error>
-//   GIT_merge.in_progress(gitdir)                              -> bool
+//   GIT_merge.is_in_progress(gitdir)                              -> bool
 //   GIT_merge.merge_head(gitdir)                               -> Option<str>
 //   GIT_merge.bases(gitdir, ours, theirs)                      -> Result<List<str>, Error>
 //   GIT_merge.stage_lines(conflicts)                           -> List<str>
@@ -50,7 +50,7 @@
 //
 // --- merge bases -------------------------------------------------------------
 //
-// One merge base: used. None: `Error.Unrelated` unless `allow_unrelated` (an
+// One merge base: used. None: `Error.Unrelated` unless `is_unrelated_allowed` (an
 // empty base then). Several (a criss-cross history): the recursive strategy's
 // virtual base. The bases, oldest first, are folded pairwise: each pair is
 // merged (recursively, with its own base) with `Temporary merge branch 1/2`
@@ -97,7 +97,7 @@ import os;
 pub enum Error {
     /// A name that is not a commit.
     NotACommit;
-    /// The two histories share no commit and `allow_unrelated` is off.
+    /// The two histories share no commit and `is_unrelated_allowed` is off.
     Unrelated;
     /// `ff_only`, and the merge is not a fast-forward.
     NotFastForward;
@@ -347,8 +347,8 @@ pub bool FastForward.eq(FastForward other) {
 }
 
 pub type StartOpts {
-    pub FastForward ff = FastForward.Allow;
-    pub bool allow_unrelated = false;
+    pub FastForward fast_forward = FastForward.Allow;
+    pub bool is_unrelated_allowed = false;
     pub GIT_diff3.Style style = GIT_diff3.Style.Merge;
     /// Replaces the generated merge message when not empty.
     pub str message = "";
@@ -437,7 +437,7 @@ bool is_absent(Side side) {
     return side.mode == 0;
 }
 
-bool is_dir(Side side) {
+bool is_directory(Side side) {
     return side.mode >> 12 == 0o04;
 }
 
@@ -445,7 +445,7 @@ bool is_reg(Side side) {
     return side.mode >> 12 == 0o10;
 }
 
-bool same_side(Side left_side, Side right_side) {
+bool is_same_side(Side left_side, Side right_side) {
     return left_side.mode == right_side.mode && left_side.id == right_side.id;
 }
 
@@ -628,7 +628,7 @@ pub Result<TreeMerge, Error> merge_trees(str gitdir, str base_tree, str ours_tre
     str ours_tree_id = tree_of(gitdir, ours_tree)?;
     str theirs_tree_id = tree_of(gitdir, theirs_tree)?;
     Ctx context = Ctx(gitdir, labels, style, [], []);
-    str merged = merge_dir(context, "", base_tree_id, ours_tree_id, theirs_tree_id)?;
+    str merged = merge_directory(context, "", base_tree_id, ours_tree_id, theirs_tree_id)?;
     if (merged == "") {
         List<GIT_object.Entry> none = [];
         merged = write_tree(gitdir, none)?;
@@ -638,7 +638,7 @@ pub Result<TreeMerge, Error> merge_trees(str gitdir, str base_tree, str ours_tre
 }
 
 // The merged tree of one directory, written; `""` when it came out empty.
-Result<str, Error> merge_dir(Ctx context, str prefix, str base_tree, str ours_tree, str theirs_tree) {
+Result<str, Error> merge_directory(Ctx context, str prefix, str base_tree, str ours_tree, str theirs_tree) {
     Map<str, Side> base = side_map(read_tree(context.gitdir, base_tree)?)?;
     Map<str, Side> ours = side_map(read_tree(context.gitdir, ours_tree)?)?;
     Map<str, Side> theirs = side_map(read_tree(context.gitdir, theirs_tree)?)?;
@@ -687,34 +687,34 @@ Result<bool, Error> merge_name(Ctx context, str prefix, str name, Side base_side
         full = prefix + "/" + name;
     }
     // Nothing to decide: the same on both sides, or only one side changed.
-    if (same_side(ours_side, theirs_side)) {
+    if (is_same_side(ours_side, theirs_side)) {
         push_side(out, name, ours_side);
         return Result<bool, Error>.Ok(true);
     }
-    if (same_side(base_side, ours_side)) {
+    if (is_same_side(base_side, ours_side)) {
         push_side(out, name, theirs_side);
         return Result<bool, Error>.Ok(true);
     }
-    if (same_side(base_side, theirs_side)) {
+    if (is_same_side(base_side, theirs_side)) {
         push_side(out, name, ours_side);
         return Result<bool, Error>.Ok(true);
     }
-    bool is_ours_tree_or_absent = is_absent(ours_side) || is_dir(ours_side);
-    bool is_theirs_tree_or_absent = is_absent(theirs_side) || is_dir(theirs_side);
+    bool is_ours_tree_or_absent = is_absent(ours_side) || is_directory(ours_side);
+    bool is_theirs_tree_or_absent = is_absent(theirs_side) || is_directory(theirs_side);
     if (is_ours_tree_or_absent && is_theirs_tree_or_absent) {
         str base_subtree = "";
-        if (is_dir(base_side)) {
+        if (is_directory(base_side)) {
             base_subtree = base_side.id;
         }
         str ours_subtree = "";
-        if (is_dir(ours_side)) {
+        if (is_directory(ours_side)) {
             ours_subtree = ours_side.id;
         }
         str theirs_subtree = "";
-        if (is_dir(theirs_side)) {
+        if (is_directory(theirs_side)) {
             theirs_subtree = theirs_side.id;
         }
-        str sub = merge_dir(context, full, base_subtree, ours_subtree, theirs_subtree)?;
+        str sub = merge_directory(context, full, base_subtree, ours_subtree, theirs_subtree)?;
         if (sub != "") {
             out.push(GIT_object.Entry(0o40000, name.to_bytes(), sub));
         }
@@ -722,7 +722,7 @@ Result<bool, Error> merge_name(Ctx context, str prefix, str name, Side base_side
     }
     // The base's file, if it had a file there.
     Side base_leaf = base_side;
-    if (is_dir(base_side)) {
+    if (is_directory(base_side)) {
         base_leaf = absent();
     }
     if (!is_ours_tree_or_absent && !is_theirs_tree_or_absent) {
@@ -738,7 +738,7 @@ Result<bool, Error> merge_name(Ctx context, str prefix, str name, Side base_side
         other = theirs_side;
         file_label = context.labels.ours;
     }
-    if (is_dir(other)) {
+    if (is_directory(other)) {
         str ours_subtree = "";
         str theirs_subtree = "";
         if (is_file_ours) {
@@ -747,10 +747,10 @@ Result<bool, Error> merge_name(Ctx context, str prefix, str name, Side base_side
             ours_subtree = other.id;
         }
         str base_subtree = "";
-        if (is_dir(base_side)) {
+        if (is_directory(base_side)) {
             base_subtree = base_side.id;
         }
-        str sub = merge_dir(context, full, base_subtree, ours_subtree, theirs_subtree)?;
+        str sub = merge_directory(context, full, base_subtree, ours_subtree, theirs_subtree)?;
         if (sub != "") {
             out.push(GIT_object.Entry(0o40000, name.to_bytes(), sub));
             str moved = unique_name(name, file_label, taken);
@@ -1028,7 +1028,7 @@ pub Result<bool, Error> ref_update(str gitdir, str name, str new_id, Option<str>
 // --- the state files -----------------------------------------------------------------
 
 /// Is a merge under way (`.git/MERGE_HEAD` exists)?
-pub bool in_progress(str gitdir) {
+pub bool is_in_progress(str gitdir) {
     return fs.is_present(fs.join(gitdir, "MERGE_HEAD"));
 }
 
@@ -1339,7 +1339,7 @@ List<str> dedupe(List<str> sorted) {
 List<str> tree_differences(Map<str, Side> left_sides, Map<str, Side> right_sides) {
     List<str> out = [];
     for (str path in left_sides.keys()) {
-        if (!same_side(left_sides.get(path).or(absent()), right_sides.get(path).or(absent()))) {
+        if (!is_same_side(left_sides.get(path).or(absent()), right_sides.get(path).or(absent()))) {
             out.push(path);
         }
     }
@@ -1508,7 +1508,7 @@ pub Result<Report, Error> start(str gitdir, str worktree, str spec, StartOpts op
 ///     the index holding stages 1/2/3, `Ending.Conflicts`.
 /// `ORIG_HEAD` is HEAD as it was, for every merge that gets past the checks.
 pub Result<Report, Error> start_commit(str gitdir, str worktree, str theirs, str spec, StartOpts opts) {
-    if (in_progress(gitdir)) {
+    if (is_in_progress(gitdir)) {
         return Result<Report, Error>.Err(Error.InProgress);
     }
     GIT_refs.Head head = GIT_refs.Head.Unborn("");
@@ -1542,7 +1542,7 @@ pub Result<Report, Error> start_commit(str gitdir, str worktree, str theirs, str
         return Result<Report, Error>.Ok(Report(Ending.UpToDate, ours, ours_tree, none, ["Already up to date."]));
     }
     bool can_fast_forward = graph_is_ancestor(gitdir, ours, theirs)?;
-    if (can_fast_forward && opts.ff != FastForward.Never) {
+    if (can_fast_forward && opts.fast_forward != FastForward.Never) {
         GIT_index.Index index = read_index(gitdir)?;
         match (GIT_checkout.apply_tree_diff(gitdir, worktree, ours_tree, theirs_tree, index)) {
             case Ok(_): {
@@ -1555,12 +1555,12 @@ pub Result<Report, Error> start_commit(str gitdir, str worktree, str theirs, str
         ref_update(gitdir, ref_name, theirs, Option<str>.Some(ours), "merge " + spec + ": Fast-forward")?;
         return Result<Report, Error>.Ok(Report(Ending.FastForwarded, theirs, theirs_tree, none, ["Fast-forward"]));
     }
-    if (opts.ff == FastForward.Only) {
+    if (opts.fast_forward == FastForward.Only) {
         return Result<Report, Error>.Err(Error.NotFastForward);
     }
     refuse_signing(gitdir)?;
     List<str> found = bases(gitdir, ours, theirs)?;
-    if (found.size() == 0 && !opts.allow_unrelated) {
+    if (found.size() == 0 && !opts.is_unrelated_allowed) {
         return Result<Report, Error>.Err(Error.Unrelated);
     }
     BaseTree base = base_for(gitdir, ours, theirs, opts.style)?;
@@ -1583,7 +1583,7 @@ pub Result<Report, Error> start_commit(str gitdir, str worktree, str theirs, str
     }
     write_state(gitdir, "MERGE_HEAD", theirs + "\n")?;
     str mode = "";
-    if (opts.ff == FastForward.Never) {
+    if (opts.fast_forward == FastForward.Never) {
         mode = "no-ff";
     }
     write_state(gitdir, "MERGE_MODE", mode)?;
@@ -1595,7 +1595,7 @@ pub Result<Report, Error> start_commit(str gitdir, str worktree, str theirs, str
 // A merge commit would be signed by git when `commit.gpgsign` is true; this
 // client cannot, so it stops before it changes anything.
 Result<bool, Error> refuse_signing(str gitdir) {
-    if (GIT_config.commit_gpgsign(gitdir)) {
+    if (GIT_config.is_commit_gpgsign_enabled(gitdir)) {
         return Result<bool, Error>.Err(Error.Unsupported(GIT_config.GPGSIGN_REFUSAL));
     }
     return Result<bool, Error>.Ok(true);
@@ -1688,7 +1688,7 @@ pub Result<str, Error> index_tree(str gitdir, List<GIT_index.Entry> entries, int
             continue;
         }
         int group_end = entry_index + 1;
-        while (group_end < end_index && shares_prefix(entries[group_end].path, path, slash + 1)) {
+        while (group_end < end_index && has_shared_prefix(entries[group_end].path, path, slash + 1)) {
             group_end = group_end + 1;
         }
         str sub = index_tree(gitdir, entries, entry_index, group_end, slash + 1)?;
@@ -1699,7 +1699,7 @@ pub Result<str, Error> index_tree(str gitdir, List<GIT_index.Entry> entries, int
 }
 
 // Do `a` and `b` agree on their first `count` bytes?
-bool shares_prefix(bytes left_path, bytes right_path, int count) {
+bool has_shared_prefix(bytes left_path, bytes right_path, int count) {
     if (left_path.size() < count || right_path.size() < count) {
         return false;
     }
@@ -1721,7 +1721,7 @@ bool shares_prefix(bytes left_path, bytes right_path, int count) {
 /// A path staged differently from HEAD that also has unstaged edits refuses
 /// (`LocalChanges`) with nothing written, as `reset --merge` does.
 pub Result<bool, Error> abort_merge(str gitdir, str worktree) {
-    if (!in_progress(gitdir)) {
+    if (!is_in_progress(gitdir)) {
         return Result<bool, Error>.Err(Error.NoMerge);
     }
     GIT_refs.Head head = GIT_refs.Head.Unborn("");
@@ -2023,7 +2023,7 @@ pub Result<bool, Error> take_side(str gitdir, str worktree, str path, int stage)
 /// Is the file at `path` (the commit message file) newer than the merge's
 /// `MERGE_MSG`? `COMMIT_EDITMSG` outlives the commit that wrote it, so during a
 /// merge only a file written after the merge began is the person's own text.
-pub bool message_file_is_current(str gitdir, str path) {
+pub bool is_message_file_current(str gitdir, str path) {
     match (fs.stat(path)) {
         case Ok(fs.Stat mine): {
             match (fs.stat(fs.join(gitdir, "MERGE_MSG"))) {

@@ -39,7 +39,7 @@
 
 import text.diff;
 
-const int SNAKE_CNT = 20;
+const int SNAKE_COUNT = 20;
 const int HEUR_MIN_COST = 256;
 const int MAX_COST_MIN = 256;
 const int K_HEUR = 4;
@@ -48,14 +48,14 @@ const int SIMSCAN_WINDOW = 100;
 const int KPDIS_RUN = 4;
 const int LINE_MAX = 1073741823;
 
-/// One run of difference: `a[a_start .. a_start + a_len)` is replaced by
-/// `b[b_start .. b_start + b_len)`. Either length may be 0 (a pure insertion
+/// One run of difference: `a[a_start .. a_start + a_length)` is replaced by
+/// `b[b_start .. b_start + b_length)`. Either length may be 0 (a pure insertion
 /// or deletion).
 pub type Edit {
     pub int a_start;
-    pub int a_len;
+    pub int a_length;
     pub int b_start;
-    pub int b_len;
+    pub int b_length;
 }
 
 /// The result of comparing two line lists: for each line, whether it was
@@ -110,11 +110,11 @@ LineKey key_of(bytes line) {
     return LineKey(line, digest);
 }
 
-// `a` / `b` are the class number of every line; `count_a` / `count_b` say how
+// `classes_a` / `classes_b` are the class number of every line; `count_a` / `count_b` say how
 // many lines of each file belong to each class.
 type Classes {
-    List<int> a;
-    List<int> b;
+    List<int> classes_a;
+    List<int> classes_b;
     List<int> count_a;
     List<int> count_b;
 }
@@ -124,12 +124,12 @@ Classes classify(List<bytes> lines_a, List<bytes> lines_b) {
     Classes classes = Classes([], [], [], []);
     for (bytes line in lines_a) {
         int id = class_of(seen, classes, line);
-        classes.a.push(id);
+        classes.classes_a.push(id);
         classes.count_a[id] = classes.count_a[id] + 1;
     }
     for (bytes line in lines_b) {
         int id = class_of(seen, classes, line);
-        classes.b.push(id);
+        classes.classes_b.push(id);
         classes.count_b[id] = classes.count_b[id] + 1;
     }
     return classes;
@@ -165,10 +165,10 @@ int bogosqrt(int value) {
 }
 
 type Split {
-    int i1;
-    int i2;
-    bool min_lo;
-    bool min_hi;
+    int index1;
+    int index2;
+    bool is_minimal_low;
+    bool is_minimal_high;
 }
 
 // The two files after cleanup: class numbers of the lines that are still in
@@ -214,8 +214,8 @@ void Env.recs_cmp(int off1_in, int lim1_in, int off2_in, int lim2_in, bool needs
         }
     } else {
         Split spl = split_box(off1, lim1, off2, lim2, needs_minimum);
-        recs_cmp(off1, spl.i1, off2, spl.i2, spl.min_lo);
-        recs_cmp(spl.i1, lim1, spl.i2, lim2, spl.min_hi);
+        recs_cmp(off1, spl.index1, off2, spl.index2, spl.is_minimal_low);
+        recs_cmp(spl.index1, lim1, spl.index2, lim2, spl.is_minimal_high);
     }
 }
 
@@ -264,15 +264,15 @@ Split Env.split_box(int off1, int lim1, int off2, int lim2, bool needs_minimum) 
                 index1 = index1 + 1;
                 index2 = index2 + 1;
             }
-            if (index1 - prev1 > SNAKE_CNT) {
+            if (index1 - prev1 > SNAKE_COUNT) {
                 did_find_snake = true;
             }
             kvdf[diagonal + offset] = index1;
             if (odd == 1 && bmin <= diagonal && diagonal <= bmax && kvdb[diagonal + offset] <= index1) {
-                spl.i1 = index1;
-                spl.i2 = index2;
-                spl.min_lo = true;
-                spl.min_hi = true;
+                spl.index1 = index1;
+                spl.index2 = index2;
+                spl.is_minimal_low = true;
+                spl.is_minimal_high = true;
                 return spl;
             }
             diagonal = diagonal - 2;
@@ -303,25 +303,25 @@ Split Env.split_box(int off1, int lim1, int off2, int lim2, bool needs_minimum) 
                 index1 = index1 - 1;
                 index2 = index2 - 1;
             }
-            if (prev1 - index1 > SNAKE_CNT) {
+            if (prev1 - index1 > SNAKE_COUNT) {
                 did_find_snake = true;
             }
             kvdb[diagonal + offset] = index1;
             if (odd == 0 && fmin <= diagonal && diagonal <= fmax && index1 <= kvdf[diagonal + offset]) {
-                spl.i1 = index1;
-                spl.i2 = index2;
-                spl.min_lo = true;
-                spl.min_hi = true;
+                spl.index1 = index1;
+                spl.index2 = index2;
+                spl.is_minimal_low = true;
+                spl.is_minimal_high = true;
                 return spl;
             }
             diagonal = diagonal - 2;
         }
         if (!needs_minimum) {
             if (did_find_snake && edit_cost > HEUR_MIN_COST) {
-                if (heuristic_forward(spl, off1, lim1, off2, lim2, fmin, fmax, fmid, edit_cost)) {
+                if (did_find_forward_heuristic(spl, off1, lim1, off2, lim2, fmin, fmax, fmid, edit_cost)) {
                     return spl;
                 }
-                if (heuristic_backward(spl, off1, lim1, off2, lim2, bmin, bmax, bmid, edit_cost)) {
+                if (did_find_backward_heuristic(spl, off1, lim1, off2, lim2, bmin, bmax, bmid, edit_cost)) {
                     return spl;
                 }
             }
@@ -335,7 +335,7 @@ Split Env.split_box(int off1, int lim1, int off2, int lim2, bool needs_minimum) 
 
 // The forward half of xdiff's "interesting snake" heuristic: a diagonal that
 // has already run a long way along a long match is taken as the split.
-bool Env.heuristic_forward(Split spl, int off1, int lim1, int off2, int lim2, int fmin, int fmax, int fmid, int edit_cost) {
+bool Env.did_find_forward_heuristic(Split spl, int off1, int lim1, int off2, int lim2, int fmin, int fmax, int fmid, int edit_cost) {
     int offset = kv_off;
     int best = 0;
     int diagonal = fmax;
@@ -344,13 +344,13 @@ bool Env.heuristic_forward(Split spl, int off1, int lim1, int off2, int lim2, in
         int index1 = kvdf[diagonal + offset];
         int index2 = index1 - diagonal;
         int progress = (index1 - off1) + (index2 - off2) - diagonal_distance;
-        if (progress > K_HEUR * edit_cost && progress > best && off1 + SNAKE_CNT <= index1 && index1 < lim1 && off2 + SNAKE_CNT <= index2 && index2 < lim2) {
+        if (progress > K_HEUR * edit_cost && progress > best && off1 + SNAKE_COUNT <= index1 && index1 < lim1 && off2 + SNAKE_COUNT <= index2 && index2 < lim2) {
             int run_length = 1;
             while (ha1[index1 - run_length] == ha2[index2 - run_length]) {
-                if (run_length == SNAKE_CNT) {
+                if (run_length == SNAKE_COUNT) {
                     best = progress;
-                    spl.i1 = index1;
-                    spl.i2 = index2;
+                    spl.index1 = index1;
+                    spl.index2 = index2;
                     break;
                 }
                 run_length = run_length + 1;
@@ -359,14 +359,14 @@ bool Env.heuristic_forward(Split spl, int off1, int lim1, int off2, int lim2, in
         diagonal = diagonal - 2;
     }
     if (best > 0) {
-        spl.min_lo = true;
-        spl.min_hi = false;
+        spl.is_minimal_low = true;
+        spl.is_minimal_high = false;
         return true;
     }
     return false;
 }
 
-bool Env.heuristic_backward(Split spl, int off1, int lim1, int off2, int lim2, int bmin, int bmax, int bmid, int edit_cost) {
+bool Env.did_find_backward_heuristic(Split spl, int off1, int lim1, int off2, int lim2, int bmin, int bmax, int bmid, int edit_cost) {
     int offset = kv_off;
     int best = 0;
     int diagonal = bmax;
@@ -375,13 +375,13 @@ bool Env.heuristic_backward(Split spl, int off1, int lim1, int off2, int lim2, i
         int index1 = kvdb[diagonal + offset];
         int index2 = index1 - diagonal;
         int progress = (lim1 - index1) + (lim2 - index2) - diagonal_distance;
-        if (progress > K_HEUR * edit_cost && progress > best && off1 < index1 && index1 <= lim1 - SNAKE_CNT && off2 < index2 && index2 <= lim2 - SNAKE_CNT) {
+        if (progress > K_HEUR * edit_cost && progress > best && off1 < index1 && index1 <= lim1 - SNAKE_COUNT && off2 < index2 && index2 <= lim2 - SNAKE_COUNT) {
             int run_length = 0;
             while (ha1[index1 + run_length] == ha2[index2 + run_length]) {
-                if (run_length == SNAKE_CNT - 1) {
+                if (run_length == SNAKE_COUNT - 1) {
                     best = progress;
-                    spl.i1 = index1;
-                    spl.i2 = index2;
+                    spl.index1 = index1;
+                    spl.index2 = index2;
                     break;
                 }
                 run_length = run_length + 1;
@@ -390,8 +390,8 @@ bool Env.heuristic_backward(Split spl, int off1, int lim1, int off2, int lim2, i
         diagonal = diagonal - 2;
     }
     if (best > 0) {
-        spl.min_lo = false;
-        spl.min_hi = true;
+        spl.is_minimal_low = false;
+        spl.is_minimal_high = true;
         return true;
     }
     return false;
@@ -434,15 +434,15 @@ Split Env.furthest(Split spl, int off1, int lim1, int off2, int lim2, int fmin, 
         diagonal = diagonal - 2;
     }
     if ((lim1 + lim2) - bbest < fbest - (off1 + off2)) {
-        spl.i1 = fbest1;
-        spl.i2 = fbest - fbest1;
-        spl.min_lo = true;
-        spl.min_hi = false;
+        spl.index1 = fbest1;
+        spl.index2 = fbest - fbest1;
+        spl.is_minimal_low = true;
+        spl.is_minimal_high = false;
     } else {
-        spl.i1 = bbest1;
-        spl.i2 = bbest - bbest1;
-        spl.min_lo = false;
-        spl.min_hi = true;
+        spl.index1 = bbest1;
+        spl.index2 = bbest - bbest1;
+        spl.is_minimal_low = false;
+        spl.is_minimal_high = true;
     }
     return spl;
 }
@@ -473,7 +473,7 @@ int abs_of(int x) {
 // xdl_clean_mmatch: should a line that occurs very often in the other file
 // (dis == 2) be thrown out, because it sits in a run of lines that mostly have
 // no counterpart?
-bool clean_mmatch(List<int> dis, int index, int s_in, int e_in) {
+bool should_clean_mmatch(List<int> dis, int index, int s_in, int e_in) {
     int scan_start = s_in;
     int scan_end = e_in;
     if (index - scan_start > SIMSCAN_WINDOW) {
@@ -540,7 +540,7 @@ void discard(List<int> cls, List<int> other_count, int dstart, int dend, List<bo
     }
     index = dstart;
     while (index <= dend) {
-        if (dis[index] == 1 || (dis[index] == 2 && !clean_mmatch(dis, index, dstart, dend))) {
+        if (dis[index] == 1 || (dis[index] == 2 && !should_clean_mmatch(dis, index, dstart, dend))) {
             kept_classes.push(cls[index]);
             rindex.push(index);
         } else {
@@ -570,7 +570,7 @@ Group group_init(List<bool> rchg) {
 }
 
 // True when there is no next group.
-bool group_next(List<bool> rchg, Group group) {
+bool has_no_next_group(List<bool> rchg, Group group) {
     if (group.end == rchg.size()) {
         return true;
     }
@@ -582,7 +582,7 @@ bool group_next(List<bool> rchg, Group group) {
     return false;
 }
 
-bool group_previous(List<bool> rchg, Group group) {
+bool has_no_previous_group(List<bool> rchg, Group group) {
     if (group.start == 0) {
         return true;
     }
@@ -595,7 +595,7 @@ bool group_previous(List<bool> rchg, Group group) {
 }
 
 // True when the group could not slide down by one line.
-bool group_slide_down(List<bool> rchg, List<int> cls, Group group) {
+bool is_unable_to_slide_down(List<bool> rchg, List<int> cls, Group group) {
     if (group.end < rchg.size() && cls[group.start] == cls[group.end]) {
         rchg[group.start] = false;
         group.start = group.start + 1;
@@ -609,7 +609,7 @@ bool group_slide_down(List<bool> rchg, List<int> cls, Group group) {
     return true;
 }
 
-bool group_slide_up(List<bool> rchg, List<int> cls, Group group) {
+bool is_unable_to_slide_up(List<bool> rchg, List<int> cls, Group group) {
     if (group.start > 0 && cls[group.start - 1] == cls[group.end - 1]) {
         group.start = group.start - 1;
         rchg[group.start] = true;
@@ -651,7 +651,7 @@ type Score {
 }
 
 type Measure {
-    bool end_of_file;
+    bool is_end_of_file;
     int indent;
     int pre_blank;
     int pre_indent;
@@ -686,7 +686,7 @@ int get_indent(bytes line) {
 Measure measure_split(List<bytes> lines, int split) {
     Measure measure = Measure(false, -1, 0, -1, 0, -1);
     if (split >= lines.size()) {
-        measure.end_of_file = true;
+        measure.is_end_of_file = true;
     } else {
         measure.indent = get_indent(lines[split]);
     }
@@ -723,7 +723,7 @@ void score_add_split(Measure measure, Score score) {
     if (measure.pre_indent == -1 && measure.pre_blank == 0) {
         score.penalty = score.penalty + START_OF_FILE_PENALTY;
     }
-    if (measure.end_of_file) {
+    if (measure.is_end_of_file) {
         score.penalty = score.penalty + END_OF_FILE_PENALTY;
     }
     int post_blank = 0;
@@ -791,18 +791,18 @@ void compact(List<bool> rchg, List<int> cls, List<bool> rchg_other, List<bytes> 
             while (true) {
                 groupsize = group.end - group.start;
                 end_matching_other = -1;
-                while (!group_slide_up(rchg, cls, group)) {
-                    group_previous(rchg_other, other_group);
+                while (!is_unable_to_slide_up(rchg, cls, group)) {
+                    has_no_previous_group(rchg_other, other_group);
                 }
                 earliest_end = group.end;
                 if (other_group.end > other_group.start) {
                     end_matching_other = group.end;
                 }
                 while (true) {
-                    if (group_slide_down(rchg, cls, group)) {
+                    if (is_unable_to_slide_down(rchg, cls, group)) {
                         break;
                     }
-                    group_next(rchg_other, other_group);
+                    has_no_next_group(rchg_other, other_group);
                     if (other_group.end > other_group.start) {
                         end_matching_other = group.end;
                     }
@@ -813,8 +813,8 @@ void compact(List<bool> rchg, List<int> cls, List<bool> rchg_other, List<bytes> 
             }
             if (group.end != earliest_end && end_matching_other != -1) {
                 while (other_group.end == other_group.start) {
-                    group_slide_up(rchg, cls, group);
-                    group_previous(rchg_other, other_group);
+                    is_unable_to_slide_up(rchg, cls, group);
+                    has_no_previous_group(rchg_other, other_group);
                 }
             } else if (group.end != earliest_end && should_use_indent) {
                 int shift = earliest_end;
@@ -837,15 +837,15 @@ void compact(List<bool> rchg, List<int> cls, List<bool> rchg_other, List<bytes> 
                     shift = shift + 1;
                 }
                 while (group.end > best_shift) {
-                    group_slide_up(rchg, cls, group);
-                    group_previous(rchg_other, other_group);
+                    is_unable_to_slide_up(rchg, cls, group);
+                    has_no_previous_group(rchg_other, other_group);
                 }
             }
         }
-        if (group_next(rchg, group)) {
+        if (has_no_next_group(rchg, group)) {
             break;
         }
-        group_next(rchg_other, other_group);
+        has_no_next_group(rchg_other, other_group);
     }
 }
 
@@ -872,20 +872,20 @@ Diff diff_lines_with(List<bytes> lines_a, List<bytes> lines_b, bool should_use_i
     List<bool> flags_b = [false; size_b];
     int lim = min_of(size_a, size_b);
     int dstart = 0;
-    while (dstart < lim && classes.a[dstart] == classes.b[dstart]) {
+    while (dstart < lim && classes.classes_a[dstart] == classes.classes_b[dstart]) {
         dstart = dstart + 1;
     }
     int suffix = 0;
     int room = lim - dstart;
-    while (suffix < room && classes.a[size_a - 1 - suffix] == classes.b[size_b - 1 - suffix]) {
+    while (suffix < room && classes.classes_a[size_a - 1 - suffix] == classes.classes_b[size_b - 1 - suffix]) {
         suffix = suffix + 1;
     }
     List<int> keep_a = [];
     List<int> keep_b = [];
     List<int> from_a = [];
     List<int> from_b = [];
-    discard(classes.a, classes.count_b, dstart, size_a - suffix - 1, flags_a, keep_a, from_a);
-    discard(classes.b, classes.count_a, dstart, size_b - suffix - 1, flags_b, keep_b, from_b);
+    discard(classes.classes_a, classes.count_b, dstart, size_a - suffix - 1, flags_a, keep_a, from_a);
+    discard(classes.classes_b, classes.count_a, dstart, size_b - suffix - 1, flags_b, keep_b, from_b);
     int reduced_a = keep_a.size();
     int reduced_b = keep_b.size();
     int ndiags = reduced_a + reduced_b + 3;
@@ -895,9 +895,9 @@ Diff diff_lines_with(List<bytes> lines_a, List<bytes> lines_b, bool should_use_i
     }
     Env env = Env(keep_a, keep_b, from_a, from_b, flags_a, flags_b, [0; ndiags + 1], [0; ndiags + 1], reduced_b + 1, mxcost);
     env.recs_cmp(0, reduced_a, 0, reduced_b, false);
-    compact(flags_a, classes.a, flags_b, lines_a, should_use_indent);
-    compact(flags_b, classes.b, flags_a, lines_b, should_use_indent);
-    return Diff(flags_a, flags_b, classes.a, classes.b);
+    compact(flags_a, classes.classes_a, flags_b, lines_a, should_use_indent);
+    compact(flags_b, classes.classes_b, flags_a, lines_b, should_use_indent);
+    return Diff(flags_a, flags_b, classes.classes_a, classes.classes_b);
 }
 
 /// The groups of changed lines in `d`, in order (xdl_build_script).

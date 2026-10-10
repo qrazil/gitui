@@ -98,7 +98,7 @@ pub void MergeLayer.settle_merge_picks() {
 /// `git merge [--no-ff | --ff-only] <spec>`: `spec` is a branch, `origin/main`,
 /// a tag or a commit id. The outcome is the status line.
 pub void MergeLayer.start_merge(str spec, GIT_merge.FastForward fast_forward) {
-    GIT_merge.StartOpts opts = GIT_merge.StartOpts(ff: fast_forward, style: GIT_merge.configured_style(gitdir));
+    GIT_merge.StartOpts opts = GIT_merge.StartOpts(fast_forward: fast_forward, style: GIT_merge.configured_style(gitdir));
     str flag = "";
     if (fast_forward.eq(GIT_merge.FastForward.Never)) {
         flag = " --no-ff";
@@ -186,13 +186,13 @@ pub void MergeLayer.open_resolve_current() {
 /// Open the resolution view on the unmerged `path`.
 pub void MergeLayer.open_resolve(str path) {
     ResolveOverlay view = ResolveOverlay(this, path);
-    if (view.load()) {
+    if (view.did_load()) {
         push_overlay(view);
     }
 }
 
 /// True once after the editor ran on the file the view shows.
-pub bool MergeLayer.take_dirty() {
+pub bool MergeLayer.did_take_dirty() {
     bool was_dirty = is_resolve_dirty;
     is_resolve_dirty = false;
     return was_dirty;
@@ -207,7 +207,7 @@ pub void MergeLayer.want_editor(str path) {
 }
 
 /// Stage `path` as it is: the resolution is complete.
-pub bool MergeLayer.stage_resolved(str path) {
+pub bool MergeLayer.did_stage_resolved(str path) {
     match (GIT_merge.mark_resolved(gitdir, worktree, path)) {
         case Ok(_): {
             log_command("add " + path);
@@ -223,7 +223,7 @@ pub bool MergeLayer.stage_resolved(str path) {
 }
 
 /// Take one side of `path` whole (stage 2 ours, 3 theirs, 1 base).
-pub bool MergeLayer.take_whole(str path, int stage, str word) {
+pub bool MergeLayer.did_take_whole(str path, int stage, str word) {
     match (GIT_merge.take_side(gitdir, worktree, path, stage)) {
         case Ok(_): {
             log_command("checkout --" + word + " " + path);
@@ -274,7 +274,7 @@ pub void MergeLayer.launch_resolve_editor() {
     }
     is_resolve_dirty = true;
     if (has_run && did_have_markers && markers_in(full) == 0) {
-        if (stage_resolved(path)) {
+        if (did_stage_resolved(path)) {
             is_resolve_dirty = false;
             pop_overlay();
         }
@@ -410,7 +410,7 @@ str ResolveOverlay.full() {
 }
 
 /// Read the file and lay it out. False (with a message) if it cannot be read.
-bool ResolveOverlay.load() {
+bool ResolveOverlay.did_load() {
     match (io.read_bytes(full())) {
         case Ok(bytes found): {
             content = found;
@@ -456,7 +456,7 @@ Option<GIT_status.Unmerged> ResolveOverlay.entry() {
 }
 
 /// Write `bytes` to the file, remembering what was there.
-bool ResolveOverlay.write(bytes next) {
+bool ResolveOverlay.did_write(bytes next) {
     match (io.write_bytes(full(), next)) {
         case Ok(_): {
             history.push(content);
@@ -493,12 +493,12 @@ void ResolveOverlay.choose(GIT_diff3.Choice choice, str word) {
         }
     }
     bytes next = GIT_diff3.render(GIT_diff3.resolve_at(segments, current, choice));
-    if (!write(next)) {
+    if (!did_write(next)) {
         return;
     }
     parse();
     if (count() == 0) {
-        if (host.stage_resolved(path)) {
+        if (host.did_stage_resolved(path)) {
             host.pop_overlay();
         }
         return;
@@ -531,7 +531,7 @@ void ResolveOverlay.choose_whole(str word) {
             return;
         }
     }
-    if (host.take_whole(path, stage, word)) {
+    if (host.did_take_whole(path, stage, word)) {
         host.pop_overlay();
     }
 }
@@ -570,8 +570,8 @@ void ResolveOverlay.move(int delta) {
 }
 
 pub TUI_app.Action ResolveOverlay.handle_key(term.Code code) {
-    if (host.take_dirty()) {
-        if (load()) {
+    if (host.did_take_dirty()) {
+        if (did_load()) {
             history = [];
         }
     }
@@ -595,7 +595,7 @@ pub TUI_app.Action ResolveOverlay.handle_key(term.Code code) {
             if (cmd == GIT_ui_core.CMD_NEXT) {
                 move(1);
             }
-            if (cmd == GIT_ui_core.CMD_PREV) {
+            if (cmd == GIT_ui_core.CMD_PREVIOUS) {
                 move(-1);
             }
             if (cmd == GIT_ui_core.CMD_DOWN) {
@@ -629,14 +629,14 @@ void ResolveOverlay.stage_as_is() {
         host.say("conflict markers remain in " + path + ": resolve them, or e to edit");
         return;
     }
-    if (host.stage_resolved(path)) {
+    if (host.did_stage_resolved(path)) {
         host.pop_overlay();
     }
 }
 
 pub void ResolveOverlay.render(TUI_buffer.Buffer buffer, TUI_geometry.Rect area) {
-    if (host.take_dirty()) {
-        if (load()) {
+    if (host.did_take_dirty()) {
+        if (did_load()) {
             history = [];
         }
     }

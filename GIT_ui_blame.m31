@@ -245,7 +245,7 @@ str BlameOverlay.notice_suffix() {
 str BlameOverlay.format(GIT_blame.Line line, int number, int number_width) {
     Margin margin = margin_of(host.gitdir, margins, line.commit);
     str id = line.commit.substr(0, 7);
-    if (line.boundary) {
+    if (line.is_boundary) {
         id = "^" + line.commit.substr(0, 6);
     }
     return id + " " + pad(margin.who, 12) + " " + margin.day + " " + pad_left(number.to_str(), number_width) + " " + line.text.utf8().or("(not UTF-8)");

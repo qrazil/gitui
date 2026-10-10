@@ -332,7 +332,7 @@ List<str> sub_segments(List<str> segments, int start, int end) {
 /// Does `path` match `pattern` the way a pathname glob does: `*` and `?` stay
 /// inside one `/`-separated segment, a whole `**` segment crosses any number
 /// of them. What `includeIf "gitdir:..."` and `"onbranch:..."` need.
-pub bool path_glob(str pattern, str path) {
+pub bool is_path_glob_match(str pattern, str path) {
     return is_matching_segments(pattern.split("/"), 0, path.split("/"), 0);
 }
 

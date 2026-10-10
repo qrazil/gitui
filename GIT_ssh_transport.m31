@@ -240,16 +240,16 @@ pub type Target {
 const str AGENT = "gitui-ssh/1";
 const str DEFAULT_KEY = "id_ed25519";
 
-str home_dir() {
+str home_directory() {
     return os.env("HOME").or("");
 }
 
 str expand_home(str path) {
     if (path == "~") {
-        return home_dir();
+        return home_directory();
     }
     if (path.starts_with("~/")) {
-        return fs.join(home_dir(), path.substr(2, path.size()));
+        return fs.join(home_directory(), path.substr(2, path.size()));
     }
     return path;
 }
@@ -280,7 +280,7 @@ List<str> fields_of(str line) {
 /// Does the ssh_config `text` say `HashKnownHosts yes` for `host`? The first
 /// value wins, as in ssh; `Host` blocks are matched with their globs and
 /// `!` negations; a `Match` block is not understood and so applies to nothing.
-pub bool hashes_known_hosts(str config_text, str host) {
+pub bool should_hash_known_hosts(str config_text, str host) {
     bool is_applicable = true;
     for (str raw in config_text.split("\n")) {
         List<str> words = fields_of(raw.trim());
@@ -294,10 +294,10 @@ pub bool hashes_known_hosts(str config_text, str host) {
             for (int i in 1 .. words.size()) {
                 str pattern = words[i];
                 if (pattern.starts_with("!")) {
-                    if (GIT_remote.glob_matches(pattern.substr(1, pattern.size()), host)) {
+                    if (GIT_remote.is_glob_match(pattern.substr(1, pattern.size()), host)) {
                         is_negated = true;
                     }
-                } else if (GIT_remote.glob_matches(pattern, host)) {
+                } else if (GIT_remote.is_glob_match(pattern, host)) {
                     is_hit = true;
                 }
             }
@@ -324,8 +324,8 @@ pub Result<Target, Error> target_for(GIT_remote.Remote remote) {
         return Result<Target, Error>.Err(Error.BadUrl);
     }
     str config_text = "";
-    str config_path = fs.join(fs.join(home_dir(), ".ssh"), "config");
-    if (home_dir() != "") {
+    str config_path = fs.join(fs.join(home_directory(), ".ssh"), "config");
+    if (home_directory() != "") {
         config_text = read_text(config_path);
     }
     GIT_remote.SshTarget resolved = GIT_remote.ssh_config_resolve(config_text, remote.host, remote.user, remote.port);
@@ -349,13 +349,13 @@ pub Result<Target, Error> target_for(GIT_remote.Remote remote) {
             for (str file in resolved.identity_files) {
                 identities.push(expand_home(file));
             }
-            str fallback = fs.join(fs.join(home_dir(), ".ssh"), DEFAULT_KEY);
+            str fallback = fs.join(fs.join(home_directory(), ".ssh"), DEFAULT_KEY);
             if (!identities.contains(fallback)) {
                 identities.push(fallback);
             }
         }
     }
-    str known = fs.join(fs.join(home_dir(), ".ssh"), "known_hosts");
+    str known = fs.join(fs.join(home_directory(), ".ssh"), "known_hosts");
     match (os.env("GITUI_SSH_KNOWN_HOSTS")) {
         case Some(str overridden): {
             known = overridden;
@@ -363,7 +363,7 @@ pub Result<Target, Error> target_for(GIT_remote.Remote remote) {
         case None: {
         }
     }
-    return Result<Target, Error>.Ok(Target(resolved.hostname, port, user, remote.path, identities, known, hashes_known_hosts(config_text, remote.host)));
+    return Result<Target, Error>.Ok(Target(resolved.hostname, port, user, remote.path, identities, known, should_hash_known_hosts(config_text, remote.host)));
 }
 
 // --- keys --------------------------------------------------------------------------
@@ -711,7 +711,7 @@ Result<GIT_wire.Advertisement, Error> advertise(Conn connection) {
 
 /// A connection to `git-upload-pack` with its ref advertisement read.
 pub type Upload {
-    pub Conn conn;
+    pub Conn connection;
     pub GIT_wire.Advertisement advertisement;
 }
 
@@ -728,26 +728,26 @@ pub str Upload.tip(str refname) {
 /// Negotiate, receive the pack for `wants` given what we `haves`, verify it
 /// and write it to `out_path`; the connection is finished either way.
 pub Result<GIT_wire.Summary, Error> Upload.fetch(List<str> wants, List<str> haves, str out_path) {
-    match (GIT_wire.fetch_pack(conn, advertisement, wants, haves, agent: AGENT)) {
+    match (GIT_wire.fetch_pack(connection, advertisement, wants, haves, agent: AGENT)) {
         case Ok(GIT_wire.DemuxResult got): {
             if (got.has_remote_error) {
-                conn.finish(false);
+                connection.finish(false);
                 return Result<GIT_wire.Summary, Error>.Err(Error.Protocol("remote: " + got.remote_error.trim()));
             }
             match (GIT_wire.verify_pack(got.pack, out_path, raw: GIT_wire.raw_of(advertisement))) {
                 case Ok(GIT_wire.Summary summary): {
-                    conn.finish(true);
+                    connection.finish(true);
                     return Result<GIT_wire.Summary, Error>.Ok(summary);
                 }
                 case Err(GIT_wire.Error why): {
-                    conn.finish(true);
+                    connection.finish(true);
                     return Result<GIT_wire.Summary, Error>.Err(Error.Protocol("the received pack is unusable: " + why.to_str()));
                 }
             }
         }
         case Err(GIT_wire.Error why): {
-            str message = conn.describe("fetch failed: " + why.to_str());
-            conn.finish(false);
+            str message = connection.describe("fetch failed: " + why.to_str());
+            connection.finish(false);
             return Result<GIT_wire.Summary, Error>.Err(Error.Protocol(message));
         }
     }
@@ -755,13 +755,13 @@ pub Result<GIT_wire.Summary, Error> Upload.fetch(List<str> wants, List<str> have
 
 /// Say goodbye (a flush) and finish: nothing is wanted after all.
 pub void Upload.finish() {
-    match (GIT_wire.say_goodbye(conn)) {
+    match (GIT_wire.say_goodbye(connection)) {
         case Ok(_): {
         }
         case Err(_): {
         }
     }
-    conn.finish(true);
+    connection.finish(true);
 }
 
 pub Result<Upload, Error> connect_upload(Target target) {
@@ -781,7 +781,7 @@ pub type PushResult {
 
 /// A connection to `git-receive-pack` with its ref advertisement read.
 pub type Receive {
-    pub Conn conn;
+    pub Conn connection;
     pub GIT_wire.Advertisement advertisement;
 }
 
@@ -791,24 +791,24 @@ pub Result<PushResult, Error> Receive.push(str gitdir, str refname, str new_id) 
     Result<GIT_wire.ReportStatus, Error> attempt = transmit(gitdir, refname, new_id);
     match (attempt) {
         case Ok(GIT_wire.ReportStatus status): {
-            conn.finish(true);
+            connection.finish(true);
             str reason = status.reason;
             if (!status.is_unpacked && reason == "") {
                 reason = "the server could not unpack the objects";
             }
-            return Result<PushResult, Error>.Ok(PushResult(status.is_unpacked && status.is_ok, reason, conn.remote_messages()));
+            return Result<PushResult, Error>.Ok(PushResult(status.is_unpacked && status.is_ok, reason, connection.remote_messages()));
         }
         case Err(Error why): {
             if (why.to_str() == Error.UpToDate.to_str() || why.to_str() == Error.Behind.to_str() || why.to_str() == Error.NonFastForward.to_str() || why.to_str() == Error.Pack.to_str() || why.to_str() == Error.BadName.to_str() || why.to_str() == Error.FormatMismatch.to_str() || why.to_str() == Error.NoReportStatus.to_str()) {
-                match (GIT_wire.say_goodbye(conn)) {
+                match (GIT_wire.say_goodbye(connection)) {
                     case Ok(_): {
                     }
                     case Err(_): {
                     }
                 }
-                conn.finish(true);
+                connection.finish(true);
             } else {
-                conn.finish(false);
+                connection.finish(false);
             }
             return Result<PushResult, Error>.Err(why);
         }
@@ -819,7 +819,7 @@ Result<GIT_wire.ReportStatus, Error> Receive.transmit(str gitdir, str refname, s
     if (!GIT_object.is_name(new_id) || !GIT_object.is_full(gitdir, new_id) || !refname.starts_with("refs/")) {
         return Result<GIT_wire.ReportStatus, Error>.Err(Error.BadName);
     }
-    if (advertisement.object_format != GIT_hash.name(GIT_hash.raw_len(gitdir))) {
+    if (advertisement.object_format != GIT_hash.name(GIT_hash.raw_length(gitdir))) {
         return Result<GIT_wire.ReportStatus, Error>.Err(Error.FormatMismatch);
     }
     if (!GIT_wire.has_cap(advertisement.capabilities, "report-status")) {
@@ -870,12 +870,12 @@ Result<GIT_wire.ReportStatus, Error> Receive.transmit(str gitdir, str refname, s
             return Result<GIT_wire.ReportStatus, Error>.Err(Error.Pack);
         }
     }
-    match (GIT_wire.send_push(conn, advertisement, old, new_id, refname, pack, agent: AGENT)) {
+    match (GIT_wire.send_push(connection, advertisement, old, new_id, refname, pack, agent: AGENT)) {
         case Ok(GIT_wire.ReportStatus status): {
             return Result<GIT_wire.ReportStatus, Error>.Ok(status);
         }
         case Err(GIT_wire.Error why): {
-            return Result<GIT_wire.ReportStatus, Error>.Err(Error.Protocol(conn.describe("push failed: " + why.to_str())));
+            return Result<GIT_wire.ReportStatus, Error>.Err(Error.Protocol(connection.describe("push failed: " + why.to_str())));
         }
     }
 }

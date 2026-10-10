@@ -189,7 +189,7 @@ pub Result<Index, Error> read(str gitdir) {
             return Result<Index, Error>.Err(Error.Io);
         }
     }
-    return parse(data, GIT_hash.raw_len(gitdir));
+    return parse(data, GIT_hash.raw_length(gitdir));
 }
 
 /// An index from its raw bytes -- no I/O, so a fixture or a test can hand
@@ -316,7 +316,7 @@ pub Entry from_stat(bytes path, fs.Stat stat, bool is_link, str blob_id) {
 /// mid-write leaves the old one intact -- the same discipline `GIT_refs.m31` uses
 /// for a ref.
 pub Result<bool, Error> write(str gitdir, Index index) {
-    bytes out = encode(index, GIT_hash.raw_len(gitdir));
+    bytes out = encode(index, GIT_hash.raw_length(gitdir));
     str path = fs.join(GIT_repository.common(gitdir), "index");
     random.System rnd = random.system();
     str temp = path + ".tmp" + rnd.hex(12);

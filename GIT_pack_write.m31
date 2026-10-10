@@ -121,7 +121,7 @@ pub Result<bytes, Error> build(str gitdir, List<str> ids) {
             }
         }
     }
-    bytes trailer = GIT_hash.digest(GIT_hash.raw_len(gitdir), out);
+    bytes trailer = GIT_hash.digest(GIT_hash.raw_length(gitdir), out);
     out.extend(trailer);
     return Result<bytes, Error>.Ok(out);
 }

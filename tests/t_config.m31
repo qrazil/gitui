@@ -85,7 +85,7 @@ if (operation == "get-all" || operation == "get" || operation == "bool") {
                         os.exit(1);
                     }
                 }
-            } else if (!config.has(name.section, name.subsection, name.key)) {
+            } else if (!config.has_key(name.section, name.subsection, name.key)) {
                 print("unset");
             } else {
                 match (config.get_bool(name.section, name.subsection, name.key)) {

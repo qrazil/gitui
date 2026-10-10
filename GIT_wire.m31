@@ -455,9 +455,9 @@ pub str zero_id(Advertisement advertisement) {
 /// Octets of an id in the advertisement's format: 32 for `sha256`, else 20.
 pub int raw_of(Advertisement advertisement) {
     if (advertisement.object_format == "sha256") {
-        return GIT_hash.SHA256_LEN;
+        return GIT_hash.SHA256_LENGTH;
     }
-    return GIT_hash.SHA1_LEN;
+    return GIT_hash.SHA1_LENGTH;
 }
 
 Result<RemoteRef, Error> parse_ref_line(bytes line, int id_width) {

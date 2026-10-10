@@ -147,7 +147,7 @@ List<str> moving_labels(str message) {
 
 Result<Stacks, Error> scan(str gitdir) {
     List<GIT_reflog.Entry> entries = [];
-    if (GIT_reflog.exists(gitdir, "HEAD")) {
+    if (GIT_reflog.has_log(gitdir, "HEAD")) {
         match (GIT_reflog.read(gitdir, "HEAD")) {
             case Ok(List<GIT_reflog.Entry> found): {
                 entries = found;

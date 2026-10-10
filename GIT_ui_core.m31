@@ -116,7 +116,7 @@ pub const str CMD_FOCUS = "focus";
 pub const str CMD_REFRESH = "refresh";
 pub const str CMD_SEARCH = "search";
 pub const str CMD_NEXT = "next";
-pub const str CMD_PREV = "prev";
+pub const str CMD_PREVIOUS = "prev";
 pub const str CMD_LOG = "log";
 pub const str CMD_HELP = "help";
 pub const str CMD_EDIT = "edit";
@@ -400,7 +400,7 @@ pub void Core.refresh() {
             log = [];
         }
     }
-    is_merging = GIT_merge.in_progress(gitdir);
+    is_merging = GIT_merge.is_in_progress(gitdir);
     is_sequencing = false;
     sequence_word = "";
     sequence_left = 0;
@@ -409,7 +409,7 @@ pub void Core.refresh() {
             is_sequencing = true;
             sequence_word = GIT_sequencer.banner(gitdir);
             sequence_left = found.todo.size();
-            if (found.stopped && sequence_left > 0) {
+            if (found.is_stopped && sequence_left > 0) {
                 sequence_left = sequence_left - 1;
             }
         }
@@ -668,7 +668,7 @@ pub List<Binding> key_table() {
     table.push(Binding(SCOPE_OUTLINE, CMD_FOCUS, ["w"], "give the jump list the keys, or take them back", "", ""));
     table.push(Binding(SCOPE_OUTLINE, CMD_SEARCH, ["/"], "search the outline and the log (smart-case: lower case ignores case)", "/", "search"));
     table.push(Binding(SCOPE_OUTLINE, CMD_NEXT, ["n"], "next search match", "n/N", "next"));
-    table.push(Binding(SCOPE_OUTLINE, CMD_PREV, ["N"], "previous search match", "", ""));
+    table.push(Binding(SCOPE_OUTLINE, CMD_PREVIOUS, ["N"], "previous search match", "", ""));
     table.push(Binding(SCOPE_OUTLINE, CMD_MERGE, ["m"], "merge: a branch into the current one, continue or abort a merge, resolve conflicts (Enter on an unmerged path)", "m", "merge"));
     table.push(Binding(SCOPE_OUTLINE, CMD_PICK, ["A"], "cherry-pick the commit under the cursor (menu: now, -x, -n, a range); while one is under way: continue, skip, abort", "A", "pick"));
     table.push(Binding(SCOPE_OUTLINE, CMD_REVERT, ["V"], "revert the commit under the cursor (menu: now, -n, a range); while one is under way: continue, skip, abort", "V", "revert"));
@@ -807,7 +807,7 @@ pub List<Binding> key_table() {
     table.push(Binding(SCOPE_RESOLVE, CMD_BOTH, ["B"], "keep both: ours, then theirs", "B", "both"));
     table.push(Binding(SCOPE_RESOLVE, CMD_BASE, ["z"], "keep the common ancestor's text (needs merge.conflictstyle=diff3)", "z", "base"));
     table.push(Binding(SCOPE_RESOLVE, CMD_NEXT, ["j", "n"], "next conflict", "j/k", "conflict"));
-    table.push(Binding(SCOPE_RESOLVE, CMD_PREV, ["k", "p"], "previous conflict", "", ""));
+    table.push(Binding(SCOPE_RESOLVE, CMD_PREVIOUS, ["k", "p"], "previous conflict", "", ""));
     table.push(Binding(SCOPE_RESOLVE, CMD_DOWN, ["down"], "scroll down a line", "", ""));
     table.push(Binding(SCOPE_RESOLVE, CMD_UP, ["up"], "scroll up a line", "", ""));
     table.push(Binding(SCOPE_RESOLVE, CMD_UNDO, ["u"], "undo the last choice", "u", "undo"));

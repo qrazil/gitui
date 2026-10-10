@@ -46,8 +46,8 @@ pub void CommitLayer.open_commit() {
 /// handoff that takes" -- so `launch_editor` below is where the actual
 /// launch happens, called back once the terminal is cooked again.
 pub void CommitLayer.edit_message() {
-    bool is_merge = GIT_merge.in_progress(gitdir);
-    if (!fs.is_present(commit_message_path) || (is_merge && !GIT_merge.message_file_is_current(gitdir, commit_message_path))) {
+    bool is_merge = GIT_merge.is_in_progress(gitdir);
+    if (!fs.is_present(commit_message_path) || (is_merge && !GIT_merge.is_message_file_current(gitdir, commit_message_path))) {
         // A merge under way starts from its own message (`MERGE_MSG`).
         str prefill = "";
         if (is_merge) {
@@ -163,17 +163,17 @@ pub void CommitLayer.start_amend() {
 /// second writer racing this one is refused rather than silently overwritten
 /// (`GIT_refs.m31`'s own guarantee).
 pub void CommitLayer.finish_commit() {
-    bool is_merge = GIT_merge.in_progress(gitdir);
+    bool is_merge = GIT_merge.is_in_progress(gitdir);
     if (is_merge && is_amending) {
         message = "cannot amend while a merge is under way";
         return;
     }
-    if (GIT_config.commit_gpgsign(gitdir)) {
+    if (GIT_config.is_commit_gpgsign_enabled(gitdir)) {
         message = GIT_config.GPGSIGN_REFUSAL + "; the message is kept at " + commit_message_path;
         return;
     }
     str raw = "";
-    if (is_merge && !GIT_merge.message_file_is_current(gitdir, commit_message_path)) {
+    if (is_merge && !GIT_merge.is_message_file_current(gitdir, commit_message_path)) {
         raw = GIT_merge.merge_message_text(gitdir);
     } else {
         match (io.read(commit_message_path)) {

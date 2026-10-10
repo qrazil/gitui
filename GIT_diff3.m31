@@ -94,16 +94,16 @@ pub type Merged {
 
 const int MARKER_SIZE = 7;
 
-// One stretch of the merge, in the three files' lines: [i0, i0 + chg0) of the
-// base, [i1, i1 + chg1) of ours, [i2, i2 + chg2) of theirs. `mode` says what
+// One stretch of the merge, in the three files' lines: [base_index, base_index + chg0) of the
+// base, [ours_index, ours_index + chg1) of ours, [theirs_index, theirs_index + chg2) of theirs. `mode` says what
 // to emit: 0 a conflict, 1 ours, 2 theirs.
 type Piece {
     int mode;
-    int i0;
+    int base_index;
     int chg0;
-    int i1;
+    int ours_index;
     int chg1;
-    int i2;
+    int theirs_index;
     int chg2;
 }
 
@@ -178,20 +178,20 @@ void append_piece(List<Piece> pieces, int mode, int base_start, int chg0, int ou
     int piece_count = pieces.size();
     if (piece_count > 0) {
         Piece last = pieces[piece_count - 1];
-        if (ours_start <= last.i1 + last.chg1 || theirs_start <= last.i2 + last.chg2) {
+        if (ours_start <= last.ours_index + last.chg1 || theirs_start <= last.theirs_index + last.chg2) {
             if (mode != last.mode) {
                 last.mode = 0;
             }
-            last.chg0 = base_start + chg0 - last.i0;
-            last.chg1 = ours_start + chg1 - last.i1;
-            last.chg2 = theirs_start + chg2 - last.i2;
+            last.chg0 = base_start + chg0 - last.base_index;
+            last.chg1 = ours_start + chg1 - last.ours_index;
+            last.chg2 = theirs_start + chg2 - last.theirs_index;
             return;
         }
     }
     pieces.push(Piece(mode, base_start, chg0, ours_start, chg1, theirs_start, chg2));
 }
 
-bool same_lines(List<bytes> left, int left_start, List<bytes> right, int right_start, int count) {
+bool is_same_lines(List<bytes> left, int left_start, List<bytes> right, int right_start, int count) {
     int offset = 0;
     while (offset < count) {
         if (left[left_start + offset] != right[right_start + offset]) {
@@ -211,19 +211,19 @@ List<Piece> combine(Ctx context, List<GIT_xdiff.Edit> script1, List<GIT_xdiff.Ed
     while (first_position < script1.size() && second_position < script2.size()) {
         GIT_xdiff.Edit first_edit = script1[first_position];
         GIT_xdiff.Edit second_edit = script2[second_position];
-        if (first_edit.a_start + first_edit.a_len < second_edit.a_start) {
-            append_piece(pieces, 1, first_edit.a_start, first_edit.a_len, first_edit.b_start, first_edit.b_len, second_edit.b_start - second_edit.a_start + first_edit.a_start, first_edit.a_len);
+        if (first_edit.a_start + first_edit.a_length < second_edit.a_start) {
+            append_piece(pieces, 1, first_edit.a_start, first_edit.a_length, first_edit.b_start, first_edit.b_length, second_edit.b_start - second_edit.a_start + first_edit.a_start, first_edit.a_length);
             first_position = first_position + 1;
             continue;
         }
-        if (second_edit.a_start + second_edit.a_len < first_edit.a_start) {
-            append_piece(pieces, 2, second_edit.a_start, second_edit.a_len, first_edit.b_start - first_edit.a_start + second_edit.a_start, second_edit.a_len, second_edit.b_start, second_edit.b_len);
+        if (second_edit.a_start + second_edit.a_length < first_edit.a_start) {
+            append_piece(pieces, 2, second_edit.a_start, second_edit.a_length, first_edit.b_start - first_edit.a_start + second_edit.a_start, second_edit.a_length, second_edit.b_start, second_edit.b_length);
             second_position = second_position + 1;
             continue;
         }
-        if (rank == 0 || first_edit.a_start != second_edit.a_start || first_edit.a_len != second_edit.a_len || first_edit.b_len != second_edit.b_len || !same_lines(context.ours, first_edit.b_start, context.theirs, second_edit.b_start, first_edit.b_len)) {
+        if (rank == 0 || first_edit.a_start != second_edit.a_start || first_edit.a_length != second_edit.a_length || first_edit.b_length != second_edit.b_length || !is_same_lines(context.ours, first_edit.b_start, context.theirs, second_edit.b_start, first_edit.b_length)) {
             int off = first_edit.a_start - second_edit.a_start;
-            int ffo = off + first_edit.a_len - second_edit.a_len;
+            int ffo = off + first_edit.a_length - second_edit.a_length;
             int base_start = first_edit.a_start;
             int ours_start = first_edit.b_start;
             int theirs_start = second_edit.b_start;
@@ -233,9 +233,9 @@ List<Piece> combine(Ctx context, List<GIT_xdiff.Edit> script1, List<GIT_xdiff.Ed
             } else {
                 theirs_start = theirs_start + off;
             }
-            int chg0 = first_edit.a_start + first_edit.a_len - base_start;
-            int chg1 = first_edit.b_start + first_edit.b_len - ours_start;
-            int chg2 = second_edit.b_start + second_edit.b_len - theirs_start;
+            int chg0 = first_edit.a_start + first_edit.a_length - base_start;
+            int chg1 = first_edit.b_start + first_edit.b_length - ours_start;
+            int chg2 = second_edit.b_start + second_edit.b_length - theirs_start;
             if (ffo < 0) {
                 chg0 = chg0 - ffo;
                 chg1 = chg1 - ffo;
@@ -244,8 +244,8 @@ List<Piece> combine(Ctx context, List<GIT_xdiff.Edit> script1, List<GIT_xdiff.Ed
             }
             append_piece(pieces, 0, base_start, chg0, ours_start, chg1, theirs_start, chg2);
         }
-        int end1 = first_edit.a_start + first_edit.a_len;
-        int end2 = second_edit.a_start + second_edit.a_len;
+        int end1 = first_edit.a_start + first_edit.a_length;
+        int end2 = second_edit.a_start + second_edit.a_length;
         if (end1 >= end2) {
             second_position = second_position + 1;
         }
@@ -256,13 +256,13 @@ List<Piece> combine(Ctx context, List<GIT_xdiff.Edit> script1, List<GIT_xdiff.Ed
     int delta2 = context.theirs.size() - context.base.size();
     while (first_position < script1.size()) {
         GIT_xdiff.Edit first_edit = script1[first_position];
-        append_piece(pieces, 1, first_edit.a_start, first_edit.a_len, first_edit.b_start, first_edit.b_len, first_edit.a_start + delta2, first_edit.a_len);
+        append_piece(pieces, 1, first_edit.a_start, first_edit.a_length, first_edit.b_start, first_edit.b_length, first_edit.a_start + delta2, first_edit.a_length);
         first_position = first_position + 1;
     }
     int delta1 = context.ours.size() - context.base.size();
     while (second_position < script2.size()) {
         GIT_xdiff.Edit second_edit = script2[second_position];
-        append_piece(pieces, 2, second_edit.a_start, second_edit.a_len, second_edit.a_start + delta1, second_edit.a_len, second_edit.b_start, second_edit.b_len);
+        append_piece(pieces, 2, second_edit.a_start, second_edit.a_length, second_edit.a_start + delta1, second_edit.a_length, second_edit.b_start, second_edit.b_length);
         second_position = second_position + 1;
     }
     return pieces;
@@ -289,28 +289,28 @@ void refine_conflicts(Ctx context, List<Piece> pieces) {
             out.push(piece);
             continue;
         }
-        int base1 = piece.i1;
-        int base2 = piece.i2;
-        List<GIT_xdiff.Edit> script = GIT_xdiff.edits(GIT_xdiff.diff_lines(slice(context.ours, piece.i1, piece.chg1), slice(context.theirs, piece.i2, piece.chg2)));
+        int base1 = piece.ours_index;
+        int base2 = piece.theirs_index;
+        List<GIT_xdiff.Edit> script = GIT_xdiff.edits(GIT_xdiff.diff_lines(slice(context.ours, piece.ours_index, piece.chg1), slice(context.theirs, piece.theirs_index, piece.chg2)));
         if (script.size() == 0) {
             // Both sides came to the same lines after all.
             piece.mode = 1;
             out.push(piece);
             continue;
         }
-        int parent_i0 = piece.i0;
+        int parent_i0 = piece.base_index;
         int parent_chg0 = piece.chg0;
         bool is_first = true;
         for (GIT_xdiff.Edit edit in script) {
             if (is_first) {
-                piece.i1 = edit.a_start + base1;
-                piece.chg1 = edit.a_len;
-                piece.i2 = edit.b_start + base2;
-                piece.chg2 = edit.b_len;
+                piece.ours_index = edit.a_start + base1;
+                piece.chg1 = edit.a_length;
+                piece.theirs_index = edit.b_start + base2;
+                piece.chg2 = edit.b_length;
                 out.push(piece);
                 is_first = false;
             } else {
-                out.push(Piece(0, parent_i0, parent_chg0, edit.a_start + base1, edit.a_len, edit.b_start + base2, edit.b_len));
+                out.push(Piece(0, parent_i0, parent_chg0, edit.a_start + base1, edit.a_length, edit.b_start + base2, edit.b_length));
             }
         }
     }
@@ -324,7 +324,7 @@ bool is_alnum_byte(int code) {
     return (code >= 48 && code <= 57) || (code >= 65 && code <= 90) || (code >= 97 && code <= 122);
 }
 
-bool lines_contain_alnum(List<bytes> lines, int start, int count) {
+bool has_alnum_in_lines(List<bytes> lines, int start, int count) {
     int offset = 0;
     while (offset < count) {
         for (int code in lines[start + offset]) {
@@ -346,11 +346,11 @@ void simplify_non_conflicts(Ctx context, List<Piece> pieces, bool should_simplif
         int output_count = out.size();
         if (output_count > 0) {
             Piece previous = out[output_count - 1];
-            int begin = previous.i1 + previous.chg1;
-            int end = piece.i1;
-            if (previous.mode == 0 && piece.mode == 0 && (end - begin <= 3 || (should_simplify_if_no_alnum && !lines_contain_alnum(context.ours, begin, end - begin)))) {
-                previous.chg1 = piece.i1 + piece.chg1 - previous.i1;
-                previous.chg2 = piece.i2 + piece.chg2 - previous.i2;
+            int begin = previous.ours_index + previous.chg1;
+            int end = piece.ours_index;
+            if (previous.mode == 0 && piece.mode == 0 && (end - begin <= 3 || (should_simplify_if_no_alnum && !has_alnum_in_lines(context.ours, begin, end - begin)))) {
+                previous.chg1 = piece.ours_index + piece.chg1 - previous.ours_index;
+                previous.chg2 = piece.theirs_index + piece.chg2 - previous.theirs_index;
                 continue;
             }
         }
@@ -399,14 +399,14 @@ int is_eol_crlf(List<bytes> file, int index) {
 // line cannot say, and does not veto).
 bool is_cr_needed(Ctx context, Piece piece) {
     int at1 = 0;
-    if (piece.i1 > 0) {
-        at1 = piece.i1 - 1;
+    if (piece.ours_index > 0) {
+        at1 = piece.ours_index - 1;
     }
     int needs = is_eol_crlf(context.ours, at1);
     if (needs != 0) {
         int at2 = 0;
-        if (piece.i2 > 0) {
-            at2 = piece.i2 - 1;
+        if (piece.theirs_index > 0) {
+            at2 = piece.theirs_index - 1;
         }
         needs = is_eol_crlf(context.theirs, at2);
     }
@@ -457,15 +457,15 @@ void marker(bytes out, int marker_byte, str label, bool needs_cr) {
 
 void conflict_hunk(Ctx context, bytes out, Piece piece, int done) {
     bool needs_cr = is_cr_needed(context, piece);
-    copy_lines(out, context.ours, done, piece.i1 - done, false, false);
+    copy_lines(out, context.ours, done, piece.ours_index - done, false, false);
     marker(out, 60, context.labels.ours, needs_cr);
-    copy_lines(out, context.ours, piece.i1, piece.chg1, needs_cr, true);
+    copy_lines(out, context.ours, piece.ours_index, piece.chg1, needs_cr, true);
     if (is_diff3(context.style)) {
         marker(out, 124, context.labels.base, needs_cr);
-        copy_lines(out, context.base, piece.i0, piece.chg0, needs_cr, true);
+        copy_lines(out, context.base, piece.base_index, piece.chg0, needs_cr, true);
     }
     marker(out, 61, "", needs_cr);
-    copy_lines(out, context.theirs, piece.i2, piece.chg2, needs_cr, true);
+    copy_lines(out, context.theirs, piece.theirs_index, piece.chg2, needs_cr, true);
     marker(out, 62, context.labels.theirs, needs_cr);
 }
 
@@ -476,14 +476,14 @@ bytes fill(Ctx context, List<Piece> pieces) {
         if (piece.mode == 0) {
             conflict_hunk(context, out, piece, done);
         } else {
-            copy_lines(out, context.ours, done, piece.i1 - done, false, false);
+            copy_lines(out, context.ours, done, piece.ours_index - done, false, false);
             if (piece.mode == 1) {
-                copy_lines(out, context.ours, piece.i1, piece.chg1, false, false);
+                copy_lines(out, context.ours, piece.ours_index, piece.chg1, false, false);
             } else {
-                copy_lines(out, context.theirs, piece.i2, piece.chg2, false, false);
+                copy_lines(out, context.theirs, piece.theirs_index, piece.chg2, false, false);
             }
         }
-        done = piece.i1 + piece.chg1;
+        done = piece.ours_index + piece.chg1;
     }
     copy_lines(out, context.ours, done, context.ours.size() - done, false, false);
     return out;

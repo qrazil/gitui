@@ -17,7 +17,7 @@
 //   GIT_sequencer.skip(gitdir, worktree)            -> Result<Report, Error>
 //   GIT_sequencer.abort(gitdir, worktree)           -> Result<Aborted, Error>
 //   GIT_sequencer.quit(gitdir)                      -> Result<bool, Error>
-//   GIT_sequencer.in_progress(gitdir)               -> bool
+//   GIT_sequencer.is_in_progress(gitdir)               -> bool
 //   GIT_sequencer.state(gitdir)                     -> Option<State>
 //   GIT_sequencer.banner(gitdir)                    -> str   CHERRY-PICKING, REVERTING or ""
 //
@@ -25,7 +25,7 @@
 //   GIT_sequencer.apply_step(gitdir, worktree, item, opts, log_prefix)
 //                                                   -> Result<StepResult, Error>
 //       One pick or revert onto HEAD: the three-way merge, then a commit, a
-//       staged result (`no_commit`), or a stop on conflicts or an empty result
+//       staged result (`should_skip_commit`), or a stop on conflicts or an empty result
 //       with `CHERRY_PICK_HEAD` / `REVERT_HEAD`, `MERGE_MSG` and `AUTO_MERGE`
 //       written. It reads and writes no sequencer directory.
 //   GIT_sequencer.finish_step(gitdir, worktree, pending, opts, log_prefix)
@@ -65,9 +65,9 @@
 //     the parent `parent of <abbrev> (<subject>)`; the index holds stages
 //     1/2/3 and the files hold markers (`GIT_merge.merge_with_base`).
 //   - A pick that comes out empty stops: a redundant commit always, an
-//     originally empty one unless `allow_empty`; `keep_redundant` commits
+//     originally empty one unless `is_empty_allowed`; `should_keep_redundant` commits
 //     both. `skip` drops it.
-//   - Without `no_commit` the index must equal HEAD to start. With it the
+//   - Without `should_skip_commit` the index must equal HEAD to start. With it the
 //     changes pile up in the index and the files, one step on top of the next;
 //     `MERGE_MSG` holds the last message.
 //   - `-x` appends `(cherry picked from commit <id>)` after a blank line, or
@@ -87,7 +87,7 @@
 //     first of a new sequence leaves nothing behind; git leaves the sequencer
 //     directory and then calls the operation "already in progress".
 //   - `commit --allow-empty` by hand on an empty stop is not offered: `skip`
-//     it, or start again with `allow_empty` / `keep_redundant`.
+//     it, or start again with `is_empty_allowed` / `should_keep_redundant`.
 //   - The editor is never run: messages are used as they are, `continue`
 //     cleans `MERGE_MSG` of `#` lines as `git commit` does.
 //   - `--signoff`, `--strategy`, `-X`, `--gpg-sign`, `--empty=` are not read
@@ -215,13 +215,13 @@ pub str Error.to_str() {
 /// What to do and how: git's `-n`, `-x`, `-m`, `--allow-empty` and
 /// `--keep-redundant-commits`.
 pub type Options {
-    pub bool no_commit = false;
-    pub bool record_origin = false;
+    pub bool should_skip_commit = false;
+    pub bool should_record_origin = false;
     pub int mainline = 0;
-    pub bool allow_empty = false;
-    pub bool keep_redundant = false;
+    pub bool is_empty_allowed = false;
+    pub bool should_keep_redundant = false;
     /// The commits came from a range: keep the sequencer state even for one.
-    pub bool as_range = false;
+    pub bool is_range = false;
     pub GIT_diff3.Style style = GIT_diff3.Style.Merge;
 }
 
@@ -245,7 +245,7 @@ pub type State {
     /// The commit being applied (the stopped one), or `""`.
     pub str current;
     /// A step is stopped (`CHERRY_PICK_HEAD` / `REVERT_HEAD`).
-    pub bool stopped;
+    pub bool is_stopped;
     /// The steps left, the stopped one first; empty for a single commit.
     pub List<Item> todo;
 }
@@ -253,11 +253,11 @@ pub type State {
 pub enum Landed {
     /// A commit was made (`StepResult.commit`).
     Committed;
-    /// `no_commit`: the changes are in the index and the files.
+    /// `should_skip_commit`: the changes are in the index and the files.
     Staged;
     /// Conflicts: stages 1/2/3 in the index, markers in the files.
     Conflicted;
-    /// The result is HEAD's own tree and `allow_empty` / `keep_redundant` did not allow it.
+    /// The result is HEAD's own tree and `is_empty_allowed` / `should_keep_redundant` did not allow it.
     Empty;
 }
 
@@ -335,10 +335,10 @@ pub enum Aborted {
 }
 
 pub bool Aborted.eq(Aborted other) {
-    return rewound() == other.rewound();
+    return is_rewound() == other.is_rewound();
 }
 
-bool Aborted.rewound() {
+bool Aborted.is_rewound() {
     match (this) {
         case Rewound: {
             return true;
@@ -457,7 +457,7 @@ pub void remove_file(str path) {
 }
 
 /// The directory `start` keeps a sequence in.
-pub str sequencer_dir(str gitdir) {
+pub str sequencer_directory(str gitdir) {
     return fs.join(gitdir, "sequencer");
 }
 
@@ -487,7 +487,7 @@ void clear_all_state(str gitdir) {
     remove_file(fs.join(gitdir, "AUTO_MERGE"));
 }
 
-void remove_dir(str directory) {
+void remove_directory(str directory) {
     List<str> names = ["todo", "head", "opts", "abort-safety"];
     for (str name in names) {
         remove_file(fs.join(directory, name));
@@ -689,10 +689,10 @@ Result<bool, Error> originally_empty(str gitdir, GIT_object.Commit commit, int m
 }
 
 Result<bool, Error> may_commit_empty(str gitdir, GIT_object.Commit commit, Options opts) {
-    if (opts.keep_redundant) {
+    if (opts.should_keep_redundant) {
         return Result<bool, Error>.Ok(true);
     }
-    if (!opts.allow_empty) {
+    if (!opts.is_empty_allowed) {
         return Result<bool, Error>.Ok(false);
     }
     return originally_empty(gitdir, commit, effective_mainline(commit, opts));
@@ -711,7 +711,7 @@ pub Result<str, Error> index_tree_of(str gitdir) {
 }
 
 /// One pick or revert of `item` onto HEAD. `log_prefix` heads the reflog line
-/// (`cherry-pick`, `revert`, `rebase (pick)`). Without `no_commit` the index
+/// (`cherry-pick`, `revert`, `rebase (pick)`). Without `should_skip_commit` the index
 /// must be HEAD's (`Merge(IndexDirty)` otherwise); with it, the step goes on
 /// top of whatever the index holds. The result says what was left behind; the
 /// per-step state files are written for a conflict and an empty stop, and no
@@ -729,7 +729,7 @@ pub Result<StepResult, Error> apply_step(str gitdir, str worktree, Item item, Op
     str theirs = item.id;
     str base_label = parent_label;
     str theirs_label = label;
-    str message = pick_message(original, item.id, opts.record_origin);
+    str message = pick_message(original, item.id, opts.should_record_origin);
     if (item.verb == Verb.Revert) {
         base = item.id;
         theirs = parent;
@@ -742,7 +742,7 @@ pub Result<StepResult, Error> apply_step(str gitdir, str worktree, Item item, Op
         message = revert_message(original, item.id, shown);
     }
     str ours = head.id;
-    if (opts.no_commit) {
+    if (opts.should_skip_commit) {
         ours = index_tree_of(gitdir)?;
     }
     GIT_merge.Opts merge_opts = GIT_merge.Opts(ours_label: "HEAD", theirs_label: theirs_label, base_label: base_label, style: opts.style);
@@ -750,13 +750,13 @@ pub Result<StepResult, Error> apply_step(str gitdir, str worktree, Item item, Op
     lift_bool(GIT_merge.write_state(gitdir, "AUTO_MERGE", applied.tree + "\n"))?;
     if (applied.conflicts.size() > 0) {
         lift_bool(GIT_merge.write_state(gitdir, "MERGE_MSG", message + GIT_merge.conflicts_block(applied.conflicts)))?;
-        if (!opts.no_commit || item.verb == Verb.Revert) {
+        if (!opts.should_skip_commit || item.verb == Verb.Revert) {
             lift_bool(GIT_merge.write_state(gitdir, head_file(item.verb), item.id + "\n"))?;
         }
         return Result<StepResult, Error>.Ok(StepResult(Landed.Conflicted, "", applied.conflicts, applied.messages));
     }
     List<GIT_merge.Conflicted> none = [];
-    if (opts.no_commit) {
+    if (opts.should_skip_commit) {
         lift_bool(GIT_merge.write_state(gitdir, "MERGE_MSG", message))?;
         if (item.verb == Verb.Revert) {
             lift_bool(GIT_merge.write_state(gitdir, head_file(item.verb), item.id + "\n"))?;
@@ -891,13 +891,13 @@ pub Options read_options(str directory) {
         str value = line.substr(equals + 1, line.size()).trim();
         bool is_enabled = value == "true";
         if (key == "no-commit") {
-            opts.no_commit = is_enabled;
+            opts.should_skip_commit = is_enabled;
         } else if (key == "record-origin") {
-            opts.record_origin = is_enabled;
+            opts.should_record_origin = is_enabled;
         } else if (key == "allow-empty") {
-            opts.allow_empty = is_enabled;
+            opts.is_empty_allowed = is_enabled;
         } else if (key == "keep-redundant-commits") {
-            opts.keep_redundant = is_enabled;
+            opts.should_keep_redundant = is_enabled;
         } else if (key == "mainline") {
             opts.mainline = value.parse_int().or(0);
         }
@@ -912,19 +912,19 @@ pub Result<bool, Error> write_options(str directory, Verb verb, Options opts) {
     if (verb == Verb.Revert) {
         body = body + "\tedit = false\n";
     }
-    if (opts.no_commit) {
+    if (opts.should_skip_commit) {
         body = body + "\tno-commit = true\n";
     }
-    if (opts.record_origin) {
+    if (opts.should_record_origin) {
         body = body + "\trecord-origin = true\n";
     }
     if (opts.mainline > 0) {
         body = body + "\tmainline = " + opts.mainline.to_str() + "\n";
     }
-    if (opts.allow_empty) {
+    if (opts.is_empty_allowed) {
         body = body + "\tallow-empty = true\n";
     }
-    if (opts.keep_redundant) {
+    if (opts.should_keep_redundant) {
         body = body + "\tkeep-redundant-commits = true\n";
     }
     if (body == "") {
@@ -959,17 +959,17 @@ bool has_pending(str gitdir) {
 }
 
 /// Is a cherry-pick or revert under way: a stopped step or a sequencer directory.
-pub bool in_progress(str gitdir) {
-    return fs.is_present(sequencer_dir(gitdir)) || fs.is_present(fs.join(gitdir, CHERRY_PICK_HEAD)) || fs.is_present(fs.join(gitdir, REVERT_HEAD));
+pub bool is_in_progress(str gitdir) {
+    return fs.is_present(sequencer_directory(gitdir)) || fs.is_present(fs.join(gitdir, CHERRY_PICK_HEAD)) || fs.is_present(fs.join(gitdir, REVERT_HEAD));
 }
 
 /// What is under way, or None.
 pub Option<State> state(str gitdir) {
-    if (!in_progress(gitdir)) {
+    if (!is_in_progress(gitdir)) {
         return Option<State>.None;
     }
     List<Item> todo = [];
-    match (read_todo(gitdir, sequencer_dir(gitdir))) {
+    match (read_todo(gitdir, sequencer_directory(gitdir))) {
         case Ok(List<Item> found): {
             todo = found;
         }
@@ -1118,7 +1118,7 @@ Report stopped_report(Ending ending, List<str> made, Item item, StepResult step)
 // before each step and `abort-safety` follows HEAD. A stop leaves the state,
 // the end of the list removes the directory.
 Result<Report, Error> run(str gitdir, str worktree, List<Item> items, Options opts, bool is_sequence) {
-    str directory = sequencer_dir(gitdir);
+    str directory = sequencer_directory(gitdir);
     List<str> made = [];
     for (int i in 0 .. items.size()) {
         Item item = items[i];
@@ -1144,7 +1144,7 @@ Result<Report, Error> run(str gitdir, str worktree, List<Item> items, Options op
         }
     }
     if (is_sequence) {
-        remove_dir(directory);
+        remove_directory(directory);
     }
     List<GIT_merge.Conflicted> none = [];
     List<str> no_messages = [];
@@ -1163,7 +1163,7 @@ Result<bool, Error> refuse_if_busy(str gitdir) {
         case None: {
         }
     }
-    if (GIT_merge.in_progress(gitdir)) {
+    if (GIT_merge.is_in_progress(gitdir)) {
         return Result<bool, Error>.Err(Error.Merging);
     }
     return Result<bool, Error>.Ok(true);
@@ -1181,8 +1181,8 @@ pub Result<Report, Error> start(str gitdir, str worktree, Verb verb, List<str> i
     refuse_if_busy(gitdir)?;
     Head head = read_head(gitdir)?;
     List<Item> items = items_of(gitdir, verb, ids)?;
-    bool is_sequence = items.size() > 1 || opts.as_range;
-    str directory = sequencer_dir(gitdir);
+    bool is_sequence = items.size() > 1 || opts.is_range;
+    str directory = sequencer_directory(gitdir);
     if (is_sequence) {
         write_text_in(directory, "head", head.id + "\n")?;
         write_abort_safety(directory, head.id)?;
@@ -1195,7 +1195,7 @@ pub Result<Report, Error> start(str gitdir, str worktree, Verb verb, List<str> i
         case Err(Error error): {
             if (is_sequence && read_text(fs.join(directory, "head")) != "" && !fs.is_present(fs.join(gitdir, head_file(verb)))) {
                 if (read_text(fs.join(directory, "abort-safety")).trim() == head.id) {
-                    remove_dir(directory);
+                    remove_directory(directory);
                 }
             }
             return Result<Report, Error>.Err(error);
@@ -1216,9 +1216,9 @@ Result<bool, Error> write_text_in(str directory, str name, str text) {
 
 // Carry on with `rest` after a step is done or skipped.
 Result<Report, Error> carry_on(str gitdir, str worktree, List<Item> rest, Options opts, List<str> made, Verb verb) {
-    str directory = sequencer_dir(gitdir);
+    str directory = sequencer_directory(gitdir);
     if (rest.size() == 0) {
-        remove_dir(directory);
+        remove_directory(directory);
         List<GIT_merge.Conflicted> none = [];
         List<str> no_messages = [];
         return Result<Report, Error>.Ok(Report(Ending.Finished, made, "", verb, none, no_messages));
@@ -1235,10 +1235,10 @@ Result<Report, Error> carry_on(str gitdir, str worktree, List<Item> rest, Option
 /// `git cherry-pick --continue` / `git revert --continue`: commit the stopped
 /// step (its conflicts must be resolved and staged), then do the rest of the
 /// sequence. A stopped step that is still empty stops again as `Ending.Empty`.
-/// With no stopped step (`git commit` made the commit, or `no_commit`) the
+/// With no stopped step (`git commit` made the commit, or `should_skip_commit`) the
 /// first todo item counts as done.
 pub Result<Report, Error> continue_sequence(str gitdir, str worktree) {
-    str directory = sequencer_dir(gitdir);
+    str directory = sequencer_directory(gitdir);
     bool is_sequence = fs.is_present(directory);
     Option<Pending> stopped = pending(gitdir);
     if (!is_sequence && !has_pending(gitdir)) {
@@ -1269,7 +1269,7 @@ pub Result<Report, Error> continue_sequence(str gitdir, str worktree) {
             }
         }
         case None: {
-            if (!opts.no_commit) {
+            if (!opts.should_skip_commit) {
                 Head head = read_head(gitdir)?;
                 GIT_index.Index index = lift_index(GIT_merge.read_index(gitdir))?;
                 str head_tree = lift_str(GIT_merge.tree_of(gitdir, head.id))?;
@@ -1345,7 +1345,7 @@ pub Result<bool, Error> reset_to(str gitdir, str worktree, str target, str messa
 /// `--skip`: forget the stopped step (index and files back to HEAD) and do
 /// the rest of the sequence.
 pub Result<Report, Error> skip(str gitdir, str worktree) {
-    str directory = sequencer_dir(gitdir);
+    str directory = sequencer_directory(gitdir);
     bool is_sequence = fs.is_present(directory);
     if (!is_sequence && !has_pending(gitdir)) {
         return Result<Report, Error>.Err(Error.NoSequence);
@@ -1387,7 +1387,7 @@ pub Result<Report, Error> skip(str gitdir, str worktree) {
 /// and only the state goes (`Aborted.HeadMoved`). A single step is undone by
 /// a `reset --merge` to HEAD.
 pub Result<Aborted, Error> abort(str gitdir, str worktree) {
-    str directory = sequencer_dir(gitdir);
+    str directory = sequencer_directory(gitdir);
     if (!fs.is_present(directory)) {
         if (!has_pending(gitdir)) {
             return Result<Aborted, Error>.Err(Error.NoSequence);
@@ -1403,21 +1403,21 @@ pub Result<Aborted, Error> abort(str gitdir, str worktree) {
     }
     str safety = read_text(fs.join(directory, "abort-safety")).trim();
     if (safety != "" && safety != head.id) {
-        remove_dir(directory);
+        remove_directory(directory);
         return Result<Aborted, Error>.Ok(Aborted.HeadMoved);
     }
     reset_to(gitdir, worktree, start_id, "reset: moving to " + start_id)?;
-    remove_dir(directory);
+    remove_directory(directory);
     return Result<Aborted, Error>.Ok(Aborted.Rewound);
 }
 
 /// `--quit`: forget the operation, leaving the index, the files and HEAD as
 /// they are. The sequencer directory and the per-step files go.
 pub Result<bool, Error> quit(str gitdir) {
-    if (!in_progress(gitdir)) {
+    if (!is_in_progress(gitdir)) {
         return Result<bool, Error>.Err(Error.NoSequence);
     }
-    remove_dir(sequencer_dir(gitdir));
+    remove_directory(sequencer_directory(gitdir));
     clear_all_state(gitdir);
     return Result<bool, Error>.Ok(true);
 }

@@ -162,7 +162,7 @@ void unit_trust(str name, GIT_ssh_transport.PendingHost pending, str seed_end) {
 }
 
 // A listener that accepts and never speaks: the probe must give up.
-bool unit_silent_server() {
+bool did_give_up_on_silent_server() {
     match (net.listen("127.0.0.1", 0)) {
         case Ok(net.Listener listener): {
             int port = listener.local().port();
@@ -216,13 +216,13 @@ void run_unit() {
     unit_trust("plain, no trailing newline", GIT_ssh_transport.PendingHost("example.org", 22, key, fs.join(directory, "bare"), false), "");
     unit_trust("hashed", GIT_ssh_transport.PendingHost("example.org", 22, key, fs.join(directory, "hashed"), true), "\n");
     unit_trust("a nested missing directory", GIT_ssh_transport.PendingHost("example.org", 22, key, fs.join(fs.join(directory, "a/b"), "kh"), false), "\n");
-    check("probe_host_key: a server that says nothing times out", unit_silent_server(), "no timeout");
+    check("probe_host_key: a server that says nothing times out", did_give_up_on_silent_server(), "no timeout");
     str config = "Host *.corp\n  HashKnownHosts yes\nHost plain\n  HashKnownHosts no\nHost *\n  HashKnownHosts no\n";
-    check("hashes_known_hosts: glob host block", GIT_ssh_transport.hashes_known_hosts(config, "git.corp"), "not hashed");
-    check("hashes_known_hosts: first value wins", !GIT_ssh_transport.hashes_known_hosts("Host *\n  HashKnownHosts no\nHost *\n  HashKnownHosts yes\n", "x"), "later value won");
-    check("hashes_known_hosts: other host", !GIT_ssh_transport.hashes_known_hosts(config, "plain"), "hashed");
-    check("hashes_known_hosts: top-level setting", GIT_ssh_transport.hashes_known_hosts("HashKnownHosts yes\n", "anything"), "not hashed");
-    check("hashes_known_hosts: default is no", !GIT_ssh_transport.hashes_known_hosts("", "anything"), "hashed");
+    check("hashes_known_hosts: glob host block", GIT_ssh_transport.should_hash_known_hosts(config, "git.corp"), "not hashed");
+    check("hashes_known_hosts: first value wins", !GIT_ssh_transport.should_hash_known_hosts("Host *\n  HashKnownHosts no\nHost *\n  HashKnownHosts yes\n", "x"), "later value won");
+    check("hashes_known_hosts: other host", !GIT_ssh_transport.should_hash_known_hosts(config, "plain"), "hashed");
+    check("hashes_known_hosts: top-level setting", GIT_ssh_transport.should_hash_known_hosts("HashKnownHosts yes\n", "anything"), "not hashed");
+    check("hashes_known_hosts: default is no", !GIT_ssh_transport.should_hash_known_hosts("", "anything"), "hashed");
     // target_for, against $HOME/.ssh/config as the shell arranged it.
     unit_target("ssh://bob@h.example:2022/srv/r.git", "h.example", 2022, "bob", "/srv/r.git");
     unit_target("bob@h.example:srv/r.git", "h.example", 22, "bob", "srv/r.git");

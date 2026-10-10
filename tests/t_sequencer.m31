@@ -67,15 +67,15 @@ if (command == "pick" || command == "revert") {
     int position = 4;
     while (position < argv.size()) {
         if (argv[position] == "-n") {
-            opts.no_commit = true;
+            opts.should_skip_commit = true;
         } else if (argv[position] == "-x") {
-            opts.record_origin = true;
+            opts.should_record_origin = true;
         } else if (argv[position] == "--allow-empty") {
-            opts.allow_empty = true;
+            opts.is_empty_allowed = true;
         } else if (argv[position] == "--keep-redundant") {
-            opts.keep_redundant = true;
+            opts.should_keep_redundant = true;
         } else if (argv[position] == "--range") {
-            opts.as_range = true;
+            opts.is_range = true;
         } else if (argv[position] == "-m" && position + 1 < argv.size()) {
             opts.mainline = argv[position + 1].parse_int().or(0);
             position = position + 1;
@@ -83,7 +83,7 @@ if (command == "pick" || command == "revert") {
             match (GIT_revparse.is_range(gitdir, argv[position])) {
                 case Ok(bool answer): {
                     if (answer) {
-                        opts.as_range = true;
+                        opts.is_range = true;
                     }
                 }
                 case Err(_): {
@@ -135,7 +135,7 @@ if (command == "pick" || command == "revert") {
     match (GIT_sequencer.state(gitdir)) {
         case Some(GIT_sequencer.State found): {
             str kind = "todo";
-            if (found.stopped) {
+            if (found.is_stopped) {
                 kind = "stopped";
             }
             print(GIT_sequencer.banner(gitdir) + " " + kind + " " + found.current);

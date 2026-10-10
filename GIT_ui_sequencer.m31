@@ -120,7 +120,7 @@ pub void run(GIT_ui_core.Core core, GIT_sequencer.Verb verb, List<str> specs, GI
 }
 
 GIT_sequencer.Options options(GIT_ui_core.Core core, bool is_no_commit, bool should_record_origin, int mainline, bool should_keep, bool is_as_range) {
-    return GIT_sequencer.Options(no_commit: is_no_commit, record_origin: should_record_origin, mainline: mainline, allow_empty: false, keep_redundant: should_keep, as_range: is_as_range, style: GIT_merge.configured_style(core.gitdir));
+    return GIT_sequencer.Options(should_skip_commit: is_no_commit, should_record_origin: should_record_origin, mainline: mainline, is_empty_allowed: false, should_keep_redundant: should_keep, is_range: is_as_range, style: GIT_merge.configured_style(core.gitdir));
 }
 
 /// `continue`, `skip`: both answer with a report.
@@ -200,7 +200,7 @@ void quit_now(GIT_ui_core.Core core) {
 type RangeAsk {
     GIT_ui_core.Core host;
     GIT_sequencer.Verb verb;
-    bool record_origin;
+    bool should_record_origin;
 }
 
 /// The prompt's answer (`GIT_ui_prompt.Receiver`): specs split on spaces.
@@ -226,10 +226,10 @@ pub void RangeAsk.received(str purpose, str text) {
         return;
     }
     str line = verb.noun();
-    if (record_origin) {
+    if (should_record_origin) {
         line = line + " -x";
     }
-    run(host, verb, specs, options(host, false, record_origin, 0, false, is_range), line + " " + specs.join(" "));
+    run(host, verb, specs, options(host, false, should_record_origin, 0, false, is_range), line + " " + specs.join(" "));
 }
 
 // --- the menu for one commit ----------------------------------------------------------

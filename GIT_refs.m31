@@ -464,7 +464,7 @@ List<Ref> packed_all(str gitdir) {
             return out;
         }
     }
-    int width = GIT_object.hex_len(gitdir);
+    int width = GIT_object.hex_length(gitdir);
     for (str line in text.lines(body)) {
         if (line.size() == 0 || line.starts_with("#") || line.starts_with("^")) {
             continue;

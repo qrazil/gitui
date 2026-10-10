@@ -214,7 +214,7 @@ pub type Saved {
 
 /// One stack entry.
 pub type Item {
-    pub int n;
+    pub int index;
     pub str id;
     pub str message;
     pub int when;
@@ -388,11 +388,11 @@ int find_byte(bytes haystack, int needle) {
     return -1;
 }
 
-bool same_bytes(bytes left, bytes right) {
+bool is_same_bytes(bytes left, bytes right) {
     return left == right;
 }
 
-str dir_of(str path) {
+str directory_of(str path) {
     int cut = -1;
     for (int i in 0 .. path.size()) {
         if (path.byte_at(i) == '/') {
@@ -405,7 +405,7 @@ str dir_of(str path) {
     return path.substr(0, cut);
 }
 
-bool same_leaf(GIT_udiff.Leaf left, GIT_udiff.Leaf right) {
+bool is_same_leaf(GIT_udiff.Leaf left, GIT_udiff.Leaf right) {
     return left.mode == right.mode && left.id == right.id;
 }
 
@@ -435,7 +435,7 @@ Result<str, Error> tree_of(str gitdir, List<Lf> leaves) {
         Lf sub = Lf(leaf.mode, leaf.id, leaf.path.substr(slash + 1, leaf.path.size()));
         int found = -1;
         for (int i in 0 .. names.size()) {
-            if (same_bytes(names[i], directory)) {
+            if (is_same_bytes(names[i], directory)) {
                 found = i;
             }
         }
@@ -791,7 +791,7 @@ void remove_and_prune(str worktree, str full) {
             return;
         }
     }
-    str directory = dir_of(full);
+    str directory = directory_of(full);
     str root = fs.join(worktree, "");
     while (directory != "" && directory != worktree && directory != root && directory.starts_with(worktree)) {
         match (fs.rmdir(directory)) {
@@ -801,7 +801,7 @@ void remove_and_prune(str worktree, str full) {
                 return;
             }
         }
-        directory = dir_of(directory);
+        directory = directory_of(directory);
     }
 }
 
@@ -813,11 +813,11 @@ str ref_path(str gitdir, str name) {
 
 Result<bool, Error> write_ref(str gitdir, str name, str id) {
     str path = ref_path(gitdir, name);
-    match (fs.makedirs(dir_of(path))) {
+    match (fs.makedirs(directory_of(path))) {
         case Ok: {
         }
         case Err: {
-            return Result<bool, Error>.Err(Error.Io("cannot create " + dir_of(path)));
+            return Result<bool, Error>.Err(Error.Io("cannot create " + directory_of(path)));
         }
     }
     random.System rnd = random.system();
@@ -927,7 +927,7 @@ pub List<str> labels(str gitdir) {
     match (list(gitdir)) {
         case Ok(List<Item> items): {
             for (Item item in items) {
-                out.push("stash@{" + item.n.to_str() + "}: " + item.message);
+                out.push("stash@{" + item.index.to_str() + "}: " + item.message);
             }
         }
         case Err: {
@@ -1134,11 +1134,11 @@ Result<bool, Error> write_untracked(str gitdir, str worktree, str path, GIT_udif
     GIT_object.Object object = read_object(gitdir, leaf.id)?;
     content = object.raw;
     str full = fs.join(worktree, path);
-    match (fs.makedirs(dir_of(full))) {
+    match (fs.makedirs(directory_of(full))) {
         case Ok: {
         }
         case Err: {
-            return Result<bool, Error>.Err(Error.Io("cannot create " + dir_of(full)));
+            return Result<bool, Error>.Err(Error.Io("cannot create " + directory_of(full)));
         }
     }
     if (leaf.mode >> 12 == 0o12) {
@@ -1238,7 +1238,7 @@ pub Result<Applied, Error> apply(str gitdir, str worktree, str id, bool should_r
         GIT_udiff.Leaf was = leaf_at(base, path);
         GIT_udiff.Leaf now = leaf_at(work, path);
         GIT_udiff.Leaf have = leaf_at(current, path);
-        if (!(same_leaf(have, now) || same_leaf(have, was))) {
+        if (!(is_same_leaf(have, now) || is_same_leaf(have, was))) {
             needs_merge = true;
             break;
         }
@@ -1263,7 +1263,7 @@ pub Result<Applied, Error> apply(str gitdir, str worktree, str id, bool should_r
             Map<str, GIT_udiff.Leaf> landed = flat(gitdir, onto.tree)?;
             for (str path in GIT_udiff.changed_paths(base, staged)) {
                 // a patch whose change is already there (or whose file is not) does not apply
-                if (same_leaf(leaf_at(landed, path), leaf_at(current, path))) {
+                if (is_same_leaf(leaf_at(landed, path), leaf_at(current, path))) {
                     return Result<Applied, Error>.Err(Error.IndexConflict(path));
                 }
             }
@@ -1276,7 +1276,7 @@ pub Result<Applied, Error> apply(str gitdir, str worktree, str id, bool should_r
             GIT_udiff.Leaf was = leaf_at(base, path);
             GIT_udiff.Leaf want = leaf_at(staged, path);
             GIT_udiff.Leaf have = leaf_at(current, path);
-            if (same_leaf(have, want) || same_leaf(have, was)) {
+            if (is_same_leaf(have, want) || is_same_leaf(have, was)) {
                 continue;
             }
             return Result<Applied, Error>.Err(Error.IndexConflict(path));
@@ -1349,7 +1349,7 @@ pub Result<Applied, Error> apply(str gitdir, str worktree, str id, bool should_r
     for (str path in touched) {
         GIT_udiff.Leaf now = leaf_at(work, path);
         GIT_udiff.Leaf have = leaf_at(current, path);
-        if (same_leaf(have, now) || have.id == "") {
+        if (is_same_leaf(have, now) || have.id == "") {
             continue;
         }
         GIT_index.Entry kept = original.get(path).or(GIT_index.Entry(0, 0, 0, 0, 0, 0, have.mode, 0, 0, -1, have.id, 0, false, path.to_bytes()));
@@ -1364,7 +1364,7 @@ pub Result<Applied, Error> apply(str gitdir, str worktree, str id, bool should_r
         GIT_udiff.Leaf now = leaf_at(work, path);
         if (want.id == "") {
             final_entries.remove(path);
-        } else if (final_entries.contains(path) && same_leaf(want, now)) {
+        } else if (final_entries.contains(path) && is_same_leaf(want, now)) {
             continue;
         } else {
             final_entries.set(path, unknown_stat(want.mode, want.id, path.to_bytes()));

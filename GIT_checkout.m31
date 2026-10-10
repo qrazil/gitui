@@ -830,10 +830,10 @@ pub Result<Summary, Error> apply_tree_diff(str gitdir, str worktree, str from_tr
         if (conflicted.contains(path)) {
             return Result<Summary, Error>.Err(Error.Dirty);
         }
-        if (index_has(staged, path, new)) {
+        if (is_in_index(staged, path, new)) {
             continue;
         }
-        if (!index_has(staged, path, old)) {
+        if (!is_in_index(staged, path, old)) {
             return Result<Summary, Error>.Err(Error.Dirty);
         }
         if (old.id != "" && worktree_state(fs.join(worktree, path), get_entry(staged, path)) == 2) {
@@ -895,7 +895,7 @@ pub Result<Summary, Error> reset_files(str gitdir, str worktree, str commit) {
                 }
                 if (entry.is_gitlink()) {
                     TreeEntry want = target.get(path).or(TreeEntry(0, ""));
-                    if (entry.stage != 0 || !index_has(staged, path, want)) {
+                    if (entry.stage != 0 || !is_in_index(staged, path, want)) {
                         return Result<Summary, Error>.Err(Error.Submodule);
                     }
                 }
@@ -922,12 +922,12 @@ pub Result<Summary, Error> reset_files(str gitdir, str worktree, str commit) {
     for (str path in paths) {
         TreeEntry want = target.get(path).or(TreeEntry(0, ""));
         if (want.mode >> 12 == 0o16) {
-            if (!index_has(staged, path, want)) {
+            if (!is_in_index(staged, path, want)) {
                 return Result<Summary, Error>.Err(Error.Submodule);
             }
             continue;
         }
-        if (index_has(staged, path, want) && worktree_state(fs.join(worktree, path), get_entry(staged, path)) == 0) {
+        if (is_in_index(staged, path, want) && worktree_state(fs.join(worktree, path), get_entry(staged, path)) == 0) {
             continue;
         }
         writes.push(Step(path, TreeEntry(0, ""), want));
@@ -1039,7 +1039,7 @@ GIT_index.Entry get_entry(Map<str, GIT_index.Entry> entries, str path) {
 
 // Does the stage-0 index hold `want` at `path` -- or nothing, for an absent
 // `want`?
-bool index_has(Map<str, GIT_index.Entry> staged, str path, TreeEntry want) {
+bool is_in_index(Map<str, GIT_index.Entry> staged, str path, TreeEntry want) {
     match (staged.get(path)) {
         case Some(GIT_index.Entry entry): {
             return want.id != "" && entry.id == want.id && entry.mode == want.mode;
@@ -1103,26 +1103,26 @@ bool is_blocked(str worktree, str path, Map<str, bool> deleted) {
         return true;
     }
     if (fs.is_present(full)) {
-        if (!fs.is_directory(full) || !holds_only(worktree, full, deleted)) {
+        if (!fs.is_directory(full) || !is_all_deleted(worktree, full, deleted)) {
             return true;
         }
     }
-    return parent_in_the_way(worktree, path, deleted);
+    return has_parent_in_the_way(worktree, path, deleted);
 }
 
 // The reset flavour of `is_blocked`: a plain untracked file at the path is
 // not in the way (it is overwritten, as git's `reset --hard` does).
 bool is_blocked_for_reset(str worktree, str path, Map<str, bool> gone) {
     str full = fs.join(worktree, path);
-    if (!fs.is_link(full) && fs.is_directory(full) && !holds_only(worktree, full, gone)) {
+    if (!fs.is_link(full) && fs.is_directory(full) && !is_all_deleted(worktree, full, gone)) {
         return true;
     }
-    return parent_in_the_way(worktree, path, gone);
+    return has_parent_in_the_way(worktree, path, gone);
 }
 
 // A non-directory standing at one of `path`'s parent directories that this
 // change does not remove.
-bool parent_in_the_way(str worktree, str path, Map<str, bool> deleted) {
+bool has_parent_in_the_way(str worktree, str path, Map<str, bool> deleted) {
     str relative_parent = parent_directory(path);
     while (relative_parent != "") {
         str full = fs.join(worktree, relative_parent);
@@ -1135,7 +1135,7 @@ bool parent_in_the_way(str worktree, str path, Map<str, bool> deleted) {
 }
 
 // Is everything under the directory `full` a file this change deletes?
-bool holds_only(str worktree, str full, Map<str, bool> deleted) {
+bool is_all_deleted(str worktree, str full, Map<str, bool> deleted) {
     str base = fs.join(worktree, "");
     match (fs.walk(full)) {
         case Ok(List<str> found): {

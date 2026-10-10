@@ -9,7 +9,7 @@
 // One `Line` per line of `path` at `rev`: the commit that introduced it, its
 // line number in that commit's version of the file (1-based, git's
 // `orig_line`), the path, the text, and whether the commit is a root commit
-// (git's "boundary"). `progress.step(resolved, total, commits)` is called
+// (git's "boundary"). `progress.should_continue(resolved, total, commits)` is called
 // after each commit has been dealt with; returning false stops the walk, and
 // the lines not yet attributed come back with `commit == ""`.
 //
@@ -19,7 +19,7 @@
 //     the commit's takes every line (even a second parent). Otherwise each
 //     parent in turn takes the lines unchanged against it, by the same xdiff
 //     `git diff` uses, and what no parent has is the commit's own.
-//   - a root commit owns what it adds, marked `boundary`.
+//   - a root commit owns what it adds, marked `is_boundary`.
 //
 // Not done, and where this differs from git: git also follows a file through
 // a whole-file rename when the path is missing in a parent; here a parent
@@ -63,7 +63,7 @@ pub str Error.to_str() {
 
 /// What the walk tells whoever is watching; `false` stops it.
 pub interface Progress {
-    bool step(int resolved, int total, int commits);
+    bool should_continue(int resolved, int total, int commits);
 }
 
 /// A `Progress` that never stops the walk.
@@ -71,7 +71,7 @@ pub type Quiet {
     pub int calls = 0;
 }
 
-pub bool Quiet.step(int resolved, int total, int commits) {
+pub bool Quiet.should_continue(int resolved, int total, int commits) {
     calls = calls + 1;
     return true;
 }
@@ -85,7 +85,7 @@ pub type Line {
     pub str path;
     pub bytes text;
     /// The commit is a root commit.
-    pub bool boundary;
+    pub bool is_boundary;
 }
 
 // Lines of one commit's version of the file that still need an owner:
@@ -219,7 +219,7 @@ void Engine.own(Suspect suspect, int index, bool is_boundary) {
     Line line = lines[suspect.final_index[index]];
     line.commit = suspect.commit;
     line.orig_line = suspect.orig_index[index] + 1;
-    line.boundary = is_boundary;
+    line.is_boundary = is_boundary;
     resolved = resolved + 1;
 }
 
@@ -340,7 +340,7 @@ pub Result<List<Line>, Error> blame(str gitdir, str rev, str path, Progress prog
             }
         }
         visited = visited + 1;
-        if (!progress.step(engine.resolved, total, visited)) {
+        if (!progress.should_continue(engine.resolved, total, visited)) {
             break;
         }
     }

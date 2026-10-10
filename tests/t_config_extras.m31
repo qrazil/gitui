@@ -38,10 +38,10 @@ if (command == "list") {
 } else if (command == "editor") {
     print(GIT_ui_model.editor_for(gitdir));
 } else if (command == "settings") {
-    print("gpgsign " + GIT_config.commit_gpgsign(gitdir).to_str());
+    print("gpgsign " + GIT_config.is_commit_gpgsign_enabled(gitdir).to_str());
     print("pull_rebase " + GIT_config.pull_rebase(gitdir, argv[3]));
     print("push_default " + GIT_config.push_default(gitdir));
-    print("autosetup " + GIT_config.push_auto_setup_remote(gitdir).to_str());
+    print("autosetup " + GIT_config.is_push_auto_setup_remote_enabled(gitdir).to_str());
     print("init_branch " + GIT_config.init_default_branch(gitdir));
-    print("rerere " + GIT_config.rerere_enabled(gitdir).to_str());
+    print("rerere " + GIT_config.is_rerere_enabled(gitdir).to_str());
 }

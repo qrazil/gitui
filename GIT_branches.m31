@@ -293,7 +293,7 @@ pub Result<bool, Error> set_upstream(str gitdir, str branch, str remote, str mer
 pub Result<bool, Error> unset_upstream(str gitdir, str branch) {
     List<str> keys = ["remote", "merge"];
     for (str key in keys) {
-        if (!load_config(gitdir).has("branch", branch, key)) {
+        if (!load_config(gitdir).has_key("branch", branch, key)) {
             continue;
         }
         match (GIT_config.unset(gitdir, "branch", branch, key)) {

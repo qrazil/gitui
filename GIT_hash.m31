@@ -25,11 +25,11 @@
 // and the width is what every caller needs: the length to read from a tree
 // entry, a pack's `.idx` name table, the index, the trailer of a pack.
 //
-// Most readers do not call `raw_len` at all. An object name carries its own
+// Most readers do not call `raw_length` at all. An object name carries its own
 // width -- 40 digits is SHA-1, 64 is SHA-256 -- and a function that was handed
 // a name (`GIT_object.read`, `tree_entries`, `commit_of`) takes the algorithm
 // from that, which costs nothing on the hot path of a walk over ten thousand
-// commits. `raw_len` is for the callers that have no name yet: hashing new
+// commits. `raw_length` is for the callers that have no name yet: hashing new
 // content, naming the zero id, an index or a pack on disk, a short prefix.
 // What guards a name that came from outside (a ref's content, the wire, a
 // reflog line) is `GIT_object.is_full`, which holds it to this repository's
@@ -57,41 +57,41 @@ import GIT_config;
 import crypto.sha1digest;
 import crypto.sha256;
 
-pub const int SHA1_LEN = 20;
-pub const int SHA256_LEN = 32;
+pub const int SHA1_LENGTH = 20;
+pub const int SHA256_LENGTH = 32;
 
 /// Octets of a binary object id in this repository.
-pub int raw_len(str gitdir) {
+pub int raw_length(str gitdir) {
     match (GIT_config.load(gitdir)) {
         case Ok(GIT_config.Config config): {
             return raw_of_config(config);
         }
         case Err(_): {
-            return SHA1_LEN;
+            return SHA1_LENGTH;
         }
     }
 }
 
 /// Digits of an object name in this repository.
-pub int hex_len(str gitdir) {
-    return raw_len(gitdir) * 2;
+pub int hex_length(str gitdir) {
+    return raw_length(gitdir) * 2;
 }
 
 // The version-1 gate: `objectFormat` counts only in a repository whose
 // `core.repositoryFormatVersion` is 1.
 int raw_of_config(GIT_config.Config config) {
     if (version_of(config) != 1) {
-        return SHA1_LEN;
+        return SHA1_LENGTH;
     }
     match (config.get("extensions", "", "objectformat")) {
         case Some(str value): {
             if (value.to_lower() == "sha256") {
-                return SHA256_LEN;
+                return SHA256_LENGTH;
             }
-            return SHA1_LEN;
+            return SHA1_LENGTH;
         }
         case None: {
-            return SHA1_LEN;
+            return SHA1_LENGTH;
         }
     }
 }
@@ -167,7 +167,7 @@ bool is_known_extension(str key) {
 
 /// `data`'s hash, `raw` octets long (20 or 32).
 pub bytes digest(int raw, bytes data) {
-    if (raw == SHA256_LEN) {
+    if (raw == SHA256_LENGTH) {
         return sha256.sum(data);
     }
     return sha1digest.sum(data);
@@ -175,7 +175,7 @@ pub bytes digest(int raw, bytes data) {
 
 /// `digest`, as lower-case hex.
 pub str hex(int raw, bytes data) {
-    if (raw == SHA256_LEN) {
+    if (raw == SHA256_LENGTH) {
         return sha256.hex(data);
     }
     return sha1digest.hex(data);
@@ -192,7 +192,7 @@ pub str zero(int raw) {
 
 /// `sha1` or `sha256`.
 pub str name(int raw) {
-    if (raw == SHA256_LEN) {
+    if (raw == SHA256_LENGTH) {
         return "sha256";
     }
     return "sha1";
@@ -201,10 +201,10 @@ pub str name(int raw) {
 /// 20 for `sha1`, 32 for `sha256`, 0 for anything else.
 pub int raw_of_name(str format_name) {
     if (format_name == "sha1") {
-        return SHA1_LEN;
+        return SHA1_LENGTH;
     }
     if (format_name == "sha256") {
-        return SHA256_LEN;
+        return SHA256_LENGTH;
     }
     return 0;
 }

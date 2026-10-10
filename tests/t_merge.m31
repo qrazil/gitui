@@ -90,11 +90,11 @@ if (command == "merge") {
     int index = 5;
     while (index < argv.size()) {
         if (argv[index] == "--no-ff") {
-            opts.ff = GIT_merge.FastForward.Never;
+            opts.fast_forward = GIT_merge.FastForward.Never;
         } else if (argv[index] == "--ff-only") {
-            opts.ff = GIT_merge.FastForward.Only;
+            opts.fast_forward = GIT_merge.FastForward.Only;
         } else if (argv[index] == "--unrelated") {
-            opts.allow_unrelated = true;
+            opts.is_unrelated_allowed = true;
         } else if (argv[index] == "-m" && index + 1 < argv.size()) {
             opts.message = argv[index + 1];
             index = index + 1;

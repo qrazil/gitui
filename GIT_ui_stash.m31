@@ -61,7 +61,7 @@ pub void push_stash(GIT_ui_core.Core core, bool should_include_untracked, bool s
 }
 
 // A merge that stopped on conflicts has changed the tree: say so and reload.
-bool conflicted(GIT_ui_core.Core core, str verb, int number, GIT_stash.Error error) {
+bool did_report_conflicts(GIT_ui_core.Core core, str verb, int number, GIT_stash.Error error) {
     List<str> paths = error.conflicted_paths();
     if (paths.size() == 0) {
         return false;
@@ -84,7 +84,7 @@ pub void apply_stash(GIT_ui_core.Core core, int number, bool should_restore_inde
                 done = found;
             }
             case Err(GIT_stash.Error error): {
-                if (conflicted(core, "pop", number, error)) {
+                if (did_report_conflicts(core, "pop", number, error)) {
                     return;
                 }
                 core.say("pop refused: " + error.to_str());
@@ -108,7 +108,7 @@ pub void apply_stash(GIT_ui_core.Core core, int number, bool should_restore_inde
                 done = found;
             }
             case Err(GIT_stash.Error error): {
-                if (conflicted(core, "apply", number, error)) {
+                if (did_report_conflicts(core, "apply", number, error)) {
                     return;
                 }
                 core.say("apply refused: " + error.to_str());
@@ -266,7 +266,7 @@ type PromptOverlay {
     GIT_ui_core.Core host;
     // "message" or "branch"
     str purpose;
-    int n;
+    int number;
     str input = "";
 }
 
@@ -283,7 +283,7 @@ pub TUI_app.Action PromptOverlay.handle_key(term.Code code) {
             if (cmd == GIT_ui_core.CMD_SUBMIT) {
                 host.pop_overlay();
                 if (purpose == "branch") {
-                    branch_stash(host, n, input.trim());
+                    branch_stash(host, number, input.trim());
                 } else {
                     push_stash(host, false, false, input.trim());
                 }
@@ -310,7 +310,7 @@ pub void PromptOverlay.render(TUI_buffer.Buffer buffer, TUI_geometry.Rect area) 
     }
     str label = "stash message: ";
     if (purpose == "branch") {
-        label = "branch from " + ref_name(n) + ": ";
+        label = "branch from " + ref_name(number) + ": ";
     }
     TUI_geometry.Rect row = TUI_geometry.Rect(area.x, area.y + area.height - 1, area.width, 1);
     TUI_style.Style style = TUI_style.Style(attrs: TUI_style.REVERSE);
@@ -326,7 +326,7 @@ pub List<GIT_ui_core.Hint> PromptOverlay.hints() {
 
 type DropConfirm {
     GIT_ui_core.Core host;
-    int n;
+    int number;
 }
 
 /// `y` drops; every other key keeps the stash.
@@ -335,7 +335,7 @@ pub TUI_app.Action DropConfirm.handle_key(term.Code code) {
     match (GIT_ui_core.lookup(GIT_ui_core.SCOPE_CONFIRM, code)) {
         case Some(str cmd): {
             if (cmd == GIT_ui_core.CMD_YES) {
-                drop_stash(host, n);
+                drop_stash(host, number);
                 return TUI_app.Action.Redraw;
             }
         }
@@ -348,8 +348,8 @@ pub TUI_app.Action DropConfirm.handle_key(term.Code code) {
 
 pub void DropConfirm.render(TUI_buffer.Buffer buffer, TUI_geometry.Rect area) {
     str label = "";
-    if (n < host.stash_labels.size()) {
-        label = host.stash_labels[n];
+    if (number < host.stash_labels.size()) {
+        label = host.stash_labels[number];
     }
     TUI_menu.WhichKey which_key = TUI_menu.WhichKey("drop " + label + "?", [TUI_menu.Item("y", "yes, drop it"), TUI_menu.Item("any other key", "no, keep it")]);
     which_key.render(buffer, area);

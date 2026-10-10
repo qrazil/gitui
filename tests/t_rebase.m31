@@ -157,16 +157,16 @@ if (command == "start") {
     int position = 4;
     while (position < argv.size()) {
         if (argv[position] == "-i") {
-            popts.interactive = true;
-            sopts.interactive = true;
+            popts.is_interactive = true;
+            sopts.is_interactive = true;
         } else if (argv[position] == "--autosquash") {
-            popts.autosquash = true;
+            popts.should_autosquash = true;
         } else if (argv[position] == "--autostash") {
-            sopts.autostash = true;
+            sopts.should_autostash = true;
         } else if (argv[position] == "--root") {
-            popts.root = true;
+            popts.is_root = true;
         } else if (argv[position] == "--keep-base") {
-            popts.keep_base = true;
+            popts.should_keep_base = true;
         } else if (argv[position] == "--onto" && position + 1 < argv.size()) {
             popts.onto = argv[position + 1];
             position = position + 1;

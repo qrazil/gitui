@@ -201,7 +201,7 @@ type Raw {
 /// The trailing checksum is not checked here; `GIT_http_fetch.verify_pack` has
 /// already done that for anything it wrote.
 pub Result<List<Unpacked>, Error> read_pack(str gitdir, bytes pack) {
-    int raw_width = GIT_hash.raw_len(gitdir);
+    int raw_width = GIT_hash.raw_length(gitdir);
     if (pack.size() < 12 + raw_width || pack.substr(0, 4) != "PACK".to_bytes() || u32be(pack, 4) != 2) {
         return Result<List<Unpacked>, Error>.Err(Error.BadPack);
     }
@@ -342,7 +342,7 @@ str object_name(int raw_width, str kind, bytes content) {
 /// unreadable.
 pub Result<List<str>, Error> ids(str gitdir) {
     List<PackFile> packs = discover(gitdir);
-    int raw_width = GIT_hash.raw_len(gitdir);
+    int raw_width = GIT_hash.raw_length(gitdir);
     List<str> out = [];
     for (PackFile pack_file in packs) {
         match (io.read_bytes(pack_file.index_path)) {

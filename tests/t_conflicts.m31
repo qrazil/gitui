@@ -28,11 +28,11 @@ void Counter.check(str name, bool is_ok, str detail) {
 
 Counter counter = Counter();
 
-bytes b(str text) {
+bytes to_bytes(str text) {
     return text.to_bytes();
 }
 
-str s(bytes data) {
+str to_text(bytes data) {
     return data.hex();
 }
 
@@ -70,35 +70,35 @@ merges(counter, "custom labels", "a\n", "b\n", "c\n", "<<<<<<< ours\nb\n=======\
 // --- the reader ---------------------------------------------------------------
 
 str three = "x\n<<<<<<< ours\nO1\nO2\n||||||| base\nB1\n=======\nT1\n>>>>>>> theirs\nmid\n<<<<<<< ours\n=======\nT2\n>>>>>>> theirs\nend";
-List<GIT_diff3.Segment> segments = GIT_diff3.parse_conflicts(b(three));
+List<GIT_diff3.Segment> segments = GIT_diff3.parse_conflicts(to_bytes(three));
 counter.check("parse: 2 conflicts", GIT_diff3.count_conflicts(segments) == 2, GIT_diff3.count_conflicts(segments).to_str());
-counter.check("parse: render is the identity", GIT_diff3.render(segments) == b(three), GIT_diff3.render(segments).hex());
-counter.check("resolve_all Ours", GIT_diff3.resolve_all(segments, GIT_diff3.Choice.Ours) == b("x\nO1\nO2\nmid\nend"), GIT_diff3.resolve_all(segments, GIT_diff3.Choice.Ours).hex());
-counter.check("resolve_all Theirs", GIT_diff3.resolve_all(segments, GIT_diff3.Choice.Theirs) == b("x\nT1\nmid\nT2\nend"), GIT_diff3.resolve_all(segments, GIT_diff3.Choice.Theirs).hex());
-counter.check("resolve_all Both", GIT_diff3.resolve_all(segments, GIT_diff3.Choice.Both) == b("x\nO1\nO2\nT1\nmid\nT2\nend"), GIT_diff3.resolve_all(segments, GIT_diff3.Choice.Both).hex());
-counter.check("resolve_all BothReversed", GIT_diff3.resolve_all(segments, GIT_diff3.Choice.BothReversed) == b("x\nT1\nO1\nO2\nmid\nT2\nend"), GIT_diff3.resolve_all(segments, GIT_diff3.Choice.BothReversed).hex());
-counter.check("resolve_all Base", GIT_diff3.resolve_all(segments, GIT_diff3.Choice.Base) == b("x\nB1\nmid\nend"), GIT_diff3.resolve_all(segments, GIT_diff3.Choice.Base).hex());
+counter.check("parse: render is the identity", GIT_diff3.render(segments) == to_bytes(three), GIT_diff3.render(segments).hex());
+counter.check("resolve_all Ours", GIT_diff3.resolve_all(segments, GIT_diff3.Choice.Ours) == to_bytes("x\nO1\nO2\nmid\nend"), GIT_diff3.resolve_all(segments, GIT_diff3.Choice.Ours).hex());
+counter.check("resolve_all Theirs", GIT_diff3.resolve_all(segments, GIT_diff3.Choice.Theirs) == to_bytes("x\nT1\nmid\nT2\nend"), GIT_diff3.resolve_all(segments, GIT_diff3.Choice.Theirs).hex());
+counter.check("resolve_all Both", GIT_diff3.resolve_all(segments, GIT_diff3.Choice.Both) == to_bytes("x\nO1\nO2\nT1\nmid\nT2\nend"), GIT_diff3.resolve_all(segments, GIT_diff3.Choice.Both).hex());
+counter.check("resolve_all BothReversed", GIT_diff3.resolve_all(segments, GIT_diff3.Choice.BothReversed) == to_bytes("x\nT1\nO1\nO2\nmid\nT2\nend"), GIT_diff3.resolve_all(segments, GIT_diff3.Choice.BothReversed).hex());
+counter.check("resolve_all Base", GIT_diff3.resolve_all(segments, GIT_diff3.Choice.Base) == to_bytes("x\nB1\nmid\nend"), GIT_diff3.resolve_all(segments, GIT_diff3.Choice.Base).hex());
 List<GIT_diff3.Segment> one = GIT_diff3.resolve_at(segments, 1, GIT_diff3.Choice.Theirs);
 counter.check("resolve_at 1 leaves one conflict", GIT_diff3.count_conflicts(one) == 1, GIT_diff3.count_conflicts(one).to_str());
-counter.check("resolve_at 1 rendered", GIT_diff3.render(one) == b("x\n<<<<<<< ours\nO1\nO2\n||||||| base\nB1\n=======\nT1\n>>>>>>> theirs\nmid\nT2\nend"), GIT_diff3.render(one).hex());
-counter.check("resolve_at out of range changes nothing", GIT_diff3.render(GIT_diff3.resolve_at(segments, 7, GIT_diff3.Choice.Ours)) == b(three), "changed");
+counter.check("resolve_at 1 rendered", GIT_diff3.render(one) == to_bytes("x\n<<<<<<< ours\nO1\nO2\n||||||| base\nB1\n=======\nT1\n>>>>>>> theirs\nmid\nT2\nend"), GIT_diff3.render(one).hex());
+counter.check("resolve_at out of range changes nothing", GIT_diff3.render(GIT_diff3.resolve_at(segments, 7, GIT_diff3.Choice.Ours)) == to_bytes(three), "changed");
 List<GIT_diff3.Segment> two = GIT_diff3.resolve_at(one, 0, GIT_diff3.Choice.Base);
-counter.check("resolve_at both: no conflict left", GIT_diff3.count_conflicts(two) == 0 && GIT_diff3.render(two) == b("x\nB1\nmid\nT2\nend"), GIT_diff3.render(two).hex());
+counter.check("resolve_at both: no conflict left", GIT_diff3.count_conflicts(two) == 0 && GIT_diff3.render(two) == to_bytes("x\nB1\nmid\nT2\nend"), GIT_diff3.render(two).hex());
 str crlf = "a\r\n<<<<<<< ours\r\nO\r\n=======\r\nT\r\n>>>>>>> theirs\r\nz\r\n";
-List<GIT_diff3.Segment> crsegs = GIT_diff3.parse_conflicts(b(crlf));
+List<GIT_diff3.Segment> crsegs = GIT_diff3.parse_conflicts(to_bytes(crlf));
 counter.check("parse CRLF: 1 conflict", GIT_diff3.count_conflicts(crsegs) == 1, "n=" + GIT_diff3.count_conflicts(crsegs).to_str());
-counter.check("parse CRLF: round trip", GIT_diff3.render(crsegs) == b(crlf), GIT_diff3.render(crsegs).hex());
-counter.check("parse CRLF: ours keeps its CRLF", GIT_diff3.resolve_all(crsegs, GIT_diff3.Choice.Ours) == b("a\r\nO\r\nz\r\n"), GIT_diff3.resolve_all(crsegs, GIT_diff3.Choice.Ours).hex());
+counter.check("parse CRLF: round trip", GIT_diff3.render(crsegs) == to_bytes(crlf), GIT_diff3.render(crsegs).hex());
+counter.check("parse CRLF: ours keeps its CRLF", GIT_diff3.resolve_all(crsegs, GIT_diff3.Choice.Ours) == to_bytes("a\r\nO\r\nz\r\n"), GIT_diff3.resolve_all(crsegs, GIT_diff3.Choice.Ours).hex());
 str unfinished = "a\n<<<<<<< ours\nO\n=======\nT\nz\n";
-counter.check("an unterminated conflict stays text", GIT_diff3.count_conflicts(GIT_diff3.parse_conflicts(b(unfinished))) == 0 && GIT_diff3.render(GIT_diff3.parse_conflicts(b(unfinished))) == b(unfinished), "parsed");
+counter.check("an unterminated conflict stays text", GIT_diff3.count_conflicts(GIT_diff3.parse_conflicts(to_bytes(unfinished))) == 0 && GIT_diff3.render(GIT_diff3.parse_conflicts(to_bytes(unfinished))) == to_bytes(unfinished), "parsed");
 str nested = "<<<<<<< ours\n<<<<<<< ours\nO\n=======\nT\n>>>>>>> theirs\n";
-List<GIT_diff3.Segment> nsegs = GIT_diff3.parse_conflicts(b(nested));
-counter.check("a start marker inside a conflict restarts it", GIT_diff3.count_conflicts(nsegs) == 1 && GIT_diff3.render(nsegs) == b(nested), "n=" + GIT_diff3.count_conflicts(nsegs).to_str());
+List<GIT_diff3.Segment> nsegs = GIT_diff3.parse_conflicts(to_bytes(nested));
+counter.check("a start marker inside a conflict restarts it", GIT_diff3.count_conflicts(nsegs) == 1 && GIT_diff3.render(nsegs) == to_bytes(nested), "n=" + GIT_diff3.count_conflicts(nsegs).to_str());
 str longer = "<<<<<<<< ours\nO\n=======\nT\n>>>>>>> theirs\n";
-counter.check("eight < is not a marker", GIT_diff3.count_conflicts(GIT_diff3.parse_conflicts(b(longer))) == 0, "parsed");
-counter.check("text without markers is one Text", GIT_diff3.parse_conflicts(b("a\nb\n")).size() == 1 && GIT_diff3.count_conflicts(GIT_diff3.parse_conflicts(b("a\nb\n"))) == 0, "segments");
+counter.check("eight < is not a marker", GIT_diff3.count_conflicts(GIT_diff3.parse_conflicts(to_bytes(longer))) == 0, "parsed");
+counter.check("text without markers is one Text", GIT_diff3.parse_conflicts(to_bytes("a\nb\n")).size() == 1 && GIT_diff3.count_conflicts(GIT_diff3.parse_conflicts(to_bytes("a\nb\n"))) == 0, "segments");
 counter.check("empty text has no segments", GIT_diff3.parse_conflicts([]).size() == 0, "segments");
-GIT_diff3.Merged real = GIT_diff3.merge3(b("a\nb\nc\n"), b("a\nX\nc\n"), b("a\nY\nc\n"), GIT_diff3.Labels("ours", "base", "theirs"));
-counter.check("merge then resolve Ours is ours", GIT_diff3.resolve_all(GIT_diff3.parse_conflicts(real.text), GIT_diff3.Choice.Ours) == b("a\nX\nc\n"), s(real.text));
-counter.check("merge then resolve Theirs is theirs", GIT_diff3.resolve_all(GIT_diff3.parse_conflicts(real.text), GIT_diff3.Choice.Theirs) == b("a\nY\nc\n"), s(real.text));
+GIT_diff3.Merged real = GIT_diff3.merge3(to_bytes("a\nb\nc\n"), to_bytes("a\nX\nc\n"), to_bytes("a\nY\nc\n"), GIT_diff3.Labels("ours", "base", "theirs"));
+counter.check("merge then resolve Ours is ours", GIT_diff3.resolve_all(GIT_diff3.parse_conflicts(real.text), GIT_diff3.Choice.Ours) == to_bytes("a\nX\nc\n"), to_text(real.text));
+counter.check("merge then resolve Theirs is theirs", GIT_diff3.resolve_all(GIT_diff3.parse_conflicts(real.text), GIT_diff3.Choice.Theirs) == to_bytes("a\nY\nc\n"), to_text(real.text));
 print(counter.checks.to_str() + " checks, " + counter.failed.to_str() + " failed");
