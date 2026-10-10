@@ -185,6 +185,13 @@ MaxStartups 1000
 LoginGraceTime 60
 SetEnv GIT_TRACE_PACKET=$ss_root/trace.log PATH=$ss_session_path
 EOF
+        # OpenSSH 9.8+ drops a source that keeps disconnecting before auth (as the host-key
+        # refusal tests do); older sshd rejects the keyword, so keep it only if accepted.
+        printf 'PerSourcePenalties no\n' >>"$ss_root/sshd_config"
+        if ! "$ss_sshd" -t -f "$ss_root/sshd_config" >/dev/null 2>&1; then
+            sed '/^PerSourcePenalties/d' "$ss_root/sshd_config" >"$ss_root/sshd_config.new"
+            mv "$ss_root/sshd_config.new" "$ss_root/sshd_config"
+        fi
         "$ss_sshd" -f "$ss_root/sshd_config" -D -e >"$ss_root/sshd.log" 2>&1 &
         ss_pid=$!
         for ss_try in $(seq 1 100); do
