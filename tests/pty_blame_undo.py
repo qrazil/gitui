@@ -93,7 +93,7 @@ def run(ctx):
     s.send("\r")
     t = s.text()
     last = expected[-1][0]
-    check("blame: Enter opens the commit of the line under the cursor, with its diff of the file", "commit " + last in t and "third" in t and "+ five" in t, t)
+    check("blame: Enter opens the commit of the line under the cursor, with its diff of the file", "commit " + last[:32] in t and "third" in t and "+ five" in t, t)
     s.send("q")
     check("blame: q closes the commit view back to the blame", "blame a.txt @ HEAD" in s.text(), s.text())
     s.send("g")
