@@ -13,7 +13,7 @@ build and records it in `deps.lock`. Library modules and the two entry points st
 at the root; `tests/`, `tests/oracles/`, `scripts/` and `docs/` hold the rest.
 
 ```
-export M31_ROOT=/path/to/m31      # a checkout, or an extracted release's runtime SDK (m31 v0.3.0+)
+export M31_ROOT=/path/to/m31      # a checkout, or an extracted release's runtime SDK (m31 v0.4.0+)
 export LANGC=/path/to/m31c        # the matching compiler
 
 bash tests/test.sh                    # the built-in fixtures
@@ -406,7 +406,7 @@ below) and `ssh://` (see "Remotes over ssh" below) are supported.
 
 Fetch, push and pull all work over `https://` remotes as well as `http://`.
 Every request goes through `GIT_http_fetch.exchange`, which is the standard
-library's `https.fetch` (m31 v0.3.0+; `http` itself no longer links TLS): an
+library's `https.fetch` (m31 v0.4.0+, in `net`; `http` itself no longer links TLS): an
 `http://` URL is spoken exactly as before, an `https://` one is spoken over a
 TLS connection whose certificate is verified. There is no insecure mode and no
 switch that skips the check.

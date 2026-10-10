@@ -152,3 +152,118 @@ References to the m31 monorepo's `apps/git`, `apps/tui` and `apps/markdown`
 (deleted when these repos were extracted) now name this repo's own files
 (`tests/`, `scripts/`) or the `tui` package; `tests/test.sh` no longer mentions a
 separate `TUI_ROOT` checkout, since `deps` pins tui.
+
+---
+
+# 0.5.0: m31 0.4.0 layout and naming
+
+Branch `feat/m31-0.4.0`, from master 6313d91 (0.5.0). gitui is built with m31
+v0.4.0, which groups the standard library into folders and makes `m31c lint` a
+gate. `m31c lint .` reports no findings and `m31c fmt --check -r .` is clean;
+behaviour, the command line and the key bindings are unchanged.
+
+## Imports and standard library
+
+Standard library imports use the group path (`import net.http;`,
+`import encoding.base64;`, `import crypto.sha256;`, `import ssh.sshclient;`
+and so on). The standard library renames gitui calls:
+
+| old | new |
+|---|---|
+| `fs.exists` | `fs.is_present` |
+| `fs.is_dir` | `fs.is_directory` |
+| `os.args` | `os.arguments` |
+| `os.ExitStatus.success` | `os.ExitStatus.is_success` |
+| `term.fg` / `term.bg` | `term.foreground` / `term.background` |
+| `term.Size.cols` | `term.Size.columns` |
+| `args.Parsed.flag` | `args.Parsed.is_flag_set` |
+| `sshexec.Channel.read_all_err` | `sshexec.Channel.read_all_error` |
+
+## Public fields (break named arguments and every `.field` access)
+
+| module | type | old | new |
+|---|---|---|---|
+| GIT_blame | Line | boundary | is_boundary |
+| GIT_merge | StartOpts | ff | fast_forward |
+| GIT_merge | StartOpts | allow_unrelated | is_unrelated_allowed |
+| GIT_rebase | PlanOpts | root | is_root |
+| GIT_rebase | PlanOpts | keep_base | should_keep_base |
+| GIT_rebase | PlanOpts | interactive | is_interactive |
+| GIT_rebase | PlanOpts | autosquash | should_autosquash |
+| GIT_rebase | Plan | root | is_root |
+| GIT_rebase | Plan | up_to_date | is_up_to_date |
+| GIT_rebase | StartOpts | interactive | is_interactive |
+| GIT_rebase | StartOpts | autostash | should_autostash |
+| GIT_rebase | State | interactive | is_interactive |
+| GIT_sequencer | Options | no_commit | should_skip_commit |
+| GIT_sequencer | Options | record_origin | should_record_origin |
+| GIT_sequencer | Options | allow_empty | is_empty_allowed |
+| GIT_sequencer | Options | keep_redundant | should_keep_redundant |
+| GIT_sequencer | Options | as_range | is_range |
+| GIT_sequencer | State | stopped | is_stopped |
+| GIT_ssh_transport | Upload, Receive | conn | connection |
+| GIT_stash | Item | n | index |
+| GIT_xdiff | Edit | a_len | a_length |
+| GIT_xdiff | Edit | b_len | b_length |
+
+## Public functions, methods and constants
+
+| module | old | new |
+|---|---|---|
+| GIT_blame | Quiet.step, `Progress.step` | Quiet.should_continue, `Progress.should_continue` |
+| GIT_config | Config.has | Config.has_key |
+| GIT_config | commit_gpgsign | is_commit_gpgsign_enabled |
+| GIT_config | push_auto_setup_remote | is_push_auto_setup_remote_enabled |
+| GIT_config | rerere_enabled | is_rerere_enabled |
+| GIT_hash | SHA1_LEN / SHA256_LEN | SHA1_LENGTH / SHA256_LENGTH |
+| GIT_hash | raw_len | raw_length |
+| GIT_hash | hex_len | hex_length |
+| GIT_object | hex_len | hex_length |
+| GIT_ignore | path_glob | is_path_glob_match |
+| GIT_merge | in_progress | is_in_progress |
+| GIT_merge | message_file_is_current | is_message_file_current |
+| GIT_rebase | state_dir | state_directory |
+| GIT_rebase | in_progress | is_in_progress |
+| GIT_rebase | default_autostash | is_autostash_default |
+| GIT_rebase | default_autosquash | is_autosquash_default |
+| GIT_reflog | exists | has_log |
+| GIT_remote | glob_matches | is_glob_match |
+| GIT_sequencer | sequencer_dir | sequencer_directory |
+| GIT_sequencer | in_progress | is_in_progress |
+| GIT_ssh_transport | hashes_known_hosts | should_hash_known_hosts |
+| GIT_ui_autorefresh | AutoRefresh.tick, `Ticker.tick` | AutoRefresh.did_change_on_tick, `Ticker.did_change_on_tick` |
+| GIT_ui_core | CMD_PREV | CMD_PREVIOUS |
+| GIT_ui_merge | MergeLayer.take_dirty | MergeLayer.did_take_dirty |
+| GIT_ui_merge | MergeLayer.stage_resolved | MergeLayer.did_stage_resolved |
+| GIT_ui_merge | MergeLayer.take_whole | MergeLayer.did_take_whole |
+| GIT_ui_rebase | RebaseLayer.describe | RebaseLayer.needs_message_after_describing |
+| GIT_ui_rebase | RebaseLayer.write_message_file | RebaseLayer.did_write_message_file |
+| GIT_ui_rebase | RebaseLayer.run_editor | RebaseLayer.did_run_editor |
+| GIT_watch | DIR_CAP | DIRECTORY_CAP |
+
+## Public parameters (break calls with named arguments)
+
+| function | old | new |
+|---|---|---|
+| GIT_stash.push | include_untracked, keep_index, store | should_include_untracked, should_keep_index, should_store |
+| GIT_stash.show | include_untracked | should_include_untracked |
+| GIT_stash.apply, GIT_stash.pop | restore_index | should_restore_index |
+| GIT_refs.update | msg | reflog_message |
+| GIT_reflog.delete | rewrite | should_rewrite |
+| GIT_sequencer.write_todo, read_todo, read_options, write_options | dir | directory |
+| GIT_ui_stash.push_stash, apply_stash | include_untracked, keep_index, restore_index, drop_after | should_include_untracked, should_keep_index, should_restore_index, should_drop_after |
+| GIT_ui_remote.push_with, record_pushed, push_over_ssh | set_upstream | should_set_upstream |
+| GIT_ui_rebase.continue_rebase_now | skip | should_skip |
+
+Positional parameters renamed without a new meaning (`msg` -> `message`,
+`n` -> `count` / `number`, `a` / `b` -> `first` / `second` or `lines_a` /
+`lines_b`, `lo` / `hi` -> `first_index` / `end_index`) do not break callers
+unless they pass the argument by name.
+
+## Everything else
+
+Private functions, fields, locals and `case` bindings follow the same rules
+(booleans take is_/has_/did_/should_, abbreviations are spelled out, unused
+`case` payloads are `_`, `Err` payloads are `error`); a grep for the old name
+finds nothing, and the diff shows the new one. String literals, command names
+the test programs take, and every on-disk or on-wire format are unchanged.

@@ -11,7 +11,7 @@
 # names tui and the exact commit; the first compile fetches it into
 # `.m31-deps/` and records it in `deps.lock`, so nothing is staged or copied.
 #
-# Also needs LANGC (the m31c compiler binary, v0.2.0 or later) and M31_ROOT (a
+# Also needs LANGC (the m31c compiler binary, v0.4.0 or later) and M31_ROOT (a
 # checkout of github.com/qrazil/m31, or an extracted release's bundled runtime
 # SDK, containing config.sh and runtime/) -- there is no pre-built runtime
 # library to link against instead.

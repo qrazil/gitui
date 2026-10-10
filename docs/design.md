@@ -280,3 +280,11 @@ cases, plus a seeded fuzzer.
     does (a file entry nested under the commit that touches it, say).
   - How undo/redo of staging works, if at all — Magit leans on Emacs' undo,
     which has no equivalent here.
+
+## m31 0.4.0, 2026-10-10
+
+m31 v0.4.0 grouped the standard library into folders (`import net.http;`,
+`import encoding.base64;`) and made `m31c lint` a gate, so gitui follows the
+new naming rules: booleans start with is_/has_/did_/should_, abbreviations are
+spelled out, and short names became real ones. Nothing about the design
+changed. `RENAMES.md` lists every old public name next to its new one.
