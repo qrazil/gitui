@@ -1229,7 +1229,7 @@ def main():
     check("search: Escape did not remember the query", "press / and type" in s23b.text(), s23b.text())
     s23b.quit()
 
-    # g and R refresh; r is no longer bound.
+    # g and R refresh; r opens the rebase menu.
     fx24 = make_fixture(root, "refresh")
     commit_file(fx24, "a.txt", "one\n", "first")
     s24 = Session(binpath, fx24)
@@ -1244,9 +1244,8 @@ def main():
     with open(os.path.join(fx24, "via_r.txt"), "w") as f:
         f.write("x\n")
     s24.send("r")
-    # The outline now also refreshes on its own, so whether via_r.txt shows up
-    # says nothing about r; r must simply not open anything.
-    check("refresh: r is no longer bound (it opens nothing)", "Untracked files" in s24.text() and "Esc" not in s24.text(), s24.text())
+    check("refresh: r opens the rebase menu, not a refresh", "autosquash" in s24.text(), s24.text())
+    s24.send("\x1b")
     s24.send("g")
     check("refresh: g then picks it up", "via_r.txt" in s24.text(), s24.text())
     s24.quit()
