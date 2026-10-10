@@ -241,6 +241,33 @@ bounded. (3) The environment overrides
 unusual setups; nothing reads a password from anywhere, and an encrypted key or
 a missing key ends in a message that names `https://` as the alternative.
 
+## SHA-256 and the revision grammar, 2026-10-10
+
+Both were "not done" in the README; the maintainer decided they are needed, and
+each has its own audit or design note in the code.
+
+**SHA-256** (`GIT_hash.m31`). An object name's width is the one thing that
+changes, so the decision was where the algorithm comes from: not a global, not a
+parameter threaded through every caller, but (1) the id's own length wherever an
+id is in hand (40 digits is SHA-1, 64 is SHA-256) and (2) the repository's
+`extensions.objectFormat`, read once, where there is no id yet (hashing a new
+object, a zero id, a pack trailer). The entry points refuse, by name, every
+repository extension this program does not implement instead of reading such a
+repository wrongly. On the wire the client echoes `object-format=<fmt>` and
+refuses a remote of the other format before anything moves, over HTTP and ssh
+alike (`FormatMismatch`); there is no protocol v2, so `ls-refs` and `fetch`
+arguments do not arise. `TEST_HASH=sha256 bash tests/test.sh` runs every fixture
+of every family as SHA-256, so the second hash is not a separate, thinner suite.
+
+**Revisions** (`GIT_revparse.m31`, `docs/revisions-audit.md`). The audit found
+that cursor and picker flows hand the engines full ids, and that three entries
+take free text: the range prompt, the rebase todo and the CLI. The module follows
+git's `object-name.c` in order (the order is part of the grammar's meaning: a
+branch `cafe` beats an object `cafe...`), and refuses what it cannot do (dates in
+`@{...}`, GNU regex escapes) with an error, never a different answer. Its
+oracle is `git rev-parse` / `git rev-list` over a fixture built to hit the special
+cases, plus a seeded fuzzer.
+
 ## What this deliberately does not decide yet
 
   - Exact keybindings (mnemonic, one key per base verb, is the only

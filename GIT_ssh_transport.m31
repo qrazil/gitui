@@ -43,6 +43,7 @@
 // files); `HOME` locates `~/.ssh`.
 
 import GIT_http_push;
+import GIT_hash;
 import GIT_object;
 import GIT_pack_write;
 import GIT_remote;
@@ -117,6 +118,8 @@ pub enum Error {
     NoReportStatus;
     /// A malformed ref name or object id.
     BadName;
+    /// The remote's object format is not this repository's.
+    FormatMismatch;
 }
 
 pub str Error.to_str() {
@@ -173,6 +176,9 @@ pub str Error.to_str() {
         case BadName: {
             return "not a well-formed ref name or object id";
         }
+        case FormatMismatch: {
+            return "the remote's object format differs from this repository's (SHA-1 and SHA-256 repositories cannot exchange objects)";
+        }
     }
 }
 
@@ -197,6 +203,8 @@ pub Option<PendingHost> Error.pending_host() {
         case NoReportStatus: {
         }
         case BadName: {
+        }
+        case FormatMismatch: {
         }
         case NoKey(_): {
         }
@@ -726,7 +734,7 @@ pub Result<GIT_wire.Summary, Error> Upload.fetch(List<str> wants, List<str> have
                 conn.finish(false);
                 return Result<GIT_wire.Summary, Error>.Err(Error.Protocol("remote: " + got.remote_error.trim()));
             }
-            match (GIT_wire.verify_pack(got.pack, out_path)) {
+            match (GIT_wire.verify_pack(got.pack, out_path, raw: GIT_wire.raw_of(advertisement))) {
                 case Ok(GIT_wire.Summary summary): {
                     conn.finish(true);
                     return Result<GIT_wire.Summary, Error>.Ok(summary);
@@ -791,7 +799,7 @@ pub Result<PushResult, Error> Receive.push(str gitdir, str refname, str new_id) 
             return Result<PushResult, Error>.Ok(PushResult(status.is_unpacked && status.is_ok, reason, conn.remote_messages()));
         }
         case Err(Error why): {
-            if (why.to_str() == Error.UpToDate.to_str() || why.to_str() == Error.Behind.to_str() || why.to_str() == Error.NonFastForward.to_str() || why.to_str() == Error.Pack.to_str() || why.to_str() == Error.BadName.to_str() || why.to_str() == Error.NoReportStatus.to_str()) {
+            if (why.to_str() == Error.UpToDate.to_str() || why.to_str() == Error.Behind.to_str() || why.to_str() == Error.NonFastForward.to_str() || why.to_str() == Error.Pack.to_str() || why.to_str() == Error.BadName.to_str() || why.to_str() == Error.FormatMismatch.to_str() || why.to_str() == Error.NoReportStatus.to_str()) {
                 match (GIT_wire.say_goodbye(conn)) {
                     case Ok(_): {
                     }
@@ -808,13 +816,16 @@ pub Result<PushResult, Error> Receive.push(str gitdir, str refname, str new_id) 
 }
 
 Result<GIT_wire.ReportStatus, Error> Receive.transmit(str gitdir, str refname, str new_id) {
-    if (!GIT_object.is_name(new_id) || new_id.size() != 40 || !refname.starts_with("refs/")) {
+    if (!GIT_object.is_name(new_id) || !GIT_object.is_full(gitdir, new_id) || !refname.starts_with("refs/")) {
         return Result<GIT_wire.ReportStatus, Error>.Err(Error.BadName);
+    }
+    if (advertisement.object_format != GIT_hash.name(GIT_hash.raw_len(gitdir))) {
+        return Result<GIT_wire.ReportStatus, Error>.Err(Error.FormatMismatch);
     }
     if (!GIT_wire.has_cap(advertisement.capabilities, "report-status")) {
         return Result<GIT_wire.ReportStatus, Error>.Err(Error.NoReportStatus);
     }
-    str old = GIT_wire.ZERO_ID;
+    str old = GIT_wire.zero_id(advertisement);
     List<str> known = [];
     Map<str, bool> seen = {};
     for (GIT_wire.RemoteRef advertised in advertisement.refs) {
@@ -829,7 +840,7 @@ Result<GIT_wire.ReportStatus, Error> Receive.transmit(str gitdir, str refname, s
     if (old == new_id) {
         return Result<GIT_wire.ReportStatus, Error>.Err(Error.UpToDate);
     }
-    if (old != GIT_wire.ZERO_ID) {
+    if (old != GIT_wire.zero_id(advertisement)) {
         match (GIT_object.read(gitdir, old)) {
             case Ok(_): {
             }

@@ -360,6 +360,97 @@ if [ "${ss_up:-0}" = 1 ]; then
     ss_has "push: a rewritten tip is refused as not a fast-forward" "$ss_out" "not a fast-forward"
     ss_eq "push: the remote branch is untouched by that refusal" "$(git ls-remote "$ss_push_bare" refs/heads/main | cut -f1)" "$ss_before"
 
+    # --- SHA-256 repositories over ssh: the object-format capability, 64-digit ids, the pack's
+    # 32-octet trailer, and the refusals between formats. Explicit --object-format, so these
+    # run the same whatever TEST_HASH says; everything is judged by git. ----------------------
+    ss_s2_bare="$ss_root/repos/sha256.git"
+    ss_s1_bare="$ss_root/repos/sha1.git"
+    (
+        set -e
+        ss_g init -q --bare --object-format=sha256 "$ss_s2_bare"
+        ss_g init -q --bare --object-format=sha1 "$ss_s1_bare"
+        ss_g init -q --object-format=sha256 "$ss_root/s2seed"
+        cd "$ss_root/s2seed"
+        for ss_n in 1 2 3 4; do
+            echo "sha256 line $ss_n" >"s$ss_n.txt"
+            ss_g add -A
+            ss_g commit -q -m "s2 seed $ss_n"
+        done
+        ss_g tag -a -m "tagged" s2v1
+        ss_g push -q "$ss_s2_bare" main s2v1
+        ss_g init -q --object-format=sha1 "$ss_root/s1seed"
+        cd "$ss_root/s1seed"
+        echo "sha1 line" >one.txt
+        ss_g add -A
+        ss_g commit -q -m "s1 seed"
+        ss_g push -q "$ss_s1_bare" main
+    ) >"$ss_root/s2fixture.log" 2>&1 || bad "ssh sha256: fixture" "$(tail -5 "$ss_root/s2fixture.log")"
+    ss_t ls "$(ss_url_of "$ss_s2_bare")" 2>"$ss_root/s2ls.err" | sort >"$ss_root/s2ls.got"
+    git ls-remote "$ss_s2_bare" | sort >"$ss_root/s2ls.want"
+    if cmp -s "$ss_root/s2ls.got" "$ss_root/s2ls.want" && [ -s "$ss_root/s2ls.want" ] \
+        && [ "$(head -1 "$ss_root/s2ls.got" | cut -f1 | tr -d '\n' | wc -c | tr -d ' ')" = 64 ]; then
+        note "ssh sha256: the advertisement (64-digit ids) matches git ls-remote"
+    else
+        bad "ssh sha256: ls matches git ls-remote" "$(diff "$ss_root/s2ls.got" "$ss_root/s2ls.want" | head -4)" "$(cat "$ss_root/s2ls.err")"
+    fi
+    ss_g clone -q "$ss_s2_bare" "$ss_root/s2c" 2>/dev/null
+    ss_g clone -q "$ss_s2_bare" "$ss_root/s2o" 2>/dev/null
+    ss_eq "sha256: the clone is a SHA-256 repository" "$(git -C "$ss_root/s2c" rev-parse --show-object-format)" "sha256"
+    ss_up_commit "$ss_root/s2o" up1.txt "from upstream"
+    ss_up_commit "$ss_root/s2o" up2.txt "from upstream again"
+    ss_g -C "$ss_root/s2o" push -q origin main 2>/dev/null
+    ss_old=$(git -C "$ss_root/s2c" rev-parse HEAD)
+    ss_want=$(git -C "$ss_root/s2o" rev-parse HEAD)
+    ss_out=$(ss_t pull "$(ss_url_of "$ss_s2_bare")" "$ss_root/s2c/.git" "$ss_root/s2c" 2>&1)
+    ss_has "sha256: pull reports the fast-forward" "$ss_out" "pulled $ss_old $ss_want"
+    ss_eq "sha256: pull: HEAD is the remote tip" "$(git -C "$ss_root/s2c" rev-parse HEAD)" "$ss_want"
+    ss_eq "sha256: pull: git status is clean" "$(git -C "$ss_root/s2c" status --porcelain)" ""
+    ss_eq "sha256: pull: git fsck --strict is clean" "$(git -C "$ss_root/s2c" fsck --strict 2>&1 >/dev/null | head -3)" ""
+    ss_out=$(ss_t pull "$(ss_url_of "$ss_s2_bare")" "$ss_root/s2c/.git" "$ss_root/s2c" 2>&1)
+    ss_has "sha256: pull again: up to date" "$ss_out" "up to date $ss_want"
+
+    ss_up_commit "$ss_root/s2o" up3.txt "third"
+    ss_g -C "$ss_root/s2o" push -q origin main 2>/dev/null
+    ss_out=$(ss_t fetch "$(ss_url_of "$ss_s2_bare")" "$ss_root/s2c/.git" "$ss_root/s2fetch.pack" 2>&1)
+    ss_has "sha256: fetch with haves: pack received" "$ss_out" "pack "
+    if git -C "$ss_root/s2c" index-pack --strict "$ss_root/s2fetch.pack" >/dev/null 2>"$ss_root/s2idx.err"; then
+        note "ssh sha256: fetch: git index-pack --strict accepts the pack"
+    else
+        bad "ssh sha256: fetch: git index-pack --strict" "$(head -3 "$ss_root/s2idx.err")"
+    fi
+
+    ss_g -C "$ss_root/s2c" checkout -q -b feature
+    ss_up_commit "$ss_root/s2c" feat.txt "a feature"
+    ss_out=$(ss_t push "$(ss_url_of "$ss_s2_bare")" "$ss_root/s2c/.git" refs/heads/feature 2>&1)
+    ss_has "sha256: push: a new branch" "$ss_out" "ok refs/heads/feature"
+    ss_eq "sha256: push: the branch is on the remote" "$(git ls-remote "$ss_s2_bare" refs/heads/feature | cut -f1)" "$(git -C "$ss_root/s2c" rev-parse feature)"
+    ss_up_commit "$ss_root/s2c" feat2.txt "more"
+    ss_out=$(ss_t push "$(ss_url_of "$ss_s2_bare")" "$ss_root/s2c/.git" refs/heads/feature 2>&1)
+    ss_has "sha256: push: a fast-forward" "$ss_out" "ok refs/heads/feature"
+    ss_eq "sha256: push: remote git fsck --strict is clean" "$(git -C "$ss_s2_bare" fsck --strict 2>&1 | head -3)" ""
+    ss_out=$(ss_t push "$(ss_url_of "$ss_s2_bare")" "$ss_root/s2c/.git" refs/heads/feature 2>&1)
+    ss_has "sha256: push: nothing new is up to date" "$ss_out" "up to date"
+
+    # between the formats, in both directions, for pull and for push: refused before anything moves
+    ss_g clone -q "$ss_s1_bare" "$ss_root/s1c" 2>/dev/null
+    ss_g -C "$ss_root/s1c" checkout -q -b feature
+    ss_up_commit "$ss_root/s1c" f.txt "sha1 side"
+    ss_s1_tip=$(git -C "$ss_root/s1c" rev-parse HEAD)
+    ss_before=$(git ls-remote "$ss_s2_bare" | sort)
+    ss_out=$(ss_t push "$(ss_url_of "$ss_s2_bare")" "$ss_root/s1c/.git" refs/heads/feature 2>&1)
+    ss_has "sha256: a SHA-1 repository cannot push to a SHA-256 remote" "$ss_out" "object format"
+    ss_eq "sha256: ... and the remote is untouched" "$(git ls-remote "$ss_s2_bare" | sort)" "$ss_before"
+    ss_g -C "$ss_root/s1c" checkout -q main
+    ss_out=$(ss_t pull "$(ss_url_of "$ss_s2_bare")" "$ss_root/s1c/.git" "$ss_root/s1c" 2>&1)
+    ss_has "sha256: a SHA-1 repository cannot pull from a SHA-256 remote" "$ss_out" "object format"
+    ss_eq "sha256: ... and its HEAD did not move" "$(git -C "$ss_root/s1c" rev-parse HEAD)" "$(git -C "$ss_root/s1c" rev-parse main)"
+    ss_before=$(git ls-remote "$ss_s1_bare" | sort)
+    ss_out=$(ss_t push "$(ss_url_of "$ss_s1_bare")" "$ss_root/s2c/.git" refs/heads/feature 2>&1)
+    ss_has "sha256: a SHA-256 repository cannot push to a SHA-1 remote" "$ss_out" "object format"
+    ss_eq "sha256: ... and the remote is untouched" "$(git ls-remote "$ss_s1_bare" | sort)" "$ss_before"
+    ss_out=$(ss_t pull "$(ss_url_of "$ss_s1_bare")" "$ss_root/s2c/.git" "$ss_root/s2c" 2>&1)
+    ss_has "sha256: a SHA-256 repository cannot pull from a SHA-1 remote" "$ss_out" "object format"
+
     # --- a path with spaces and quotes ---------------------------------------------
     ss_odd="$ss_root/repos/it's a \"quoted\" repo.git"
     ss_g init -q --bare "$ss_odd"

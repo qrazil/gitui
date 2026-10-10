@@ -33,6 +33,7 @@ bash scripts/build-gitui.sh -o ourgitui    # not build.sh -- it is the one with 
 | `GIT_object.m31` | the object store: the header, the hash check, trees, commits, tags -- loose or, via `GIT_pack.m31`, packed, through the one `read` |
 | `GIT_pack.m31` | packfiles: `.idx` v2, the pack's own object encoding, `OBJ_OFS_DELTA`/`OBJ_REF_DELTA` delta-chain resolution |
 | `GIT_refs.m31` | HEAD, `refs/**`, `packed-refs`, symbolic refs, `rev-parse`'s DWIM |
+| `GIT_revparse.m31` | git's revision grammar (`HEAD~3`, `HEAD^2`, `@{upstream}`, `@{-1}`, `:/text`, `rev:path`, `rev^{tree}`, `A..B`, `A...B`, ...): `object_id`, `commit_id`, `tree_id`, `rev_lines` (what `git rev-parse` prints), `rev_range` (what `git rev-list` walks); every typed revision goes through it |
 | `GIT_repository.m31` | where the files are: `.git` as a file, and a linked worktree's `commondir` |
 | `git.m31` | the read-only CLI |
 | `GIT_index.m31` | `.git/index`: read, write, a fresh entry from `fs.stat` |
@@ -467,7 +468,8 @@ Wire: protocol v0/v1 only (this client has no protocol v2, so v2's
 `object-format` argument to `ls-refs` and `fetch` does not arise). The server
 advertises `object-format=<fmt>` among the first ref line's capabilities; the
 client echoes it on its first `want` and on a push command line when the format
-is `sha256`. Fetch, pull and push compare the advertised format with the
+is `sha256`. Fetch, pull and push (over `http(s)://` and over ssh, which share
+`GIT_wire.m31`) compare the advertised format with the
 repository's and **refuse a mismatch** (`the remote's object format differs from
 this repository's`), before anything is written or sent. This client has no
 `clone` or `init`: fetch and push work on a repository that already exists, so a
@@ -485,11 +487,44 @@ Tested against real git: `tests/test_sha256.sh` builds SHA-256 fixtures (loose,
 `repack -ad`, `OBJ_REF_DELTA`), reads them with the Python object reader and the
 `compare.sh` command comparison, writes objects, index, refs and packs and has
 `git fsck --strict` and `git index-pack --strict` judge them, checks the
-refusals, and pushes and pulls through a real `git http-backend` between
-repositories of the same format and of different ones. And
+refusals, and pushes and pulls through a real `git http-backend` and a real
+`sshd` (`test_ssh.sh`) between repositories of the same format and of different
+ones. And
 `TEST_HASH=sha256 bash tests/test.sh` runs **every** fixture of every test family
 as SHA-256 (it sets `GIT_DEFAULT_HASH` for the fixtures, and the oracles read the
 width from the repository), so the whole suite is run once per hash.
+
+## Revisions (`GIT_revparse.m31`)
+
+Anywhere a person types a revision it is resolved by git's own grammar, not by a
+ref lookup: the cherry-pick / revert range prompt (`r`, `R`), the words of a
+rebase todo (`pick HEAD~2`), the merge / log / blame / file-history / stash /
+rebase target specs, and the CLI's `-cat-file`, `-ls-tree`, `-log` and
+`-rev-parse`. Where the UI already holds an object name (the cursor row, a
+picker) it still passes the full id, which resolves as itself.
+
+Supported, in git's own order of precedence: full and abbreviated ids; ref names
+by git's DWIM (`name`, `refs/name`, `refs/tags/name`, `refs/heads/name`,
+`refs/remotes/name`, `refs/remotes/name/HEAD`, refs before abbreviations);
+`@`; `rev^`, `rev^N`, `rev^0`, `rev~N`; `rev^{commit|tree|blob|tag}`, `rev^{}`,
+`rev^{/text}`; `name@{N}`, `@{N}`, `@{-N}`, `@{upstream}` / `@{u}`, `@{push}`;
+`<tag>-<n>-g<hex>` (`git describe` output); `rev:path`, `rev:`, `:path`,
+`:N:path`; `:/text`, `:/!-text`; and, for `rev_lines` / `rev_range`, `A..B`,
+`A...B`, `^A`, `A^@`, `A^!`, `A^-N`. The `:/` and `^{/}` patterns are POSIX
+extended regular expressions through the standard library's `regex`.
+
+Not understood, and said so (an `Unsupported...` error, never a wrong answer):
+dates in `@{...}` (`@{yesterday}`, `@{2.days.ago}`; a Unix timestamp works),
+`@{-N}@{u}`, GNU-only regex escapes and back-references in `:/` patterns, and
+`:../path`. The header of `GIT_revparse.m31` has the full list. `docs/revisions-audit.md`
+records where each entry point takes a revision and why the grammar was needed.
+
+`tests/test_revparse.sh` is the proof: a fixture with merges, a criss-cross,
+every tag kind, clashing names, abbreviation collisions, a reflog, upstreams, a
+stash, packed and loose objects and a gitlink; every expression drawn from the
+names that are in it is compared with real `git rev-parse` (and `git rev-list`
+for ranges), plus a seeded fuzzer. Run with `TEST_HASH=sha256` it is the same
+suite on a SHA-256 repository.
 
 ## Smaller things this does not do
 
