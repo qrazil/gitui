@@ -6,7 +6,7 @@
 //   ./t_blame <gitdir> sketch <rev> <path>
 //        the same, but the commit abbreviated to 7 and the text appended
 
-import GIT_blame;
+import diff.GIT_blame;
 import io;
 import os;
 

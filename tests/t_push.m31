@@ -30,12 +30,12 @@
 //   ./t_push ancestor <gitdir> <anc> <desc>
 //       "yes" or "no".
 
-import GIT_config;
-import GIT_http_push;
+import core.GIT_config;
+import net.GIT_http_push;
 import io;
 import os;
-import GIT_pack_write;
-import GIT_refs;
+import core.GIT_pack_write;
+import core.GIT_refs;
 
 List<str> argv = os.arguments();
 if (argv.size() < 2) {

@@ -10,15 +10,15 @@
 // (the same convention `t_write_refs.m31` already uses). No repository, no
 // filesystem, no `gitdir` -- this is exactly what a pure function buys.
 
-import GIT_checkout;
-import GIT_client;
-import GIT_ui_model;
-import GIT_log;
-import GIT_object;
-import GIT_status;
-import tui.TUI_diff_view;
-import tui.TUI_outline;
-import tui.TUI_text;
+import core.GIT_checkout;
+import ui.GIT_client;
+import ui.GIT_ui_model;
+import core.GIT_log;
+import core.GIT_object;
+import core.GIT_status;
+import tui.widgets.TUI_diff_view;
+import tui.widgets.TUI_outline;
+import tui.core.TUI_text;
 
 // A local of the top-level program body is invisible to a function
 // (`docs/FRICTION.md` §6, `git.m31`'s own `dispatch` comment) -- so the

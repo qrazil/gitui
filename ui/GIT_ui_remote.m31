@@ -1,0 +1,369 @@
+// The remote layer: the push (`P`) and pull (`F`) overlays and the two
+// operations behind them, fast-forward only, over smart HTTP -- and over ssh
+// when `origin` is an ssh URL (`GIT_ssh_transport.m31`), where an unknown host
+// key stops at a confirm overlay (`HostTrustOverlay`) before anything is sent.
+
+import core.GIT_branches;
+import core.GIT_config;
+import net.GIT_http_push;
+import net.GIT_pull;
+import core.GIT_refs;
+import net.GIT_remote;
+import net.GIT_ssh_transport;
+import ui.GIT_ui_core;
+import ui.GIT_ui_rebase;
+import term;
+import tui.app.TUI_app;
+import tui.core.TUI_buffer;
+import tui.core.TUI_geometry;
+import tui.widgets.TUI_menu;
+
+pub type RemoteLayer {
+    pub GIT_ui_rebase.RebaseLayer;
+}
+
+/// `P`: open the push overlay.
+pub void RemoteLayer.open_push() {
+    push_overlay(RemoteOverlay(this, true));
+}
+
+/// `F`: open the pull overlay.
+pub void RemoteLayer.open_pull() {
+    if (is_blocked_by_sequence("pull")) {
+        return;
+    }
+    push_overlay(RemoteOverlay(this, false));
+}
+
+/// Push the current branch to the same-named branch on `origin`, over
+/// smart HTTP, fast-forward only. The outcome -- success or the reason it
+/// did not happen -- is the status line's message; a password is never part
+/// of it (`GIT_http_push.parse_remote` strips it from the URL before anything
+/// else sees the URL).
+pub void RemoteLayer.push_current() {
+    push_with(false);
+}
+
+/// `u` in the push menu: push, and on success make `origin/<branch>` the
+/// branch's upstream (`git push -u`).
+pub void RemoteLayer.push_set_upstream() {
+    push_with(true);
+}
+
+// After a successful push git moves the remote-tracking ref to what was
+// pushed (reflog "update by push"), and with `-u` writes branch.<n>.remote
+// and branch.<n>.merge.
+pub void RemoteLayer.push_with(bool should_set_upstream) {
+    str refname = "";
+    str id = "";
+    match (GIT_refs.head(gitdir)) {
+        case Ok(GIT_refs.Head head): {
+            match (head) {
+                case Born(str name, str old_id): {
+                    refname = name;
+                    id = old_id;
+                }
+                case Unborn(str name): {
+                    message = "push: " + name + " has no commits yet";
+                    return;
+                }
+                case Detached(str old_id): {
+                    message = "push: HEAD is detached; check out a branch first";
+                    return;
+                }
+            }
+        }
+        case Err(GIT_refs.Error error): {
+            message = "push: " + error.to_str();
+            return;
+        }
+    }
+    Option<str> url = GIT_config.get(gitdir, "remote", "origin", "url");
+    if (!url.is_some()) {
+        message = "push: no remote 'origin' in .git/config";
+        return;
+    }
+    match (GIT_remote.parse(GIT_remote.rewrite_gitdir(gitdir, url.or(""), true))) {
+        case Ok(GIT_remote.Remote ssh_remote): {
+            if (ssh_remote.transport.eq(GIT_remote.Transport.Ssh)) {
+                push_over_ssh(ssh_remote, refname, id, should_set_upstream);
+                return;
+            }
+        }
+        case Err(_): {
+        }
+    }
+    GIT_http_push.Remote remote = GIT_http_push.Remote("", Option<GIT_http_push.Credentials>.None);
+    match (GIT_http_push.parse_remote(url.or(""))) {
+        case Ok(GIT_http_push.Remote parsed): {
+            remote = parsed;
+        }
+        case Err(GIT_http_push.Error error): {
+            message = "push: " + error.to_str();
+            return;
+        }
+    }
+    match (GIT_http_push.push(gitdir, remote, refname, id)) {
+        case Ok(GIT_http_push.Report report): {
+            if (report.is_ok) {
+                message = "pushed " + refname + " to origin";
+                log_command("push origin " + refname + " " + GIT_ui_core.short_id(id));
+                record_pushed(refname, id, should_set_upstream);
+            } else {
+                message = "push refused by origin: " + report.reason;
+            }
+        }
+        case Err(GIT_http_push.Error error): {
+            message = "push: " + error.to_str();
+        }
+    }
+    reload();
+}
+
+/// Pull the current branch from `origin`, fast-forward only (`GIT_pull.pull`):
+/// refused on a dirty tree and on a diverged branch. The outcome is the
+/// status line's message.
+pub void RemoteLayer.pull_current() {
+    Option<str> url = GIT_config.get(gitdir, "remote", "origin", "url");
+    if (!url.is_some()) {
+        message = "pull: no remote 'origin' in .git/config";
+        return;
+    }
+    match (GIT_remote.parse(GIT_remote.rewrite_gitdir(gitdir, url.or(""), false))) {
+        case Ok(GIT_remote.Remote ssh_remote): {
+            if (ssh_remote.transport.eq(GIT_remote.Transport.Ssh)) {
+                pull_over_ssh(ssh_remote);
+                return;
+            }
+        }
+        case Err(_): {
+        }
+    }
+    GIT_http_push.Remote remote = GIT_http_push.Remote("", Option<GIT_http_push.Credentials>.None);
+    match (GIT_http_push.parse_remote(url.or(""))) {
+        case Ok(GIT_http_push.Remote parsed): {
+            remote = parsed;
+        }
+        case Err(GIT_http_push.Error error): {
+            message = "pull: " + error.to_str();
+            return;
+        }
+    }
+    match (GIT_pull.pull(gitdir, worktree, remote)) {
+        case Ok(GIT_pull.Outcome outcome): {
+            if (outcome.has_moved) {
+                message = "pulled: fast-forwarded " + outcome.old_id.substr(0, 7) + ".." + outcome.new_id.substr(0, 7);
+                log_command("pull origin " + GIT_ui_core.short_id(outcome.old_id) + ".." + GIT_ui_core.short_id(outcome.new_id));
+            } else {
+                message = "pull: already up to date";
+            }
+        }
+        case Err(GIT_pull.Error error): {
+            message = "pull: " + error.to_str();
+            if (error.is_diverged()) {
+                offer_pull("origin/" + current_branch_name());
+            }
+        }
+    }
+    reload();
+}
+
+// The bookkeeping after a push that origin accepted.
+pub void RemoteLayer.record_pushed(str refname, str id, bool should_set_upstream) {
+    str branch = refname.substr(11, refname.size());
+    match (GIT_branches.record_push(gitdir, branch, "origin", id)) {
+        case Ok(bool wrote): {
+        }
+        case Err(GIT_branches.Error error): {
+            message = message + " (tracking ref: " + error.to_str() + ")";
+        }
+    }
+    if (!should_set_upstream) {
+        return;
+    }
+    match (GIT_branches.set_upstream(gitdir, branch, "origin", refname)) {
+        case Ok(bool wrote): {
+            message = message + "; upstream is origin/" + branch;
+            log_command("branch --set-upstream-to origin/" + branch + " " + branch);
+        }
+        case Err(GIT_branches.Error error): {
+            message = message + " (upstream: " + error.to_str() + ")";
+        }
+    }
+}
+
+// --- over ssh ------------------------------------------------------------------------
+
+// A refusal from the ssh transport as the status line's message -- or, for a
+// host whose key is not known yet, the confirm overlay.
+pub void RemoteLayer.ssh_stopped(str verb, GIT_ssh_transport.Error error, bool is_push) {
+    match (error.pending_host()) {
+        case Some(GIT_ssh_transport.PendingHost pending): {
+            message = verb + ": " + pending.prompt();
+            push_overlay(HostTrustOverlay(this, pending, is_push));
+        }
+        case None: {
+            message = verb + ": " + error.to_str();
+        }
+    }
+}
+
+pub void RemoteLayer.push_over_ssh(GIT_remote.Remote remote, str refname, str id, bool should_set_upstream) {
+    match (GIT_ssh_transport.target_for(remote)) {
+        case Ok(GIT_ssh_transport.Target target): {
+            match (GIT_ssh_transport.connect_receive(target)) {
+                case Ok(GIT_ssh_transport.Receive receive): {
+                    match (receive.push(gitdir, refname, id)) {
+                        case Ok(GIT_ssh_transport.PushResult result): {
+                            if (result.is_ok) {
+                                message = "pushed " + refname + " to origin";
+                                log_command("push origin " + refname + " " + GIT_ui_core.short_id(id));
+                                record_pushed(refname, id, should_set_upstream);
+                            } else {
+                                message = "push refused by origin: " + result.reason + " " + result.remote;
+                            }
+                        }
+                        case Err(GIT_ssh_transport.Error error): {
+                            message = "push: " + error.to_str();
+                        }
+                    }
+                }
+                case Err(GIT_ssh_transport.Error error): {
+                    ssh_stopped("push", error, true);
+                    return;
+                }
+            }
+        }
+        case Err(GIT_ssh_transport.Error error): {
+            message = "push: " + error.to_str();
+            return;
+        }
+    }
+    reload();
+}
+
+pub void RemoteLayer.pull_over_ssh(GIT_remote.Remote remote) {
+    match (GIT_ssh_transport.target_for(remote)) {
+        case Ok(GIT_ssh_transport.Target target): {
+            match (GIT_pull.pull_ssh(gitdir, worktree, target)) {
+                case Ok(GIT_pull.Outcome outcome): {
+                    if (outcome.has_moved) {
+                        message = "pulled: fast-forwarded " + outcome.old_id.substr(0, 7) + ".." + outcome.new_id.substr(0, 7);
+                        log_command("pull origin " + GIT_ui_core.short_id(outcome.old_id) + ".." + GIT_ui_core.short_id(outcome.new_id));
+                    } else {
+                        message = "pull: already up to date";
+                    }
+                }
+                case Err(GIT_pull.Error error): {
+                    match (error.ssh_error()) {
+                        case Some(GIT_ssh_transport.Error ssh_error): {
+                            ssh_stopped("pull", ssh_error, false);
+                            return;
+                        }
+                        case None: {
+                            message = "pull: " + error.to_str();
+                        }
+                    }
+                }
+            }
+        }
+        case Err(GIT_ssh_transport.Error error): {
+            message = "pull: " + error.to_str();
+            return;
+        }
+    }
+    reload();
+}
+
+// --- the overlays -----------------------------------------------------------------
+
+/// One type serves both: `is_push` picks the table scope and the text.
+type RemoteOverlay {
+    RemoteLayer host;
+    bool is_push;
+}
+
+pub TUI_app.Action RemoteOverlay.handle_key(term.Code code) {
+    str scope = GIT_ui_core.SCOPE_PULL;
+    if (is_push) {
+        scope = GIT_ui_core.SCOPE_PUSH;
+    }
+    match (GIT_ui_core.lookup(scope, code)) {
+        case Some(str cmd): {
+            host.pop_overlay();
+            if (cmd == GIT_ui_core.CMD_PUSH) {
+                host.push_current();
+            }
+            if (cmd == GIT_ui_core.CMD_PUSH_UPSTREAM) {
+                host.push_set_upstream();
+            }
+            if (cmd == GIT_ui_core.CMD_PULL) {
+                host.pull_current();
+            }
+            return TUI_app.Action.Redraw;
+        }
+        case None: {
+        }
+    }
+    return TUI_app.Action.Continue;
+}
+
+pub void RemoteOverlay.render(TUI_buffer.Buffer buffer, TUI_geometry.Rect area) {
+    TUI_menu.WhichKey which_key = TUI_menu.WhichKey("pull", [TUI_menu.Item("p", "pull current branch from origin (fast-forward only)")]);
+    if (is_push) {
+        which_key = TUI_menu.WhichKey("push", [TUI_menu.Item("p", "push current branch to origin (fast-forward only)"), TUI_menu.Item("u", "push and set origin/<branch> as the upstream")]);
+    }
+    which_key.render(buffer, area);
+}
+
+pub List<GIT_ui_core.Hint> RemoteOverlay.hints() {
+    if (is_push) {
+        return GIT_ui_core.hints_for(GIT_ui_core.SCOPE_PUSH);
+    }
+    return GIT_ui_core.hints_for(GIT_ui_core.SCOPE_PULL);
+}
+
+/// An ssh host whose key is not in known_hosts: `y` records it and runs the
+/// push or pull again (now checked against the file like any known host);
+/// every other key cancels with nothing recorded and nothing sent.
+type HostTrustOverlay {
+    RemoteLayer host;
+    GIT_ssh_transport.PendingHost pending;
+    bool is_push;
+}
+
+pub TUI_app.Action HostTrustOverlay.handle_key(term.Code code) {
+    host.pop_overlay();
+    match (GIT_ui_core.lookup(GIT_ui_core.SCOPE_CONFIRM, code)) {
+        case Some(str cmd): {
+            if (cmd == GIT_ui_core.CMD_YES) {
+                match (GIT_ssh_transport.trust_host(pending)) {
+                    case Ok(_): {
+                        if (is_push) {
+                            host.push_current();
+                        } else {
+                            host.pull_current();
+                        }
+                    }
+                    case Err(GIT_ssh_transport.Error error): {
+                        host.say(error.to_str());
+                    }
+                }
+                return TUI_app.Action.Redraw;
+            }
+        }
+        case None: {
+        }
+    }
+    host.say("host key not trusted; nothing was sent");
+    return TUI_app.Action.Redraw;
+}
+
+pub void HostTrustOverlay.render(TUI_buffer.Buffer buffer, TUI_geometry.Rect area) {
+    TUI_menu.WhichKey which_key = TUI_menu.WhichKey("host key " + pending.fingerprint() + " not known", [TUI_menu.Item("host", pending.spec()), TUI_menu.Item("y", "trust and add to known_hosts (" + pending.known_hosts + ")"), TUI_menu.Item("N", "any other key: do not trust")]);
+    which_key.render(buffer, area);
+}
+
+pub List<GIT_ui_core.Hint> HostTrustOverlay.hints() {
+    return [GIT_ui_core.Hint("y", "trust host key"), GIT_ui_core.Hint("any", "cancel")];
+}

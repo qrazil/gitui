@@ -8,8 +8,8 @@
 // `commit-a` and `commit-b` must both already exist in the repository -- the
 // program only writes refs, never objects.
 
-import GIT_hash;
-import GIT_refs;
+import core.GIT_hash;
+import core.GIT_refs;
 import io;
 import os;
 

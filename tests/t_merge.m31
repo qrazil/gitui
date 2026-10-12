@@ -10,8 +10,8 @@
 //   ./t_merge <gitdir> <worktree> take <path> ours|theirs|base   (check out a stage's content)
 //   ./t_merge <gitdir> <worktree> apply <base> <ours> <theirs> [diff3]
 
-import GIT_diff3;
-import GIT_merge;
+import diff.GIT_diff3;
+import diff.GIT_merge;
 import io;
 import os;
 

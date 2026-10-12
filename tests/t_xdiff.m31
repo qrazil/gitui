@@ -12,7 +12,7 @@
 import os;
 import io;
 import text.diff;
-import GIT_xdiff;
+import diff.GIT_xdiff;
 
 void run() {
     List<str> argv = os.arguments();

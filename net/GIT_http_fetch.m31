@@ -1,0 +1,603 @@
+// Git's smart HTTP protocol, protocol v0 only: enough to fetch a real
+// packfile from a real server over `lib/https.m31`. See
+// `docs/design.md`'s "Going remote, 2026-09-29" for where this sits: a
+// fetched pack is written to disk here, verified byte for byte against its
+// own trailing checksum, and handed to nothing else in this program.
+//
+// This module is the HTTP *adapter*. Everything that is the git protocol and
+// not HTTP -- pkt-line framing, the ref advertisement, capabilities, the
+// want/have negotiation, the side-band-64k demultiplexer, the pack checksum --
+// lives in `GIT_wire.m31`, over an `io.Stream`-shaped interface, and is shared
+// with the ssh transport. What is left here is what only HTTP has: the URLs
+// (`<url>/info/refs?service=...`, `<url>/git-upload-pack`), the content types,
+// the status codes, TLS and the trust roots, and the `# service=` preamble.
+// Smart HTTP is stateless RPC, so a request is one `GIT_wire.negotiation_body`
+// and a response is read by `GIT_wire.read_fetch_response` over an
+// `io.buffer_of(response.body())`.
+//
+// API
+// ---
+//   GIT_http_fetch.discover(url)                         -> Result<Advertisement, Error>
+//   GIT_http_fetch.fetch(url, ad, wants, haves, out_path) -> Result<Summary, Error>
+//
+//   ad.service, ad.capabilities, ad.refs, ad.object_format
+//   summary.pack_bytes, summary.object_count
+//
+// The seam, testable with no socket in sight:
+//   GIT_http_fetch.parse_advertisement(body) -> Result<Advertisement, Error>
+//   GIT_http_fetch.verify_pack(pack, out_path) -> Result<Summary, Error>
+//
+// `Advertisement`, `RemoteRef` and `Summary` here are this module's public
+// shapes (the language has no type aliases, and callers name them as
+// `GIT_http_fetch.Advertisement`); each is the `GIT_wire` value, copied field
+// for field. `Error` is the same story, with the transport failures added.
+//
+// --- protocol version: v0, not v2 -------------------------------------------
+//
+// A client asks for protocol v2 by sending a `Git-Protocol: version=2`
+// header; this module never sends it, so every server answers with v0.
+// Protocol v2 is a named follow-up (`docs/design.md`), not an oversight.
+//
+// --- the ref advertisement, and what makes it "smart" ------------------------
+//
+// `GET <url>/info/refs?service=git-upload-pack` gets one of two answers. A
+// server that understands the smart protocol sends
+// `Content-Type: application/x-git-upload-pack-advertisement`, and the body
+// is pkt-lines: `# service=git-upload-pack\n`, a flush, then the refs
+// (`GIT_wire.read_advertisement`). A server that does not understand the
+// query parameter at all -- "dumb HTTP" -- answers with a directory listing or
+// a 404, and parsing that as pkt-lines would either trap on the length prefix
+// or silently read garbage as ref data. So the content type is checked before
+// a single byte of the body is treated as a pkt-line, and anything else is
+// `NotSmart`.
+//
+// --- negotiation, the ACK/NAK preamble, side-band, verification --------------
+//
+// See `GIT_wire.m31`. In short: this adapter sends the simplest legal round (no
+// `multi_ack`, one request, `done` at the end), the response is zero or more
+// `ACK`/`NAK` lines and then side-band-64k, and a pack is never written to
+// disk before its trailing checksum has been checked. Band 2 (progress) and band
+// 3 (a server error) are printed to standard error, as they always were, and
+// band 3 becomes `RemoteError`.
+//
+// --- what is NOT here ---------------------------------------------------------
+//
+//   - **Unpacking** (`GIT_pack.read_pack`), **push** (`GIT_http_push.m31`),
+//     **protocol v2**, **ssh** (`GIT_remote.m31` names it; the transport is a
+//     follow-up that implements `GIT_wire.Stream`).
+//   - **`multi_ack`** over HTTP -- see `GIT_wire.m31`.
+
+import core.GIT_object;
+import net.GIT_wire;
+import net.http;
+import net.https;
+import io;
+import os;
+import tls;
+
+// --- TLS ----------------------------------------------------------------------
+//
+// `http://` URLs are spoken as before. An `https://` URL goes through
+// `lib/https.m31`, which proves the server's certificate against whom `trust()`
+// names and follows redirects by that module's own rules (five same-origin
+// hops; `http` to `https` on the same host is followed; `https` to `http` is
+// never followed -- `Error.InsecureRedirect`). There is no way to switch the
+// check off. The only knob is where the roots come from: the operating
+// system's by default, or the PEM file named by `GITUI_HTTP_CA_FILE` (a
+// private CA for a self-hosted server, or a test's throwaway one).
+
+/// Why a fetch or a ref listing could not be completed. Payload-free
+/// (`docs/errors-decision.md` §4, the convention every module in this
+/// program past `zlib`/`refs`/`object`/`http` already follows): the URL, the
+/// bytes involved, and which capability or band was wrong are context the
+/// caller already has when it reports.
+pub enum Error {
+    /// The HTTP exchange itself failed -- a bad URL, a refused, reset or
+    /// timed-out connection, or a malformed HTTP message. `lib/http.m31`'s
+    /// own `Error` already said which; there is nothing more specific to add
+    /// at this layer.
+    Http;
+    /// An `https://` server's certificate was refused: not issued by a
+    /// trusted root (see `GITUI_HTTP_CA_FILE`), expired, or for another host.
+    Certificate;
+    /// The TLS connection failed for any other reason.
+    Tls;
+    /// An `https://` URL redirected to `http://`, which is never followed.
+    InsecureRedirect;
+    /// The server answered, but not with `200`.
+    Status;
+    /// The response's `Content-Type` does not name a smart-HTTP git service
+    /// -- most likely a plain file server, "dumb HTTP", answering the same
+    /// URL a git server would.
+    NotSmart;
+    /// The ref advertisement is not shaped the way `info/refs` promises: no
+    /// `# service=...` line, no flush where one is required, or a ref line
+    /// this module cannot parse.
+    BadAdvertisement;
+    /// A pkt-line's length prefix is not four hex digits, or names `1`, `2`
+    /// or `3` -- protocol v2's delimiter and response-end packets, which a
+    /// v0-only client never sends and never expects back.
+    Syntax;
+    /// A pkt-line's length prefix names more bytes than actually arrived --
+    /// a message cut off in the middle.
+    Truncated;
+    /// The server's object format is neither `sha1` nor `sha256`.
+    UnsupportedFormat;
+    /// The ref advertisement does not offer `side-band-64k`, which this
+    /// module requires -- see the module note.
+    NoSideBand;
+    /// A side-band pkt-line named a channel other than 1, 2 or 3, or carried
+    /// no band byte at all.
+    BadBand;
+    /// Band 3 carried an error from the server's own `upload-pack`, already
+    /// printed to standard error by the time this is returned.
+    RemoteError;
+    /// The bytes that were meant to be a packfile do not begin with the
+    /// `PACK` magic.
+    BadPack;
+    /// The pack's trailing SHA-1 does not match the SHA-1 of what came
+    /// before it: a truncated or corrupted transfer.
+    ChecksumMismatch;
+    /// `fetch` was given no `want`s -- there is nothing to negotiate.
+    NoWant;
+    /// A `want` or a `have` is not a well-formed object name: 40 lowercase
+    /// hex digits.
+    BadName;
+    /// The verified pack could not be written to disk.
+    Io;
+}
+
+pub str Error.to_str() {
+    match (this) {
+        case Http: {
+            return "the HTTP exchange failed";
+        }
+        case Certificate: {
+            return "the server's certificate was refused (untrusted, expired or for another host)";
+        }
+        case Tls: {
+            return "the TLS connection failed";
+        }
+        case InsecureRedirect: {
+            return "the server redirected https to http, which is not followed";
+        }
+        case Status: {
+            return "the server did not answer 200";
+        }
+        case NotSmart: {
+            return "the server answered dumb HTTP, not a smart-HTTP git service";
+        }
+        case BadAdvertisement: {
+            return "the ref advertisement is not well-formed";
+        }
+        case Syntax: {
+            return "the pkt-line framing is not well-formed, or is protocol v2's";
+        }
+        case Truncated: {
+            return "the message was cut off in the middle";
+        }
+        case UnsupportedFormat: {
+            return "the server's object format is neither sha1 nor sha256";
+        }
+        case NoSideBand: {
+            return "the server did not offer side-band-64k, which this module requires";
+        }
+        case BadBand: {
+            return "a side-band pkt-line named an unknown channel";
+        }
+        case RemoteError: {
+            return "the server reported an error; see standard error";
+        }
+        case BadPack: {
+            return "the bytes received are not a packfile";
+        }
+        case ChecksumMismatch: {
+            return "the pack's trailing checksum does not match its content";
+        }
+        case NoWant: {
+            return "no want was given -- nothing to fetch";
+        }
+        case BadName: {
+            return "not a well-formed object name: 40 (SHA-1) or 64 (SHA-256) lowercase hex digits, as the server's format has";
+        }
+        case Io: {
+            return "the pack could not be written to disk";
+        }
+    }
+}
+
+/// How a failed exchange is told apart: `Plain` is everything `http` reports
+/// (a refused connection, a timeout, a malformed message), `Certificate` the
+/// three ways a server's certificate is refused, `Tls` the rest of TLS, and
+/// `InsecureRedirect` an `https` to `http` redirect.
+pub enum TransportFailure {
+    Plain;
+    Certificate;
+    Tls;
+    InsecureRedirect;
+}
+
+/// `error`, as one of the four `TransportFailure`s.
+pub TransportFailure classify(http.Error error) {
+    match (error) {
+        case CertificateUntrusted: {
+            return TransportFailure.Certificate;
+        }
+        case CertificateExpired: {
+            return TransportFailure.Certificate;
+        }
+        case HostnameMismatch: {
+            return TransportFailure.Certificate;
+        }
+        case TlsFailed: {
+            return TransportFailure.Tls;
+        }
+        case InsecureRedirect: {
+            return TransportFailure.InsecureRedirect;
+        }
+        case Syntax: {
+            return TransportFailure.Plain;
+        }
+        case Framing: {
+            return TransportFailure.Plain;
+        }
+        case TooLarge: {
+            return TransportFailure.Plain;
+        }
+        case BadUrl: {
+            return TransportFailure.Plain;
+        }
+        case Closed: {
+            return TransportFailure.Plain;
+        }
+        case Refused: {
+            return TransportFailure.Plain;
+        }
+        case TimedOut: {
+            return TransportFailure.Plain;
+        }
+        case Unreachable: {
+            return TransportFailure.Plain;
+        }
+        case Reset: {
+            return TransportFailure.Plain;
+        }
+        case InUse: {
+            return TransportFailure.Plain;
+        }
+        case NameNotFound: {
+            return TransportFailure.Plain;
+        }
+        case Other: {
+            return TransportFailure.Plain;
+        }
+        case SchemeNeedsTls: {
+            return TransportFailure.Plain;
+        }
+    }
+}
+
+Error error_of(http.Error error) {
+    match (classify(error)) {
+        case Plain: {
+            return Error.Http;
+        }
+        case Certificate: {
+            return Error.Certificate;
+        }
+        case Tls: {
+            return Error.Tls;
+        }
+        case InsecureRedirect: {
+            return Error.InsecureRedirect;
+        }
+    }
+}
+
+/// Whom an `https://` server must prove it is: the roots in the PEM file
+/// `GITUI_HTTP_CA_FILE` names, or the operating system's.
+pub tls.Trust trust() {
+    match (os.env("GITUI_HTTP_CA_FILE")) {
+        case Some(str path): {
+            if (path != "") {
+                return tls.Trust.CaFile(path);
+            }
+        }
+        case None: {
+        }
+    }
+    return tls.Trust.SystemRoots;
+}
+
+/// Send `request` over `http://` or, with `trust()`, `https://`.
+pub Result<http.Response, http.Error> exchange(http.Request request) {
+    return https.fetch(request, trust: trust());
+}
+
+/// One advertised ref: its full name and the object it points at.
+pub type RemoteRef {
+    pub str name;
+    pub str id;
+}
+
+/// The service announcement, the capabilities on the first ref line, and
+/// every ref -- in the server's own order, which is what `git ls-remote`
+/// prints and what this module's own tests compare against byte for byte.
+pub type Advertisement {
+    pub str service;
+    pub List<str> capabilities;
+    pub List<RemoteRef> refs;
+    pub str object_format;
+}
+
+/// What a fetch produced: the verified pack's size on disk, and the object
+/// count read out of its own 12-byte header.
+pub type Summary {
+    pub int pack_bytes;
+    pub int object_count;
+}
+
+// A `GIT_wire.Error` as this module's `Error`. `Closed` (the response ended
+// where a packet should have begun) is `Truncated`, as it always was here.
+Error error_of_wire(GIT_wire.Error error) {
+    match (error) {
+        case Syntax: {
+            return Error.Syntax;
+        }
+        case Truncated: {
+            return Error.Truncated;
+        }
+        case Closed: {
+            return Error.Truncated;
+        }
+        case Io: {
+            return Error.Io;
+        }
+        case BadAdvertisement: {
+            return Error.BadAdvertisement;
+        }
+        case UnsupportedFormat: {
+            return Error.UnsupportedFormat;
+        }
+        case NoSideBand: {
+            return Error.NoSideBand;
+        }
+        case BadBand: {
+            return Error.BadBand;
+        }
+        case RemoteError: {
+            return Error.RemoteError;
+        }
+        case BadAck: {
+            return Error.Syntax;
+        }
+        case BadPack: {
+            return Error.BadPack;
+        }
+        case ChecksumMismatch: {
+            return Error.ChecksumMismatch;
+        }
+        case NoWant: {
+            return Error.NoWant;
+        }
+        case BadName: {
+            return Error.BadName;
+        }
+        case NoReportStatus: {
+            return Error.BadAdvertisement;
+        }
+        case BadReport: {
+            return Error.BadAdvertisement;
+        }
+        case Write: {
+            return Error.Io;
+        }
+    }
+}
+
+Advertisement advertisement_of(GIT_wire.Advertisement wire_ad) {
+    List<RemoteRef> refs = [];
+    for (GIT_wire.RemoteRef remote_ref in wire_ad.refs) {
+        refs.push(RemoteRef(remote_ref.name, remote_ref.id));
+    }
+    return Advertisement(wire_ad.service, wire_ad.capabilities, refs, wire_ad.object_format);
+}
+
+GIT_wire.Advertisement wire_advertisement_of(Advertisement advertisement) {
+    List<GIT_wire.RemoteRef> refs = [];
+    for (RemoteRef remote_ref in advertisement.refs) {
+        refs.push(GIT_wire.RemoteRef(remote_ref.name, remote_ref.id));
+    }
+    return GIT_wire.Advertisement(advertisement.service, advertisement.capabilities, refs, advertisement.object_format);
+}
+
+/// `GET <url>/info/refs?service=git-upload-pack`, parsed.
+///
+/// Refuses `NotSmart` before looking at the body at all if the response is
+/// not `200` with `Content-Type: application/x-git-upload-pack-advertisement`
+/// -- see the module note on why a dumb-HTTP answer must never reach the
+/// pkt-line parser.
+pub Result<Advertisement, Error> discover(str url, str authorization = "") {
+    str target = base_of(url) + "/info/refs?service=git-upload-pack";
+    match (http.request("GET", target)) {
+        case Ok(http.Request request): {
+            request.set("accept", "application/x-git-upload-pack-advertisement");
+            if (authorization != "") {
+                request.set("authorization", authorization);
+            }
+            match (exchange(request)) {
+                case Ok(http.Response response): {
+                    return after_refs_response(response);
+                }
+                case Err(http.Error failure): {
+                    return Result<Advertisement, Error>.Err(error_of(failure));
+                }
+            }
+        }
+        case Err(_): {
+            return Result<Advertisement, Error>.Err(Error.Http);
+        }
+    }
+}
+
+Result<Advertisement, Error> after_refs_response(http.Response response) {
+    if (response.status() != 200) {
+        return Result<Advertisement, Error>.Err(Error.Status);
+    }
+    str ctype = response.header("content-type").or("");
+    if (!ctype.starts_with("application/x-git-upload-pack-advertisement")) {
+        return Result<Advertisement, Error>.Err(Error.NotSmart);
+    }
+    return parse_advertisement(response.body());
+}
+
+/// The ref advertisement, parsed out of the response body already read into
+/// memory: the `# service=` preamble and its flush (HTTP's own), then
+/// `GIT_wire.read_advertisement`. No I/O, no socket.
+pub Result<Advertisement, Error> parse_advertisement(bytes body) {
+    io.Buffer stream = io.buffer_of(body);
+    GIT_wire.Packet first = wire_ok(GIT_wire.read_pkt(stream))?;
+    if (first.is_flush) {
+        return Result<Advertisement, Error>.Err(Error.BadAdvertisement);
+    }
+    str line0 = "";
+    match (first.payload.utf8()) {
+        case Some(str payload): {
+            line0 = payload.trim();
+        }
+        case None: {
+            return Result<Advertisement, Error>.Err(Error.BadAdvertisement);
+        }
+    }
+    if (!line0.starts_with("# service=")) {
+        return Result<Advertisement, Error>.Err(Error.BadAdvertisement);
+    }
+    str service = line0.substr(10, line0.size());
+    GIT_wire.Packet flush1 = wire_ok(GIT_wire.read_pkt(stream))?;
+    if (!flush1.is_flush) {
+        return Result<Advertisement, Error>.Err(Error.BadAdvertisement);
+    }
+    match (GIT_wire.read_advertisement(stream, service: service)) {
+        case Ok(GIT_wire.Advertisement wire_ad): {
+            return Result<Advertisement, Error>.Ok(advertisement_of(wire_ad));
+        }
+        case Err(GIT_wire.Error error): {
+            return Result<Advertisement, Error>.Err(error_of_wire(error));
+        }
+    }
+}
+
+// `?` needs matching error types; this is the conversion for a packet read.
+Result<GIT_wire.Packet, Error> wire_ok(Result<GIT_wire.Packet, GIT_wire.Error> result) {
+    match (result) {
+        case Ok(GIT_wire.Packet packet): {
+            return Result<GIT_wire.Packet, Error>.Ok(packet);
+        }
+        case Err(GIT_wire.Error error): {
+            return Result<GIT_wire.Packet, Error>.Err(error_of_wire(error));
+        }
+    }
+}
+
+/// `POST <url>/git-upload-pack`: negotiate for `wants` given `haves`
+/// (computed by the caller), and write the verified pack to `out_path`.
+///
+/// `advertisement` is the `Advertisement` `discover` already returned for this `url`:
+/// its capabilities decide what is asked for (`ofs-delta` only if offered;
+/// `side-band-64k` always, and `NoSideBand` if the server never offered it).
+/// Every `want` and `have` must be a lowercase hex object name of the
+/// advertisement's width (40 digits for `sha1`, 64 for `sha256`), and there
+/// must be at least one `want`. Whether the advertised format is the local
+/// repository's is for the caller (`GIT_pull.pull`).
+pub Result<Summary, Error> fetch(str url, Advertisement advertisement, List<str> wants, List<str> haves, str out_path, str authorization = "") {
+    if (wants.size() == 0) {
+        return Result<Summary, Error>.Err(Error.NoWant);
+    }
+    int id_width = GIT_wire.raw_of(wire_advertisement_of(advertisement)) * 2;
+    for (str want in wants) {
+        if (!GIT_object.is_name(want) || want.size() != id_width) {
+            return Result<Summary, Error>.Err(Error.BadName);
+        }
+    }
+    for (str have in haves) {
+        if (!GIT_object.is_name(have) || have.size() != id_width) {
+            return Result<Summary, Error>.Err(Error.BadName);
+        }
+    }
+    if (!GIT_wire.has_cap(advertisement.capabilities, "side-band-64k")) {
+        return Result<Summary, Error>.Err(Error.NoSideBand);
+    }
+    bytes body = GIT_wire.negotiation_body(wire_advertisement_of(advertisement), wants, haves, "m31-httpfetch/1");
+    str target = base_of(url) + "/git-upload-pack";
+    match (http.request("POST", target)) {
+        case Ok(http.Request request): {
+            request.set("content-type", "application/x-git-upload-pack-request");
+            request.set("accept", "application/x-git-upload-pack-result");
+            if (authorization != "") {
+                request.set("authorization", authorization);
+            }
+            request.set_body(body);
+            match (exchange(request)) {
+                case Ok(http.Response response): {
+                    return after_pack_response(response, out_path, GIT_wire.raw_of(wire_advertisement_of(advertisement)));
+                }
+                case Err(http.Error failure): {
+                    return Result<Summary, Error>.Err(error_of(failure));
+                }
+            }
+        }
+        case Err(_): {
+            return Result<Summary, Error>.Err(Error.Http);
+        }
+    }
+}
+
+Result<Summary, Error> after_pack_response(http.Response response, str out_path, int raw) {
+    if (response.status() != 200) {
+        return Result<Summary, Error>.Err(Error.Status);
+    }
+    str ctype = response.header("content-type").or("");
+    if (!ctype.starts_with("application/x-git-upload-pack-result")) {
+        return Result<Summary, Error>.Err(Error.NotSmart);
+    }
+    // Zero or more plain ACK/NAK lines, then the side-band pack stream.
+    match (GIT_wire.read_fetch_response(io.buffer_of(response.body()))) {
+        case Ok(GIT_wire.DemuxResult demux_result): {
+            if (demux_result.progress != "") {
+                io.eprint(demux_result.progress);
+            }
+            if (demux_result.has_remote_error) {
+                io.eprint("remote: " + demux_result.remote_error);
+                return Result<Summary, Error>.Err(Error.RemoteError);
+            }
+            return verify_pack(demux_result.pack, out_path, raw: raw);
+        }
+        case Err(GIT_wire.Error error): {
+            return Result<Summary, Error>.Err(error_of_wire(error));
+        }
+    }
+}
+
+/// Check `pack`'s trailing checksum (`raw` octets: 20 for SHA-1, the default,
+/// 32 for SHA-256) against the hash of everything before it
+/// (`GIT_wire.check_pack`), and only then write it to `out_path`.
+/// Exposed on its own -- given bytes, not a URL -- so a truncated or
+/// corrupted transfer can be tested by handing this function a byte string
+/// that was never near a socket.
+pub Result<Summary, Error> verify_pack(bytes pack, str out_path, int raw = 20) {
+    match (GIT_wire.verify_pack(pack, out_path, raw: raw)) {
+        case Ok(GIT_wire.Summary summary): {
+            return Result<Summary, Error>.Ok(Summary(summary.pack_bytes, summary.object_count));
+        }
+        case Err(GIT_wire.Error error): {
+            return Result<Summary, Error>.Err(error_of_wire(error));
+        }
+    }
+}
+
+str base_of(str url) {
+    if (url.ends_with("/")) {
+        return url.substr(0, url.size() - 1);
+    }
+    return url;
+}

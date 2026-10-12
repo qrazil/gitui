@@ -9,7 +9,7 @@
 //   t_branches <gitdir> atag <name> <commit> <message>
 //   t_branches <gitdir> deltag <name>
 
-import GIT_branches;
+import core.GIT_branches;
 import io;
 import os;
 

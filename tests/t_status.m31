@@ -5,7 +5,7 @@
 //
 //   ./t_status <gitdir> <worktree>
 
-import GIT_status;
+import core.GIT_status;
 import io;
 import os;
 

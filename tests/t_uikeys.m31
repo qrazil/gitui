@@ -8,11 +8,11 @@
 // Prints one `<case> ok` or `<case> FAIL ...` line per check, like
 // `t_gitclient.m31`.
 
-import GIT_ui_core;
-import GIT_ui_help;
-import GIT_ui_log;
-import GIT_ui_picker;
-import GIT_ui_search;
+import ui.GIT_ui_core;
+import ui.GIT_ui_help;
+import ui.GIT_ui_log;
+import ui.GIT_ui_picker;
+import ui.GIT_ui_search;
 import term;
 
 type Counter {

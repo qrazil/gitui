@@ -11,10 +11,10 @@
 //   ./t_rebase <gitdir> <worktree> state
 
 import fs;
-import GIT_merge;
-import GIT_rebase;
-import GIT_rebase_todo;
-import GIT_sequencer;
+import diff.GIT_merge;
+import diff.GIT_rebase;
+import diff.GIT_rebase_todo;
+import diff.GIT_sequencer;
 import io;
 import os;
 

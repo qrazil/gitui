@@ -3,8 +3,8 @@
 //
 //   ./t_filelog <gitdir> <rev> <path> [limit]
 
-import GIT_filelog;
-import GIT_log;
+import diff.GIT_filelog;
+import core.GIT_log;
 import io;
 import os;
 

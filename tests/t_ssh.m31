@@ -33,12 +33,12 @@
 // An unknown host prints "unknown-host <fingerprint>" and exits 3; any other
 // failure prints "error: <message>" to standard error and exits 1.
 
-import GIT_log;
-import GIT_pull;
-import GIT_refs;
-import GIT_remote;
-import GIT_ssh_transport;
-import GIT_wire;
+import core.GIT_log;
+import net.GIT_pull;
+import core.GIT_refs;
+import net.GIT_remote;
+import net.GIT_ssh_transport;
+import net.GIT_wire;
 import fs;
 import io;
 import net;

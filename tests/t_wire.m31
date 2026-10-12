@@ -30,14 +30,14 @@
 //       "ng <ref> <reason>" (exit 1); "error: <message>" on stderr, exit 1,
 //       when it could not happen.
 
-import GIT_hash;
-import GIT_log;
-import GIT_object;
-import GIT_pack_write;
-import GIT_refs;
+import core.GIT_hash;
+import core.GIT_log;
+import core.GIT_object;
+import core.GIT_pack_write;
+import core.GIT_refs;
 import crypto.sha1digest;
 import crypto.sha256;
-import GIT_wire;
+import net.GIT_wire;
 import io;
 import net;
 import os;

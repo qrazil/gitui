@@ -5,7 +5,7 @@
 //
 //   ./t_index_rewrite <gitdir>
 
-import GIT_index;
+import core.GIT_index;
 import io;
 import os;
 

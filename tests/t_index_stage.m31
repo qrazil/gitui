@@ -5,8 +5,8 @@
 //
 //   ./t_index_stage <gitdir> <worktree> <relative-path>
 
-import GIT_index;
-import GIT_object;
+import core.GIT_index;
+import core.GIT_object;
 import fs;
 import io;
 import os;

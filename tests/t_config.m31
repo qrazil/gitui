@@ -13,7 +13,7 @@
 //
 // An edit prints `ok` and exit 0, or `refused: <why>` and exit 1.
 
-import GIT_config;
+import core.GIT_config;
 import io;
 import os;
 

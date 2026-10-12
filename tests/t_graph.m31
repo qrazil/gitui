@@ -7,7 +7,7 @@
 //        resulting ids on one line in order, after `include... ^exclude... =>`
 //   ./t_graph <gitdir> count <id>        the number of commits reachable from <id>
 
-import GIT_graph;
+import core.GIT_graph;
 import io;
 import os;
 

@@ -5,7 +5,7 @@
 //
 //   ./t_write_object <gitdir>
 
-import GIT_object;
+import core.GIT_object;
 import io;
 import os;
 

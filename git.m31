@@ -43,12 +43,12 @@ import os;
 import fs;
 import date;
 import text;
-import GIT_hash;
-import GIT_object;
-import GIT_refs;
-import GIT_repository;
-import GIT_revparse;
-import GIT_log;
+import core.GIT_hash;
+import core.GIT_object;
+import core.GIT_refs;
+import core.GIT_repository;
+import core.GIT_revparse;
+import core.GIT_log;
 
 args.Parser parser = args.Parser("ourgit", summary: "read-only git plumbing over loose objects");
 parser.value("git-dir", help: "the repository's git directory", placeholder: "DIR");

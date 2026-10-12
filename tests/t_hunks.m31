@@ -10,8 +10,8 @@
 
 import os;
 import io;
-import GIT_hunks;
-import tui.TUI_diff_view;
+import diff.GIT_hunks;
+import tui.widgets.TUI_diff_view;
 
 List<str> argv = os.arguments();
 if (argv.size() != 3) {

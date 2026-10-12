@@ -8,10 +8,10 @@
 //   ./t_sequencer <gitdir> <worktree> state      prints `none` or `<banner> <stopped|todo> <current>` and the todo
 //   ./t_sequencer <gitdir> <worktree> abbrev <id>
 
-import GIT_diff3;
-import GIT_merge;
-import GIT_revparse;
-import GIT_sequencer;
+import diff.GIT_diff3;
+import diff.GIT_merge;
+import core.GIT_revparse;
+import diff.GIT_sequencer;
 import io;
 import os;
 

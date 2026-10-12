@@ -38,15 +38,15 @@
 import fs;
 import io;
 import os;
-import GIT_hash;
-import GIT_repository;
+import core.GIT_hash;
+import core.GIT_repository;
 import term;
-import tui.TUI_app;
-import tui.TUI_buffer;
-import tui.TUI_geometry;
-import GIT_client;
-import GIT_ui_autorefresh;
-import GIT_ui_loop;
+import tui.app.TUI_app;
+import tui.core.TUI_buffer;
+import tui.core.TUI_geometry;
+import ui.GIT_client;
+import ui.GIT_ui_autorefresh;
+import ui.GIT_ui_loop;
 
 List<str> argv = os.arguments();
 str path = ".";

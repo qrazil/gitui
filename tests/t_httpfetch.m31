@@ -26,12 +26,12 @@
 // Every command prints "error: <message>" to standard error and exits 1 on
 // failure; a successful command exits 0.
 
-import GIT_hash;
-import GIT_http_fetch;
-import GIT_log;
+import core.GIT_hash;
+import net.GIT_http_fetch;
+import core.GIT_log;
 import io;
 import os;
-import GIT_refs;
+import core.GIT_refs;
 
 List<str> argv = os.arguments();
 if (argv.size() < 2) {

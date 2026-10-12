@@ -1,0 +1,469 @@
+// `.git/index`: what is staged, and what git believes about it without
+// re-reading the working tree.
+//
+// The index is a flat, sorted array of entries -- one per staged path, not a
+// tree -- each holding a blob's name and a `stat(2)` snapshot from when it
+// was staged. That snapshot is the whole reason the file exists: comparing a
+// working-tree file's size and mtime against it is far cheaper than reading
+// and hashing the file, and is safe precisely because a change to either
+// number is what the file system promises on a write (`GIT_status.m31` is the
+// caller that leans on this).
+//
+// Layout (`Documentation/gitformat-index.txt`, version 2, the common case):
+//
+//     "DIRC"  version:u32  count:u32          -- 12-byte header
+//     entry * count                            -- sorted by path, then stage
+//     extension *                              -- signature:4  size:u32  data
+//     hash(everything above)                    -- 20-byte trailer (32 in SHA-256)
+//
+// Each entry is ctime, mtime (seconds and nanoseconds, four fields), dev,
+// ino, mode, uid, gid, file size (nine 32-bit fields), the blob's name (20
+// octets in SHA-1, 32 in SHA-256: `GIT_hash.m31` says which repository is which,
+// and the same width is the trailer's), a 16-bit flags word (assume-valid, extended, a 2-bit merge stage,
+// a 12-bit name length), the path, and NUL padding out to a multiple of 8
+// octets counted from the start of the entry -- see `read_entry` for the
+// exact arithmetic, which is git's own and not a round number.
+//
+// API
+// ---
+//   GIT_index.read(gitdir)         -> Result<Index, Error>
+//   GIT_index.parse(data, raw)     -> Result<Index, Error>   (no I/O; raw is 20 or 32)
+//   GIT_index.write(gitdir, ix)    -> Result<bool, Error>
+//   GIT_index.encode(ix, raw)      -> bytes                  (no I/O)
+//
+// --- what this does not have to get right ------------------------------------
+//
+// `dev`, `ino`, `uid` and `gid` are always written as 0: `fs.stat` (this
+// standard library's only window on a file) does not report them at all
+// (`runtime/sys.h`'s `SysStat` has exactly `size`, `mode`, `mtime_ns`), and
+// there is no primitive here to ask for the rest. `ctime` is written equal to
+// `mtime`, for the same reason -- there is no separate ctime to read. This is
+// a real gap against a byte-for-byte index real git would have written, and a
+// deliberate one: every one of those fields is an optimisation git itself
+// falls back from safely. A `dev`/`ino` mismatch, or a zeroed one, only ever
+// costs a re-hash it would otherwise have skipped (`read-cache.c`'s own
+// `ce_match_stat`); it is never trusted on its own to mean "unchanged" the way
+// `mtime` and `size` together are (`GIT_status.m31` implements exactly that
+// shortcut, and only that one). So an index this module writes is safe for
+// real git to read -- slower on its next `status`, in exchange for every
+// entry it has to re-hash once, never wrong.
+//
+// Versions 3 and 4 are not implemented. A version-3 entry differs from
+// version 2 only by an extra 16-bit "extended flags" word when the entry's
+// own extended bit is set, which costs nothing extra to read, so it is
+// handled here regardless of the file's declared version. Version 4's
+// whole-file prefix-compressed pathnames are a different entry encoding
+// altogether and are refused (`Error.BadVersion`) rather than misread --
+// silently decoding a v4 index as if it were v2 would produce entries with
+// wrong, truncated paths, which is worse than refusing to open it. Every
+// extension block (`TREE`, `REUC`, `UNTR`, `link`, and any this has never
+// heard of) is skipped by its own declared size rather than by name, and
+// none is written back: a round trip through this module keeps the entries
+// and drops every extension, cache-tree included, which only ever costs real
+// git a cache it can rebuild.
+
+import io;
+import fs;
+import core.GIT_repository;
+import core.GIT_hash;
+import random;
+
+/// Why an index could not be read or believed. Payload-free
+/// (docs/errors-decision.md §4): the offset or the extension's signature is
+/// context the caller already has, from the same read that produced this.
+pub enum Error {
+    /// There is no index file yet -- an empty repository, or one nothing has
+    /// ever been staged in.
+    NotFound;
+    /// The file is there and could not be read, or could not be written.
+    Io;
+    /// The first four octets are not `DIRC`.
+    BadSignature;
+    /// A version this does not read: anything but 2 or 3.
+    BadVersion;
+    /// The file ends in the middle of an entry, an extension header, or the
+    /// trailing checksum.
+    Truncated;
+    /// An extension's declared size runs past the end of the file.
+    BadExtension;
+    /// The trailing SHA-1 does not match the bytes before it: the index is
+    /// corrupt.
+    Checksum;
+}
+
+pub str Error.to_str() {
+    match (this) {
+        case NotFound: {
+            return "no index file";
+        }
+        case Io: {
+            return "the index file could not be read or written";
+        }
+        case BadSignature: {
+            return "not an index file: missing the 'DIRC' signature";
+        }
+        case BadVersion: {
+            return "index format version is not 2 or 3 (version 4's compressed names are not read here)";
+        }
+        case Truncated: {
+            return "the index ends in the middle of an entry or an extension";
+        }
+        case BadExtension: {
+            return "an extension's declared size runs past the end of the file";
+        }
+        case Checksum: {
+            return "the index's trailing SHA-1 does not match its contents: the index is corrupt";
+        }
+    }
+}
+
+/// One staged path: a blob, the `stat(2)` snapshot from when it was staged,
+/// and the merge machinery's own two bits. `path` is `bytes`, not `str`, for
+/// `GIT_object.m31`'s reason (its own module header): a path is whatever octets
+/// the filesystem gave git, and no caller of this one is required to prove
+/// they are UTF-8 before staging them.
+pub type Entry {
+    pub int ctime_s;
+    pub int ctime_ns;
+    pub int mtime_s;
+    pub int mtime_ns;
+    pub int dev;
+    pub int ino;
+    /// The full mode, exactly as `GIT_object.Entry.mode` is: 0o100644, 0o100755,
+    /// 0o120000 or 0o160000 (a submodule's gitlink), never a tree.
+    pub int mode;
+    pub int uid;
+    pub int gid;
+    pub int size;
+    /// The blob's name: 40 digits, or 64 in a SHA-256 repository.
+    pub str id;
+    /// 0 for an ordinary entry; 1, 2 or 3 name the three sides of a conflict
+    /// not yet resolved: 1 the merge base, 2 "ours" (the side being merged
+    /// into), 3 "theirs". `write` keeps whatever stage it is handed.
+    pub int stage;
+    pub bool is_assume_valid;
+    pub bytes path;
+}
+
+/// Is the staged mode a symlink?
+pub bool Entry.is_link() {
+    return mode >> 12 == 0o12;
+}
+
+/// Is it a submodule -- a commit staged inside a tree?
+pub bool Entry.is_gitlink() {
+    return mode >> 12 == 0o16;
+}
+
+/// Entries sort by path first and by stage second, which is the index
+/// format's own order (`read_entry` relies on nothing about the order it is
+/// handed; `write` imposes this with `sort()` before encoding).
+pub int Entry.cmp(Entry other) {
+    int order = cmp_bytes(path, other.path);
+    if (order != 0) {
+        return order;
+    }
+    return stage - other.stage;
+}
+
+/// The whole index: every staged entry, in the file's own order.
+pub type Index {
+    pub List<Entry> entries;
+}
+
+/// The index of the repository whose git directory is `gitdir`. `NotFound`
+/// for a repository with nothing staged yet -- not an error a caller should
+/// print, just "there is no index", which `GIT_status.m31` treats as an empty
+/// one.
+pub Result<Index, Error> read(str gitdir) {
+    str path = fs.join(GIT_repository.common(gitdir), "index");
+    bytes data = [];
+    match (io.read_bytes(path)) {
+        case Ok(bytes contents): {
+            data = contents;
+        }
+        case Err(_): {
+            if (!fs.is_present(path)) {
+                return Result<Index, Error>.Err(Error.NotFound);
+            }
+            return Result<Index, Error>.Err(Error.Io);
+        }
+    }
+    return parse(data, GIT_hash.raw_length(gitdir));
+}
+
+/// An index from its raw bytes -- no I/O, so a fixture or a test can hand
+/// this whatever it likes. `raw` is the octets of an object name: 20, or 32
+/// for a SHA-256 repository.
+pub Result<Index, Error> parse(bytes data, int raw) {
+    if (data.size() < 12 + raw) {
+        return Result<Index, Error>.Err(Error.Truncated);
+    }
+    if (!(data[0] == 'D' && data[1] == 'I' && data[2] == 'R' && data[3] == 'C')) {
+        return Result<Index, Error>.Err(Error.BadSignature);
+    }
+    int version = be32(data, 4);
+    if (version != 2 && version != 3) {
+        return Result<Index, Error>.Err(Error.BadVersion);
+    }
+    int count = be32(data, 8);
+    int end = data.size() - raw;
+    if (end < 12) {
+        return Result<Index, Error>.Err(Error.Truncated);
+    }
+    bytes body = data.substr(0, end);
+    bytes want = data.substr(end, data.size());
+    if (GIT_hash.digest(raw, body) != want) {
+        return Result<Index, Error>.Err(Error.Checksum);
+    }
+    List<Entry> entries = [];
+    int offset = 12;
+    for (int i in 0 .. count) {
+        Parsed parsed = read_entry(data, offset, end, raw)?;
+        entries.push(parsed.entry);
+        offset = parsed.next;
+    }
+    while (end - offset >= 8) {
+        int size = be32(data, offset + 4);
+        int next = offset + 8 + size;
+        if (size < 0 || next > end) {
+            return Result<Index, Error>.Err(Error.BadExtension);
+        }
+        offset = next;
+    }
+    if (offset != end) {
+        return Result<Index, Error>.Err(Error.Truncated);
+    }
+    return Result<Index, Error>.Ok(Index(entries));
+}
+
+// One entry, and the offset just past it (already padded).
+type Parsed {
+    Entry entry;
+    int next;
+}
+
+Result<Parsed, Error> read_entry(bytes data, int offset, int end, int raw) {
+    if (offset + 42 + raw > end) {
+        return Result<Parsed, Error>.Err(Error.Truncated);
+    }
+    int ctime_s = be32(data, offset);
+    int ctime_ns = be32(data, offset + 4);
+    int mtime_s = be32(data, offset + 8);
+    int mtime_ns = be32(data, offset + 12);
+    int dev = be32(data, offset + 16);
+    int ino = be32(data, offset + 20);
+    int mode = be32(data, offset + 24);
+    int uid = be32(data, offset + 28);
+    int gid = be32(data, offset + 32);
+    int size = be32(data, offset + 36);
+    bytes id = data.substr(offset + 40, offset + 40 + raw);
+    int flags = be16(data, offset + 40 + raw);
+    int stage = flags >> 12 & 0x3;
+    bool is_assume_valid = flags & 0x8000 != 0;
+    bool is_extended = flags & 0x4000 != 0;
+    int path_start = offset + 42 + raw;
+    if (is_extended) {
+        path_start = path_start + 2;
+    }
+    if (path_start > end) {
+        return Result<Parsed, Error>.Err(Error.Truncated);
+    }
+    int nul = find(data, 0, path_start, end);
+    if (nul < 0) {
+        return Result<Parsed, Error>.Err(Error.Truncated);
+    }
+    bytes path = data.substr(path_start, nul);
+    // The record from `at` through the terminating NUL, inclusive, rounded up
+    // to the next multiple of 8 -- git's own padding rule (`read-cache.c`'s
+    // `ondisk_size`), which always leaves at least the one NUL already
+    // counted and never fewer.
+    int through_nul = nul + 1 - offset;
+    int padded = through_nul;
+    if (padded % 8 != 0) {
+        padded = padded + (8 - padded % 8);
+    }
+    int next = offset + padded;
+    if (next > end) {
+        return Result<Parsed, Error>.Err(Error.Truncated);
+    }
+    Entry entry = Entry(ctime_s, ctime_ns, mtime_s, mtime_ns, dev, ino, mode, uid, gid, size, id.hex(), stage, is_assume_valid, path);
+    return Result<Parsed, Error>.Ok(Parsed(entry, next));
+}
+
+/// A fresh, stage-0 entry for a regular file or a symlink: `fs.stat`'s
+/// numbers, `is_link` (which the caller must supply -- `fs.stat` itself
+/// follows a symlink, so its `mode` is the *target's* type, not the entry
+/// being staged's), and the blob's name already computed and written
+/// elsewhere (`GIT_object.write_blob`). `dev`, `ino`, `uid` and `gid` are 0 and
+/// `ctime` is set equal to `mtime`; see the module header for why that is
+/// safe.
+pub Entry from_stat(bytes path, fs.Stat stat, bool is_link, str blob_id) {
+    int mode = 0o100644;
+    if (is_link) {
+        mode = 0o120000;
+    } else if (stat.perm() & 0o111 != 0) {
+        mode = 0o100755;
+    }
+    int seconds = stat.mtime_ns / 1_000_000_000;
+    int nanoseconds = stat.mtime_ns % 1_000_000_000;
+    return Entry(seconds, nanoseconds, seconds, nanoseconds, 0, 0, mode, 0, 0, stat.size, blob_id, 0, false, path);
+}
+
+/// The index of the repository whose git directory is `gitdir`, written
+/// atomically: a temporary file beside `.git/index`, written whole, then
+/// renamed over it, so a reader never opens a half-written index and a crash
+/// mid-write leaves the old one intact -- the same discipline `GIT_refs.m31` uses
+/// for a ref.
+pub Result<bool, Error> write(str gitdir, Index index) {
+    bytes out = encode(index, GIT_hash.raw_length(gitdir));
+    str path = fs.join(GIT_repository.common(gitdir), "index");
+    random.System rnd = random.system();
+    str temp = path + ".tmp" + rnd.hex(12);
+    match (io.write_bytes(temp, out)) {
+        case Ok: {
+        }
+        case Err(_): {
+            return Result<bool, Error>.Err(Error.Io);
+        }
+    }
+    match (fs.rename(temp, path)) {
+        case Ok: {
+            return Result<bool, Error>.Ok(true);
+        }
+        case Err(_): {
+            return Result<bool, Error>.Err(Error.Io);
+        }
+    }
+}
+
+/// `index`, as the bytes of a version-2 index file, checksum included -- no I/O,
+/// so a test can check this against a fixture byte for byte without touching
+/// a filesystem. Entries are sorted into the format's own order first
+/// (`Entry.cmp`); a caller need not have sorted them.
+pub bytes encode(Index index, int raw) {
+    List<Entry> sorted = clone(index.entries);
+    sorted.sort();
+    bytes out = [];
+    out.extend("DIRC".to_bytes());
+    push_be32(out, 2);
+    push_be32(out, sorted.size());
+    for (Entry entry in sorted) {
+        encode_entry(out, entry);
+    }
+    bytes sum = GIT_hash.digest(raw, out);
+    out.extend(sum);
+    return out;
+}
+
+// One entry, version-2 shape: no extended-flags word, `stage` folded into the
+// flags, and NUL padding to the next multiple of 8 counted from the start of
+// the entry -- the exact inverse of `read_entry`'s arithmetic.
+void encode_entry(bytes out, Entry entry) {
+    int start = out.size();
+    push_be32(out, entry.ctime_s);
+    push_be32(out, entry.ctime_ns);
+    push_be32(out, entry.mtime_s);
+    push_be32(out, entry.mtime_ns);
+    push_be32(out, entry.dev);
+    push_be32(out, entry.ino);
+    push_be32(out, entry.mode);
+    push_be32(out, entry.uid);
+    push_be32(out, entry.gid);
+    push_be32(out, entry.size);
+    out.extend(hex_decode(entry.id));
+    int namelen = entry.path.size();
+    int lenfield = namelen;
+    if (lenfield > 0x0FFF) {
+        lenfield = 0x0FFF;
+    }
+    int flags = (entry.stage & 0x3) << 12 | lenfield;
+    if (entry.is_assume_valid) {
+        flags = flags | 0x8000;
+    }
+    push_be16(out, flags);
+    out.extend(entry.path);
+    int through_nul = out.size() - start + 1;
+    int padded = through_nul;
+    if (padded % 8 != 0) {
+        padded = padded + (8 - padded % 8);
+    }
+    int nuls = padded - (out.size() - start);
+    for (int i in 0 .. nuls) {
+        out.push(0);
+    }
+}
+
+// --- small helpers, the way GIT_object.m31 and GIT_refs.m31 each write their own ----
+
+int be32(bytes data, int offset) {
+    return data[offset] << 24 | data[offset + 1] << 16 | data[offset + 2] << 8 | data[offset + 3];
+}
+
+int be16(bytes data, int offset) {
+    return data[offset] << 8 | data[offset + 1];
+}
+
+void push_be32(bytes out, int value) {
+    out.push(value >> 24 & 0xFF);
+    out.push(value >> 16 & 0xFF);
+    out.push(value >> 8 & 0xFF);
+    out.push(value & 0xFF);
+}
+
+void push_be16(bytes out, int value) {
+    out.push(value >> 8 & 0xFF);
+    out.push(value & 0xFF);
+}
+
+// The first octet `b` at or after `from` and before `upto`, or -1.
+int find(bytes haystack, int octet, int from, int upto) {
+    int position = from;
+    while (position < upto) {
+        if (haystack[position] == octet) {
+            return position;
+        }
+        position = position + 1;
+    }
+    return -1;
+}
+
+// Lowercase hex digits to the octets they spell -- `GIT_object.m31`'s own
+// helper, needed here too and not shared, the way `find`/`ascii`/`decimal`
+// are each written out per module rather than pulled into a shared utility.
+bytes hex_decode(str text) {
+    bytes out = [];
+    int position = 0;
+    while (position + 1 < text.size()) {
+        out.push(hex_value(text.byte_at(position)) << 4 | hex_value(text.byte_at(position + 1)));
+        position = position + 2;
+    }
+    return out;
+}
+
+int hex_value(int digit) {
+    if (digit >= '0' && digit <= '9') {
+        return digit - '0';
+    }
+    if (digit >= 'a' && digit <= 'f') {
+        return digit - 'a' + 10;
+    }
+    if (digit >= 'A' && digit <= 'F') {
+        return digit - 'A' + 10;
+    }
+    return 0;
+}
+
+// Byte comparison of two runs, negative/zero/positive.
+int cmp_bytes(bytes left, bytes right) {
+    int shared_length = left.size();
+    if (right.size() < shared_length) {
+        shared_length = right.size();
+    }
+    for (int i in 0 .. shared_length) {
+        if (left[i] != right[i]) {
+            return left[i] - right[i];
+        }
+    }
+    return left.size() - right.size();
+}

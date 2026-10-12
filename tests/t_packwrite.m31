@@ -20,9 +20,9 @@
 // failure.
 
 import io;
-import GIT_object;
+import core.GIT_object;
 import os;
-import GIT_pack_write;
+import core.GIT_pack_write;
 
 List<str> argv = os.arguments();
 if (argv.size() < 2) {

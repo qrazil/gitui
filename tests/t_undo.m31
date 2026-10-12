@@ -6,8 +6,8 @@
 // `plan` prints `undo: <title> | <detail>` or `undo: - <why>`, the same for
 // `redo:`, and `busy: <why>` when something is in progress.
 
-import GIT_undo;
-import GIT_checkout;
+import diff.GIT_undo;
+import core.GIT_checkout;
 import io;
 import os;
 

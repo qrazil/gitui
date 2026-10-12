@@ -12,7 +12,7 @@
 //   <kind> <index> <start> ok <used> <sha1-of-the-payload>
 //   <kind> <index> <start> err
 
-import GIT_zlib;
+import core.GIT_zlib;
 import crypto.sha1digest;
 import io;
 import os;

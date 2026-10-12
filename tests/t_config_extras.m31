@@ -6,9 +6,9 @@
 //   ./t_config_extras <gitdir> editor              the editor a commit message is edited with
 //   ./t_config_extras <gitdir> settings <branch>   gpgsign, pull_rebase, push_default, autosetup, init_branch, rerere
 
-import GIT_config;
-import GIT_ident;
-import GIT_ui_model;
+import core.GIT_config;
+import core.GIT_ident;
+import ui.GIT_ui_model;
 import io;
 import os;
 

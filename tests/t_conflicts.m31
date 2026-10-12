@@ -9,7 +9,7 @@
 // Prints `<case> ok` or `<case> FAIL ...` per check and a last
 // `N checks, F failed` line; `test_diff3.sh` greps for it.
 
-import GIT_diff3;
+import diff.GIT_diff3;
 
 type Counter {
     int checks = 0;

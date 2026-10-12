@@ -10,12 +10,12 @@
 //       Every object `GIT_pack.read_pack` finds in `<pack>` written loose into
 //       `<gitdir>`; prints "<count>" -- real git then judges the result.
 
-import GIT_http_push;
+import net.GIT_http_push;
 import io;
-import GIT_object;
+import core.GIT_object;
 import os;
-import GIT_pack;
-import GIT_pull;
+import core.GIT_pack;
+import net.GIT_pull;
 
 List<str> argv = os.arguments();
 if (argv.size() == 5 && argv[1] == "pull") {

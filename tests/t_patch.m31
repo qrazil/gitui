@@ -11,7 +11,7 @@
 // Prints `<case> ok` or `<case> FAIL ...` per check, the convention
 // `t_gitclient.m31` uses; `test_patch.sh` greps for a FAIL line.
 
-import GIT_patch;
+import diff.GIT_patch;
 import text;
 
 type Counter {

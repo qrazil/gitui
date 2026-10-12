@@ -11,7 +11,7 @@
 //
 // A failure prints `error: <text>` and exits 1.
 
-import GIT_stash;
+import diff.GIT_stash;
 import io;
 import os;
 

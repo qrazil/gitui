@@ -14,7 +14,7 @@
 
 import os;
 import io;
-import GIT_diff3;
+import diff.GIT_diff3;
 
 void run() {
     List<str> argv = os.arguments();

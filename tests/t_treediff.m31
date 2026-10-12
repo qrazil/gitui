@@ -6,8 +6,8 @@
 //
 // Prints `ok <written> <removed>`, or `refused <error text>`.
 
-import GIT_checkout;
-import GIT_index;
+import core.GIT_checkout;
+import core.GIT_index;
 import io;
 import os;
 

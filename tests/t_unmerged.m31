@@ -6,7 +6,7 @@
 //   ./t_unmerged <gitdir> <worktree> stages      `path id1 id2 id3 mode1 mode2 mode3`
 //                                                (`-` for an absent id, modes in decimal)
 
-import GIT_status;
+import core.GIT_status;
 import io;
 import os;
 

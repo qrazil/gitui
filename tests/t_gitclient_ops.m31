@@ -49,10 +49,10 @@
 // editor script before running this, and checks `State.message` and the
 // repository afterward the same way `commit` above is checked.
 
-import GIT_client;
+import ui.GIT_client;
 import io;
 import os;
-import tui.TUI_diff_view;
+import tui.widgets.TUI_diff_view;
 
 List<str> argv = os.arguments();
 if (argv.size() < 4) {

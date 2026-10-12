@@ -7,8 +7,8 @@
 //   ./t_reflog <gitdir> drop <ref>
 //   ./t_reflog <gitdir> should <ref>                    prints yes | no
 
-import GIT_object;
-import GIT_reflog;
+import core.GIT_object;
+import core.GIT_reflog;
 import io;
 import os;
 

@@ -16,7 +16,7 @@
 //   ./t_remote unit
 //       "ok <name>" or "FAIL <name>: <detail>" per check.
 
-import GIT_remote;
+import net.GIT_remote;
 import encoding.hexcodec;
 import io;
 import os;

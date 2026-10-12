@@ -16,7 +16,7 @@
 // A refusal for a form the module does not implement (not for a wrong
 // revision) prints `unsupported <what>`; the comparison with git skips those.
 
-import GIT_revparse;
+import core.GIT_revparse;
 import io;
 import os;
 
