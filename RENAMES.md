@@ -1,3 +1,94 @@
+# gitui 0.6.0: modules grouped into folders
+
+The 66 library modules that sat at the repository root moved into four folders.
+Nothing was renamed: module names, the `GIT_` prefix and every public name are
+unchanged, so only the `import` line changes. Use `m31c fmt -r .` afterwards to
+re-sort imports. tui is re-pinned to v0.5.0 (`1609d91`), whose own modules moved
+into `core/`, `widgets/` and `app/` (see tui's RENAMES.md).
+
+```
+import GIT_object;        ->  import core.GIT_object;
+GIT_object.read(...)      ->  GIT_object.read(...)       (unchanged)
+```
+
+A flat import of a moved module is now an error.
+
+Placements decided by the import graph rather than by name: `GIT_client` is in
+`ui/` (it imports every `GIT_ui_*` module), `GIT_watch` is in `core/` (it imports
+only ignore and index), `GIT_undo` is in `diff/`, and config, reflog, revparse,
+branches and checkout are in `core/`.
+
+| module | new import path |
+|---|---|
+| `GIT_branches` | `core.GIT_branches` |
+| `GIT_checkout` | `core.GIT_checkout` |
+| `GIT_config` | `core.GIT_config` |
+| `GIT_graph` | `core.GIT_graph` |
+| `GIT_hash` | `core.GIT_hash` |
+| `GIT_ident` | `core.GIT_ident` |
+| `GIT_ignore` | `core.GIT_ignore` |
+| `GIT_index` | `core.GIT_index` |
+| `GIT_log` | `core.GIT_log` |
+| `GIT_object` | `core.GIT_object` |
+| `GIT_pack` | `core.GIT_pack` |
+| `GIT_pack_write` | `core.GIT_pack_write` |
+| `GIT_pathtree` | `core.GIT_pathtree` |
+| `GIT_reflog` | `core.GIT_reflog` |
+| `GIT_refs` | `core.GIT_refs` |
+| `GIT_repository` | `core.GIT_repository` |
+| `GIT_revparse` | `core.GIT_revparse` |
+| `GIT_status` | `core.GIT_status` |
+| `GIT_watch` | `core.GIT_watch` |
+| `GIT_zlib` | `core.GIT_zlib` |
+| `GIT_blame` | `diff.GIT_blame` |
+| `GIT_diff3` | `diff.GIT_diff3` |
+| `GIT_filelog` | `diff.GIT_filelog` |
+| `GIT_hunks` | `diff.GIT_hunks` |
+| `GIT_merge` | `diff.GIT_merge` |
+| `GIT_patch` | `diff.GIT_patch` |
+| `GIT_rebase` | `diff.GIT_rebase` |
+| `GIT_rebase_todo` | `diff.GIT_rebase_todo` |
+| `GIT_sequencer` | `diff.GIT_sequencer` |
+| `GIT_stash` | `diff.GIT_stash` |
+| `GIT_udiff` | `diff.GIT_udiff` |
+| `GIT_undo` | `diff.GIT_undo` |
+| `GIT_xdiff` | `diff.GIT_xdiff` |
+| `GIT_http_fetch` | `net.GIT_http_fetch` |
+| `GIT_http_push` | `net.GIT_http_push` |
+| `GIT_pull` | `net.GIT_pull` |
+| `GIT_remote` | `net.GIT_remote` |
+| `GIT_ssh_transport` | `net.GIT_ssh_transport` |
+| `GIT_wire` | `net.GIT_wire` |
+| `GIT_client` | `ui.GIT_client` |
+| `GIT_ui_autorefresh` | `ui.GIT_ui_autorefresh` |
+| `GIT_ui_blame` | `ui.GIT_ui_blame` |
+| `GIT_ui_branch` | `ui.GIT_ui_branch` |
+| `GIT_ui_commit` | `ui.GIT_ui_commit` |
+| `GIT_ui_core` | `ui.GIT_ui_core` |
+| `GIT_ui_diff` | `ui.GIT_ui_diff` |
+| `GIT_ui_filelog` | `ui.GIT_ui_filelog` |
+| `GIT_ui_help` | `ui.GIT_ui_help` |
+| `GIT_ui_lines` | `ui.GIT_ui_lines` |
+| `GIT_ui_log` | `ui.GIT_ui_log` |
+| `GIT_ui_loop` | `ui.GIT_ui_loop` |
+| `GIT_ui_merge` | `ui.GIT_ui_merge` |
+| `GIT_ui_merge_model` | `ui.GIT_ui_merge_model` |
+| `GIT_ui_model` | `ui.GIT_ui_model` |
+| `GIT_ui_outline` | `ui.GIT_ui_outline` |
+| `GIT_ui_panel` | `ui.GIT_ui_panel` |
+| `GIT_ui_picker` | `ui.GIT_ui_picker` |
+| `GIT_ui_prompt` | `ui.GIT_ui_prompt` |
+| `GIT_ui_rebase` | `ui.GIT_ui_rebase` |
+| `GIT_ui_remote` | `ui.GIT_ui_remote` |
+| `GIT_ui_search` | `ui.GIT_ui_search` |
+| `GIT_ui_sequencer` | `ui.GIT_ui_sequencer` |
+| `GIT_ui_show` | `ui.GIT_ui_show` |
+| `GIT_ui_stash` | `ui.GIT_ui_stash` |
+| `GIT_ui_tags` | `ui.GIT_ui_tags` |
+| `GIT_ui_undo` | `ui.GIT_ui_undo` |
+
+---
+
 # gitui -> m31 naming convention: renames
 
 Branch `naming/migrate`, from master 644ab69 (the v0.2.0 project layout). The

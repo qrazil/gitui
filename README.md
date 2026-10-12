@@ -9,8 +9,32 @@ the program is the runtime every program links.
 
 The repo is an m31 project: the `deps` file names it (`gitui`, its version) and pins
 github.com/qrazil/tui by commit; m31c fetches that into `.m31-deps/` on the first
-build and records it in `deps.lock`. Library modules and the two entry points stay
-at the root; `tests/`, `tests/oracles/`, `scripts/` and `docs/` hold the rest.
+build and records it in `deps.lock`. The two entry points (`git.m31`, `gitui.m31`)
+stay at the root; the library modules live in `core/`, `diff/`, `net/` and `ui/`
+(see Layout below); `tests/`, `tests/oracles/`, `scripts/` and `docs/` hold the rest.
+
+## Layout
+
+A module is imported by its folder path and used by its last segment:
+`import core.GIT_object;` then `GIT_object.read(...)`. Module names keep the `GIT_`
+prefix and stay globally unique; the folders are for finding files. Layering is
+one-way: `core/` imports nothing from `diff/`, `net/` or `ui/`; `diff/` imports
+nothing from `net/` or `ui/`; `net/` imports only `core/` and `net/`; `ui/` may
+import all of them.
+
+| folder | what is in it |
+|---|---|
+| `core/` | the repository: object store and packs, zlib, hash, refs, reflog, rev-parse, config, ident, index, status, ignore, checkout, branches, log, graph, pathtree, repository, watch |
+| `diff/` | content work: xdiff, udiff, diff3, hunks, patch, blame, file log, merge, sequencer (cherry-pick, revert), rebase and its todo, stash, undo |
+| `net/` | remotes and transports: remote URLs, wire protocol, smart-HTTP fetch and push, ssh transport, pull |
+| `ui/` | the interactive client: `GIT_client` (the top), and every `GIT_ui_*` layer and overlay |
+| root | `git.m31` (read-only CLI), `gitui.m31` (interactive client), `deps`, `deps.lock` |
+
+Two placements are by import graph, not by name: `GIT_client` is in `ui/` (it imports
+every `GIT_ui_*` module), and `GIT_watch` is in `core/` (it imports only ignore and
+index). `GIT_undo` is in `diff/`. `RENAMES.md` has the full old-to-new path table.
+
+In the module tables below, `GIT_x.m31` names a module; find it under the folder above.
 
 ```
 export M31_ROOT=/path/to/m31      # a checkout, or an extracted release's runtime SDK (m31 v0.4.0+)
@@ -85,6 +109,14 @@ bash scripts/build-gitui.sh -o ourgitui    # not build.sh -- it is the one with 
 | `GIT_pull.m31` | fast-forward-only pull: fetches over smart HTTP (`GIT_http_fetch.m31`), unpacks the pack with `GIT_pack.read_pack`, refuses a dirty tree and anything but a fast-forward, then `GIT_checkout.m31` moves the working tree and the ref |
 | `tests/test.sh` | all of the above (sources the `tests/test_*.sh` files next to it) |
 | `docs/FRICTION.md` | **the other half of this**: what the language made hard, and what it made easy |
+
+## Release
+
+Pushing a `v*` tag runs `.github/workflows/release.yml`: the full test suite on
+linux x86-64, linux aarch64 and macOS arm64 against the m31 release in `M31_REF`,
+then, only if all three pass, the per-platform tarballs are published. The
+version is the `version` line of `deps`; a layout change that breaks imports is
+a minor bump before 1.0 (see `RENAMES.md`).
 
 ## What works
 
