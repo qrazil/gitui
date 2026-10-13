@@ -51,7 +51,7 @@ jobs:
           OUT=dist/gitui-linux-x86_64
           mkdir -p "$OUT"
           bash scripts/build.sh git.m31 -o "$OUT/ourgit"
-          bash scripts/build-gitui.sh -o "$OUT/ourgitui"
+          bash scripts/build.sh gitui.m31 -o "$OUT/ourgitui"
           cp README.md docs/design.md docs/FRICTION.md "$OUT/" 2>/dev/null || true
           sed 's/^ *//' > "$OUT/NOTES.txt" <<EOF
           gitui — Linux x86-64 release build
@@ -96,7 +96,7 @@ jobs:
           OUT=dist/gitui-linux-aarch64
           mkdir -p "$OUT"
           bash scripts/build.sh git.m31 -o "$OUT/ourgit"
-          bash scripts/build-gitui.sh -o "$OUT/ourgitui"
+          bash scripts/build.sh gitui.m31 -o "$OUT/ourgitui"
           cp README.md docs/design.md docs/FRICTION.md "$OUT/" 2>/dev/null || true
           sed 's/^ *//' > "$OUT/NOTES.txt" <<EOF
           gitui — Linux aarch64 release build
@@ -141,7 +141,7 @@ jobs:
           OUT=dist/gitui-macos-arm64
           mkdir -p "$OUT"
           bash scripts/build.sh git.m31 -o "$OUT/ourgit"
-          bash scripts/build-gitui.sh -o "$OUT/ourgitui"
+          bash scripts/build.sh gitui.m31 -o "$OUT/ourgitui"
           cp README.md docs/design.md docs/FRICTION.md "$OUT/" 2>/dev/null || true
           sed 's/^ *//' > "$OUT/NOTES.txt" <<EOF
           gitui — macOS arm64 (Apple Silicon) release build

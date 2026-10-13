@@ -6,6 +6,7 @@ import diff.GIT_hunks;
 import core.GIT_object;
 import core.GIT_pathtree;
 import ui.GIT_ui_core;
+import ui.GIT_ui_highlight;
 import ui.GIT_ui_panel;
 import date;
 import term;
@@ -18,7 +19,12 @@ type ShowOverlay {
     GIT_ui_core.Core host;
     str title;
     List<str> lines;
+    // The file the diff in `lines` is of ("" for none): its language.
+    str path = "";
     int offset = 0;
+    GIT_ui_highlight.DiffText syntax = GIT_ui_highlight.DiffText([]);
+    bool is_syntax_ready = false;
+    bool is_syntax_for_on = true;
 }
 
 pub TUI_app.Action ShowOverlay.handle_key(term.Code code) {
@@ -26,6 +32,9 @@ pub TUI_app.Action ShowOverlay.handle_key(term.Code code) {
         case Some(str cmd): {
             if (cmd == GIT_ui_core.CMD_CLOSE) {
                 host.pop_overlay();
+            }
+            if (cmd == GIT_ui_core.CMD_SYNTAX) {
+                host.toggle_syntax();
             }
             if (cmd == GIT_ui_core.CMD_DOWN) {
                 offset = offset + 1;
@@ -56,7 +65,12 @@ pub void ShowOverlay.render(TUI_buffer.Buffer buffer, TUI_geometry.Rect area) {
         return;
     }
     offset = GIT_ui_panel.clamp(offset, lines.size(), inner.height);
-    GIT_ui_panel.draw_lines(buffer, inner, lines, offset, -1);
+    if (!is_syntax_ready || is_syntax_for_on != host.is_syntax_on) {
+        syntax = GIT_ui_highlight.DiffText.shown(lines, GIT_ui_highlight.language_for_text(host.is_syntax_on, path), host.is_syntax_on);
+        is_syntax_ready = true;
+        is_syntax_for_on = host.is_syntax_on;
+    }
+    GIT_ui_panel.draw_text(buffer, inner, lines.size(), offset, -1, host.is_dark, syntax);
 }
 
 pub List<GIT_ui_core.Hint> ShowOverlay.hints() {
@@ -163,5 +177,5 @@ bytes blob_at(str gitdir, str commit_id, str path) {
 
 /// Show `commit_id` (and its change to `path`, "" for none) over everything.
 pub void open(GIT_ui_core.Core core, str commit_id, str path) {
-    core.push_overlay(ShowOverlay(core, "commit " + commit_id.substr(0, 7), commit_lines(core.gitdir, commit_id, path)));
+    core.push_overlay(ShowOverlay(core, "commit " + commit_id.substr(0, 7), commit_lines(core.gitdir, commit_id, path), path: path));
 }

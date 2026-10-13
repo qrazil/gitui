@@ -6,6 +6,7 @@ import tui.core.TUI_geometry;
 import tui.core.TUI_style;
 import tui.core.TUI_text;
 import tui.core.TUI_widget;
+import ui.GIT_ui_highlight;
 
 /// Draw a titled panel over most of `area` and answer the rectangle inside it.
 pub TUI_geometry.Rect frame(TUI_buffer.Buffer buffer, TUI_geometry.Rect area, str title) {
@@ -53,6 +54,23 @@ pub void draw_lines(TUI_buffer.Buffer buffer, TUI_geometry.Rect inner, List<str>
             buffer.fill(TUI_geometry.Rect(inner.x, inner.y + row, inner.width, 1), " ", style);
         }
         buffer.set_str(inner.x, inner.y + row, TUI_text.truncate(lines[index], inner.width), style, max: inner.width);
+        row = row + 1;
+    }
+}
+
+/// Like `draw_lines`, for a diff text (`GIT_ui_highlight.DiffText`): the
+/// marker and plain text in each line's kind colour, code in token colours,
+/// the `highlighted` line (or -1) in reverse video over all of it.
+pub void draw_text(TUI_buffer.Buffer buffer, TUI_geometry.Rect inner, int total, int offset, int highlighted, bool is_dark, GIT_ui_highlight.DiffText text) {
+    int row = 0;
+    while (row < inner.height && offset + row < total) {
+        int index = offset + row;
+        TUI_style.Style over = TUI_style.Style();
+        if (index == highlighted) {
+            over = TUI_style.Style(attrs: TUI_style.REVERSE);
+            buffer.fill(TUI_geometry.Rect(inner.x, inner.y + row, inner.width, 1), " ", over);
+        }
+        text.draw(buffer, inner.x, inner.y + row, inner.width, index, is_dark, over: over);
         row = row + 1;
     }
 }

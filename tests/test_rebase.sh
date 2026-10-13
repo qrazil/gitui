@@ -313,7 +313,7 @@ fi
 # a pull that rebases, and git/UI interop both ways, each compared with `git rebase`.
 # It builds its own fixtures under `$WORK/pty_rebase`.
 if rb_only "pty"; then
-    if [ -f "$WORK/gitui" ] || bash scripts/build-gitui.sh -o "$WORK/gitui_rebase" >"$WORK/gitui_rebase_build.log" 2>&1; then
+    if [ -f "$WORK/gitui" ] || bash scripts/build.sh -o "$WORK/gitui_rebase" >"$WORK/gitui_rebase_build.log" 2>&1; then
         [ -f "$WORK/gitui" ] && rb_bin="$WORK/gitui" || rb_bin="$WORK/gitui_rebase"
         if command -v python3 >/dev/null; then
             if rb_out=$(python3 tests/pty_rebase.py "$rb_bin" "$WORK/pty_rebase" 2>&1); then
@@ -325,6 +325,6 @@ if rb_only "pty"; then
             echo "rebase pty: skipped, no python3" >&2
         fi
     else
-        bad "rebase pty: scripts/build-gitui.sh" "$(cat "$WORK/gitui_rebase_build.log")"
+        bad "rebase pty: scripts/build.sh" "$(cat "$WORK/gitui_rebase_build.log")"
     fi
 fi

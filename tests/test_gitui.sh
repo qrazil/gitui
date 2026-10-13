@@ -429,7 +429,7 @@ fi
 
 # --- end to end: the real interactive loop, driven under a pty -------------
 #
-# The real, user-facing build (`scripts/build-gitui.sh`) rather than a second,
+# The real, user-facing build (`scripts/build.sh`) rather than a second,
 # slightly different way of compiling the same program -- if the actual build
 # a user runs ever drifted from what this test exercises, this is exactly the
 # kind of gap that would hide.
@@ -438,8 +438,8 @@ fi
 # given; `$WORK/pty` is `test.sh`'s own scratch directory, removed with
 # everything else on exit.
 
-if bash scripts/build-gitui.sh -o "$WORK/gitui" >"$WORK/gitui_build.log" 2>&1; then
-    note "gitui: scripts/build-gitui.sh produces a working executable"
+if bash scripts/build.sh -o "$WORK/gitui" >"$WORK/gitui_build.log" 2>&1; then
+    note "gitui: scripts/build.sh produces a working executable"
     if command -v python3 >/dev/null; then
         if out=$(python3 tests/pty_e2e.py "$WORK/gitui" "$WORK/pty" 2>&1); then
             note "gitui pty: $(echo "$out" | grep -c '^ok') end-to-end checks passed under a real pty"
@@ -450,5 +450,5 @@ if bash scripts/build-gitui.sh -o "$WORK/gitui" >"$WORK/gitui_build.log" 2>&1; t
         echo "gitui pty: skipped, no python3" >&2
     fi
 else
-    bad "gitui: scripts/build-gitui.sh" "$(cat "$WORK/gitui_build.log")"
+    bad "gitui: scripts/build.sh" "$(cat "$WORK/gitui_build.log")"
 fi

@@ -1,3 +1,24 @@
+# gitui 0.7.0: one build script, syntax highlighting everywhere
+
+Version 0.7.0, from master 383a1b6 (0.6.0). No module was renamed.
+
+- **`scripts/build-gitui.sh` is gone; `scripts/build.sh` builds everything**, as
+  the other apps' one script does. No argument builds `gitui.m31` into
+  `./ourgitui`; `bash scripts/build.sh git.m31` builds the read-only CLI into
+  `./ourgit`; any other `.m31` file builds into `./<its name>`; `-o name`
+  renames the output in every case. Anything calling
+  `scripts/build-gitui.sh -o X` now calls `scripts/build.sh -o X` (or
+  `scripts/build.sh gitui.m31 -o X`). The release workflow and `tests/*.sh` do.
+- **Syntax highlighting** in the diff views, the blame view, the commit view
+  from the file history, the stash preview and the conflict view, through tui
+  0.6.0's `TUI_syntax` (the `deps` pin moves to it). New module
+  `ui/GIT_ui_highlight.m31`; new key `C` (toggle); `NO_COLOR`,
+  `GITUI_SYNTAX=off` and `git config gitui.syntax off` start it off. See the
+  README's "Syntax highlighting".
+- The commit view (`GIT_ui_show`) now also colours `+`/`-` lines and hunk
+  headers, which it drew plain before; `GIT_ui_blame.BlameOverlay.format` is
+  now `margin_text` (the code is drawn separately, coloured).
+
 # gitui 0.6.0: modules grouped into folders
 
 The 66 library modules that sat at the repository root moved into four folders.

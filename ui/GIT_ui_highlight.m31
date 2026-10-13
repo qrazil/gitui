@@ -1,0 +1,314 @@
+// Syntax highlighting for the places gitui shows file text outside a
+// `TUI_diff_view.DiffView` (which colours its own hunks, given a `language`):
+// the commit view, the stash preview, the blame view and the conflict view.
+// The lexer is tui's `TUI_syntax`; this module is the gitui side of it -- when
+// highlighting is on, which language a path is, and how a diff, a blame or a
+// conflict is walked line by line so the carried lexer state is right.
+//
+// Switches, strongest first:
+//
+//   NO_COLOR       set (non-empty): no syntax colours (https://no-color.org)
+//   GITUI_SYNTAX   off | 0 | false | no | none: off; anything else: on
+//   gitui.syntax   the same values in git config (`git config --global gitui.syntax off`)
+//   C              the key, in the outline, the diff view and every overlay
+//                  that shows file text: flip it for this session
+//
+// The terminal's light/dark comes from `$COLORFGBG`, as in m3d1tor.
+
+import os;
+import core.GIT_config;
+import tui.core.TUI_buffer;
+import tui.core.TUI_style;
+import tui.core.TUI_syntax;
+import tui.core.TUI_text;
+
+/// What one line of a diff text is.
+pub const int KIND_PLAIN = 0;
+pub const int KIND_HEADER = 1;
+pub const int KIND_HUNK = 2;
+pub const int KIND_CONTEXT = 3;
+pub const int KIND_ADD = 4;
+pub const int KIND_REMOVE = 5;
+
+/// A value of `NO_COLOR`/`GITUI_SYNTAX`/`gitui.syntax` that means "off".
+pub bool is_off_word(str value) {
+    str word = value.trim().to_lower();
+    return word == "off" || word == "0" || word == "false" || word == "no" || word == "none";
+}
+
+/// Whether syntax colours start on: see the header for the order.
+pub bool is_enabled(str gitdir) {
+    if (os.env("NO_COLOR").or("") != "") {
+        return false;
+    }
+    match (os.env("GITUI_SYNTAX")) {
+        case Some(str value): {
+            if (value != "") {
+                return !is_off_word(value);
+            }
+        }
+        case None: {
+        }
+    }
+    match (GIT_config.get(gitdir, "gitui", "", "syntax")) {
+        case Some(str value): {
+            return !is_off_word(value);
+        }
+        case None: {
+        }
+    }
+    return true;
+}
+
+/// Whether the terminal's background is dark, from `$COLORFGBG`.
+pub bool is_dark_terminal() {
+    return TUI_syntax.is_dark(os.env("COLORFGBG").or(""));
+}
+
+/// The highlighter's language for a path (bytes, as gitui holds them) and,
+/// when the file has no known extension, its first line (for a `#!`).
+/// "" when highlighting is off or the file is not a known language.
+pub str language_for(bool is_on, bytes path, str first_line = "") {
+    if (!is_on) {
+        return "";
+    }
+    return TUI_syntax.language_of(path.utf8().or(""), first_line);
+}
+
+/// The same for a path that is already text.
+pub str language_for_text(bool is_on, str path, str first_line = "") {
+    if (!is_on) {
+        return "";
+    }
+    return TUI_syntax.language_of(path, first_line);
+}
+
+/// The style a diff text line of this kind is drawn in (before any token
+/// colours). Added and removed lines are green and red, as in the outline and
+/// the diff view; hunk headers cyan; file headers bold.
+pub TUI_style.Style kind_style(int kind) {
+    if (kind == KIND_ADD) {
+        return TUI_style.Style(foreground: TUI_style.Colour.Indexed(2));
+    }
+    if (kind == KIND_REMOVE) {
+        return TUI_style.Style(foreground: TUI_style.Colour.Indexed(1));
+    }
+    if (kind == KIND_HUNK) {
+        return TUI_style.Style(foreground: TUI_style.Colour.Indexed(6));
+    }
+    if (kind == KIND_HEADER) {
+        return TUI_style.Style(attrs: TUI_style.BOLD);
+    }
+    return TUI_style.Style();
+}
+
+// The path in a "+++ b/x" or "diff --git a/x b/x" line, or "".
+str path_after(str text, str marker) {
+    int found_at = text.index_of(marker).or(-1);
+    if (found_at < 0) {
+        return "";
+    }
+    str rest = text.substr(found_at + marker.size(), text.size());
+    int tab = rest.index_of("\t").or(-1);
+    if (tab >= 0) {
+        rest = rest.substr(0, tab);
+    }
+    return rest;
+}
+
+/// A diff as text, walked line by line. `marker_width` is how many columns
+/// of each body line are the marker (1 for `git diff` output: `+x`; 2 for
+/// the commit view's own `+ x`), and what follows is code.
+///
+/// Each hunk is classified on its own, from a clean state, along its old side
+/// (context and removed lines) and its new side (context and added lines)
+/// separately, so an added line's open comment does not leak into a removed
+/// one. Lines are classified once, the first time they are asked for.
+///
+/// `language` is the whole text's language ("" for none). With `is_unified`
+/// (raw `git diff`/`git stash show -p` text) the language follows the
+/// `diff --git` and `+++` headers instead, file by file.
+pub type DiffText {
+    pub List<str> lines;
+    pub str language = "";
+    pub int marker_width = 1;
+    pub bool is_unified = false;
+    pub bool is_on = true;
+    pub List<int> kinds = [];
+    pub List<List<int>> classes = [];
+    pub bool is_in_hunk = false;
+    pub str current = "";
+    pub int old_state = 0;
+    pub int new_state = 0;
+}
+
+/// The text of a commit view (`marker_width` 2), in `language`.
+pub static DiffText DiffText.shown(List<str> lines, str language, bool is_on) {
+    return DiffText(lines, language: language, marker_width: 2, is_on: is_on, current: language);
+}
+
+/// Raw unified-diff text, the language following its file headers.
+pub static DiffText DiffText.unified(List<str> lines, bool is_on) {
+    return DiffText(lines, marker_width: 1, is_unified: true, is_on: is_on);
+}
+
+void DiffText.step() {
+    int index = kinds.size();
+    str text = lines[index];
+    int kind = KIND_PLAIN;
+    List<int> found = [];
+    if (is_unified && text.starts_with("diff --git ")) {
+        is_in_hunk = false;
+        kind = KIND_HEADER;
+        current = "";
+        if (is_on) {
+            current = TUI_syntax.language_of(path_after(text, " b/"), "");
+        }
+    } else if (text.starts_with("@@")) {
+        is_in_hunk = true;
+        old_state = 0;
+        new_state = 0;
+        kind = KIND_HUNK;
+    } else if (!is_in_hunk) {
+        if (text.starts_with("+++ ") || text.starts_with("--- ") || text.starts_with("diff ")) {
+            kind = KIND_HEADER;
+            if (is_unified && is_on && text.starts_with("+++ b/")) {
+                current = TUI_syntax.language_of(path_after(text, "+++ b/"), "");
+            }
+        }
+    } else if (text.size() >= marker_width && text.size() > 0) {
+        int marker = text.byte_at(0);
+        if (marker == 43) {
+            kind = KIND_ADD;
+        } else if (marker == 45) {
+            kind = KIND_REMOVE;
+        } else if (marker == 32) {
+            kind = KIND_CONTEXT;
+        }
+        if (kind != KIND_PLAIN && is_on && current != "") {
+            str code = text.substr(marker_width, text.size());
+            if (kind == KIND_REMOVE) {
+                TUI_syntax.Tokens tokens = TUI_syntax.classify(current, code, old_state);
+                old_state = tokens.state;
+                found = tokens.classes;
+            } else if (kind == KIND_ADD) {
+                TUI_syntax.Tokens tokens = TUI_syntax.classify(current, code, new_state);
+                new_state = tokens.state;
+                found = tokens.classes;
+            } else {
+                TUI_syntax.Tokens tokens = TUI_syntax.classify(current, code, new_state);
+                if (old_state != new_state) {
+                    old_state = TUI_syntax.classify(current, code, old_state).state;
+                } else {
+                    old_state = tokens.state;
+                }
+                new_state = tokens.state;
+                found = tokens.classes;
+            }
+        }
+    }
+    kinds.push(kind);
+    classes.push(found);
+}
+
+// Classify through line `index`.
+void DiffText.reach(int index) {
+    while (kinds.size() <= index && kinds.size() < lines.size()) {
+        step();
+    }
+}
+
+/// The kind of line `index` (`KIND_*`).
+pub int DiffText.kind_of(int index) {
+    reach(index);
+    if (index < 0 || index >= kinds.size()) {
+        return KIND_PLAIN;
+    }
+    return kinds[index];
+}
+
+/// The class of every byte of line `index`'s code (after the marker); empty
+/// for a line with no code or with highlighting off.
+pub List<int> DiffText.classes_of(int index) {
+    reach(index);
+    if (index < 0 || index >= classes.size()) {
+        return [];
+    }
+    return classes[index];
+}
+
+/// Draw line `index` at `x`, `y`, `width` columns: the marker and the plain
+/// text in the line's kind style, code tokens in their colours, `over` (the
+/// cursor's reverse video) on all of it.
+pub void DiffText.draw(TUI_buffer.Buffer buffer, int x, int y, int width, int index, bool is_dark, TUI_style.Style over = TUI_style.Style()) {
+    if (index < 0 || index >= lines.size() || width <= 0) {
+        return;
+    }
+    int kind = kind_of(index);
+    str text = lines[index];
+    TUI_style.Style base = kind_style(kind);
+    List<int> found = classes_of(index);
+    if (found.size() == 0 || text.size() < marker_width) {
+        buffer.set_str(x, y, TUI_text.truncate(text, width), base.merged(over), max: width);
+        return;
+    }
+    int used = buffer.set_str(x, y, text.substr(0, marker_width), base.merged(over), max: width);
+    TUI_syntax.draw(buffer, x + used, y, width - used, text.substr(marker_width, text.size()), found, base, is_dark, over: over);
+}
+
+/// The blame view's lines of one file: the code of line `i` is
+/// `texts[i]`, classified in order with the state carried.
+pub TUI_syntax.Highlighter highlighter_of(str language, List<str> texts) {
+    TUI_syntax.Highlighter out = TUI_syntax.Highlighter(language);
+    if (language == "") {
+        return out;
+    }
+    for (str text in texts) {
+        out.add(text);
+    }
+    return out;
+}
+
+/// A conflicted file as laid out for the screen. Plain lines are classified
+/// in order; the three versions of a conflict (`<<<<<<<` ours, `|||||||`
+/// base, `=======` theirs, `>>>>>>>`) each start from the state the conflict
+/// began in, so one side's open comment does not colour the next.
+pub type ConflictText {
+    pub List<str> lines;
+    /// 0 plain, 1 marker, 2 ours, 3 base, 4 theirs.
+    pub List<int> kinds;
+    pub str language = "";
+    pub List<List<int>> classes = [];
+    pub int state = 0;
+    pub int saved = 0;
+}
+
+void ConflictText.step() {
+    int index = classes.size();
+    int kind = kinds[index];
+    List<int> found = [];
+    if (kind == 1) {
+        str text = lines[index];
+        if (text.starts_with("<<<<<<<")) {
+            saved = state;
+        } else if (text.starts_with("|||||||") || text.starts_with("=======")) {
+            state = saved;
+        }
+    } else if (language != "") {
+        TUI_syntax.Tokens tokens = TUI_syntax.classify(language, lines[index], state);
+        state = tokens.state;
+        found = tokens.classes;
+    }
+    classes.push(found);
+}
+
+/// The class of every byte of line `index`.
+pub List<int> ConflictText.classes_of(int index) {
+    while (classes.size() <= index && classes.size() < lines.size()) {
+        step();
+    }
+    if (index < 0 || index >= classes.size()) {
+        return [];
+    }
+    return classes[index];
+}

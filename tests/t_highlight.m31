@@ -1,0 +1,132 @@
+// Unit tests for `GIT_ui_highlight`: the pure line styling the commit view,
+// the stash preview, the blame view and the conflict view use. No repository,
+// no terminal -- a `Buffer` stands in for the screen.
+//
+//   ./t_highlight
+//
+// Prints one `<case> ok` or `<case> FAIL ...` line per check, like `t_uikeys`.
+
+import ui.GIT_ui_highlight;
+import tui.core.TUI_buffer;
+import tui.core.TUI_style;
+import tui.core.TUI_syntax;
+
+type Counter {
+    int checks = 0;
+    int failed = 0;
+}
+
+void Counter.check(str name, bool is_ok, str detail) {
+    checks = checks + 1;
+    if (is_ok) {
+        print(name + " ok");
+    } else {
+        failed = failed + 1;
+        print(name + " FAIL " + detail);
+    }
+}
+
+Counter counter = Counter();
+
+void eq_int(Counter counter, str name, int got, int want) {
+    counter.check(name, got == want, "got " + got.to_str() + ", want " + want.to_str());
+}
+
+void eq_str(Counter counter, str name, str got, str want) {
+    counter.check(name, got == want, "got [" + got + "], want [" + want + "]");
+}
+
+str fg_at(TUI_buffer.Buffer buffer, int x, int y) {
+    return buffer.get(x, y).style.foreground.to_str();
+}
+
+// --- the switches and languages ---------------------------------------------
+
+counter.check("off words", GIT_ui_highlight.is_off_word("off") && GIT_ui_highlight.is_off_word("0") && GIT_ui_highlight.is_off_word(" False ") && GIT_ui_highlight.is_off_word("NO") && GIT_ui_highlight.is_off_word("none"), "");
+counter.check("on words", !GIT_ui_highlight.is_off_word("on") && !GIT_ui_highlight.is_off_word("1") && !GIT_ui_highlight.is_off_word("true") && !GIT_ui_highlight.is_off_word(""), "");
+eq_str(counter, "rust path", GIT_ui_highlight.language_for(true, "src/main.rs".to_bytes()), "rust");
+eq_str(counter, "off gives no language", GIT_ui_highlight.language_for(false, "src/main.rs".to_bytes()), "");
+eq_str(counter, "unknown extension", GIT_ui_highlight.language_for(true, "notes.txt".to_bytes()), "");
+eq_str(counter, "shebang first line", GIT_ui_highlight.language_for(true, "run".to_bytes(), first_line: "#!/bin/sh"), "sh");
+eq_str(counter, "text path", GIT_ui_highlight.language_for_text(true, "a/b.py"), "python");
+
+// --- kinds and their base styles ---------------------------------------------
+
+eq_str(counter, "added is green", GIT_ui_highlight.kind_style(GIT_ui_highlight.KIND_ADD).foreground.to_str(), "index 2");
+eq_str(counter, "removed is red", GIT_ui_highlight.kind_style(GIT_ui_highlight.KIND_REMOVE).foreground.to_str(), "index 1");
+eq_str(counter, "hunk is cyan", GIT_ui_highlight.kind_style(GIT_ui_highlight.KIND_HUNK).foreground.to_str(), "index 6");
+eq_int(counter, "header is bold", GIT_ui_highlight.kind_style(GIT_ui_highlight.KIND_HEADER).attrs, TUI_style.BOLD);
+eq_str(counter, "context is plain", GIT_ui_highlight.kind_style(GIT_ui_highlight.KIND_CONTEXT).to_str(), TUI_style.Style().to_str());
+
+// --- a commit view's text (marker width 2) -----------------------------------
+
+List<str> shown = ["commit abc", "", "    @@ not a hunk", "", "--- a.c", "@@ -1,2 +1,2 @@", "  int x;", "- int y = 1; /* old", "- still old */", "+ int y = 2;", "  return 0;"];
+GIT_ui_highlight.DiffText view = GIT_ui_highlight.DiffText.shown(shown, "c", true);
+eq_int(counter, "commit line is plain", view.kind_of(0), GIT_ui_highlight.KIND_PLAIN);
+eq_int(counter, "an indented @@ in a message is not a hunk", view.kind_of(2), GIT_ui_highlight.KIND_PLAIN);
+eq_int(counter, "--- path is a header", view.kind_of(4), GIT_ui_highlight.KIND_HEADER);
+eq_int(counter, "@@ is a hunk header", view.kind_of(5), GIT_ui_highlight.KIND_HUNK);
+eq_int(counter, "context", view.kind_of(6), GIT_ui_highlight.KIND_CONTEXT);
+eq_int(counter, "removed", view.kind_of(7), GIT_ui_highlight.KIND_REMOVE);
+eq_int(counter, "added", view.kind_of(9), GIT_ui_highlight.KIND_ADD);
+eq_int(counter, "code starts after the marker: a type", view.classes_of(6)[0], TUI_syntax.TYPE);
+eq_int(counter, "number in an added line", view.classes_of(9)[8], TUI_syntax.NUMBER);
+eq_int(counter, "the old side's comment continues over the removed line", view.classes_of(8)[0], TUI_syntax.COMMENT);
+eq_int(counter, "and the added line is not in it", view.classes_of(9)[0], TUI_syntax.TYPE);
+eq_int(counter, "a keyword in a context line after", view.classes_of(10)[0], TUI_syntax.KEYWORD);
+TUI_buffer.Buffer buffer = TUI_buffer.Buffer.sized(30, 4);
+view.draw(buffer, 0, 0, 30, 9, true);
+eq_str(counter, "added marker keeps green", fg_at(buffer, 0, 0), "index 2");
+eq_str(counter, "added type is cyan", fg_at(buffer, 2, 0), "index 6");
+eq_str(counter, "added plain text stays green", fg_at(buffer, 6, 0), "index 2");
+eq_str(counter, "added number is yellow on dark", fg_at(buffer, 10, 0), "index 3");
+view.draw(buffer, 0, 1, 30, 9, false);
+eq_str(counter, "added number is red on light", fg_at(buffer, 10, 1), "index 1");
+view.draw(buffer, 0, 2, 30, 9, true, over: TUI_style.Style(attrs: TUI_style.REVERSE));
+eq_int(counter, "the cursor row is reversed", buffer.get(2, 2).style.attrs & TUI_style.REVERSE, TUI_style.REVERSE);
+eq_str(counter, "and keeps the token colour", fg_at(buffer, 2, 2), "index 6");
+view.draw(buffer, 0, 3, 8, 7, true);
+eq_str(counter, "clipped line ends in an ellipsis", buffer.get(7, 3).symbol, "\u{2026}");
+GIT_ui_highlight.DiffText off = GIT_ui_highlight.DiffText.shown(shown, "c", false);
+eq_int(counter, "off: kinds still known", off.kind_of(9), GIT_ui_highlight.KIND_ADD);
+eq_int(counter, "off: no classes", off.classes_of(9).size(), 0);
+TUI_buffer.Buffer plain = TUI_buffer.Buffer.sized(30, 1);
+off.draw(plain, 0, 0, 30, 9, true);
+eq_str(counter, "off: the added line is wholly green", fg_at(plain, 4, 0), "index 2");
+
+// --- raw unified diff text (the stash preview) --------------------------------
+
+List<str> unified = ["diff --git a/x.py b/x.py", "index 1..2 100644", "--- a/x.py", "+++ b/x.py", "@@ -1 +1 @@", "-def f(): pass", "+def g(): return 1", "diff --git a/y.rs b/y.rs", "--- a/y.rs", "+++ b/y.rs", "@@ -1 +1 @@", "+fn main() {}", "\\ No newline at end of file"];
+GIT_ui_highlight.DiffText stash = GIT_ui_highlight.DiffText.unified(unified, true);
+eq_int(counter, "diff --git is a header", stash.kind_of(0), GIT_ui_highlight.KIND_HEADER);
+eq_int(counter, "index line is plain", stash.kind_of(1), GIT_ui_highlight.KIND_PLAIN);
+eq_int(counter, "--- before a hunk is a header", stash.kind_of(2), GIT_ui_highlight.KIND_HEADER);
+eq_int(counter, "+++ before a hunk is a header", stash.kind_of(3), GIT_ui_highlight.KIND_HEADER);
+eq_int(counter, "python keyword in the first file", stash.classes_of(6)[0], TUI_syntax.KEYWORD);
+eq_int(counter, "the second file switches language: rust keyword", stash.classes_of(11)[0], TUI_syntax.KEYWORD);
+eq_int(counter, "rust fn (not python's def) is the keyword there", stash.classes_of(11)[1], TUI_syntax.KEYWORD);
+eq_int(counter, "no-newline note is plain", stash.kind_of(12), GIT_ui_highlight.KIND_PLAIN);
+GIT_ui_highlight.DiffText stash_off = GIT_ui_highlight.DiffText.unified(unified, false);
+eq_int(counter, "unified off: no classes", stash_off.classes_of(6).size(), 0);
+eq_int(counter, "unified off: kind kept", stash_off.kind_of(6), GIT_ui_highlight.KIND_ADD);
+
+// --- a conflict -----------------------------------------------------------------
+
+List<str> conflict_lines = ["/* open", "<<<<<<< ours", "ours */ int a;", "=======", "int b;", ">>>>>>> theirs", "int c;"];
+GIT_ui_highlight.ConflictText conflict = GIT_ui_highlight.ConflictText(conflict_lines, [0, 1, 2, 1, 4, 1, 0], language: "c");
+eq_int(counter, "a marker has no classes", conflict.classes_of(1).size(), 0);
+eq_int(counter, "ours continues the comment that was open", conflict.classes_of(2)[0], TUI_syntax.COMMENT);
+eq_int(counter, "theirs starts from the state before the conflict: in the comment", conflict.classes_of(4)[0], TUI_syntax.COMMENT);
+GIT_ui_highlight.ConflictText clean = GIT_ui_highlight.ConflictText(["x", "<<<<<<< a", "/* c", "=======", "int b;", ">>>>>>> b"], [0, 1, 2, 1, 4, 1], language: "c");
+eq_int(counter, "ours opens a comment", clean.classes_of(2)[0], TUI_syntax.COMMENT);
+eq_int(counter, "theirs is not inside ours' open comment", clean.classes_of(4)[0], TUI_syntax.TYPE);
+GIT_ui_highlight.ConflictText none = GIT_ui_highlight.ConflictText(["int b;"], [0]);
+eq_int(counter, "no language: no classes", none.classes_of(0).size(), 0);
+
+// --- the blame view's highlighter ------------------------------------------------
+
+TUI_syntax.Highlighter blame = GIT_ui_highlight.highlighter_of("c", ["int a; /* c", "b */ return 0;"]);
+eq_int(counter, "blame: state carried between lines", blame.classes(1)[0], TUI_syntax.COMMENT);
+eq_int(counter, "blame: and out of the comment", blame.classes(1)[5], TUI_syntax.KEYWORD);
+eq_int(counter, "blame: no language, nothing classified", GIT_ui_highlight.highlighter_of("", ["int a;"]).classes(0).size(), 0);
+print(counter.checks.to_str() + " checks, " + counter.failed.to_str() + " failed");

@@ -1,23 +1,22 @@
 #!/usr/bin/env bash
-# Build git.m31 (the read-only CLI) into a real executable. Not for
-# gitui.m31 -- see scripts/build-gitui.sh's own header for why that one needs a
-# dependency on tui (git.m31 has none) and so builds from the project root.
+# Build gitui (`gitui.m31`, the interactive client) or the read-only CLI
+# (`git.m31`) into a real executable, like the other qrazil apps' one
+# scripts/build.sh.
 #
-#   M31_ROOT=/path/to/m31 bash scripts/build.sh git.m31           -> ./git
-#   M31_ROOT=/path/to/m31 bash scripts/build.sh git.m31 -o ourgit
+#   M31_ROOT=/path/to/m31 bash scripts/build.sh                  -> ./ourgitui
+#   M31_ROOT=/path/to/m31 bash scripts/build.sh -o name          -> ./name
+#   M31_ROOT=/path/to/m31 bash scripts/build.sh git.m31          -> ./ourgit
+#   M31_ROOT=/path/to/m31 bash scripts/build.sh tests/t_x.m31 -o t_x
 #
-# git.m31 is one `.m31` file, compiled by the m31 compiler (m31c) and then
-# linked, as ordinary C, against the m31 RUNTIME's own source files -- there
-# is no pre-built runtime library to link against instead, so this script
-# needs both:
+# Any other `.m31` file builds into ./<its basename>. `gitui.m31` imports
+# github.com/qrazil/tui as `import tui.app.TUI_app;` and so on: the `deps`
+# file at the repo root names the exact commit, and the first compile fetches
+# it into `.m31-deps/` and records it in `deps.lock`.
 #
-#   - LANGC: the m31c compiler binary (env var, default ./m31c beside this
-#     script -- where a downloaded release binary lands).
-#   - M31_ROOT: a directory containing the m31 project's own config.sh and
-#     runtime/ (a checkout of github.com/qrazil/m31, or an extracted
-#     release's bundled runtime SDK -- see that repo's own release.yml)
-#     matching the version LANGC was built from. No default: a missing
-#     M31_ROOT is a clear error instead of a guess.
+# Needs LANGC (the m31c compiler binary, v0.4.0 or later; default ./m31c) and
+# M31_ROOT (a checkout of github.com/qrazil/m31, or an extracted release's
+# runtime SDK containing config.sh and runtime/). There is no pre-built
+# runtime library to link against.
 set -uo pipefail
 cd "$(dirname "$0")/.."
 
@@ -39,9 +38,22 @@ fi
 LANGC=${LANGC:-./m31c}
 CC=${CC:-cc}
 
-src=${1:?usage: M31_ROOT=/path/to/m31 bash scripts/build.sh <source.m31> [-o out]}
-out=$(basename "$src" ".$LANG_EXT")
-[ "${2:-}" = "-o" ] && out=${3:?-o needs a name}
+src=gitui.m31
+out=
+while [ $# -gt 0 ]; do
+    case $1 in
+        -o) out=${2:?-o needs a name}; shift 2 ;;
+        -*) echo "usage: M31_ROOT=/path/to/m31 bash scripts/build.sh [source.m31] [-o out]" >&2; exit 1 ;;
+        *)  src=$1; shift ;;
+    esac
+done
+if [ -z "$out" ]; then
+    case $src in
+        gitui.m31) out=ourgitui ;;
+        git.m31)   out=ourgit ;;
+        *)         out=$(basename "$src" ".$LANG_EXT") ;;
+    esac
+fi
 
 if [ ! -x "$LANGC" ]; then
     echo "compiler not found or not executable: $LANGC" >&2

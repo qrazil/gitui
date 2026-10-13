@@ -19,6 +19,7 @@
 
 import diff.GIT_stash;
 import ui.GIT_ui_core;
+import ui.GIT_ui_highlight;
 import ui.GIT_ui_panel;
 import term;
 import text;
@@ -368,6 +369,9 @@ type ListOverlay {
     // the preview is cached per stash commit
     str preview_id = "";
     List<str> preview = [];
+    // `preview` walked for syntax colours, rebuilt when the stash or the switch changes
+    GIT_ui_highlight.DiffText syntax = GIT_ui_highlight.DiffText([]);
+    str syntax_key = "";
 }
 
 pub TUI_app.Action ListOverlay.handle_key(term.Code code) {
@@ -375,6 +379,9 @@ pub TUI_app.Action ListOverlay.handle_key(term.Code code) {
         case Some(str cmd): {
             if (cmd == GIT_ui_core.CMD_CLOSE) {
                 host.pop_overlay();
+            }
+            if (cmd == GIT_ui_core.CMD_SYNTAX) {
+                host.toggle_syntax();
             }
             if (cmd == GIT_ui_core.CMD_DOWN && selected < host.stash_labels.size() - 1) {
                 selected = selected + 1;
@@ -484,32 +491,16 @@ pub void ListOverlay.render(TUI_buffer.Buffer buffer, TUI_geometry.Rect area) {
     TUI_geometry.Rect view = TUI_geometry.Rect(inner.x, inner.y + top, inner.width, inner.height - top);
     load_preview();
     scroll = GIT_ui_panel.clamp(scroll, preview.size(), view.height);
-    int row = 0;
-    while (row < view.height && scroll + row < preview.size()) {
-        str line = preview[scroll + row];
-        buffer.set_str(view.x, view.y + row, TUI_text.truncate(line, view.width), diff_style(line), max: view.width);
-        row = row + 1;
+    str key = preview_id + ":" + host.is_syntax_on.to_str();
+    if (key != syntax_key) {
+        syntax = GIT_ui_highlight.DiffText.unified(preview, host.is_syntax_on);
+        syntax_key = key;
     }
+    GIT_ui_panel.draw_text(buffer, view, preview.size(), scroll, -1, host.is_dark, syntax);
 }
 
 pub List<GIT_ui_core.Hint> ListOverlay.hints() {
     return GIT_ui_core.hints_for(GIT_ui_core.SCOPE_STASH_LIST);
-}
-
-TUI_style.Style diff_style(str line) {
-    if (line.starts_with("+++") || line.starts_with("---") || line.starts_with("diff ")) {
-        return TUI_style.Style(attrs: TUI_style.BOLD);
-    }
-    if (line.starts_with("+")) {
-        return TUI_style.Style(foreground: TUI_style.Colour.Indexed(2));
-    }
-    if (line.starts_with("-")) {
-        return TUI_style.Style(foreground: TUI_style.Colour.Indexed(1));
-    }
-    if (line.starts_with("@@")) {
-        return TUI_style.Style(foreground: TUI_style.Colour.Indexed(6));
-    }
-    return TUI_style.Style();
 }
 
 /// Open the stash list with `n` highlighted (`z`, `l`; Enter on a stash row).

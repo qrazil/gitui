@@ -197,6 +197,7 @@ pub const str CMD_NEW = "new";
 pub const str CMD_ANNOTATE = "annotate";
 pub const str CMD_DELETE = "delete";
 pub const str CMD_PUSH_UPSTREAM = "push-upstream";
+pub const str CMD_SYNTAX = "syntax";
 /// What `pick_purpose` says a finished `GIT_ui_picker` was for.
 pub const str PICK_CHECKOUT = "checkout";
 /// The merge menu's three pickers: the branch to merge, and how.
@@ -250,6 +251,12 @@ pub type Core {
     pub TUI_jump_list.JumpList jump = TUI_jump_list.JumpList.empty;
     pub bool is_jump_shown = false;
     pub bool is_jump_focused = false;
+    /// Syntax colours in every view that shows file text (see
+    /// `GIT_ui_highlight`): set from `NO_COLOR`/`GITUI_SYNTAX`/`gitui.syntax`
+    /// at start, flipped by `C`.
+    pub bool is_syntax_on = true;
+    /// The terminal's background is dark (`$COLORFGBG`).
+    pub bool is_dark = true;
     /// Set by an operation that finished the job the top overlay was opened
     /// for (`abort_commit`, `finish_commit`): the client pops that overlay
     /// when it next settles (`GIT_client.State.settle`). An operation that
@@ -334,6 +341,22 @@ pub type Core {
 
 pub void Core.push_overlay(Overlay overlay) {
     overlays.push(overlay);
+}
+
+/// Start-up: whether syntax colours are on, and whether the terminal is dark.
+pub void Core.set_syntax(bool is_on, bool is_background_dark) {
+    is_syntax_on = is_on;
+    is_dark = is_background_dark;
+}
+
+/// `C`: syntax colours on or off for the rest of the session.
+pub void Core.toggle_syntax() {
+    is_syntax_on = !is_syntax_on;
+    if (is_syntax_on) {
+        message = "syntax colours on";
+    } else {
+        message = "syntax colours off";
+    }
 }
 
 /// Close the top overlay. A no-op with none open.
@@ -689,6 +712,7 @@ pub List<Binding> key_table() {
     // In every view.
     table.push(Binding(SCOPE_GLOBAL, CMD_LOG, ["@"], "the command log: one line per write operation", "@", "log"));
     table.push(Binding(SCOPE_GLOBAL, CMD_HELP, ["?"], "this key help", "?", "help"));
+    table.push(Binding(SCOPE_GLOBAL, CMD_SYNTAX, ["C"], "syntax colours on or off (also in the blame, commit, stash and resolve views)", "", ""));
     // The commit overlay.
     table.push(Binding(SCOPE_COMMIT, CMD_EDIT, ["e"], "edit the message in $EDITOR", "e", "edit"));
     table.push(Binding(SCOPE_COMMIT, CMD_FINISH, ["f"], "finish: write the commit", "f", "finish"));
@@ -724,6 +748,7 @@ pub List<Binding> key_table() {
     table.push(Binding(SCOPE_STASH_LIST, CMD_STASH_POP, ["p"], "pop the highlighted stash", "p", "pop"));
     table.push(Binding(SCOPE_STASH_LIST, CMD_STASH_APPLY, ["a"], "apply the highlighted stash", "a", "apply"));
     table.push(Binding(SCOPE_STASH_LIST, CMD_STASH_DROP, ["d"], "drop the highlighted stash (asks first)", "d", "drop"));
+    table.push(Binding(SCOPE_STASH_LIST, CMD_SYNTAX, ["C"], "syntax colours on or off", "", ""));
     table.push(Binding(SCOPE_STASH_LIST, CMD_CLOSE, ["escape", "q"], "close", "esc", "close"));
     table.push(Binding(SCOPE_STASH_PROMPT, CMD_SUBMIT, ["enter"], "use what is typed", "enter", "ok"));
     table.push(Binding(SCOPE_STASH_PROMPT, CMD_CLOSE, ["escape"], "cancel", "esc", "cancel"));
@@ -813,6 +838,7 @@ pub List<Binding> key_table() {
     table.push(Binding(SCOPE_RESOLVE, CMD_UNDO, ["u"], "undo the last choice", "u", "undo"));
     table.push(Binding(SCOPE_RESOLVE, CMD_EDIT, ["e"], "edit the file in $EDITOR", "e", "edit"));
     table.push(Binding(SCOPE_RESOLVE, CMD_STAGE_FILE, ["s"], "mark the file resolved as it is now and stage it", "s", "stage"));
+    table.push(Binding(SCOPE_RESOLVE, CMD_SYNTAX, ["C"], "syntax colours on or off", "", ""));
     table.push(Binding(SCOPE_RESOLVE, CMD_CLOSE, ["escape", "q"], "close the view (choices already made stay in the file)", "esc", "close"));
     // The fuzzy picker.
     table.push(Binding(SCOPE_BLAME, CMD_DOWN, ["j", "down"], "next line", "j/k", "move"));
@@ -822,6 +848,7 @@ pub List<Binding> key_table() {
     table.push(Binding(SCOPE_BLAME, CMD_OPEN, ["enter"], "open the commit that introduced the line", "enter", "commit"));
     table.push(Binding(SCOPE_BLAME, CMD_REBLAME, [","], "blame again at the parent of that line's commit (backspace goes back)", ",", "re-blame"));
     table.push(Binding(SCOPE_BLAME, CMD_BACK, ["backspace"], "back to the previous blame", "backspace", "back"));
+    table.push(Binding(SCOPE_BLAME, CMD_SYNTAX, ["C"], "syntax colours on or off", "", ""));
     table.push(Binding(SCOPE_BLAME, CMD_CLOSE, ["escape", "q"], "close", "q", "close"));
     table.push(Binding(SCOPE_FILELOG, CMD_DOWN, ["j", "down"], "next commit", "j/k", "move"));
     table.push(Binding(SCOPE_FILELOG, CMD_UP, ["k", "up"], "previous commit", "", ""));
@@ -832,6 +859,7 @@ pub List<Binding> key_table() {
     table.push(Binding(SCOPE_SHOW, CMD_UP, ["k", "up"], "scroll up", "", ""));
     table.push(Binding(SCOPE_SHOW, CMD_TOP, ["g", "home"], "top", "g/G", "top/bottom"));
     table.push(Binding(SCOPE_SHOW, CMD_BOTTOM, ["G", "end"], "bottom", "", ""));
+    table.push(Binding(SCOPE_SHOW, CMD_SYNTAX, ["C"], "syntax colours on or off", "", ""));
     table.push(Binding(SCOPE_SHOW, CMD_CLOSE, ["escape", "q", "backspace"], "close", "q", "close"));
     table.push(Binding(SCOPE_UNDO, CMD_YES, ["y", "enter"], "do it", "y", "confirm"));
     table.push(Binding(SCOPE_UNDO, CMD_REDO, ["r"], "show redo instead of undo", "r", "redo"));

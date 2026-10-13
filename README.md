@@ -43,10 +43,10 @@ export LANGC=/path/to/m31c        # the matching compiler
 bash tests/test.sh                    # the built-in fixtures
 bash tests/test.sh <repo> [<repo>…]   # those, and each repository named
 
-bash scripts/build.sh git.m31 -o ourgit
+bash scripts/build.sh git.m31         # the read-only CLI -> ./ourgit
 ./ourgit -log --max 5
 
-bash scripts/build-gitui.sh -o ourgitui    # not build.sh -- it is the one with a dependency
+bash scripts/build.sh                 # gitui.m31 -> ./ourgitui   (-o name to rename)
 ./ourgitui                         # run from a repository's own top level
 ```
 
@@ -80,6 +80,7 @@ bash scripts/build-gitui.sh -o ourgitui    # not build.sh -- it is the one with 
 | `GIT_branches.m31` | upstream tracking (`branch.<n>.remote`/`.merge` mapped through `remote.<r>.fetch`; ahead/behind and git's `[ahead 2, behind 1]`/`[gone]` labels), `set_upstream`, `record_push` ("update by push"), and tags: `tags`, `create_lightweight`, `create_annotated` (byte-identical tag objects), `delete_tag` |
 | `GIT_watch.m31` | has the repository changed? `stat`-only fingerprint of the index, HEAD, refs, every tracked file and every non-ignored directory (bounded) |
 | `GIT_ui_blame.m31`, `GIT_ui_filelog.m31`, `GIT_ui_show.m31` | `B` blame overlay (with `,` re-blame at the parent), `H` file history, and the read-only commit view both open; `GIT_ui_blame.target` works out which file and revision `B`/`H` mean |
+| `GIT_ui_highlight.m31` | syntax colours outside the diff view: whether they are on (`NO_COLOR`, `GITUI_SYNTAX`, `gitui.syntax`), the language of a path, and `DiffText`/`ConflictText`, which walk a diff or a conflicted file line by line with the lexer's state carried |
 | `GIT_ui_undo.m31`, `GIT_ui_tags.m31`, `GIT_ui_prompt.m31` | the `Z` undo/redo overlay, the `T` tag list, and the one-line text prompt it uses |
 | `GIT_ui_loop.m31`, `GIT_ui_autorefresh.m31` | `TUI_app.Loop.run` with an idle `Ticker`, and the ticker that polls `GIT_watch` about once a second and reloads the outline when something changed behind the client's back |
 | `gitui.m31` | the interactive client's thin driver: parses a path, runs `TUI_app.Loop` |
@@ -94,9 +95,10 @@ bash scripts/build-gitui.sh -o ourgitui    # not build.sh -- it is the one with 
 | `GIT_reflog.m31` | `.git/logs/<ref>` in git's own format: read, append, delete with `--rewrite`; `GIT_refs.update` writes it for every ref move |
 | `GIT_graph.m31` | the commit graph: ancestors, `is_ancestor`, `merge_bases` (criss-cross gives several), `ahead_behind`, `rev_list(include, exclude)` |
 | `deps` | the project manifest: name, version and the pinned qrazil/tui commit (`deps.lock` records what was fetched) |
-| `scripts/build-gitui.sh` | builds `gitui.m31`; its `import tui.TUI_app;` lines resolve through `deps`, so nothing is staged or copied |
+| `scripts/build.sh` | builds `gitui.m31` (default, `./ourgitui`), `git.m31` (`./ourgit`) or any other `.m31` file; gitui's `import tui.TUI_app;` lines resolve through `deps`, so nothing is staged or copied |
 | `tests/t_*.m31` | test programs, each printing what a Python oracle prints, or asserting against its own expectations |
 | `tests/oracles/oracle_*.py` | the oracles: `hashlib`, `zlib`, and a from-scratch format reader |
+| `tests/t_highlight.m31`, `tests/pty_highlight.py` | the syntax colouring: pure line styling, and the SGR colours, scrolling and switches under a pty |
 | `tests/pty_e2e.py`, `tests/pty_blame_undo.py` | drive `ourgitui` under a real pty against disposable fixtures, real `git` as the oracle (the second file: blame, history, undo, tags, ahead/behind, `push -u`, auto-refresh) |
 | `scripts/compare.sh` | every command beside the real `git`, compared octet for octet |
 | `GIT_merge.m31` | `git merge` with conflicts: `start` (fast-forward, no-ff, ff-only, already up to date, unrelated histories), `merge_trees`/`merge_with_base` (per-path three-way merge, stages 1/2/3, rename-free like `merge.renames=false`), a virtual merge base when there are several (criss-cross, like git's recursive/ort), `continue_merge`, `abort_merge`, `mark_resolved` and `take_side` for the resolution view; writes MERGE_HEAD/MERGE_MSG/MERGE_MODE/ORIG_HEAD and reflogs as git does |
@@ -304,6 +306,7 @@ the top one takes every key.
 | `J` / `w` | outline | show the jump list / give it the keys |
 | `@` | everywhere | command log: every write the client made (`add`, `update-ref`, `checkout`, ...), newest at the bottom; `j`/`k`/`g`/`G` scroll |
 | `?` | everywhere | key help for every scope, generated from the key table |
+| `C` | outline, diff, and the blame, commit, stash and resolve views | syntax colours on or off for the session (see "Syntax highlighting") |
 | `q` / `Esc` | outline | quit (in a diff or overlay: close it) |
 
 The branch picker (`GIT_ui_picker.open(core, purpose, title, items)`) is
@@ -329,6 +332,34 @@ SHA-1 **38–45 MB/s**, inflate **71–102 MB/s** of output, and **10 MB/s** of
 object content end to end (open, inflate, verify the SHA-1, parse).
 `docs/FRICTION.md` §5 takes the SHA-1 figure apart, because it is a language
 datapoint and not a git one.
+
+## Syntax highlighting
+
+Wherever file text is shown, code is coloured by token with tui's
+`TUI_syntax` (c, c++, go, javascript/typescript, json, m31, markdown, python,
+rust, sh, toml, yaml; the language comes from each file's path):
+
+- the diff views: unstaged, staged, untracked, a commit's file, the per-hunk
+  and per-line staging views (the visual range stays reversed);
+- the blame view (the code column) and the file history's commit view;
+- the stash list's diff preview and the conflict-resolution view (each side of
+  a conflict is lexed from the state before the conflict).
+
+In a diff the `+`/`-` marker and the plain text of an added or removed line
+keep their green and red, so what changed still reads at a glance; only the
+tokens the lexer recognises (keywords, types, strings, numbers, comments)
+take their colour, in the terminal's own 16 colours. Each hunk is lexed from
+a clean state, its old side and its new side separately, and only as far as it
+is drawn; the result is cached, so scrolling a 5000-line diff costs nothing.
+
+Turn it off with, strongest first: `NO_COLOR` set (no-color.org),
+`GITUI_SYNTAX=off` (`0`, `false`, `no`, `none` also), or
+`git config gitui.syntax off` (per repository or `--global`). `C` flips it for
+the rest of the session in any of the views above. Light terminals are
+detected from `$COLORFGBG` (as in m3d1tor): a few colours swap to the shade
+that reads on a light background. Tests: `tests/t_highlight.m31` (the line
+styling, pure) and `tests/pty_highlight.py` (SGR colours in a diff, blame and
+commit view, scrolling 5000 lines, the toggle and the three switches).
 
 ## Packfiles
 

@@ -3,8 +3,8 @@
 # `$WORK/gitui` build it reuses (built here when that is missing).
 
 if [ ! -x "$WORK/gitui" ]; then
-    bash scripts/build-gitui.sh -o "$WORK/gitui" >"$WORK/uilines_build.log" 2>&1 \
-        || bad "uilines: scripts/build-gitui.sh" "$(cat "$WORK/uilines_build.log")"
+    bash scripts/build.sh -o "$WORK/gitui" >"$WORK/uilines_build.log" 2>&1 \
+        || bad "uilines: scripts/build.sh" "$(cat "$WORK/uilines_build.log")"
 fi
 if [ -x "$WORK/gitui" ] && command -v python3 >/dev/null; then
     if out=$(python3 tests/pty_lines.py "$WORK/gitui" "$WORK/ptylines" 2>&1); then

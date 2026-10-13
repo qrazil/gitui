@@ -85,6 +85,7 @@ import ui.GIT_ui_core;
 import ui.GIT_ui_diff;
 import ui.GIT_ui_filelog;
 import ui.GIT_ui_help;
+import ui.GIT_ui_highlight;
 import ui.GIT_ui_lines;
 import ui.GIT_ui_log;
 import ui.GIT_ui_merge;
@@ -123,6 +124,7 @@ pub type State {
 pub static State State.open(str gitdir, str worktree) {
     State state = State(GIT_ui_remote.RemoteLayer(GIT_ui_rebase.RebaseLayer(GIT_ui_merge.MergeLayer(GIT_ui_branch.BranchLayer(GIT_ui_commit.CommitLayer(GIT_ui_lines.LinesLayer(GIT_ui_diff.DiffLayer(GIT_ui_outline.OutlineLayer(GIT_ui_core.Core(gitdir, worktree))))))))));
     state.set_editor_paths();
+    state.set_syntax(GIT_ui_highlight.is_enabled(gitdir), GIT_ui_highlight.is_dark_terminal());
     return state;
 }
 
@@ -340,6 +342,10 @@ TUI_app.Action State.run_global_command(str cmd) {
     }
     if (cmd == GIT_ui_core.CMD_HELP) {
         GIT_ui_help.open(core());
+        return TUI_app.Action.Redraw;
+    }
+    if (cmd == GIT_ui_core.CMD_SYNTAX) {
+        toggle_syntax();
         return TUI_app.Action.Redraw;
     }
     return TUI_app.Action.Continue;

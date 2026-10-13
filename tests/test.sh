@@ -18,7 +18,7 @@
 #
 # M31_ROOT (a checkout of github.com/qrazil/m31, or an extracted release's
 # bundled runtime SDK, containing config.sh and runtime/) supplies the runtime
-# this suite links against -- see build-gitui.sh's own header for the full
+# this suite links against -- see scripts/build.sh's own header for the full
 # reasoning, which this mirrors. tui is not a separate checkout: the `deps`
 # file at the repo root pins it, and the first compile fetches it into
 # `.m31-deps/`.
@@ -41,7 +41,7 @@ export GIT_DEFAULT_HASH=$TEST_HASH
 if [ -z "${M31_ROOT:-}" ]; then
     echo "M31_ROOT is not set -- point it at a checkout of github.com/qrazil/m31" \
          "(or an extracted release's runtime SDK) matching the m31c version" \
-         "you're building with. See scripts/build-gitui.sh's own header comment." >&2
+         "you're building with. See scripts/build.sh's own header comment." >&2
     exit 1
 fi
 if [ ! -f "$M31_ROOT/config.sh" ] || [ ! -d "$M31_ROOT/runtime" ]; then
@@ -329,6 +329,7 @@ source tests/test_lines.sh
 
 source tests/test_gitui.sh
 source tests/test_uilines.sh
+source tests/test_highlight.sh
 source tests/test_stash.sh
 
 # --- the overlay stack, key table and picker: unit-level ----------------------

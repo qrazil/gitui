@@ -11,6 +11,7 @@ import core.GIT_index;
 import core.GIT_object;
 import diff.GIT_patch;
 import ui.GIT_ui_core;
+import ui.GIT_ui_highlight;
 import ui.GIT_ui_model;
 import ui.GIT_ui_outline;
 import tui.core.TUI_buffer;
@@ -366,5 +367,7 @@ pub void DiffLayer.draw_diff(TUI_buffer.Buffer buffer, TUI_geometry.Rect area) {
         TUI_widget.Paragraph("binary files differ").render(buffer, inner);
         return;
     }
+    diff_view.language = GIT_ui_highlight.language_for(is_syntax_on, diff_path);
+    diff_view.is_dark = is_dark;
     diff_view.render(buffer, inner);
 }

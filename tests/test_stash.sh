@@ -299,8 +299,8 @@ fi
 
 # --- the stash UI under a pty (z menu, Stashes section, list overlay) -----------------
 if [ ! -x "$WORK/gitui" ]; then
-    bash scripts/build-gitui.sh -o "$WORK/gitui" >"$WORK/stash_build.log" 2>&1 \
-        || bad "stash ui: scripts/build-gitui.sh" "$(cat "$WORK/stash_build.log")"
+    bash scripts/build.sh -o "$WORK/gitui" >"$WORK/stash_build.log" 2>&1 \
+        || bad "stash ui: scripts/build.sh" "$(cat "$WORK/stash_build.log")"
 fi
 if [ -x "$WORK/gitui" ] && command -v python3 >/dev/null; then
     if out=$(python3 tests/pty_stash.py "$WORK/gitui" "$WORK/ptystash" 2>&1); then

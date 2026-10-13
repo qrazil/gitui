@@ -23,6 +23,7 @@ import diff.GIT_merge;
 import core.GIT_status;
 import ui.GIT_ui_branch;
 import ui.GIT_ui_core;
+import ui.GIT_ui_highlight;
 import ui.GIT_ui_merge_model;
 import ui.GIT_ui_model;
 import ui.GIT_ui_panel;
@@ -36,6 +37,7 @@ import tui.core.TUI_geometry;
 import tui.widgets.TUI_menu;
 import tui.widgets.TUI_outline;
 import tui.core.TUI_style;
+import tui.core.TUI_syntax;
 import tui.core.TUI_text;
 
 pub type MergeLayer {
@@ -403,6 +405,10 @@ type ResolveOverlay {
     int current = 0;
     int offset = 0;
     bool is_following = true;
+    // `lines` walked for syntax colours; rebuilt when they or the switch change
+    GIT_ui_highlight.ConflictText syntax = GIT_ui_highlight.ConflictText([], []);
+    bool is_syntax_ready = false;
+    bool is_syntax_for_on = true;
 }
 
 str ResolveOverlay.full() {
@@ -431,6 +437,7 @@ bool ResolveOverlay.did_load() {
 void ResolveOverlay.parse() {
     segments = GIT_diff3.parse_conflicts(content);
     lines = GIT_ui_merge_model.layout(segments);
+    is_syntax_ready = false;
     int conflict_count = GIT_diff3.count_conflicts(segments);
     if (current >= conflict_count) {
         current = conflict_count - 1;
@@ -580,6 +587,9 @@ pub TUI_app.Action ResolveOverlay.handle_key(term.Code code) {
             if (cmd == GIT_ui_core.CMD_CLOSE) {
                 host.pop_overlay();
             }
+            if (cmd == GIT_ui_core.CMD_SYNTAX) {
+                host.toggle_syntax();
+            }
             if (cmd == GIT_ui_core.CMD_OURS) {
                 choose(GIT_diff3.Choice.Ours, "ours");
             }
@@ -677,6 +687,17 @@ pub void ResolveOverlay.render(TUI_buffer.Buffer buffer, TUI_geometry.Rect area)
         is_following = false;
     }
     offset = GIT_ui_panel.clamp(offset, lines.size(), inner.height);
+    if (!is_syntax_ready || is_syntax_for_on != host.is_syntax_on) {
+        List<str> texts = [];
+        List<int> kinds = [];
+        for (GIT_ui_merge_model.Line line in lines) {
+            texts.push(line.text);
+            kinds.push(kind_number(line.kind));
+        }
+        syntax = GIT_ui_highlight.ConflictText(texts, kinds, language: GIT_ui_highlight.language_for_text(host.is_syntax_on, path));
+        is_syntax_ready = true;
+        is_syntax_for_on = host.is_syntax_on;
+    }
     int row = 0;
     while (row < inner.height && offset + row < lines.size()) {
         GIT_ui_merge_model.Line line = lines[offset + row];
@@ -684,7 +705,9 @@ pub void ResolveOverlay.render(TUI_buffer.Buffer buffer, TUI_geometry.Rect area)
         if (line.conflict == current) {
             gutter = "> ";
         }
-        buffer.set_str(inner.x, inner.y + row, TUI_text.truncate(gutter + line.text, inner.width), line_style(line.kind), max: inner.width);
+        TUI_style.Style style = line_style(line.kind);
+        buffer.set_str(inner.x, inner.y + row, gutter, style, max: inner.width);
+        TUI_syntax.draw(buffer, inner.x + 2, inner.y + row, inner.width - 2, line.text, syntax.classes_of(offset + row), style, host.is_dark);
         row = row + 1;
     }
 }
@@ -709,6 +732,27 @@ TUI_style.Style line_style(GIT_ui_merge_model.LineKind kind) {
         }
         case Theirs: {
             return TUI_style.Style(foreground: TUI_style.Colour.Indexed(6));
+        }
+    }
+}
+
+// The `ConflictText` kind number of a line: 0 plain, 1 marker, 2 ours, 3 base, 4 theirs.
+int kind_number(GIT_ui_merge_model.LineKind kind) {
+    match (kind) {
+        case Plain: {
+            return 0;
+        }
+        case Marker: {
+            return 1;
+        }
+        case Ours: {
+            return 2;
+        }
+        case Base: {
+            return 3;
+        }
+        case Theirs: {
+            return 4;
         }
     }
 }

@@ -633,7 +633,7 @@ PY
     ss_has "revoked host key: refused" "$ss_out" "revoked"
 
     # --- 5. the interactive client under a pty ------------------------------------------
-    if bash scripts/build-gitui.sh -o "$WORK/gitui_ssh" >"$ss_root/gitui_build.log" 2>&1; then
+    if bash scripts/build.sh -o "$WORK/gitui_ssh" >"$ss_root/gitui_build.log" 2>&1; then
         ss_pty_bare="$ss_root/repos/pty.git"
         ss_g init -q --bare "$ss_pty_bare"
         ss_g -C "$ss_root/seed" push -q "$ss_pty_bare" main 2>/dev/null
@@ -646,7 +646,7 @@ PY
             bad "ssh pty end-to-end" "$out"
         fi
     else
-        bad "ssh: scripts/build-gitui.sh" "$(tail -5 "$ss_root/gitui_build.log")"
+        bad "ssh: scripts/build.sh" "$(tail -5 "$ss_root/gitui_build.log")"
     fi
 fi
 
