@@ -1,3 +1,32 @@
+# gitui 0.8.0: sections, folding and a statusline
+
+Version 0.8.0, from master fe1e39a (0.7.0). No module was renamed or removed;
+three modules were added. tui is re-pinned to 0.7.0 (`TUI_diff_view` hunks
+fold).
+
+- **New keys.** Outline: `[` / `]` previous / next section header, `{` / `}`
+  previous / next row at the same depth, `Tab` fold (on a leaf: its section),
+  `-` fold every section, `+` / `=` unfold every section. Diff view: `[` / `]`
+  previous / next hunk, `{` / `}` previous / next file of the list, `Tab` fold
+  the hunk, `-` / `+` fold / unfold all hunks. Everywhere: `i`, the overview.
+  None of the existing keys moved.
+- **The statusline** is the frame's top border (it replaced the repository
+  name that was the frame title there): branch or detached commit, upstream
+  with ahead/behind, operation under way, stash count, change counts,
+  repository name. The message row at the bottom no longer falls back to
+  `on main @ 1a2b3c4 [ahead 2]` when there is no message; it is empty. A test
+  or a script that read that text should read the top row instead
+  (`tests/pty_blame_undo.py` did and was updated).
+- **`gitui.collapsed`** in the repository's config: the folded root section
+  ids, written when they change and read at start.
+- New modules `ui/GIT_ui_sections.m31` (pure), `ui/GIT_ui_statusline.m31`
+  (pure) and `ui/GIT_ui_overview.m31` (the overlay). New `Core` fields:
+  `facts`, `folded_saved`, `diff_row_id`; new `Core` methods `repo_path`,
+  `repo_name`, `load_folds`, `persist_folds`; `GIT_ui_model.BranchRow` gains
+  `ahead`, `behind`, `is_gone`; `RemoteLayer.layer()`. New key-table scope
+  `SCOPE_OVERVIEW` and commands `CMD_SECTION_*`, `CMD_SIBLING_*`, `CMD_FOLD`,
+  `CMD_FOLD_ALL`, `CMD_UNFOLD_ALL`, `CMD_OVERVIEW`.
+
 # gitui 0.7.0: one build script, syntax highlighting everywhere
 
 Version 0.7.0, from master 383a1b6 (0.6.0). No module was renamed.

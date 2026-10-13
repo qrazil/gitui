@@ -1,0 +1,236 @@
+// The overview overlay (`i`): the statusline's facts spelled out one to a
+// line -- branch, upstream with ahead and behind, stashes, change counts, the
+// operation under way, the repository -- and `Enter` on a line opens the
+// existing piece of UI for it:
+//
+//   Branch      the branch picker (check one out)
+//   Upstream    a picker over the remote-tracking branches; picking one shows
+//               that commit
+//   Stashes     the stash list
+//   Changes     the outline, on the first section that has changes
+//   Operation   the menu of the merge, cherry-pick, revert or rebase under way
+//
+// The overlay holds the top layer (`RemoteLayer`), because those menus live
+// in the layers between `Core` and it. The text is `GIT_ui_statusline`'s
+// (pure, tested on its own); this file is only the keys and the hand-offs.
+
+import core.GIT_refs;
+import diff.GIT_sequencer;
+import ui.GIT_ui_core;
+import ui.GIT_ui_panel;
+import ui.GIT_ui_picker;
+import ui.GIT_ui_remote;
+import ui.GIT_ui_sections;
+import ui.GIT_ui_sequencer;
+import ui.GIT_ui_show;
+import ui.GIT_ui_stash;
+import ui.GIT_ui_statusline;
+import term;
+import tui.app.TUI_app;
+import tui.core.TUI_buffer;
+import tui.core.TUI_geometry;
+import tui.widgets.TUI_outline;
+
+type OverviewOverlay {
+    GIT_ui_remote.RemoteLayer host;
+    int selected = 0;
+}
+
+pub TUI_app.Action OverviewOverlay.handle_key(term.Code code) {
+    List<GIT_ui_statusline.Item> items = GIT_ui_statusline.overview(host.facts, host.repo_path());
+    match (GIT_ui_core.lookup(GIT_ui_core.SCOPE_OVERVIEW, code)) {
+        case Some(str cmd): {
+            if (cmd == GIT_ui_core.CMD_CLOSE) {
+                host.pop_overlay();
+            }
+            if (cmd == GIT_ui_core.CMD_DOWN) {
+                selected = selected + 1;
+                if (selected >= items.size()) {
+                    selected = 0;
+                }
+            }
+            if (cmd == GIT_ui_core.CMD_UP) {
+                selected = selected - 1;
+                if (selected < 0) {
+                    selected = items.size() - 1;
+                }
+            }
+            if (cmd == GIT_ui_core.CMD_OPEN) {
+                GIT_ui_statusline.Item item = items[selected];
+                if (!item.is_actionable) {
+                    host.say("nothing to open for " + item.id);
+                    return TUI_app.Action.Redraw;
+                }
+                host.pop_overlay();
+                open_item(host, item.id);
+            }
+            return TUI_app.Action.Redraw;
+        }
+        case None: {
+        }
+    }
+    return TUI_app.Action.Continue;
+}
+
+pub void OverviewOverlay.render(TUI_buffer.Buffer buffer, TUI_geometry.Rect area) {
+    List<GIT_ui_statusline.Item> items = GIT_ui_statusline.overview(host.facts, host.repo_path());
+    int height = items.size() + 6;
+    if (height > area.height) {
+        height = area.height;
+    }
+    TUI_geometry.Rect inner = GIT_ui_panel.frame(buffer, TUI_geometry.Rect(area.x, area.y, area.width, height), "overview");
+    if (inner.is_empty()) {
+        return;
+    }
+    List<str> lines = [];
+    for (GIT_ui_statusline.Item item in items) {
+        lines.push(item.text);
+    }
+    GIT_ui_panel.draw_lines(buffer, inner, lines, 0, selected);
+}
+
+pub List<GIT_ui_core.Hint> OverviewOverlay.hints() {
+    return GIT_ui_core.hints_for(GIT_ui_core.SCOPE_OVERVIEW);
+}
+
+/// `i`: open the overview.
+pub void open(GIT_ui_remote.RemoteLayer host) {
+    host.push_overlay(OverviewOverlay(host));
+}
+
+/// What `Enter` does on the overview line `id` (see the header). The overlay
+/// has already closed.
+pub void open_item(GIT_ui_remote.RemoteLayer host, str id) {
+    if (id == "branch") {
+        if (host.is_blocked_by_sequence("branch")) {
+            return;
+        }
+        host.open_branch_picker();
+        return;
+    }
+    if (id == "upstream") {
+        open_remote_refs(host.core());
+        return;
+    }
+    if (id == "stash") {
+        if (host.stash_labels.size() == 0) {
+            host.say("no stashes");
+            return;
+        }
+        GIT_ui_stash.open_list(host.core(), 0);
+        return;
+    }
+    if (id == "changes") {
+        go_to_changes(host);
+        return;
+    }
+    if (id == "op") {
+        open_operation(host);
+    }
+}
+
+/// The remote-tracking branches, the current upstream first, as picker items
+/// `origin/main  1a2b3c4  subject`.
+pub List<str> remote_ref_items(GIT_ui_core.Core core) {
+    List<str> first = [];
+    List<str> rest = [];
+    match (GIT_refs.all(core.gitdir)) {
+        case Ok(List<GIT_refs.Ref> refs): {
+            for (GIT_refs.Ref entry in refs) {
+                if (!entry.name.starts_with("refs/remotes/") || entry.name.ends_with("/HEAD")) {
+                    continue;
+                }
+                str short_name = entry.name.substr(13, entry.name.size());
+                str item = short_name + "  " + entry.id.substr(0, 7) + "  " + core.tip_subject(entry.id);
+                if (short_name == core.facts.upstream) {
+                    first.push(item);
+                } else {
+                    rest.push(item);
+                }
+            }
+        }
+        case Err: {
+        }
+    }
+    for (str item in rest) {
+        first.push(item);
+    }
+    return first;
+}
+
+pub void open_remote_refs(GIT_ui_core.Core core) {
+    List<str> items = remote_ref_items(core);
+    if (items.size() == 0) {
+        core.say("no remote-tracking branches yet (nothing fetched or pushed)");
+        return;
+    }
+    GIT_ui_picker.open(core, GIT_ui_core.PICK_REMOTE_REF, "remote branches (enter shows the commit)", items);
+}
+
+/// What a finished remote-branch picker chose: show that commit.
+pub void show_remote_ref(GIT_ui_core.Core core, str item) {
+    str name = item;
+    int space = item.index_of(" ").or(-1);
+    if (space >= 0) {
+        name = item.substr(0, space);
+    }
+    match (GIT_refs.resolve(core.gitdir, "refs/remotes/" + name)) {
+        case Ok(str id): {
+            GIT_ui_show.open(core, id, "");
+        }
+        case Err: {
+            core.say("cannot read " + name);
+        }
+    }
+}
+
+// The outline cursor on the first section that has something in it, opened
+// if it was folded.
+void go_to_changes(GIT_ui_remote.RemoteLayer host) {
+    str target = "";
+    if (host.facts.conflicts > 0) {
+        target = "unmerged";
+    } else if (host.facts.unstaged > 0) {
+        target = "unstaged";
+    } else if (host.facts.staged > 0) {
+        target = "staged";
+    } else if (host.facts.untracked > 0) {
+        target = "untracked";
+    }
+    if (target == "") {
+        host.say("the working tree is clean");
+        return;
+    }
+    host.collapsed.set(target, false);
+    match (GIT_ui_sections.find_node(host.outline.roots, target)) {
+        case Some(TUI_outline.Node node): {
+            node.is_expanded = true;
+        }
+        case None: {
+        }
+    }
+    host.outline.did_select_id(target);
+    host.jump.sync_from(host.outline);
+    host.jump.follow(host.outline);
+    host.persist_folds();
+}
+
+void open_operation(GIT_ui_remote.RemoteLayer host) {
+    if (host.is_rebasing) {
+        host.open_rebase();
+        return;
+    }
+    if (host.is_sequencing) {
+        GIT_sequencer.Verb verb = GIT_sequencer.Verb.Pick;
+        if (host.sequence_word.starts_with("REVERT")) {
+            verb = GIT_sequencer.Verb.Revert;
+        }
+        GIT_ui_sequencer.open(host.core(), verb);
+        return;
+    }
+    if (host.is_merging) {
+        host.open_merge();
+        return;
+    }
+    host.say(host.facts.operation + " is under way; gitui does not drive it -- use git");
+}

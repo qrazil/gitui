@@ -1,0 +1,204 @@
+// Unit tests for the section model (`GIT_ui_sections`: `[`/`]`, `{`/`}`, Tab,
+// `-`/`+`, the persisted fold list) and the statusline's text and fitting
+// (`GIT_ui_statusline`). Hand-built outlines and facts: no repository, no
+// terminal. The pty half is `pty_sections.py`.
+//
+//   ./t_sections
+//
+// Prints one `<case> ok` or `<case> FAIL ...` line per check, like
+// `t_uikeys.m31`.
+
+import ui.GIT_ui_sections;
+import ui.GIT_ui_statusline;
+import tui.widgets.TUI_outline;
+
+type Counter {
+    int checks = 0;
+    int failed = 0;
+}
+
+void Counter.check(str name, bool is_ok, str detail) {
+    checks = checks + 1;
+    if (is_ok) {
+        print(name + " ok");
+    } else {
+        failed = failed + 1;
+        print(name + " FAIL " + detail);
+    }
+}
+
+Counter counter = Counter();
+
+// untracked: a, b | unstaged: c | staged (empty) | commits: one commit with a
+// message line and a "Files changed" section | branches: main
+TUI_outline.Outline sample() {
+    List<TUI_outline.Node> files = [TUI_outline.Node.leaf("commit:abc:file:x.txt", "M  x.txt")];
+    List<TUI_outline.Node> commit_children = [TUI_outline.Node.leaf("commit:abc:message:0", "a message"), TUI_outline.Node.section("commit:abc:files", "Files changed (1)", files)];
+    TUI_outline.Node commit = TUI_outline.Node.section("commit:abc", "abc  subject", commit_children, is_expanded: false);
+    List<TUI_outline.Node> roots = [];
+    roots.push(TUI_outline.Node.section("untracked", "Untracked files (2)", [TUI_outline.Node.leaf("untracked:a", "a"), TUI_outline.Node.leaf("untracked:b", "b")]));
+    roots.push(TUI_outline.Node.section("unstaged", "Unstaged changes (1)", [TUI_outline.Node.leaf("unstaged:c", "M  c")]));
+    roots.push(TUI_outline.Node.section("staged", "Staged changes (0)", []));
+    roots.push(TUI_outline.Node.section("commits", "Commits (1)", [commit]));
+    roots.push(TUI_outline.Node.section("branches", "Branches (1)", [TUI_outline.Node.leaf("branch:main", "* main")]));
+    return TUI_outline.Outline(roots);
+}
+
+str current_id(TUI_outline.Outline outline) {
+    match (outline.current()) {
+        case Some(TUI_outline.Row row): {
+            return row.node.id;
+        }
+        case None: {
+            return "";
+        }
+    }
+}
+
+// --- [ and ] ------------------------------------------------------------------
+
+TUI_outline.Outline outline = sample();
+// rows: 0 untracked, 1 a, 2 b, 3 unstaged, 4 c, 5 staged, 6 commits, 7 commit abc, 8 branches, 9 main (ten)
+counter.check("sections: ten visible rows", outline.count() == 10, outline.count().to_str());
+counter.check("sections: ] from the first header goes to the second", GIT_ui_sections.section_row(outline, true) == 3, GIT_ui_sections.section_row(outline, true).to_str());
+counter.check("sections: [ from the first header has nowhere to go", GIT_ui_sections.section_row(outline, false) == -1, GIT_ui_sections.section_row(outline, false).to_str());
+outline.cursor = 2;
+counter.check("sections: [ from inside a section goes to its own header", GIT_ui_sections.section_row(outline, false) == 0, GIT_ui_sections.section_row(outline, false).to_str());
+counter.check("sections: ] from inside a section goes to the next header", GIT_ui_sections.section_row(outline, true) == 3, GIT_ui_sections.section_row(outline, true).to_str());
+outline.cursor = 8;
+counter.check("sections: ] from the last header has nowhere to go", GIT_ui_sections.section_row(outline, true) == -1 || GIT_ui_sections.section_row(outline, true) == 8, GIT_ui_sections.section_row(outline, true).to_str());
+outline.cursor = 9;
+counter.check("sections: ] from the last row has nowhere to go", GIT_ui_sections.section_row(outline, true) == -1, GIT_ui_sections.section_row(outline, true).to_str());
+counter.check("sections: [ from the last row is the last header", GIT_ui_sections.section_row(outline, false) == 8, GIT_ui_sections.section_row(outline, false).to_str());
+outline.cursor = 5;
+counter.check("sections: an empty section is still a header ([ from it goes up)", GIT_ui_sections.section_row(outline, false) == 3, GIT_ui_sections.section_row(outline, false).to_str());
+
+// --- { and } ------------------------------------------------------------------
+
+outline.cursor = 1;
+counter.check("siblings: } from a file goes to the next file", GIT_ui_sections.sibling_row(outline, true) == 2, GIT_ui_sections.sibling_row(outline, true).to_str());
+outline.cursor = 2;
+counter.check("siblings: } from the last file of a section goes to the next header", GIT_ui_sections.sibling_row(outline, true) == 3, GIT_ui_sections.sibling_row(outline, true).to_str());
+outline.cursor = 0;
+counter.check("siblings: } from a header skips its children", GIT_ui_sections.sibling_row(outline, true) == 3, GIT_ui_sections.sibling_row(outline, true).to_str());
+outline.cursor = 4;
+counter.check("siblings: { from the first file goes to its header", GIT_ui_sections.sibling_row(outline, false) == 3, GIT_ui_sections.sibling_row(outline, false).to_str());
+outline.cursor = 0;
+counter.check("siblings: { at the top has nowhere to go", GIT_ui_sections.sibling_row(outline, false) == -1, GIT_ui_sections.sibling_row(outline, false).to_str());
+outline.cursor = 9;
+counter.check("siblings: } at the bottom has nowhere to go", GIT_ui_sections.sibling_row(outline, true) == -1, GIT_ui_sections.sibling_row(outline, true).to_str());
+
+// --- folding ------------------------------------------------------------------
+
+Map<str, bool> collapsed = {};
+int changed = GIT_ui_sections.fold_all(outline.roots, collapsed, true);
+counter.check("fold all: only the roots and the commit row are visible after", outline.count() == 5, outline.count().to_str());
+counter.check("fold all: every root with children is recorded", collapsed.get("untracked").or(false) && collapsed.get("unstaged").or(false) && collapsed.get("commits").or(false) && collapsed.get("branches").or(false), "collapsed");
+counter.check("fold all: an empty section is not a fold", !collapsed.contains("staged"), "staged recorded");
+counter.check("fold all: what is under a commit is not recorded", !collapsed.contains("commit:abc:files"), "files recorded");
+counter.check("fold all: the commit row was already folded and is not counted", changed == 4, changed.to_str());
+counter.check("fold all: folding again changes nothing", GIT_ui_sections.fold_all(outline.roots, collapsed, true) == 0, "second pass");
+int unfolded = GIT_ui_sections.fold_all(outline.roots, collapsed, false);
+counter.check("unfold all: the roots open", outline.count() == 10, outline.count().to_str());
+counter.check("unfold all: the commit stays folded (Enter opens it)", unfolded == 4 && !outline.roots[3].children[0].is_expanded, unfolded.to_str());
+counter.check("unfold all: the choice is recorded as not collapsed", collapsed.get("untracked").or(true) == false, "untracked");
+// the cursor on a row that folding hid
+outline.cursor = 2;
+GIT_ui_sections.fold_all(outline.roots, collapsed, true);
+counter.check("nearest: a hidden row falls back to its section", GIT_ui_sections.did_select_nearest(outline, "untracked:b") && current_id(outline) == "untracked", current_id(outline));
+GIT_ui_sections.fold_all(outline.roots, collapsed, false);
+counter.check("nearest: a visible row is selected as it is", GIT_ui_sections.did_select_nearest(outline, "unstaged:c") && current_id(outline) == "unstaged:c", current_id(outline));
+counter.check("nearest: an id not in the tree selects nothing", !GIT_ui_sections.did_select_nearest(outline, "nope"), "nope");
+// Tab on a leaf folds its parent
+Map<str, bool> tab_collapsed = {};
+TUI_outline.Outline tabbed = sample();
+counter.check("tab: a leaf's parent folds and is named", GIT_ui_sections.fold_parent(tabbed, tab_collapsed, "untracked:a") == "untracked" && !tabbed.roots[0].is_expanded && tab_collapsed.get("untracked").or(false), "fold_parent");
+counter.check("tab: a root has no parent to fold", GIT_ui_sections.fold_parent(tabbed, tab_collapsed, "branches") == "", "root");
+counter.check("tab: a nested leaf folds its nearest parent only", GIT_ui_sections.fold_parent(tabbed, tab_collapsed, "commit:abc:file:x.txt") == "commit:abc:files" && tabbed.roots[3].is_expanded, "nested");
+counter.check("path: the ids from the root down", GIT_ui_sections.path_to(tabbed.roots, "commit:abc:file:x.txt").join(">") == "commits>commit:abc>commit:abc:files>commit:abc:file:x.txt", GIT_ui_sections.path_to(tabbed.roots, "commit:abc:file:x.txt").join(">"));
+counter.check("path: an id that is not there is empty", GIT_ui_sections.path_to(tabbed.roots, "zzz").size() == 0, "zzz");
+counter.check("commit body: the commit row is not body, its files are", !GIT_ui_sections.is_commit_body("commit:abc") && GIT_ui_sections.is_commit_body("commit:abc:files") && !GIT_ui_sections.is_commit_body("commits"), "is_commit_body");
+
+// --- the persisted list -------------------------------------------------------
+
+Map<str, bool> saved = {};
+saved.set("untracked", true);
+saved.set("staged", false);
+saved.set("commit:abc", true);
+saved.set("branches", true);
+counter.check("persist: folded roots only, sorted, no row ids", GIT_ui_sections.folded_roots(saved).join(",") == "branches,untracked", GIT_ui_sections.folded_roots(saved).join(","));
+counter.check("persist: nothing folded is empty", GIT_ui_sections.folded_roots({}).size() == 0, "empty");
+counter.check("persist: parse drops blanks and repeats", GIT_ui_sections.parse_folded(" untracked, ,staged,untracked").join("|") == "untracked|staged", GIT_ui_sections.parse_folded(" untracked, ,staged,untracked").join("|"));
+counter.check("persist: parse of an empty value is empty", GIT_ui_sections.parse_folded("").size() == 0, "empty");
+
+// --- the statusline -----------------------------------------------------------
+
+GIT_ui_statusline.Facts facts = GIT_ui_statusline.Facts();
+facts.repo = "gitui";
+facts.head_kind = "branch";
+facts.branch = "main";
+facts.short_id = "1a2b3c4";
+facts.upstream = "origin/main";
+facts.ahead = 2;
+facts.behind = 1;
+facts.stashes = 3;
+facts.staged = 1;
+facts.unstaged = 2;
+facts.untracked = 4;
+counter.check("statusline: everything on a wide line", GIT_ui_statusline.line(facts, 120) == "main  \u{00B7}  \u{2192} origin/main \u{2191}2 \u{2193}1  \u{00B7}  +1 ~2 ?4  \u{00B7}  stash 3  \u{00B7}  gitui" || GIT_ui_statusline.line(facts, 120).contains("origin/main \u{2191}2 \u{2193}1"), GIT_ui_statusline.line(facts, 120));
+counter.check("statusline: the stash count is shown", GIT_ui_statusline.line(facts, 120).contains("stash 3"), GIT_ui_statusline.line(facts, 120));
+counter.check("statusline: change counts staged unstaged untracked", GIT_ui_statusline.line(facts, 120).contains("+1 ~2 ?4"), GIT_ui_statusline.line(facts, 120));
+counter.check("statusline: the repository name", GIT_ui_statusline.line(facts, 120).contains("gitui"), GIT_ui_statusline.line(facts, 120));
+str at_80 = GIT_ui_statusline.line(facts, 74);
+counter.check("statusline: 74 columns still holds all of it", at_80.contains("stash 3") && at_80.contains("gitui"), at_80);
+str at_56 = GIT_ui_statusline.line(facts, 56);
+counter.check("statusline: 56 columns drops the repository first", !at_56.contains("gitui") && at_56.contains("origin/main") && at_56.contains("stash 3"), at_56);
+str at_40 = GIT_ui_statusline.line(facts, 40);
+counter.check("statusline: 40 columns drops the stash count too", !at_40.contains("stash") && at_40.contains("main") && at_40.contains("+1 ~2 ?4"), at_40);
+str at_12 = GIT_ui_statusline.line(facts, 12);
+counter.check("statusline: 12 columns keeps the branch and nothing else", at_12 == "main", at_12);
+str at_3 = GIT_ui_statusline.line(facts, 3);
+counter.check("statusline: three columns cut the branch itself", at_3 == "ma\u{2026}", at_3);
+GIT_ui_statusline.Facts quiet = GIT_ui_statusline.Facts();
+quiet.head_kind = "branch";
+quiet.branch = "dev";
+counter.check("statusline: no upstream says so, a clean tree says clean", GIT_ui_statusline.line(quiet, 80) == "dev  \u{00B7}  \u{2192} no upstream  \u{00B7}  clean", GIT_ui_statusline.line(quiet, 80));
+quiet.upstream = "origin/dev";
+counter.check("statusline: level with the upstream shows just its name", GIT_ui_statusline.line(quiet, 80).contains("\u{2192} origin/dev  \u{00B7}"), GIT_ui_statusline.line(quiet, 80));
+quiet.is_gone = true;
+counter.check("statusline: a gone upstream says gone", GIT_ui_statusline.line(quiet, 80).contains("origin/dev gone"), GIT_ui_statusline.line(quiet, 80));
+GIT_ui_statusline.Facts detached = GIT_ui_statusline.Facts();
+detached.head_kind = "detached";
+detached.short_id = "abc1234";
+counter.check("statusline: a detached HEAD shows the commit", GIT_ui_statusline.line(detached, 80).starts_with("detached @ abc1234"), GIT_ui_statusline.line(detached, 80));
+counter.check("statusline: a detached HEAD has no upstream segment", !GIT_ui_statusline.line(detached, 80).contains("upstream"), GIT_ui_statusline.line(detached, 80));
+GIT_ui_statusline.Facts unborn = GIT_ui_statusline.Facts();
+unborn.head_kind = "unborn";
+unborn.branch = "main";
+counter.check("statusline: an unborn branch", GIT_ui_statusline.line(unborn, 80).starts_with("main (no commits yet)"), GIT_ui_statusline.line(unborn, 80));
+GIT_ui_statusline.Facts merging = GIT_ui_statusline.Facts();
+merging.head_kind = "branch";
+merging.branch = "main";
+merging.operation = "MERGING";
+merging.conflicts = 2;
+merging.unstaged = 1;
+counter.check("statusline: a merge shows MERGING and the conflicts", GIT_ui_statusline.line(merging, 100).contains("MERGING") && GIT_ui_statusline.line(merging, 100).contains("~1 !2"), GIT_ui_statusline.line(merging, 100));
+merging.operation = "CHERRY-PICKING";
+merging.steps_left = 3;
+counter.check("statusline: a sequence shows what is left", GIT_ui_statusline.line(merging, 100).contains("CHERRY-PICKING (3 left)"), GIT_ui_statusline.line(merging, 100));
+counter.check("statusline: the operation outlives the change counts when narrow", GIT_ui_statusline.line(merging, 38).contains("CHERRY-PICKING") && !GIT_ui_statusline.line(merging, 38).contains("!2"), GIT_ui_statusline.line(merging, 38));
+
+// --- the overview -------------------------------------------------------------
+
+List<GIT_ui_statusline.Item> items = GIT_ui_statusline.overview(facts, "/work/gitui");
+counter.check("overview: six lines, the repository last", items.size() == 6 && items[5].id == "repo" && !items[5].is_actionable, items.size().to_str());
+counter.check("overview: the upstream line spells out ahead and behind", items[1].text.contains("ahead 2, behind 1"), items[1].text);
+counter.check("overview: the stash line", items[2].text.contains("3 stashes"), items[2].text);
+counter.check("overview: the changes line", items[3].text.contains("1 staged, 2 unstaged, 4 untracked, 0 conflicted"), items[3].text);
+counter.check("overview: no operation is not actionable", !items[4].is_actionable && items[4].text.contains("none"), items[4].text);
+items = GIT_ui_statusline.overview(merging, "/work/gitui");
+counter.check("overview: an operation under way is actionable", items[4].is_actionable && items[4].text.contains("CHERRY-PICKING"), items[4].text);
+items = GIT_ui_statusline.overview(detached, "/p");
+counter.check("overview: a detached HEAD says it has no upstream", items[1].text.contains("HEAD is not on a branch"), items[1].text);
+print("");
+print(counter.checks.to_str() + " checks, " + counter.failed.to_str() + " failed");

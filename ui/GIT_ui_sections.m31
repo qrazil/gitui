@@ -1,0 +1,224 @@
+// The section model: moving between the outline's sections and folding them,
+// as pure functions over a `TUI_outline.Outline` and the `collapsed` map the
+// client rebuilds the outline from -- no repository, no terminal, so
+// `t_sections.m31` drives it with hand-built trees.
+//
+// A "section" is a root row (depth 0): Untracked files, Unstaged changes,
+// Staged changes, Commits, Branches, Stashes, and the merge banner and
+// Unmerged paths while those exist. Everything below a root is its content.
+//
+// Four movements, none of which changes the repository:
+//
+//   `[` / `]`   the previous / next section header. From inside a section
+//               `[` goes to that section's own header first, so it is
+//               "to the top of this section, then the one before".
+//   `{` / `}`   the previous / next row at the same depth or shallower: the
+//               next commit from a commit, the next file from a file, the
+//               next section from a header -- the paragraph motion.
+//   Tab         fold or unfold the row; on a leaf, fold its parent and put
+//               the cursor there, so the cursor never rests on a hidden row.
+//   - / +       fold everything / unfold everything.
+//
+// Folding every row is cheap; unfolding every row is not, if it means
+// computing the file list of every commit in the log. So `+` leaves a
+// commit's own fold alone (Enter opens one, which is where its files are
+// read), and `-` folds a commit but not what is inside it.
+
+import tui.widgets.TUI_outline;
+import ui.GIT_ui_model;
+
+/// The ids from a root down to the node `id`, or `[]` when `id` is not in
+/// the tree. The last element is `id` itself.
+pub List<str> path_to(List<TUI_outline.Node> nodes, str id) {
+    for (TUI_outline.Node node in nodes) {
+        if (node.id == id) {
+            return [id];
+        }
+        List<str> below = path_to(node.children, id);
+        if (below.size() > 0) {
+            List<str> out = [node.id];
+            for (str step in below) {
+                out.push(step);
+            }
+            return out;
+        }
+    }
+    return [];
+}
+
+/// The index, in the visible rows, of the section header `[` (backward) or
+/// `]` (forward) goes to from the cursor, or -1 when there is none that way.
+pub int section_row(TUI_outline.Outline outline, bool is_forward) {
+    List<TUI_outline.Row> rows = outline.rows();
+    if (is_forward) {
+        int index = outline.cursor + 1;
+        while (index < rows.size()) {
+            if (rows[index].depth == 0) {
+                return index;
+            }
+            index = index + 1;
+        }
+        return -1;
+    }
+    int index = outline.cursor - 1;
+    if (index >= rows.size()) {
+        index = rows.size() - 1;
+    }
+    while (index >= 0) {
+        if (rows[index].depth == 0) {
+            return index;
+        }
+        index = index - 1;
+    }
+    return -1;
+}
+
+/// The index of the row `}` (forward) or `{` (backward) goes to: the nearest
+/// row in that direction whose depth is no deeper than the cursor row's.
+/// -1 when there is none.
+pub int sibling_row(TUI_outline.Outline outline, bool is_forward) {
+    List<TUI_outline.Row> rows = outline.rows();
+    if (outline.cursor < 0 || outline.cursor >= rows.size()) {
+        return -1;
+    }
+    int depth = rows[outline.cursor].depth;
+    int step = -1;
+    if (is_forward) {
+        step = 1;
+    }
+    int index = outline.cursor + step;
+    while (index >= 0 && index < rows.size()) {
+        if (rows[index].depth <= depth) {
+            return index;
+        }
+        index = index + step;
+    }
+    return -1;
+}
+
+/// The row id at visible index `index`, or "".
+pub str id_at(TUI_outline.Outline outline, int index) {
+    List<TUI_outline.Row> rows = outline.rows();
+    if (index < 0 || index >= rows.size()) {
+        return "";
+    }
+    return rows[index].node.id;
+}
+
+/// Is `id` something under a commit rather than the commit's own row (its
+/// message lines, "Files changed", a file)? False for the commit row itself
+/// and for everything that is not a commit's.
+pub bool is_commit_body(str id) {
+    str commit = GIT_ui_model.commit_in_row(id);
+    return commit != "" && id != "commit:" + commit;
+}
+
+/// Is `id` a commit row or anything under one?
+pub bool is_in_commit(str id) {
+    return GIT_ui_model.commit_in_row(id) != "";
+}
+
+/// Fold (`is_collapsed`) or unfold every node of `nodes` that has children,
+/// recording each choice in `collapsed` so the next rebuild keeps it. See the
+/// header for what a commit's subtree gets. Answers how many nodes changed.
+pub int fold_all(List<TUI_outline.Node> nodes, Map<str, bool> collapsed, bool is_collapsed) {
+    int changed = 0;
+    for (int index in 0 .. nodes.size()) {
+        if (nodes[index].has_children()) {
+            bool is_touched = !is_in_commit(nodes[index].id);
+            if (is_collapsed) {
+                is_touched = !is_commit_body(nodes[index].id);
+            }
+            if (is_touched && nodes[index].is_expanded == is_collapsed) {
+                nodes[index].is_expanded = !is_collapsed;
+                collapsed.set(nodes[index].id, is_collapsed);
+                changed = changed + 1;
+            }
+        }
+        changed = changed + fold_all(nodes[index].children, collapsed, is_collapsed);
+    }
+    return changed;
+}
+
+/// After rows were folded away: select `id` if it is still visible, else
+/// its nearest visible ancestor. True when something was selected.
+pub bool did_select_nearest(TUI_outline.Outline outline, str id) {
+    if (outline.did_select_id(id)) {
+        return true;
+    }
+    List<str> path = path_to(outline.roots, id);
+    int index = path.size() - 2;
+    while (index >= 0) {
+        if (outline.did_select_id(path[index])) {
+            return true;
+        }
+        index = index - 1;
+    }
+    return false;
+}
+
+/// The node `id` in the forest, or None.
+pub Option<TUI_outline.Node> find_node(List<TUI_outline.Node> nodes, str id) {
+    for (TUI_outline.Node node in nodes) {
+        if (node.id == id) {
+            return Option<TUI_outline.Node>.Some(node);
+        }
+        match (find_node(node.children, id)) {
+            case Some(TUI_outline.Node found): {
+                return Option<TUI_outline.Node>.Some(found);
+            }
+            case None: {
+            }
+        }
+    }
+    return Option<TUI_outline.Node>.None;
+}
+
+/// Fold the parent of the row `id` and answer the parent's id, or "" when
+/// `id` is a root (or not in the tree). The parent's fold is recorded in
+/// `collapsed`.
+pub str fold_parent(TUI_outline.Outline outline, Map<str, bool> collapsed, str id) {
+    List<str> path = path_to(outline.roots, id);
+    if (path.size() < 2) {
+        return "";
+    }
+    str parent = path[path.size() - 2];
+    match (find_node(outline.roots, parent)) {
+        case Some(TUI_outline.Node node): {
+            node.is_expanded = false;
+            collapsed.set(parent, true);
+            return parent;
+        }
+        case None: {
+            return "";
+        }
+    }
+}
+
+/// The root ids that are folded, for `gitui.collapsed`: every key of
+/// `collapsed` with no ":" in it (a root section's id) that is set, in
+/// order. A row id under a commit or a file path has a ":" and is session
+/// state only.
+pub List<str> folded_roots(Map<str, bool> collapsed) {
+    List<str> out = [];
+    for (str key in collapsed.keys()) {
+        if (!key.contains(":") && collapsed.get(key).or(false)) {
+            out.push(key);
+        }
+    }
+    out.sort();
+    return out;
+}
+
+/// The reverse: `gitui.collapsed`'s value ("untracked,staged") into the ids
+/// it names, blanks and duplicates dropped.
+pub List<str> parse_folded(str value) {
+    List<str> out = [];
+    for (str piece in value.split(",")) {
+        str id = piece.trim();
+        if (id != "" && !out.contains(id)) {
+            out.push(id);
+        }
+    }
+    return out;
+}

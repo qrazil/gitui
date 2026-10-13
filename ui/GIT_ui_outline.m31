@@ -14,6 +14,7 @@ import core.GIT_object;
 import core.GIT_status;
 import ui.GIT_ui_core;
 import ui.GIT_ui_model;
+import ui.GIT_ui_sections;
 import io;
 import term;
 import tui.app.TUI_app;
@@ -62,6 +63,89 @@ pub void OutlineLayer.toggle_current() {
         outline.did_select_id(keep_id);
     }
     jump.sync_from(outline);
+    jump.follow(outline);
+    persist_folds();
+}
+
+/// `Tab`: fold or unfold the row under the cursor, exactly as `Enter` does on
+/// a section or a commit; on a leaf there is nothing to fold, so its parent
+/// folds instead and the cursor moves up onto it (a cursor on a hidden row
+/// would be lost).
+pub void OutlineLayer.fold_current() {
+    match (outline.current()) {
+        case Some(TUI_outline.Row row): {
+            if (row.node.has_children()) {
+                toggle_current();
+                return;
+            }
+            str parent = GIT_ui_sections.fold_parent(outline, collapsed, row.node.id);
+            if (parent == "") {
+                message = "nothing to fold here";
+                return;
+            }
+            outline.did_select_id(parent);
+            jump.sync_from(outline);
+            jump.follow(outline);
+            persist_folds();
+        }
+        case None: {
+        }
+    }
+}
+
+/// `-` (fold every section) and `+` (unfold every one). The cursor stays on
+/// its row, or on the nearest row that is still there.
+pub void OutlineLayer.fold_everything(bool is_collapsed) {
+    str keep = "";
+    match (outline.current()) {
+        case Some(TUI_outline.Row row): {
+            keep = row.node.id;
+        }
+        case None: {
+        }
+    }
+    int changed = GIT_ui_sections.fold_all(outline.roots, collapsed, is_collapsed);
+    if (keep != "") {
+        GIT_ui_sections.did_select_nearest(outline, keep);
+    }
+    jump.sync_from(outline);
+    jump.follow(outline);
+    persist_folds();
+    if (is_collapsed) {
+        message = "folded " + changed.to_str() + " rows";
+    } else {
+        message = "unfolded " + changed.to_str() + " rows";
+    }
+}
+
+/// `[` and `]`: the previous or next section header. `]` on the last section
+/// and `[` on the first header say so and stay put.
+pub void OutlineLayer.go_section(bool is_forward) {
+    int target = GIT_ui_sections.section_row(outline, is_forward);
+    if (target < 0) {
+        if (is_forward) {
+            message = "already in the last section";
+        } else {
+            message = "already at the first section";
+        }
+        return;
+    }
+    outline.move(target - outline.cursor);
+    jump.follow(outline);
+}
+
+/// `{` and `}`: the previous or next row at this depth or shallower.
+pub void OutlineLayer.go_sibling(bool is_forward) {
+    int target = GIT_ui_sections.sibling_row(outline, is_forward);
+    if (target < 0) {
+        if (is_forward) {
+            message = "no later row at this level";
+        } else {
+            message = "no earlier row at this level";
+        }
+        return;
+    }
+    outline.move(target - outline.cursor);
     jump.follow(outline);
 }
 

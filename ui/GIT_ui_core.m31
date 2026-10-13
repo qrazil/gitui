@@ -43,7 +43,9 @@
 // The `@` overlay shows the ring buffer.
 
 import fs;
+import os;
 import core.GIT_branches;
+import core.GIT_config;
 import core.GIT_checkout;
 import core.GIT_log;
 import diff.GIT_merge;
@@ -55,6 +57,8 @@ import diff.GIT_stash;
 import core.GIT_status;
 import ui.GIT_ui_merge_model;
 import ui.GIT_ui_model;
+import ui.GIT_ui_sections;
+import ui.GIT_ui_statusline;
 import term;
 import tui.app.TUI_app;
 import tui.core.TUI_buffer;
@@ -94,6 +98,7 @@ pub const str SCOPE_REBASE = "rebase";
 pub const str SCOPE_REBASE_BUSY = "rebase-busy";
 pub const str SCOPE_REBASE_TODO = "rebase-todo";
 pub const str SCOPE_PULL_ASK = "pull-ask";
+pub const str SCOPE_OVERVIEW = "overview";
 pub const str CMD_QUIT = "quit";
 pub const str CMD_DOWN = "down";
 pub const str CMD_UP = "up";
@@ -198,6 +203,16 @@ pub const str CMD_ANNOTATE = "annotate";
 pub const str CMD_DELETE = "delete";
 pub const str CMD_PUSH_UPSTREAM = "push-upstream";
 pub const str CMD_SYNTAX = "syntax";
+pub const str CMD_SECTION_PREVIOUS = "section-prev";
+pub const str CMD_SECTION_NEXT = "section-next";
+pub const str CMD_SIBLING_PREVIOUS = "sibling-prev";
+pub const str CMD_SIBLING_NEXT = "sibling-next";
+pub const str CMD_FOLD = "fold";
+pub const str CMD_FOLD_ALL = "fold-all";
+pub const str CMD_UNFOLD_ALL = "unfold-all";
+pub const str CMD_OVERVIEW = "overview";
+/// What `pick_purpose` says a finished remote-ref picker was for.
+pub const str PICK_REMOTE_REF = "remote-ref";
 /// What `pick_purpose` says a finished `GIT_ui_picker` was for.
 pub const str PICK_CHECKOUT = "checkout";
 /// The merge menu's three pickers: the branch to merge, and how.
@@ -287,6 +302,8 @@ pub type Core {
     pub bool is_editor_wanted = false;
     pub str commit_message_path = "";
     pub str branch_label = "";
+    /// What the statusline and the overview are drawn from: set by `refresh`.
+    pub GIT_ui_statusline.Facts facts = GIT_ui_statusline.Facts();
     pub str message = "";
     /// Whether the primary document is currently showing a hunk-level diff
     /// instead of the outline -- see `show_diff_current`/`close_diff`.
@@ -304,7 +321,14 @@ pub type Core {
     /// For a "commit" diff: the commit the file diff belongs to (40 hex), so
     /// `B` / `H` in the diff view know which revision to start from.
     pub str diff_rev = "";
+    /// The outline row the open diff was opened from, so `{` / `}` can step
+    /// to the neighbouring file. "" while no diff is open.
+    pub str diff_row_id = "";
     pub Map<str, bool> collapsed = {};
+    /// What `gitui.collapsed` last held (or was last written as), so a fold
+    /// writes the repository's config only when the set of folded sections
+    /// actually changed.
+    pub str folded_saved = "";
     pub Map<str, bytes> paths = {};
     pub Map<str, GIT_ui_model.CommitFileDiff> file_diffs = {};
     /// `commit_changes`'s result per commit id, filled on demand the first
@@ -465,6 +489,9 @@ pub void Core.refresh() {
                     case Some(GIT_branches.Tracking tracking): {
                         row.upstream = tracking.upstream;
                         row.track = tracking.label();
+                        row.ahead = tracking.ahead;
+                        row.behind = tracking.behind;
+                        row.is_gone = tracking.is_gone;
                     }
                     case None: {
                     }
@@ -476,16 +503,25 @@ pub void Core.refresh() {
         }
     }
     stash_labels = GIT_stash.labels(gitdir);
+    facts = GIT_ui_statusline.Facts();
+    facts.repo = repo_name();
     match (GIT_refs.head(gitdir)) {
         case Ok(GIT_refs.Head head): {
             match (head) {
                 case Born(str name, str id): {
+                    facts.head_kind = "branch";
+                    facts.branch = GIT_ui_model.branch_name(name);
+                    facts.short_id = id.substr(0, 7);
                     branch_label = "on " + GIT_ui_model.branch_name(name) + " @ " + id.substr(0, 7) + track_suffix(GIT_ui_model.branch_name(name));
                 }
                 case Unborn(str name): {
+                    facts.head_kind = "unborn";
+                    facts.branch = GIT_ui_model.branch_name(name);
                     branch_label = "on " + GIT_ui_model.branch_name(name) + " (no commits yet)";
                 }
                 case Detached(str id): {
+                    facts.head_kind = "detached";
+                    facts.short_id = id.substr(0, 7);
                     branch_label = "detached @ " + id.substr(0, 7);
                 }
             }
@@ -496,6 +532,102 @@ pub void Core.refresh() {
     }
     if (is_sequencing) {
         branch_label = branch_label + "  " + sequence_word;
+    }
+    if (facts.head_kind == "branch") {
+        for (GIT_ui_model.BranchRow row in branch_rows) {
+            if (row.branch.name == facts.branch) {
+                facts.upstream = row.upstream;
+                facts.ahead = row.ahead;
+                facts.behind = row.behind;
+                facts.is_gone = row.is_gone;
+            }
+        }
+    }
+    facts.stashes = stash_labels.size();
+    facts.staged = last_status.staged.size();
+    facts.unstaged = last_status.unstaged.size();
+    facts.untracked = last_status.untracked.size();
+    facts.conflicts = last_status.unmerged.size();
+    if (is_sequencing) {
+        facts.operation = sequence_word;
+        facts.steps_left = sequence_left;
+    } else if (is_merging) {
+        facts.operation = "MERGING";
+    } else if (fs.is_present(fs.join(gitdir, "BISECT_LOG"))) {
+        facts.operation = "BISECTING";
+    }
+}
+
+/// The working tree's path as far as it is known: as given when absolute,
+/// else under `$PWD` (the shell's idea of the current directory), else as
+/// given. For the overview, and `repo_name`.
+pub str Core.repo_path() {
+    if (worktree.starts_with("/")) {
+        return worktree;
+    }
+    str here = os.env("PWD").or("");
+    if (here == "" || !here.starts_with("/")) {
+        return worktree;
+    }
+    if (worktree == "." || worktree == "") {
+        return here;
+    }
+    return fs.join(here, worktree);
+}
+
+/// The repository's name for the statusline: the last segment of
+/// `repo_path`, "" if there is none ("/" or an unknown directory).
+pub str Core.repo_name() {
+    List<str> parts = repo_path().split("/");
+    int index = parts.size() - 1;
+    while (index >= 0) {
+        if (parts[index] != "" && parts[index] != ".") {
+            return parts[index];
+        }
+        index = index - 1;
+    }
+    return "";
+}
+
+/// Read `gitui.collapsed` (a comma-separated list of root section ids) into
+/// `collapsed`, so the sections folded in an earlier run start folded. Call
+/// before the first `reload`.
+pub void Core.load_folds() {
+    match (GIT_config.get(gitdir, "gitui", "", "collapsed")) {
+        case Some(str value): {
+            for (str id in GIT_ui_sections.parse_folded(value)) {
+                collapsed.set(id, true);
+            }
+        }
+        case None: {
+        }
+    }
+    folded_saved = GIT_ui_sections.folded_roots(collapsed).join(",");
+}
+
+/// Write the folded root sections to `gitui.collapsed` when they changed
+/// since last time; unset the key when none is folded. A repository whose
+/// config cannot be written just does not remember.
+pub void Core.persist_folds() {
+    str now = GIT_ui_sections.folded_roots(collapsed).join(",");
+    if (now == folded_saved) {
+        return;
+    }
+    folded_saved = now;
+    if (now == "") {
+        match (GIT_config.unset(gitdir, "gitui", "", "collapsed")) {
+            case Ok(_): {
+            }
+            case Err(_): {
+            }
+        }
+        return;
+    }
+    match (GIT_config.set(gitdir, "gitui", "", "collapsed", now)) {
+        case Ok(_): {
+        }
+        case Err(_): {
+        }
     }
 }
 
@@ -607,12 +739,10 @@ pub str Core.tip_subject(str tip) {
     }
 }
 
-/// What the status line shows: the last message, else the branch label.
+/// What the message row shows: the last message. (The branch, upstream and
+/// the rest are the statusline on the frame's top border, from `facts`.)
 pub str Core.status_line() {
-    if (message != "") {
-        return message;
-    }
-    return branch_label;
+    return message;
 }
 
 /// Set the status-line message. For overlays, which hold a layer and cannot
@@ -671,6 +801,13 @@ pub List<Binding> key_table() {
     table.push(Binding(SCOPE_OUTLINE, CMD_UP, ["k", "up"], "move the cursor up", "", ""));
     table.push(Binding(SCOPE_OUTLINE, CMD_RIGHT, ["l", "right"], "scroll the outline right", "h/l", "scroll"));
     table.push(Binding(SCOPE_OUTLINE, CMD_LEFT, ["h", "left"], "scroll the outline left", "", ""));
+    table.push(Binding(SCOPE_OUTLINE, CMD_SECTION_PREVIOUS, ["["], "jump to the previous section header (first to the top of this section)", "", ""));
+    table.push(Binding(SCOPE_OUTLINE, CMD_SECTION_NEXT, ["]"], "jump to the next section header", "", ""));
+    table.push(Binding(SCOPE_OUTLINE, CMD_SIBLING_PREVIOUS, ["{"], "jump to the previous row at this depth or shallower (the previous commit, file or section)", "", ""));
+    table.push(Binding(SCOPE_OUTLINE, CMD_SIBLING_NEXT, ["}"], "jump to the next row at this depth or shallower", "", ""));
+    table.push(Binding(SCOPE_OUTLINE, CMD_FOLD, ["tab"], "fold or unfold the row; on a leaf fold its section and move to it", "", ""));
+    table.push(Binding(SCOPE_OUTLINE, CMD_FOLD_ALL, ["-"], "fold every section", "", ""));
+    table.push(Binding(SCOPE_OUTLINE, CMD_UNFOLD_ALL, ["+", "="], "unfold every section (commits stay as they are: Enter opens one)", "", ""));
     table.push(Binding(SCOPE_OUTLINE, CMD_TOGGLE, ["enter"], "fold or unfold the row; open a commit's file diff; load more commits", "enter", "toggle"));
     table.push(Binding(SCOPE_OUTLINE, CMD_STAGE, ["s"], "stage the file under the cursor", "s", "stage"));
     table.push(Binding(SCOPE_OUTLINE, CMD_UNSTAGE, ["u"], "unstage the file under the cursor", "u", "unstage"));
@@ -701,6 +838,13 @@ pub List<Binding> key_table() {
     // The document: the diff view.
     table.push(Binding(SCOPE_DIFF, CMD_DOWN, ["j", "down"], "move the diff cursor down", "j/k", "move"));
     table.push(Binding(SCOPE_DIFF, CMD_UP, ["k", "up"], "move the diff cursor up", "", ""));
+    table.push(Binding(SCOPE_DIFF, CMD_SECTION_PREVIOUS, ["["], "jump to the previous hunk (first to the top of this one)", "", ""));
+    table.push(Binding(SCOPE_DIFF, CMD_SECTION_NEXT, ["]"], "jump to the next hunk", "", ""));
+    table.push(Binding(SCOPE_DIFF, CMD_SIBLING_PREVIOUS, ["{"], "open the previous file of this list (staged, unstaged, untracked or the commit's)", "", ""));
+    table.push(Binding(SCOPE_DIFF, CMD_SIBLING_NEXT, ["}"], "open the next file of this list", "", ""));
+    table.push(Binding(SCOPE_DIFF, CMD_FOLD, ["tab"], "fold or unfold the hunk under the cursor", "", ""));
+    table.push(Binding(SCOPE_DIFF, CMD_FOLD_ALL, ["-"], "fold every hunk", "", ""));
+    table.push(Binding(SCOPE_DIFF, CMD_UNFOLD_ALL, ["+", "="], "unfold every hunk", "", ""));
     table.push(Binding(SCOPE_DIFF, CMD_STAGE, ["s"], "stage the hunk under the cursor", "s", "stage hunk"));
     table.push(Binding(SCOPE_DIFF, CMD_UNSTAGE, ["u"], "unstage the hunk under the cursor", "u", "unstage hunk"));
     table.push(Binding(SCOPE_DIFF, CMD_VISUAL, ["v"], "start a visual range of lines (j/k extend it, v or Escape cancels)", "v", "lines"));
@@ -712,7 +856,13 @@ pub List<Binding> key_table() {
     // In every view.
     table.push(Binding(SCOPE_GLOBAL, CMD_LOG, ["@"], "the command log: one line per write operation", "@", "log"));
     table.push(Binding(SCOPE_GLOBAL, CMD_HELP, ["?"], "this key help", "?", "help"));
+    table.push(Binding(SCOPE_GLOBAL, CMD_OVERVIEW, ["i"], "the overview: branch, upstream, stashes, changes, operation -- and Enter opens the picker or list for the one you are on", "i", "info"));
     table.push(Binding(SCOPE_GLOBAL, CMD_SYNTAX, ["C"], "syntax colours on or off (also in the blame, commit, stash and resolve views)", "", ""));
+    // The overview overlay (`i`).
+    table.push(Binding(SCOPE_OVERVIEW, CMD_DOWN, ["j", "down", "tab", "l", "right"], "next line", "j/k", "move"));
+    table.push(Binding(SCOPE_OVERVIEW, CMD_UP, ["k", "up", "back-tab", "h", "left"], "previous line", "", ""));
+    table.push(Binding(SCOPE_OVERVIEW, CMD_OPEN, ["enter"], "open it: the branch picker, the upstream's remote branches, the stash list, the changed section, the menu of the operation under way", "enter", "open"));
+    table.push(Binding(SCOPE_OVERVIEW, CMD_CLOSE, ["escape", "q", "i"], "close", "esc", "close"));
     // The commit overlay.
     table.push(Binding(SCOPE_COMMIT, CMD_EDIT, ["e"], "edit the message in $EDITOR", "e", "edit"));
     table.push(Binding(SCOPE_COMMIT, CMD_FINISH, ["f"], "finish: write the commit", "f", "finish"));
@@ -1022,12 +1172,15 @@ pub str scope_title(str scope) {
     if (scope == SCOPE_PROMPT) {
         return "text prompt";
     }
+    if (scope == SCOPE_OVERVIEW) {
+        return "overview (i)";
+    }
     return scope;
 }
 
 /// Every scope, in the order the help overlay lists them.
 pub List<str> all_scopes() {
-    return [SCOPE_OUTLINE, SCOPE_DIFF, SCOPE_GLOBAL, SCOPE_COMMIT, SCOPE_BRANCH, SCOPE_PUSH, SCOPE_PULL, SCOPE_CONFIRM, SCOPE_LOG, SCOPE_HELP, SCOPE_SEARCH, SCOPE_PICKER, SCOPE_MERGE, SCOPE_MERGE_ASK, SCOPE_RESOLVE, SCOPE_STASH, SCOPE_STASH_LIST, SCOPE_STASH_PROMPT, SCOPE_BLAME, SCOPE_FILELOG, SCOPE_SHOW, SCOPE_UNDO, SCOPE_TAGS, SCOPE_PROMPT, SCOPE_PICK, SCOPE_REVERT, SCOPE_SEQUENCE, SCOPE_REBASE, SCOPE_REBASE_BUSY, SCOPE_REBASE_TODO, SCOPE_PULL_ASK];
+    return [SCOPE_OUTLINE, SCOPE_DIFF, SCOPE_GLOBAL, SCOPE_COMMIT, SCOPE_BRANCH, SCOPE_PUSH, SCOPE_PULL, SCOPE_CONFIRM, SCOPE_LOG, SCOPE_HELP, SCOPE_SEARCH, SCOPE_PICKER, SCOPE_MERGE, SCOPE_MERGE_ASK, SCOPE_RESOLVE, SCOPE_STASH, SCOPE_STASH_LIST, SCOPE_STASH_PROMPT, SCOPE_BLAME, SCOPE_FILELOG, SCOPE_SHOW, SCOPE_UNDO, SCOPE_TAGS, SCOPE_PROMPT, SCOPE_PICK, SCOPE_REVERT, SCOPE_SEQUENCE, SCOPE_REBASE, SCOPE_REBASE_BUSY, SCOPE_REBASE_TODO, SCOPE_PULL_ASK, SCOPE_OVERVIEW];
 }
 
 // --- the overlay stack and the command log -------------------------------------

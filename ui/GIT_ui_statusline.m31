@@ -1,0 +1,227 @@
+// The statusline: one line on the frame's top border saying where you are --
+// the branch (or the detached commit), its upstream with ahead/behind, the
+// stash count, the operation under way, how dirty the tree is, and the
+// repository's name -- and the longer "overview" the `i` key shows from the
+// same facts.
+//
+// Everything here is pure: `Facts` is what `Core.refresh` read, `segments`
+// and `fit` turn it into text for a given width, `overview` into the lines of
+// the `i` panel. No repository, no terminal; `t_sections.m31` drives it.
+//
+// Narrow terminals: `fit` drops whole segments, least important first (the
+// repository name, then the stash count, then the upstream, then the change
+// counts, then the operation) and finally cuts the branch name itself. The
+// branch is never dropped; it is the one thing the line is for.
+
+import tui.core.TUI_text;
+
+/// What the statusline and the overview are drawn from. `head_kind` is
+/// "branch", "unborn" (no commits yet), "detached" or "unknown".
+pub type Facts {
+    pub str repo = "";
+    pub str head_kind = "unknown";
+    pub str branch = "";
+    pub str short_id = "";
+    /// The upstream's short name (`origin/main`), "" when none is set.
+    pub str upstream = "";
+    pub bool is_gone = false;
+    pub int ahead = 0;
+    pub int behind = 0;
+    pub int stashes = 0;
+    pub int staged = 0;
+    pub int unstaged = 0;
+    pub int untracked = 0;
+    pub int conflicts = 0;
+    /// `MERGING`, `CHERRY-PICKING`, `REBASING`, `BISECTING`, ... or "".
+    pub str operation = "";
+    /// Steps still to do after the one in progress (a sequence or a rebase).
+    pub int steps_left = 0;
+}
+
+/// "main", "main (no commits yet)", "detached @ 1a2b3c4", or "?".
+pub str Facts.head_text() {
+    if (head_kind == "branch") {
+        return branch;
+    }
+    if (head_kind == "unborn") {
+        return branch + " (no commits yet)";
+    }
+    if (head_kind == "detached") {
+        return "detached @ " + short_id;
+    }
+    return "?";
+}
+
+/// "+2 ~3 ?1 !1" -- staged, unstaged, untracked, conflicted -- or "clean".
+pub str Facts.changes_text() {
+    List<str> parts = [];
+    if (staged > 0) {
+        parts.push("+" + staged.to_str());
+    }
+    if (unstaged > 0) {
+        parts.push("~" + unstaged.to_str());
+    }
+    if (untracked > 0) {
+        parts.push("?" + untracked.to_str());
+    }
+    if (conflicts > 0) {
+        parts.push("!" + conflicts.to_str());
+    }
+    if (parts.size() == 0) {
+        return "clean";
+    }
+    return parts.join(" ");
+}
+
+/// "origin/main", "origin/main  ↑2 ↓1", "origin/main  gone", or "no upstream"
+/// for a branch without one. "" for a detached or unborn HEAD, which has none.
+pub str Facts.upstream_text() {
+    if (upstream == "") {
+        if (head_kind == "branch") {
+            return "no upstream";
+        }
+        return "";
+    }
+    str out = upstream;
+    if (is_gone) {
+        return out + " gone";
+    }
+    if (ahead > 0) {
+        out = out + " \u{2191}" + ahead.to_str();
+    }
+    if (behind > 0) {
+        out = out + " \u{2193}" + behind.to_str();
+    }
+    return out;
+}
+
+/// "MERGING", "CHERRY-PICKING (2 left)", or "".
+pub str Facts.operation_text() {
+    if (operation == "") {
+        return "";
+    }
+    if (steps_left > 0) {
+        return operation + " (" + steps_left.to_str() + " left)";
+    }
+    return operation;
+}
+
+/// One part of the statusline. `id` is "branch", "upstream", "stash", "op",
+/// "changes" or "repo"; `priority` orders what `fit` keeps.
+pub type Segment {
+    pub str id;
+    pub str text;
+    pub int priority;
+}
+
+pub const str SEPARATOR = "  \u{00B7}  ";
+
+/// Every segment there are facts for, in display order.
+pub List<Segment> segments(Facts facts) {
+    List<Segment> out = [];
+    out.push(Segment("branch", facts.head_text(), 100));
+    str upstream = facts.upstream_text();
+    if (upstream != "") {
+        out.push(Segment("upstream", "\u{2192} " + upstream, 60));
+    }
+    if (facts.operation != "") {
+        out.push(Segment("op", facts.operation_text(), 90));
+    }
+    if (facts.stashes > 0) {
+        out.push(Segment("stash", "stash " + facts.stashes.to_str(), 40));
+    }
+    out.push(Segment("changes", facts.changes_text(), 70));
+    if (facts.repo != "") {
+        out.push(Segment("repo", facts.repo, 20));
+    }
+    return out;
+}
+
+/// The width the segments take, separators included.
+pub int width_of(List<Segment> list) {
+    int total = 0;
+    for (int index in 0 .. list.size()) {
+        total = total + TUI_text.width(list[index].text);
+        if (index > 0) {
+            total = total + TUI_text.width(SEPARATOR);
+        }
+    }
+    return total;
+}
+
+/// The segments that fit in `width` columns: whole segments dropped, least
+/// important first, in display order. The branch is always kept (`render`
+/// cuts it if it alone is too wide).
+pub List<Segment> fit(List<Segment> list, int width) {
+    List<Segment> kept = [];
+    for (Segment segment in list) {
+        kept.push(segment);
+    }
+    while (kept.size() > 1 && width_of(kept) > width) {
+        int lowest = 0;
+        for (int index in 1 .. kept.size()) {
+            if (kept[index].priority < kept[lowest].priority) {
+                lowest = index;
+            }
+        }
+        kept.remove_at(lowest);
+    }
+    return kept;
+}
+
+/// The statusline's text for `width` columns.
+pub str line(Facts facts, int width) {
+    List<str> texts = [];
+    for (Segment segment in fit(segments(facts), width)) {
+        texts.push(segment.text);
+    }
+    return TUI_text.truncate(texts.join(SEPARATOR), width);
+}
+
+/// One row of the overview panel: what it is about, the text, and whether
+/// Enter on it does something.
+pub type Item {
+    pub str id;
+    pub str text;
+    pub bool is_actionable;
+}
+
+/// The overview: one line per fact, `Enter` meaning something on every line
+/// but the repository's own.
+pub List<Item> overview(Facts facts, str path) {
+    List<Item> out = [];
+    out.push(Item("branch", "Branch      " + facts.head_text(), true));
+    str upstream = "none";
+    if (facts.upstream != "") {
+        upstream = facts.upstream;
+        if (facts.is_gone) {
+            upstream = upstream + " (gone: the remote branch no longer exists)";
+        } else if (facts.ahead > 0 && facts.behind > 0) {
+            upstream = upstream + "  ahead " + facts.ahead.to_str() + ", behind " + facts.behind.to_str();
+        } else if (facts.ahead > 0) {
+            upstream = upstream + "  ahead " + facts.ahead.to_str();
+        } else if (facts.behind > 0) {
+            upstream = upstream + "  behind " + facts.behind.to_str();
+        } else {
+            upstream = upstream + "  up to date";
+        }
+    } else if (facts.head_kind != "branch") {
+        upstream = "none (HEAD is not on a branch)";
+    }
+    out.push(Item("upstream", "Upstream    " + upstream, true));
+    str stash = "none";
+    if (facts.stashes == 1) {
+        stash = "1 stash";
+    } else if (facts.stashes > 1) {
+        stash = facts.stashes.to_str() + " stashes";
+    }
+    out.push(Item("stash", "Stashes     " + stash, true));
+    out.push(Item("changes", "Changes     " + facts.staged.to_str() + " staged, " + facts.unstaged.to_str() + " unstaged, " + facts.untracked.to_str() + " untracked, " + facts.conflicts.to_str() + " conflicted", true));
+    str operation = "none";
+    if (facts.operation != "") {
+        operation = facts.operation_text();
+    }
+    out.push(Item("op", "Operation   " + operation, facts.operation != ""));
+    out.push(Item("repo", "Repository  " + path, false));
+    return out;
+}

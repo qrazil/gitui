@@ -92,10 +92,12 @@ import ui.GIT_ui_merge;
 import ui.GIT_ui_merge_model;
 import ui.GIT_ui_model;
 import ui.GIT_ui_outline;
+import ui.GIT_ui_overview;
 import ui.GIT_ui_rebase;
 import ui.GIT_ui_remote;
 import ui.GIT_ui_search;
 import ui.GIT_ui_sequencer;
+import ui.GIT_ui_statusline;
 import ui.GIT_ui_stash;
 import ui.GIT_ui_tags;
 import ui.GIT_ui_undo;
@@ -108,6 +110,7 @@ import tui.widgets.TUI_footer;
 import tui.core.TUI_geometry;
 import tui.widgets.TUI_outline;
 import tui.core.TUI_style;
+import tui.core.TUI_text;
 import tui.core.TUI_widget;
 
 /// Everything the interactive client is showing and doing right now: the
@@ -125,6 +128,7 @@ pub static State State.open(str gitdir, str worktree) {
     State state = State(GIT_ui_remote.RemoteLayer(GIT_ui_rebase.RebaseLayer(GIT_ui_merge.MergeLayer(GIT_ui_branch.BranchLayer(GIT_ui_commit.CommitLayer(GIT_ui_lines.LinesLayer(GIT_ui_diff.DiffLayer(GIT_ui_outline.OutlineLayer(GIT_ui_core.Core(gitdir, worktree))))))))));
     state.set_editor_paths();
     state.set_syntax(GIT_ui_highlight.is_enabled(gitdir), GIT_ui_highlight.is_dark_terminal());
+    state.load_folds();
     return state;
 }
 
@@ -213,6 +217,13 @@ pub void State.settle() {
         case None: {
         }
     }
+    match (take_pick(GIT_ui_core.PICK_REMOTE_REF)) {
+        case Some(str item): {
+            GIT_ui_overview.show_remote_ref(core(), item);
+        }
+        case None: {
+        }
+    }
 }
 
 /// The footer: the keys of whatever is on top, from the key table.
@@ -239,12 +250,9 @@ List<TUI_widget.Span> State.footer_spans(TUI_style.Theme theme) {
 /// outline's own entries) is not shown alongside it.
 pub void State.draw(TUI_buffer.Buffer buffer, TUI_geometry.Rect area) {
     TUI_style.Theme theme = TUI_style.Theme.plain;
-    str frame_title = worktree;
-    if (frame_title == ".") {
-        frame_title = "git";
-    }
-    TUI_widget.Block frame = TUI_widget.Block(title: frame_title, borders: TUI_widget.Borders.Rounded);
+    TUI_widget.Block frame = TUI_widget.Block(title: "", borders: TUI_widget.Borders.Rounded);
     frame.render(buffer, area);
+    draw_statusline(buffer, area);
     TUI_geometry.Rect body = frame.inner(area);
     List<TUI_geometry.Rect> bands = TUI_footer.split(body, 2);
     TUI_geometry.Rect main = bands[0];
@@ -270,6 +278,39 @@ pub void State.draw(TUI_buffer.Buffer buffer, TUI_geometry.Rect area) {
     for (GIT_ui_core.Overlay overlay in overlays) {
         overlay.render(buffer, body);
     }
+}
+
+/// The statusline, on the frame's top border: the branch (bold), what it
+/// tracks, the operation under way (red), the stash count, the change counts
+/// and the repository's name, from `facts` -- see `GIT_ui_statusline` for what
+/// goes when the line is narrow. It costs no row of the body.
+void State.draw_statusline(TUI_buffer.Buffer buffer, TUI_geometry.Rect area) {
+    int room = area.width - 6;
+    if (room < 4 || area.height < 1) {
+        return;
+    }
+    List<GIT_ui_statusline.Segment> kept = GIT_ui_statusline.fit(GIT_ui_statusline.segments(facts), room);
+    int x = area.x + 2;
+    buffer.set_str(x, area.y, " ", TUI_style.Style(), max: 1);
+    x = x + 1;
+    for (int index in 0 .. kept.size()) {
+        if (index > 0) {
+            buffer.set_str(x, area.y, GIT_ui_statusline.SEPARATOR, TUI_style.Style(attrs: TUI_style.DIM), max: area.x + area.width - 3 - x);
+            x = x + TUI_text.width(GIT_ui_statusline.SEPARATOR);
+        }
+        str text = TUI_text.truncate(kept[index].text, area.x + area.width - 3 - x);
+        TUI_style.Style style = TUI_style.Style();
+        if (kept[index].id == "branch") {
+            style = TUI_style.Style(attrs: TUI_style.BOLD);
+        } else if (kept[index].id == "op") {
+            style = TUI_style.Style(foreground: TUI_style.Colour.Indexed(1), attrs: TUI_style.BOLD);
+        } else if (kept[index].id == "repo") {
+            style = TUI_style.Style(attrs: TUI_style.DIM);
+        }
+        buffer.set_str(x, area.y, text, style, max: area.x + area.width - 3 - x);
+        x = x + TUI_text.width(text);
+    }
+    buffer.set_str(x, area.y, " ", TUI_style.Style(), max: 1);
 }
 
 /// One decoded key. Only keys are dispatched; the mouse, a paste and an
@@ -348,6 +389,10 @@ TUI_app.Action State.run_global_command(str cmd) {
         toggle_syntax();
         return TUI_app.Action.Redraw;
     }
+    if (cmd == GIT_ui_core.CMD_OVERVIEW) {
+        GIT_ui_overview.open(layer());
+        return TUI_app.Action.Redraw;
+    }
     return TUI_app.Action.Continue;
 }
 
@@ -357,6 +402,27 @@ TUI_app.Action State.run_diff_command(str cmd) {
     }
     if (cmd == GIT_ui_core.CMD_UP) {
         move_lines(-1);
+    }
+    if (cmd == GIT_ui_core.CMD_SECTION_PREVIOUS) {
+        go_hunk(false);
+    }
+    if (cmd == GIT_ui_core.CMD_SECTION_NEXT) {
+        go_hunk(true);
+    }
+    if (cmd == GIT_ui_core.CMD_SIBLING_PREVIOUS) {
+        go_file(false);
+    }
+    if (cmd == GIT_ui_core.CMD_SIBLING_NEXT) {
+        go_file(true);
+    }
+    if (cmd == GIT_ui_core.CMD_FOLD) {
+        fold_hunk();
+    }
+    if (cmd == GIT_ui_core.CMD_FOLD_ALL) {
+        fold_all_hunks(true);
+    }
+    if (cmd == GIT_ui_core.CMD_UNFOLD_ALL) {
+        fold_all_hunks(false);
     }
     if (cmd == GIT_ui_core.CMD_STAGE) {
         stage_hunk_lines();
@@ -413,6 +479,27 @@ TUI_app.Action State.run_outline_command(str cmd, str name) {
     }
     if (cmd == GIT_ui_core.CMD_TOGGLE) {
         handle_enter();
+    }
+    if (cmd == GIT_ui_core.CMD_SECTION_PREVIOUS) {
+        go_section(false);
+    }
+    if (cmd == GIT_ui_core.CMD_SECTION_NEXT) {
+        go_section(true);
+    }
+    if (cmd == GIT_ui_core.CMD_SIBLING_PREVIOUS) {
+        go_sibling(false);
+    }
+    if (cmd == GIT_ui_core.CMD_SIBLING_NEXT) {
+        go_sibling(true);
+    }
+    if (cmd == GIT_ui_core.CMD_FOLD) {
+        fold_current();
+    }
+    if (cmd == GIT_ui_core.CMD_FOLD_ALL) {
+        fold_everything(true);
+    }
+    if (cmd == GIT_ui_core.CMD_UNFOLD_ALL) {
+        fold_everything(false);
     }
     if (cmd == GIT_ui_core.CMD_STAGE) {
         stage_current();

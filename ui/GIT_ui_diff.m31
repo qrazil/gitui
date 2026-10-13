@@ -68,6 +68,7 @@ pub type DiffLayer {
 pub void DiffLayer.show_diff_current() {
     match (outline.current()) {
         case Some(TUI_outline.Row row): {
+            diff_row_id = row.node.id;
             if (row.node.id.contains(":file:")) {
                 match (file_diffs.get(row.node.id)) {
                     case Some(GIT_ui_model.CommitFileDiff commit_file_diff): {
@@ -143,6 +144,7 @@ pub void DiffLayer.close_diff() {
     diff_section = "";
     diff_path = [];
     diff_rev = "";
+    diff_row_id = "";
     message = "";
 }
 

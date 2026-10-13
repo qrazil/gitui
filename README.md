@@ -72,6 +72,7 @@ bash scripts/build.sh                 # gitui.m31 -> ./ourgitui   (-o name to re
 | `GIT_ui_core.m31` | the shared `Core`, the `Overlay` interface (`handle_key`, `render`, `hints`), **the key table** that drives dispatch, the footer and `?` alike, and the command-log ring buffer |
 | `GIT_ui_model.m31` | the pure model: outline rows, commit-file diffs, commit template, editor choice |
 | `GIT_ui_outline.m31`, `GIT_ui_diff.m31`, `GIT_ui_commit.m31`, `GIT_ui_branch.m31`, `GIT_ui_remote.m31` | one layer per concern (stage/unstage/discard/stage-all, hunk staging, commit and amend, branches, push and pull), each embedding the one below it, plus that concern's overlays |
+| `GIT_ui_sections.m31`, `GIT_ui_statusline.m31`, `GIT_ui_overview.m31` | the pure section model (`[`/`]`, `{`/`}`, Tab, `-`/`+`, the persisted fold list), the pure statusline (facts, segments, fitting a width, the overview lines), and the `i` overview overlay that opens the pickers and lists |
 | `GIT_ui_help.m31`, `GIT_ui_log.m31`, `GIT_ui_search.m31`, `GIT_ui_picker.m31`, `GIT_ui_panel.m31` | the `?` key help, the `@` command log, `/` search, the reusable fuzzy-filter picker, and the shared frame/clamp drawing helpers |
 | `GIT_pathtree.m31` | a commit's tree as a lookup: `read_commit`, `entry_at(tree, path)`, `blob` |
 | `GIT_blame.m31` | `git blame` without renames or `-M`/`-C`: `blame(gitdir, rev, path, progress)` gives each line's commit, line number in that commit, path and boundary flag, matching `git blame --line-porcelain` (merge parents in order, an identical blob takes all lines) |
@@ -98,6 +99,7 @@ bash scripts/build.sh                 # gitui.m31 -> ./ourgitui   (-o name to re
 | `scripts/build.sh` | builds `gitui.m31` (default, `./ourgitui`), `git.m31` (`./ourgit`) or any other `.m31` file; gitui's `import tui.TUI_app;` lines resolve through `deps`, so nothing is staged or copied |
 | `tests/t_*.m31` | test programs, each printing what a Python oracle prints, or asserting against its own expectations |
 | `tests/oracles/oracle_*.py` | the oracles: `hashlib`, `zlib`, and a from-scratch format reader |
+| `tests/t_sections.m31`, `tests/pty_sections.py` | the section model and statusline text, and the section keys, folds, hunk folds, statusline and overview under a pty |
 | `tests/t_highlight.m31`, `tests/pty_highlight.py` | the syntax colouring: pure line styling, and the SGR colours, scrolling and switches under a pty |
 | `tests/pty_e2e.py`, `tests/pty_blame_undo.py` | drive `ourgitui` under a real pty against disposable fixtures, real `git` as the oracle (the second file: blame, history, undo, tags, ahead/behind, `push -u`, auto-refresh) |
 | `scripts/compare.sh` | every command beside the real `git`, compared octet for octet |
@@ -271,6 +273,14 @@ the top one takes every key.
 |---|---|---|
 | `j` `k` / arrows | outline, diff | move the cursor |
 | `h` `l` | outline | scroll sideways |
+| `[` / `]` | outline | the previous / next section header (`[` from inside a section goes to its own header first) |
+| `{` / `}` | outline | the previous / next row at this depth or shallower: the next commit from a commit, the next file from a file, the next section from a header |
+| `Tab` | outline | fold or unfold the row; on a leaf, fold its section and move onto it |
+| `-` / `+` (`=`) | outline | fold every section / unfold every section (commits stay folded: `Enter` opens one) |
+| `[` / `]` | diff | the previous / next hunk |
+| `{` / `}` | diff | open the previous / next file of the list the diff came from (the same working-tree section, or the same commit's files) |
+| `Tab` / `-` / `+` | diff | fold or unfold the hunk under the cursor / every hunk (a folded hunk shows its header and how many lines it hides; `s`, `u` and `Space` on its header still act on the whole hunk) |
+| `i` | everywhere | the overview: branch, upstream with ahead/behind, stashes, change counts, operation under way and path, one per line; `Enter` opens the matching picker or list (see "Sections, folding and the statusline") |
 | `Enter` | outline | fold or unfold; on a commit's file, open its diff; on the last row, load more commits |
 | `s` / `u` | outline, diff | stage / unstage the file, or the hunk in a diff |
 | `S` / `U` | outline | stage everything / unstage everything |
@@ -332,6 +342,68 @@ SHA-1 **38–45 MB/s**, inflate **71–102 MB/s** of output, and **10 MB/s** of
 object content end to end (open, inflate, verify the SHA-1, parse).
 `docs/FRICTION.md` §5 takes the SHA-1 figure apart, because it is a language
 datapoint and not a git one.
+
+## Sections, folding and the statusline
+
+**The statusline** is the frame's top border, so it costs no row of the body:
+
+```
+╭─ main  ·  → origin/main ↑2 ↓1  ·  MERGING  ·  stash 3  ·  +1 ~2 ?4 !1  ·  gitui ──╮
+```
+
+branch (or `detached @ 1a2b3c4`, or `main (no commits yet)`); `→` its upstream,
+with `↑` commits ahead and `↓` behind, `gone` when the remote branch no longer
+exists, `no upstream` when none is set; the operation under way (`MERGING`,
+`CHERRY-PICKING (2 left)`, `REVERTING`, `REBASING`, `BISECTING`); the stash
+count; `+` staged, `~` unstaged, `?` untracked, `!` conflicted (`clean` when
+all are zero); and the repository's name. It is rebuilt with the outline on
+every reload, so the one-second auto-refresh keeps it current. When the line
+is too narrow whole segments go, least important first (repository name,
+stash count, upstream, change counts, operation) and only then is the branch
+cut; the branch is never dropped. `GIT_ui_statusline.m31` is the pure model
+(`Facts`, `segments`, `fit`, `overview`); `Core.refresh` fills the facts.
+
+**`i` is the quick overview and the way into the segments.** It lists the
+same facts one to a line, with the full path and the spelled-out ahead and
+behind, and `Enter` on a line opens the existing piece of UI for it: Branch,
+the branch picker (check one out); Upstream, a picker over the
+remote-tracking branches (current upstream first) whose pick shows that
+commit; Stashes, the stash list; Changes, the outline on the first section
+that has changes (unfolding it); Operation, the menu of the merge,
+cherry-pick, revert or rebase under way. `j`/`k`, `Tab`, arrows move; `Esc`,
+`q` or `i` close. The auto-refresh does not run while it is open, like every
+overlay.
+
+**Sections.** A section is a root row of the outline (Untracked files,
+Unstaged changes, Staged changes, Commits, Branches, Stashes, and the merge
+banner and Unmerged paths while they exist). `[` / `]` jump between their
+headers, `{` / `}` between rows at the same depth. `Tab` folds the row under
+the cursor, or, on a leaf, its section (and puts the cursor on the header so
+it never rests on a hidden row); `-` folds every section and `+` / `=` unfolds
+every one. Unfolding all does not open the commits (each commit's file list
+is read from the object store when it is first opened, and 200 of them is not
+an instant), `Enter` opens one. `GIT_ui_sections.m31` holds the pure
+model (`section_row`, `sibling_row`, `fold_all`, `fold_parent`).
+
+**In the diff view** the same keys work on hunks: `[` / `]` the previous /
+next hunk, `Tab` folds the hunk under the cursor, `-` / `+` fold or unfold
+all of them, and `{` / `}` replace the diff with the previous / next file of
+the list it came from. Staging a folded hunk stages the whole hunk. A hunk
+fold lasts as long as the view is open (staging reopens it).
+
+**What is remembered.** Folds are kept for the session. The folded root
+sections are also written to `git config gitui.collapsed` (comma-separated
+section ids, e.g. `staged,untracked`) when they change, and read at start, so
+a repository you keep folded stays folded; unfolding the last one unsets the
+key. Folds of commits and of what is under them are session-only. A repository
+whose config cannot be written just does not remember. Set the key by hand,
+or `git config --unset gitui.collapsed`, to change it.
+
+The hunk folds are `TUI_diff_view`'s (`Hunk.is_collapsed`, `DiffView.toggle_hunk`
+and `set_all_collapsed`, tui 0.7.0). Tests: `tests/t_sections.m31` (the model
+and the statusline text), `tests/pty_sections.py` (the keys, ahead/behind,
+stash count, detached HEAD, a merge under way, narrow terminals, the
+overview), through `tests/test_sections.sh`.
 
 ## Syntax highlighting
 

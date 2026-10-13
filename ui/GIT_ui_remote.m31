@@ -22,6 +22,12 @@ pub type RemoteLayer {
     pub GIT_ui_rebase.RebaseLayer;
 }
 
+/// This layer itself, for an overlay that drives everything up to the remote
+/// layer (the overview's menus) and so cannot be handed only the `Core`.
+pub RemoteLayer RemoteLayer.layer() {
+    return this;
+}
+
 /// `P`: open the push overlay.
 pub void RemoteLayer.open_push() {
     push_overlay(RemoteOverlay(this, true));

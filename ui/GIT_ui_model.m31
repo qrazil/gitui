@@ -50,6 +50,10 @@ pub type BranchRow {
     pub str upstream = "";
     /// `[ahead 2, behind 1]`, `[gone]`, or "" when level or without upstream.
     pub str track = "";
+    pub int ahead = 0;
+    pub int behind = 0;
+    /// The upstream is configured but its tracking ref no longer exists.
+    pub bool is_gone = false;
 }
 
 /// A branch picker item: the name, then its upstream and ahead/behind when

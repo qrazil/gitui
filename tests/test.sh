@@ -330,6 +330,7 @@ source tests/test_lines.sh
 source tests/test_gitui.sh
 source tests/test_uilines.sh
 source tests/test_highlight.sh
+source tests/test_sections.sh
 source tests/test_stash.sh
 
 # --- the overlay stack, key table and picker: unit-level ----------------------
