@@ -51,8 +51,8 @@ export LANGC=/path/to/m31c        # the matching compiler
 bash tests/test.sh                    # the built-in fixtures
 bash tests/test.sh <repo> [<repo>…]   # those, and each repository named
 
-bash scripts/build.sh git.m31         # the read-only CLI -> ./ourgit
-./ourgit -log --max 5
+bash scripts/build.sh git.m31         # the read-only CLI -> ./1git
+./1git -log --max 5
 
 bash scripts/build.sh                 # gitui.m31 -> ./mgit   (-o name to rename)
 ./mgit                         # run from a repository's own top level
@@ -104,7 +104,7 @@ bash scripts/build.sh                 # gitui.m31 -> ./mgit   (-o name to rename
 | `GIT_reflog.m31` | `.git/logs/<ref>` in git's own format: read, append, delete with `--rewrite`; `GIT_refs.update` writes it for every ref move |
 | `GIT_graph.m31` | the commit graph: ancestors, `is_ancestor`, `merge_bases` (criss-cross gives several), `ahead_behind`, `rev_list(include, exclude)` |
 | `deps` | the project manifest: name, version and the pinned qrazil/tui commit (`deps.lock` records what was fetched) |
-| `scripts/build.sh` | builds `gitui.m31` (default, `./mgit`), `git.m31` (`./ourgit`) or any other `.m31` file; gitui's `import tui.TUI_app;` lines resolve through `deps`, so nothing is staged or copied |
+| `scripts/build.sh` | builds `gitui.m31` (default, `./mgit`), `git.m31` (`./1git`) or any other `.m31` file; gitui's `import tui.TUI_app;` lines resolve through `deps`, so nothing is staged or copied |
 | `tests/t_*.m31` | test programs, each printing what a Python oracle prints, or asserting against its own expectations |
 | `tests/oracles/oracle_*.py` | the oracles: `hashlib`, `zlib`, and a from-scratch format reader |
 | `tests/t_sections.m31`, `tests/pty_sections.py` | the section model and statusline text, and the section keys, folds, hunk folds, statusline and overview under a pty |

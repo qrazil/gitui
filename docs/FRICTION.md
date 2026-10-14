@@ -339,7 +339,7 @@ suggestions works for a CLI:
 ```c
 // what I wanted
 io.File out = io.stdout();
-args.Parser p = args.Parser("ourgit", ...);
+args.Parser p = args.Parser("1git", ...);
 ...
 void write(bytes b) { out.write(b) ... }        // no: `out` is not in scope
 ```
@@ -492,7 +492,7 @@ following house style made the code worse.
     is worse. `ends_with` first, then strip, is what I should have written.
   - **`lib/args` has its own grammar and it is not git's.** A command is
     `-word`, an option is `--word`. So `git cat-file -t X` is
-    `ourgit -cat-file --type X`. The module's header argues its case well and
+    `1git -cat-file --type X`. The module's header argues its case well and
     the case is good; it does mean a program that reimplements a famous CLI
     cannot reimplement its command line, and `-t` is not available at all
     because it would be a command called `t`.

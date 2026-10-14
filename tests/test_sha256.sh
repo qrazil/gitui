@@ -229,7 +229,7 @@ if [ -x "$WORK/git" ]; then
     rm -rf "$sh2_x"
     cp -r "$sh2_loose" "$sh2_x"
     sh2_cfg=$(cat "$sh2_x/.git/config")
-    sh2_refuses() { # <label> <expected text> -- `ourgit -refs` must fail naming it
+    sh2_refuses() { # <label> <expected text> -- `1git -refs` must fail naming it
         sh2_out=$("$WORK/git" --git-dir "$sh2_x/.git" -refs 2>&1)
         sh2_rc=$?
         case "$sh2_out" in

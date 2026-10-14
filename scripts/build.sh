@@ -5,7 +5,7 @@
 #
 #   M31_ROOT=/path/to/m31 bash scripts/build.sh                  -> ./mgit
 #   M31_ROOT=/path/to/m31 bash scripts/build.sh -o name          -> ./name
-#   M31_ROOT=/path/to/m31 bash scripts/build.sh git.m31          -> ./ourgit
+#   M31_ROOT=/path/to/m31 bash scripts/build.sh git.m31          -> ./1git
 #   M31_ROOT=/path/to/m31 bash scripts/build.sh tests/t_x.m31 -o t_x
 #
 # Any other `.m31` file builds into ./<its basename>. `gitui.m31` imports
@@ -50,7 +50,7 @@ done
 if [ -z "$out" ]; then
     case $src in
         gitui.m31) out=mgit ;;
-        git.m31)   out=ourgit ;;
+        git.m31)   out=1git ;;
         *)         out=$(basename "$src" ".$LANG_EXT") ;;
     esac
 fi

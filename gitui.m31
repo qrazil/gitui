@@ -8,7 +8,7 @@
 //   ./mgit [path]                      # default: "."
 //
 // `path` is where the repository is, exactly like `git status` run from
-// that directory -- it is not walked up through parents the way `ourgit`'s
+// that directory -- it is not walked up through parents the way `1git`'s
 // own `--git-dir` discovery is (`GIT_repository.find` still walks up to *find*
 // `.git`, but the working tree this client reads and writes is `path`
 // itself). Run it from the repository's own top level.

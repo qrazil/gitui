@@ -12,7 +12,7 @@
 //
 // `rev` is anything `GIT_revparse.commit_id` accepts (a ref, an object name or
 // an abbreviation, `HEAD~3`, `main^{/fix}`, `@{-1}`, ...); `limit` stops after that many commits, newest committer date
-// first, or walks everything reachable when negative -- `ourgit -log`'s own
+// first, or walks everything reachable when negative -- `1git -log`'s own
 // `--max` and default.
 
 import core.GIT_object;

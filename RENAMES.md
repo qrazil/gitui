@@ -1,11 +1,12 @@
-# gitui 0.10.0: the program is `mgit`
+# gitui 0.10.0: `mgit` and `1git`
 
 Version 0.10.0, from master 35e6d98 (0.9.0). The interactive client's binary
-is now `mgit` (it was `ourgitui`); the repository and release assets keep the
-name gitui. The read-only CLI `ourgit` is no longer shipped in releases (it is the
-library's test harness: build it with `scripts/build.sh git.m31`). `bash scripts/build.sh`
-writes `./mgit`. Scripts that ran `ourgitui` need the new name; `install.sh`
-removes the stale `~/.local/bin/ourgitui` and `ourgit` links of 0.9.0.
+is now `mgit` (it was `ourgitui`) and the git-compatible command line client
+is `1git` (it was `ourgit`); the repository and release assets keep the name
+gitui. `install.sh` links both and removes the stale `~/.local/bin/ourgitui`
+and `ourgit` links of 0.9.0. `bash scripts/build.sh` writes `./mgit`,
+`bash scripts/build.sh git.m31` writes `./1git`. Scripts that ran the old
+names need the new ones.
 
 # gitui 0.9.0: syntax library
 

@@ -1,6 +1,6 @@
 name: Release
 
-# Build mgit (the interactive client)
+# Build 1git (the read-only CLI) and mgit (the interactive client)
 # release binaries for each platform and attach them to the GitHub Release
 # for a pushed version tag -- the same pattern qrazil/httpserver and
 # qrazil/term-markdown's own release.yml use, against a pinned release of
@@ -50,6 +50,7 @@ jobs:
           set -euo pipefail
           OUT=dist/gitui-linux-x86_64
           mkdir -p "$OUT"
+          bash scripts/build.sh git.m31 -o "$OUT/1git"
           bash scripts/build.sh gitui.m31 -o "$OUT/mgit"
           cp README.md docs/design.md docs/FRICTION.md "$OUT/" 2>/dev/null || true
           sed 's/^ *//' > "$OUT/NOTES.txt" <<EOF
@@ -58,6 +59,7 @@ jobs:
           Tag: ${GITHUB_REF_NAME}
           Built against m31 ${{ env.M31_REF }}, tui $(awk '$1=="tui"{print $3}' deps)
 
+          1git                          ./1git -log --max 5
           mgit                          ./mgit (run from a repository's own top level)
           EOF
 
@@ -93,6 +95,7 @@ jobs:
           set -euo pipefail
           OUT=dist/gitui-linux-aarch64
           mkdir -p "$OUT"
+          bash scripts/build.sh git.m31 -o "$OUT/1git"
           bash scripts/build.sh gitui.m31 -o "$OUT/mgit"
           cp README.md docs/design.md docs/FRICTION.md "$OUT/" 2>/dev/null || true
           sed 's/^ *//' > "$OUT/NOTES.txt" <<EOF
@@ -101,6 +104,7 @@ jobs:
           Tag: ${GITHUB_REF_NAME}
           Built against m31 ${{ env.M31_REF }}, tui $(awk '$1=="tui"{print $3}' deps)
 
+          1git                          ./1git -log --max 5
           mgit                          ./mgit (run from a repository's own top level)
           EOF
 
@@ -136,6 +140,7 @@ jobs:
           set -euo pipefail
           OUT=dist/gitui-macos-arm64
           mkdir -p "$OUT"
+          bash scripts/build.sh git.m31 -o "$OUT/1git"
           bash scripts/build.sh gitui.m31 -o "$OUT/mgit"
           cp README.md docs/design.md docs/FRICTION.md "$OUT/" 2>/dev/null || true
           sed 's/^ *//' > "$OUT/NOTES.txt" <<EOF
@@ -144,6 +149,7 @@ jobs:
           Tag: ${GITHUB_REF_NAME}
           Built against m31 ${{ env.M31_REF }}, tui $(awk '$1=="tui"{print $3}' deps)
 
+          1git                          ./1git -log --max 5
           mgit                          ./mgit (run from a repository's own top level)
           EOF
 

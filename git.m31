@@ -2,22 +2,22 @@
 // and `refs`, over loose objects and packfiles, in SHA-1 and SHA-256
 // repositories.
 //
-//   bash scripts/build.sh git.m31 -o ourgit
+//   bash scripts/build.sh git.m31 -o 1git
 //
-//   ourgit -cat-file --type <object>
-//   ourgit -cat-file --size <object>
-//   ourgit -cat-file <object>              # --pretty is the default
-//   ourgit -ls-tree <tree>
-//   ourgit -log [--max N] [<rev>]
-//   ourgit -rev-parse <rev>
-//   ourgit -refs
-//   ourgit [--git-dir DIR] ...             # default: `.git` here or above
+//   1git -cat-file --type <object>
+//   1git -cat-file --size <object>
+//   1git -cat-file <object>              # --pretty is the default
+//   1git -ls-tree <tree>
+//   1git -log [--max N] [<rev>]
+//   1git -rev-parse <rev>
+//   1git -refs
+//   1git [--git-dir DIR] ...             # default: `.git` here or above
 //
 // --- why the command is `-cat-file` and not `cat-file` ------------------------
 //
 // `lib/args` has one grammar and it is not git's: a command is `-word`, an
 // option is `--word`, and anything else is data (its module header argues for
-// this at length). So `git cat-file -t X` is spelled `ourgit -cat-file --type
+// this at length). So `git cat-file -t X` is spelled `1git -cat-file --type
 // X` here. Writing git's own spelling would have meant not using `lib/args`,
 // which was the point of the exercise; what it costs is that no muscle memory
 // transfers. See docs/FRICTION.md.
@@ -50,7 +50,7 @@ import core.GIT_repository;
 import core.GIT_revparse;
 import core.GIT_log;
 
-args.Parser parser = args.Parser("ourgit", summary: "read-only git plumbing over loose objects");
+args.Parser parser = args.Parser("1git", summary: "read-only git plumbing over loose objects");
 parser.value("git-dir", help: "the repository's git directory", placeholder: "DIR");
 args.Parser cat = parser.command("cat-file", "print an object's type, size or contents");
 cat.flag("type", help: "print the object's type word");
