@@ -12,6 +12,7 @@ round. (Commit ids differ: the client commits under its own identity.)
 Every `ok` / `FAIL` line is one check; the exit status says whether any failed.
 """
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -426,7 +427,7 @@ def main():
     s.send("r")
     s.send("e")
     t = s.text()
-    check("edit: r e opens the todo list of what is left", "what is left" in t and " cc" in t and " cb" not in t, t)
+    check("edit: r e opens the todo list of what is left", "what is left" in t and " cc" in t and not re.search(r"\bcb\b", t), t)  # a hash such as "cbd713a" is not the subject
     s.send("d")
     s.send("\r")
     check("edit: Enter saves it: git sees 'drop' in git-rebase-todo", "drop" in read(fx, ".git/rebase-merge/git-rebase-todo"), read(fx, ".git/rebase-merge/git-rebase-todo"))
