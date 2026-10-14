@@ -1,3 +1,12 @@
+# gitui 0.9.0: syntax library
+
+Version 0.9.0, from master 5b9a2a1 (0.8.0). No module was renamed or removed.
+tui is re-pinned to 0.8.0, whose `TUI_syntax` is an adapter over the new
+`syntax` library (77 languages, tree-sitter-checked token classes, markdown
+fences, HTML/Vue script and style injection). Diffs, blame, file history,
+stash and conflict views are highlighted in every language the library knows;
+`NO_COLOR`, `GITUI_SYNTAX=off` and `C` still switch it off.
+
 # gitui 0.8.0: sections, folding and a statusline
 
 Version 0.8.0, from master fe1e39a (0.7.0). No module was renamed or removed;
