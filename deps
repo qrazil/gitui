@@ -1,4 +1,4 @@
 # gitui project file: this directory is the project root.
 name gitui
 version 0.8.0
-tui https://github.com/qrazil/tui 2e1f7f570959844feaa471d327a81cc01772b432
+tui https://github.com/qrazil/tui 57a63afb4ce800975d7e00aa08a090780a5cdde3
