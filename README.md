@@ -32,11 +32,11 @@ import all of them.
 
 | folder | what is in it |
 |---|---|
-| `core/` | the repository: object store and packs, zlib, hash, refs, reflog, rev-parse, config, ident, index, status, ignore, checkout, branches, log, graph, pathtree, repository, watch |
+| `core/` | the repository: object store and packs, zlib, hash, refs, reflog, rev-parse, config, ident, index, status, `git status` output (`GIT_gitstatus`), ignore, checkout, branches, log, graph, pathtree, repository, watch |
 | `diff/` | content work: xdiff, udiff, diff3, hunks, patch, blame, file log, merge, sequencer (cherry-pick, revert), rebase and its todo, stash, undo |
 | `net/` | remotes and transports: remote URLs, wire protocol, smart-HTTP fetch and push, ssh transport, pull |
 | `ui/` | the interactive client: `GIT_client` (the top), and every `GIT_ui_*` layer and overlay |
-| root | `git.m31` (read-only CLI), `gitui.m31` (interactive client), `deps`, `deps.lock` |
+| root | `git.m31` (command line client: `1git status` in git's grammar, `-log`-style plumbing), `gitui.m31` (interactive client), `deps`, `deps.lock` |
 
 Two placements are by import graph, not by name: `GIT_client` is in `ui/` (it imports
 every `GIT_ui_*` module), and `GIT_watch` is in `core/` (it imports only ignore and
@@ -51,8 +51,10 @@ export LANGC=/path/to/m31c        # the matching compiler
 bash tests/test.sh                    # the built-in fixtures
 bash tests/test.sh <repo> [<repo>…]   # those, and each repository named
 
-bash scripts/build.sh git.m31         # the read-only CLI -> ./1git
-./1git -log --max 5
+bash scripts/build.sh git.m31         # the command line client -> ./1git
+./1git status -sb                     # git's own spelling: same bytes as `git status -sb`
+./1git -C ../other status --porcelain=v2 -b
+./1git -log --max 5                   # the older `-word` grammar, unchanged
 
 bash scripts/build.sh                 # gitui.m31 -> ./mgit   (-o name to rename)
 ./mgit                         # run from a repository's own top level
@@ -111,6 +113,7 @@ bash scripts/build.sh                 # gitui.m31 -> ./mgit   (-o name to rename
 | `tests/t_highlight.m31`, `tests/pty_highlight.py` | the syntax colouring: pure line styling, and the SGR colours, scrolling and switches under a pty |
 | `tests/pty_e2e.py`, `tests/pty_blame_undo.py` | drive `mgit` under a real pty against disposable fixtures, real `git` as the oracle (the second file: blame, history, undo, tags, ahead/behind, `push -u`, auto-refresh) |
 | `scripts/compare.sh` | every command beside the real `git`, compared octet for octet |
+| `scripts/compare_status.sh` | `1git status` beside the real `git status` on disposable fixtures: ~20 forms each, bytes and exit status |
 | `GIT_merge.m31` | `git merge` with conflicts: `start` (fast-forward, no-ff, ff-only, already up to date, unrelated histories), `merge_trees`/`merge_with_base` (per-path three-way merge, stages 1/2/3, rename-free like `merge.renames=false`), a virtual merge base when there are several (criss-cross, like git's recursive/ort), `continue_merge`, `abort_merge`, `mark_resolved` and `take_side` for the resolution view; writes MERGE_HEAD/MERGE_MSG/MERGE_MODE/ORIG_HEAD and reflogs as git does |
 | `GIT_ui_merge.m31`, `GIT_ui_merge_model.m31` | the merge layer: the `m` menu and branch picker, the abort prompt, the conflict-resolution view, the "Unmerged paths" outline section and the MERGING banner (the model is pure and unit-testable) |
 | `GIT_sequencer.m31` | `git cherry-pick` and `git revert` with git's own on-disk state: `expand` (`A..B`, tags followed), `start`, `continue_sequence`, `skip`, `abort`, `quit`, over `GIT_merge.merge_with_base`; writes CHERRY_PICK_HEAD / REVERT_HEAD, MERGE_MSG, AUTO_MERGE, `.git/sequencer/{head,abort-safety,todo,opts}` and the reflog lines git writes, so either tool can finish what the other started. Also exports the per-step pieces (`apply_step`, `finish_step`, `read_todo`/`write_todo`, `read_options`/`write_options`, `reset_to`, `clear_step_state`) for a rebase driver that keeps its own state directory |

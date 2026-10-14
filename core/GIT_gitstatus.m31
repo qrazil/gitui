@@ -1,0 +1,2415 @@
+// `git status`, in git's own spelling and git's own bytes: the long form, the
+// short form, `--porcelain` (v1 and v2), `-z`, `-b`, `-u<mode>`, `--ignored`,
+// pathspecs, colour and the in-progress merge / cherry-pick / revert
+// sections.
+//
+// `GIT_status` (what the TUI uses) answers the questions "which paths differ
+// and how"; this module adds what only the command line needs: modes (a pure
+// mode change, a typechange), rename detection for the staged side (git's
+// own: exact object ids, then its span-hash similarity at 50%), untracked
+// directories collapsed the way git prints them, the upstream's ahead/behind
+// sentence, the colour palette and `color.*` configuration, and the text.
+//
+// Known divergences from git, all of them listed in docs/GIT-COMPAT.md:
+//
+//   - object names are abbreviated to seven digits (git derives a length
+//     from the object count; `core.abbrev` is not read);
+//   - a path that is not valid UTF-8 is left out (see `GIT_status`);
+//   - `status -v`, `--column`, submodule summaries and the interactive-rebase
+//     todo lists are not implemented;
+//   - .gitattributes / `core.autocrlf` conversions are not applied.
+//
+// There is no pager, no TUI and no syntax highlighting here: the output goes
+// to standard output in one write.
+
+import io;
+import os;
+import fs;
+import term;
+import core.GIT_object;
+import core.GIT_refs;
+import core.GIT_index;
+import core.GIT_ignore;
+import core.GIT_config;
+import core.GIT_status;
+import core.GIT_branches;
+import core.GIT_reflog;
+import core.GIT_repository;
+import core.GIT_revparse;
+
+// --- the options ---------------------------------------------------------------
+
+type Opts {
+    // 0 long, 1 short, 2 porcelain v1, 3 porcelain v2
+    int format = 0;
+    bool is_format_set = false;
+    bool is_branch = false;
+    bool is_branch_set = false;
+    bool is_nul = false;
+    // 0 no, 1 normal, 2 all
+    int untracked = 1;
+    bool is_untracked_set = false;
+    // 0 no, 1 traditional, 2 matching
+    int ignored = 0;
+    bool is_renames = true;
+    bool is_ahead_behind = true;
+    // "" unset, else always / never / auto
+    str color = "";
+    bool is_stash = false;
+    bool is_stash_set = false;
+    List<str> paths = [];
+    List<str> overrides = [];
+}
+
+/// One change to one path, both sides of it.
+type Change {
+    str path;
+    // The rename's source in HEAD, or "".
+    str orig = "";
+    // Index-vs-HEAD letter and worktree-vs-index letter; " " for none.
+    str x = " ";
+    str y = " ";
+    // For an unmerged path, its two-letter code (`UU`, `AA`, ...).
+    str unmerged = "";
+    int mode_head = 0;
+    int mode_index = 0;
+    int mode_wt = 0;
+    str id_head = "";
+    str id_index = "";
+    int score = 0;
+    int mode_base = 0;
+    int mode_ours = 0;
+    int mode_theirs = 0;
+    str id_base = "";
+    str id_ours = "";
+    str id_theirs = "";
+}
+
+type HeadItem {
+    int mode;
+    str id;
+}
+
+// --- colour --------------------------------------------------------------------
+
+type Palette {
+    bool is_on = false;
+    str header = "";
+    str updated = "\x1b[32m";
+    str changed = "\x1b[31m";
+    str untracked = "\x1b[31m";
+    str nobranch = "\x1b[31m";
+    str unmerged = "\x1b[31m";
+    str local = "\x1b[32m";
+    str remote = "\x1b[31m";
+    str onbranch = "";
+}
+
+// `body` in `code`'s colour, or as it is when colour is off or `code` is the
+// empty (normal) colour. git wraps every printed fragment on its own, so the
+// callers below paint fragment by fragment, as git's `color_fprintf` does.
+str paint(Palette palette, str code, str body) {
+    if (palette.is_on && code != "" && body != "") {
+        return code + body + "\x1b[m";
+    }
+    return body;
+}
+
+int color_name(str word) {
+    if (word == "black") {
+        return 0;
+    }
+    if (word == "red") {
+        return 1;
+    }
+    if (word == "green") {
+        return 2;
+    }
+    if (word == "yellow") {
+        return 3;
+    }
+    if (word == "blue") {
+        return 4;
+    }
+    if (word == "magenta") {
+        return 5;
+    }
+    if (word == "cyan") {
+        return 6;
+    }
+    if (word == "white") {
+        return 7;
+    }
+    return -1;
+}
+
+int attr_code(str word) {
+    if (word == "bold") {
+        return 1;
+    }
+    if (word == "dim") {
+        return 2;
+    }
+    if (word == "italic") {
+        return 3;
+    }
+    if (word == "ul") {
+        return 4;
+    }
+    if (word == "blink") {
+        return 5;
+    }
+    if (word == "reverse") {
+        return 7;
+    }
+    if (word == "strike") {
+        return 9;
+    }
+    return -1;
+}
+
+int hex_digit(int c) {
+    if (c >= '0' && c <= '9') {
+        return c - '0';
+    }
+    if (c >= 'a' && c <= 'f') {
+        return c - 'a' + 10;
+    }
+    if (c >= 'A' && c <= 'F') {
+        return c - 'A' + 10;
+    }
+    return -1;
+}
+
+// The sgr parameter for one colour word as foreground (`is_bg` false) or
+// background; `Some("")` is "normal"/"default", `None` is not a colour.
+Option<str> color_part(str word, bool is_bg) {
+    int base = 30;
+    int bright = 90;
+    str extended = "38";
+    if (is_bg) {
+        base = 40;
+        bright = 100;
+        extended = "48";
+    }
+    if (word == "normal" || word == "default") {
+        return Option<str>.Some("");
+    }
+    int named = color_name(word);
+    if (named >= 0) {
+        return Option<str>.Some((base + named).to_str());
+    }
+    if (word.starts_with("bright")) {
+        int light = color_name(word.substr(6, word.size()));
+        if (light >= 0) {
+            return Option<str>.Some((bright + light).to_str());
+        }
+    }
+    if (word.size() == 7 && word.byte_at(0) == '#') {
+        int channels = 0;
+        List<int> values = [];
+        for (int i in 0 .. 3) {
+            int high = hex_digit(word.byte_at(1 + 2 * i));
+            int low = hex_digit(word.byte_at(2 + 2 * i));
+            if (high < 0 || low < 0) {
+                return Option<str>.None;
+            }
+            values.push(high * 16 + low);
+            channels = channels + 1;
+        }
+        return Option<str>.Some(extended + ";2;" + values[0].to_str() + ";" + values[1].to_str() + ";" + values[2].to_str());
+    }
+    match (word.parse_int()) {
+        case Some(int number): {
+            if (number < 0 || number > 255) {
+                return Option<str>.None;
+            }
+            if (number < 8) {
+                return Option<str>.Some((base + number).to_str());
+            }
+            if (number < 16) {
+                return Option<str>.Some((bright + number - 8).to_str());
+            }
+            return Option<str>.Some(extended + ";5;" + number.to_str());
+        }
+        case None: {
+            return Option<str>.None;
+        }
+    }
+}
+
+// git's colour value ("bold red", "#ff0000 ul", "12") as the escape sequence
+// it prints, "" for no colour at all, or None for a value git rejects.
+Option<str> parse_color(str value) {
+    List<int> attrs = [];
+    str fg = "";
+    str bg = "";
+    int seen = 0;
+    for (str raw in value.split(" ")) {
+        str word = raw.to_lower();
+        if (word == "") {
+            continue;
+        }
+        int attribute = attr_code(word);
+        if (attribute > 0) {
+            if (!attrs.contains(attribute)) {
+                attrs.push(attribute);
+            }
+            continue;
+        }
+        if (word.starts_with("no-") && attr_code(word.substr(3, word.size())) > 0) {
+            continue;
+        }
+        if (seen >= 2) {
+            return Option<str>.None;
+        }
+        match (color_part(word, seen == 1)) {
+            case Some(str part): {
+                if (seen == 0) {
+                    fg = part;
+                } else {
+                    bg = part;
+                }
+            }
+            case None: {
+                return Option<str>.None;
+            }
+        }
+        seen = seen + 1;
+    }
+    attrs.sort();
+    List<str> parts = [];
+    for (int attribute in attrs) {
+        parts.push(attribute.to_str());
+    }
+    if (fg != "") {
+        parts.push(fg);
+    }
+    if (bg != "") {
+        parts.push(bg);
+    }
+    if (parts.size() == 0) {
+        return Option<str>.Some("");
+    }
+    return Option<str>.Some("\x1b[" + parts.join(";") + "m");
+}
+
+// --- configuration ---------------------------------------------------------------
+
+// `section[.subsection].key` as git writes it on a command line.
+Option<str> config_value(Opts opts, GIT_config.Config config, str section, str key) {
+    str wanted = section + "." + key;
+    int count = opts.overrides.size();
+    for (int i in 0 .. count) {
+        str entry = opts.overrides[count - 1 - i];
+        match (entry.index_of("=")) {
+            case Some(int at): {
+                if (entry.substr(0, at).to_lower() == wanted) {
+                    return Option<str>.Some(entry.substr(at + 1, entry.size()));
+                }
+            }
+            case None: {
+                if (entry.to_lower() == wanted) {
+                    return Option<str>.Some("true");
+                }
+            }
+        }
+    }
+    return config.get(section, "", key);
+}
+
+// git's boolean spellings; `fallback` for anything else.
+bool bool_value(str value, bool fallback) {
+    str lower = value.to_lower();
+    if (lower == "true" || lower == "yes" || lower == "on" || lower == "1" || lower == "") {
+        return true;
+    }
+    if (lower == "false" || lower == "no" || lower == "off" || lower == "0") {
+        return false;
+    }
+    return fallback;
+}
+
+// "always" / "never" / "auto" for a colour setting's value.
+str color_mode(str value) {
+    str lower = value.to_lower();
+    if (lower == "always") {
+        return "always";
+    }
+    if (lower == "never" || lower == "false" || lower == "no" || lower == "off" || lower == "0") {
+        return "never";
+    }
+    return "auto";
+}
+
+Palette build_palette(Opts opts, GIT_config.Config config) {
+    str mode = "";
+    // --color on the command line, then color.status, then color.ui; git
+    // itself reads the last two only (`--color` is this program's addition).
+    if (opts.color != "") {
+        mode = opts.color;
+    }
+    if (mode == "") {
+        match (config_value(opts, config, "color", "status")) {
+            case Some(str value): {
+                mode = color_mode(value);
+            }
+            case None: {
+            }
+        }
+    }
+    if (mode == "") {
+        match (config_value(opts, config, "color", "ui")) {
+            case Some(str value): {
+                mode = color_mode(value);
+            }
+            case None: {
+            }
+        }
+    }
+    if (mode == "") {
+        mode = "auto";
+    }
+    Palette palette = Palette();
+    if (mode == "always") {
+        palette.is_on = true;
+    } else if (mode == "auto") {
+        if (term.is_terminal(1) && os.env("TERM").or("") != "dumb" && os.env("NO_COLOR").or("") == "") {
+            palette.is_on = true;
+        }
+    }
+    if (!palette.is_on) {
+        return palette;
+    }
+    palette.header = slot(opts, config, "header", palette.header);
+    palette.updated = slot(opts, config, "updated", palette.updated);
+    palette.updated = slot(opts, config, "added", palette.updated);
+    palette.changed = slot(opts, config, "changed", palette.changed);
+    palette.untracked = slot(opts, config, "untracked", palette.untracked);
+    palette.nobranch = slot(opts, config, "nobranch", palette.nobranch);
+    palette.unmerged = slot(opts, config, "unmerged", palette.unmerged);
+    palette.local = slot(opts, config, "branch", palette.local);
+    palette.local = slot(opts, config, "localbranch", palette.local);
+    palette.remote = slot(opts, config, "remotebranch", palette.remote);
+    palette.onbranch = slot(opts, config, "onbranch", palette.onbranch);
+    return palette;
+}
+
+str slot(Opts opts, GIT_config.Config config, str name, str fallback) {
+    match (config_value(opts, config, "color.status", name)) {
+        case Some(str value): {
+            match (parse_color(value)) {
+                case Some(str code): {
+                    return code;
+                }
+                case None: {
+                    return fallback;
+                }
+            }
+        }
+        case None: {
+            return fallback;
+        }
+    }
+}
+
+// --- paths -----------------------------------------------------------------------
+
+// `a/b/../c/./d` -> `a/c/d`; leading `/` kept.
+str normalize(str path) {
+    bool is_absolute = path.starts_with("/");
+    List<str> out = [];
+    for (str part in path.split("/")) {
+        if (part == "" || part == ".") {
+            continue;
+        }
+        if (part == "..") {
+            if (out.size() > 0) {
+                out.pop();
+            }
+            continue;
+        }
+        out.push(part);
+    }
+    str joined = out.join("/");
+    if (is_absolute) {
+        return "/" + joined;
+    }
+    return joined;
+}
+
+// git's `relative_path`: `path` (repository-relative) as seen from the
+// directory `prefix` (repository-relative, no trailing slash, "" at the root).
+str relative_to(str path, str prefix) {
+    if (prefix == "") {
+        return path;
+    }
+    List<str> base = prefix.split("/");
+    List<str> target = path.split("/");
+    int common = 0;
+    // Only directories of `path` can be shared with the prefix, not its last
+    // component (a file or, with a trailing slash, an empty one).
+    while (common < base.size() && common < target.size() - 1 && base[common] == target[common]) {
+        common = common + 1;
+    }
+    List<str> out = [];
+    for (int i in common .. base.size()) {
+        out.push("..");
+    }
+    for (int i in common .. target.size()) {
+        out.push(target[i]);
+    }
+    return out.join("/");
+}
+
+// git's `quote_c_style` (core.quotePath on), with `quote_space` for the
+// short and porcelain formats, which quote a name that has a space in it.
+str quote(str name, bool quote_space) {
+    bool is_needed = false;
+    for (int byte_value in name.to_bytes()) {
+        if (byte_value < ' ' || byte_value == '"' || byte_value == '\\' || byte_value >= 127) {
+            is_needed = true;
+        }
+        if (quote_space && byte_value == ' ') {
+            is_needed = true;
+        }
+    }
+    if (!is_needed) {
+        return name;
+    }
+    bytes output = [];
+    output.push('"');
+    for (int byte_value in name.to_bytes()) {
+        if (byte_value == 7) {
+            output.extend("\\a".to_bytes());
+        } else if (byte_value == 8) {
+            output.extend("\\b".to_bytes());
+        } else if (byte_value == '\t') {
+            output.extend("\\t".to_bytes());
+        } else if (byte_value == '\n') {
+            output.extend("\\n".to_bytes());
+        } else if (byte_value == 11) {
+            output.extend("\\v".to_bytes());
+        } else if (byte_value == 12) {
+            output.extend("\\f".to_bytes());
+        } else if (byte_value == '\r') {
+            output.extend("\\r".to_bytes());
+        } else if (byte_value == '"') {
+            output.extend("\\\"".to_bytes());
+        } else if (byte_value == '\\') {
+            output.extend("\\\\".to_bytes());
+        } else if (byte_value < ' ' || byte_value >= 127) {
+            output.push('\\');
+            output.push(48 + (byte_value >> 6 & 7));
+            output.push(48 + (byte_value >> 3 & 7));
+            output.push(48 + (byte_value & 7));
+        } else {
+            output.push(byte_value);
+        }
+    }
+    output.push('"');
+    match (output.utf8()) {
+        case Some(str text): {
+            return text;
+        }
+        case None: {
+            return name;
+        }
+    }
+}
+
+bool has_wildcard(str spec) {
+    return spec.contains("*") || spec.contains("?") || spec.contains("[");
+}
+
+// Does `path` (repository-relative) fall under any pathspec? `specs` are
+// repository-relative already; none means everything.
+bool in_spec(List<str> specs, str path) {
+    if (specs.size() == 0) {
+        return true;
+    }
+    str bare = path;
+    if (bare.ends_with("/")) {
+        bare = bare.substr(0, bare.size() - 1);
+    }
+    for (str spec in specs) {
+        if (spec == "") {
+            return true;
+        }
+        if (has_wildcard(spec)) {
+            if (GIT_ignore.is_path_glob_match(spec, bare)) {
+                return true;
+            }
+            continue;
+        }
+        if (bare == spec || bare.starts_with(spec + "/")) {
+            return true;
+        }
+        // a collapsed untracked directory is shown if the spec is inside it
+        if (path.ends_with("/") && spec.starts_with(path)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+// --- reading the repository -------------------------------------------------------
+
+str abbrev(str id) {
+    if (id.size() <= 7) {
+        return id;
+    }
+    return id.substr(0, 7);
+}
+
+// HEAD's tree entries, keyed by full path, with mode and id.
+Result<bool, GIT_status.Error> walk_head(str gitdir, str tree, str prefix, Map<str, HeadItem> out) {
+    match (GIT_object.read(gitdir, tree)) {
+        case Ok(GIT_object.Object object): {
+            match (object.body) {
+                case Tree(List<GIT_object.Entry> entries): {
+                    for (GIT_object.Entry entry in entries) {
+                        match (entry.name.utf8()) {
+                            case Some(str name): {
+                                str full = name;
+                                if (prefix != "") {
+                                    full = prefix + "/" + name;
+                                }
+                                if (entry.is_tree()) {
+                                    walk_head(gitdir, entry.id, full, out)?;
+                                } else {
+                                    out.set(full, HeadItem(entry.mode, entry.id));
+                                }
+                            }
+                            case None: {
+                            }
+                        }
+                    }
+                    return Result<bool, GIT_status.Error>.Ok(true);
+                }
+                case Blob: {
+                    return Result<bool, GIT_status.Error>.Err(GIT_status.Error.HeadNotCommit);
+                }
+                case Commit: {
+                    return Result<bool, GIT_status.Error>.Err(GIT_status.Error.HeadNotCommit);
+                }
+                case Tag: {
+                    return Result<bool, GIT_status.Error>.Err(GIT_status.Error.HeadNotCommit);
+                }
+            }
+        }
+        case Err(GIT_object.Error error): {
+            return Result<bool, GIT_status.Error>.Err(GIT_status.Error.Object(error));
+        }
+    }
+}
+
+Result<str, GIT_status.Error> tree_of(str gitdir, str commit) {
+    match (GIT_object.read(gitdir, commit)) {
+        case Ok(GIT_object.Object object): {
+            match (object.body) {
+                case Commit(GIT_object.Commit parsed): {
+                    return Result<str, GIT_status.Error>.Ok(parsed.tree);
+                }
+                case Blob: {
+                    return Result<str, GIT_status.Error>.Err(GIT_status.Error.HeadNotCommit);
+                }
+                case Tree: {
+                    return Result<str, GIT_status.Error>.Err(GIT_status.Error.HeadNotCommit);
+                }
+                case Tag: {
+                    return Result<str, GIT_status.Error>.Err(GIT_status.Error.HeadNotCommit);
+                }
+            }
+        }
+        case Err(GIT_object.Error error): {
+            return Result<str, GIT_status.Error>.Err(GIT_status.Error.Object(error));
+        }
+    }
+}
+
+bool is_regular_mode(int mode) {
+    return mode >> 12 == 0o10;
+}
+
+bool is_link_mode(int mode) {
+    return mode >> 12 == 0o12;
+}
+
+// git's `S_ISREG` / `S_ISLNK` / gitlink family of a mode, for "typechange".
+int type_of(int mode) {
+    return mode >> 12;
+}
+
+// Normalised mode, as the index records it: 100644, 100755, 120000, 160000.
+int canonical(int mode) {
+    int kind = mode >> 12;
+    if (kind == 0o10) {
+        if (mode & 0o111 != 0) {
+            return 0o100755;
+        }
+        return 0o100644;
+    }
+    return mode;
+}
+
+// --- rename detection -------------------------------------------------------------
+
+// git's `hash_chars` spans (diffcore-delta.c): the text is cut at newlines
+// or every 64 bytes, each span hashed, and a hash's weight is the bytes in
+// the spans that hash to it.
+Map<int, int> span_counts(bytes data) {
+    Map<int, int> counts = {};
+    bool is_text = true;
+    int limit = data.size();
+    if (limit > 8000) {
+        limit = 8000;
+    }
+    for (int i in 0 .. limit) {
+        if (data[i] == 0) {
+            is_text = false;
+        }
+    }
+    int accum1 = 0;
+    int accum2 = 0;
+    int length = 0;
+    int size = data.size();
+    for (int i in 0 .. size) {
+        int c = data[i];
+        if (is_text && c == 13 && i + 1 < size && data[i + 1] == 10) {
+            continue;
+        }
+        int old1 = accum1;
+        accum1 = ((accum1 << 7) ^ (accum2 >> 25)) & 0xffffffff;
+        accum2 = ((accum2 << 7) ^ (old1 >> 25)) & 0xffffffff;
+        accum1 = (accum1 + c) & 0xffffffff;
+        length = length + 1;
+        if (length < 64 && c != 10) {
+            continue;
+        }
+        int hashed = ((accum1 + accum2 * 0x61) & 0xffffffff) % 107927;
+        counts.set(hashed, counts.get(hashed).or(0) + length);
+        length = 0;
+        accum1 = 0;
+        accum2 = 0;
+    }
+    if (length > 0) {
+        int hashed = ((accum1 + accum2 * 0x61) & 0xffffffff) % 107927;
+        counts.set(hashed, counts.get(hashed).or(0) + length);
+    }
+    return counts;
+}
+
+// git's similarity of a deleted blob and an added one, 0 .. 60000, or 0 when
+// it cannot reach the 50% threshold.
+int similarity(Map<int, int> source, int source_size, Map<int, int> target, int target_size) {
+    int max_size = source_size;
+    int base_size = target_size;
+    if (target_size > source_size) {
+        max_size = target_size;
+        base_size = source_size;
+    }
+    if (max_size == 0 || base_size == 0) {
+        return 0;
+    }
+    int delta = max_size - base_size;
+    if (max_size * 30000 < delta * 60000) {
+        return 0;
+    }
+    int copied = 0;
+    for (int hashed in source.keys()) {
+        int mine = source.get(hashed).or(0);
+        int theirs = target.get(hashed).or(0);
+        if (theirs > 0) {
+            if (mine < theirs) {
+                copied = copied + mine;
+            } else {
+                copied = copied + theirs;
+            }
+        }
+    }
+    return copied * 60000 / max_size;
+}
+
+str basename(str path) {
+    match (path.index_of("/")) {
+        case Some(_): {
+            List<str> parts = path.split("/");
+            return parts[parts.size() - 1];
+        }
+        case None: {
+            return path;
+        }
+    }
+}
+
+bytes blob_of(str gitdir, str id) {
+    match (GIT_object.read(gitdir, id)) {
+        case Ok(GIT_object.Object object): {
+            return object.raw;
+        }
+        case Err: {
+            return [];
+        }
+    }
+}
+
+type Pair {
+    int score;
+    int dst;
+    int src;
+}
+
+int Pair.cmp(Pair other) {
+    if (score != other.score) {
+        return other.score - score;
+    }
+    if (dst != other.dst) {
+        return dst - other.dst;
+    }
+    return src - other.src;
+}
+
+// Pair the staged additions with the staged deletions the way git's
+// `diffcore_rename` does at the default 50%: identical objects first, then by
+// similarity, best score first, each side used once. Returns dst -> src and
+// dst -> score.
+void detect_renames(str gitdir, List<str> added, List<str> deleted, Map<str, HeadItem> head, Map<str, HeadItem> index, Map<str, str> source_of, Map<str, int> score_of) {
+    Map<str, bool> used_src = {};
+    Map<str, bool> used_dst = {};
+    for (str dst in added) {
+        HeadItem entry = index.get(dst).or(HeadItem(0, ""));
+        str best = "";
+        for (str src in deleted) {
+            if (used_src.contains(src)) {
+                continue;
+            }
+            HeadItem item = head.get(src).or(HeadItem(0, ""));
+            if (item.id == entry.id && type_of(item.mode) == type_of(entry.mode)) {
+                if (best == "") {
+                    best = src;
+                }
+                if (basename(src) == basename(dst)) {
+                    best = src;
+                    break;
+                }
+            }
+        }
+        if (best != "") {
+            source_of.set(dst, best);
+            score_of.set(dst, 60000);
+            used_src.set(best, true);
+            used_dst.set(dst, true);
+        }
+    }
+    List<str> rest_dst = [];
+    for (str dst in added) {
+        if (!used_dst.contains(dst)) {
+            rest_dst.push(dst);
+        }
+    }
+    List<str> rest_src = [];
+    for (str src in deleted) {
+        if (!used_src.contains(src)) {
+            rest_src.push(src);
+        }
+    }
+    if (rest_dst.size() == 0 || rest_src.size() == 0 || rest_dst.size() * rest_src.size() > 250000) {
+        return;
+    }
+    List<Map<int, int>> src_spans = [];
+    List<int> src_sizes = [];
+    for (str src in rest_src) {
+        bytes data = blob_of(gitdir, head.get(src).or(HeadItem(0, "")).id);
+        src_spans.push(span_counts(data));
+        src_sizes.push(data.size());
+    }
+    List<Pair> pairs = [];
+    for (int d in 0 .. rest_dst.size()) {
+        HeadItem entry = index.get(rest_dst[d]).or(HeadItem(0, ""));
+        bytes data = blob_of(gitdir, entry.id);
+        Map<int, int> spans = span_counts(data);
+        for (int s in 0 .. rest_src.size()) {
+            HeadItem item = head.get(rest_src[s]).or(HeadItem(0, ""));
+            if (type_of(item.mode) != type_of(entry.mode)) {
+                continue;
+            }
+            int score = similarity(src_spans[s], src_sizes[s], spans, data.size());
+            if (score >= 30000) {
+                pairs.push(Pair(score, d, s));
+            }
+        }
+    }
+    pairs.sort();
+    Map<int, bool> taken_src = {};
+    Map<int, bool> taken_dst = {};
+    for (Pair pair in pairs) {
+        if (taken_src.contains(pair.src) || taken_dst.contains(pair.dst)) {
+            continue;
+        }
+        taken_src.set(pair.src, true);
+        taken_dst.set(pair.dst, true);
+        source_of.set(rest_dst[pair.dst], rest_src[pair.src]);
+        score_of.set(rest_dst[pair.dst], pair.score);
+    }
+}
+
+// --- the status itself ------------------------------------------------------------
+
+// Everything the formats print.
+type Snapshot {
+    // sorted by path
+    List<Change> changes = [];
+    List<str> untracked = [];
+    List<str> ignored = [];
+    bool is_initial = false;
+    // "" a branch, "d" detached
+    bool is_detached = false;
+    str branch = "";
+    str head_id = "";
+    bool has_staged = false;
+    bool has_unstaged = false;
+    bool has_unmerged = false;
+    bool has_deleted_unstaged = false;
+    bool has_both_deleted = false;
+    bool has_del_mod = false;
+    bool has_not_deleted = false;
+    str detached_name = "";
+    bool is_detached_at = false;
+    bool is_upstream = false;
+    str upstream = "";
+    bool is_gone = false;
+    int ahead = 0;
+    int behind = 0;
+}
+
+str mode_text(int mode) {
+    if (mode == 0) {
+        return "000000";
+    }
+    str digits = "";
+    int rest = mode;
+    for (int i in 0 .. 6) {
+        digits = (rest & 7).to_str() + digits;
+        rest = rest >> 3;
+    }
+    return digits;
+}
+
+int worktree_mode(str path, str root, int fallback) {
+    str full = fs.join(root, path);
+    if (fs.is_link(full)) {
+        return 0o120000;
+    }
+    match (fs.stat(full)) {
+        case Ok(fs.Stat stat): {
+            if (stat.mode & 0o111 != 0) {
+                return 0o100755;
+            }
+            return 0o100644;
+        }
+        case Err(_): {
+            return fallback;
+        }
+    }
+}
+
+// The name git prints for a detached HEAD, from the HEAD reflog's latest
+// `checkout: moving from X to Y` (git's `wt_status_check_detached`).
+void detached_from(str gitdir, str head_id, Snapshot snap) {
+    match (GIT_reflog.read(gitdir, "HEAD")) {
+        case Ok(List<GIT_reflog.Entry> entries): {
+            int count = entries.size();
+            for (int i in 0 .. count) {
+                GIT_reflog.Entry entry = entries[count - 1 - i];
+                str prefix = "checkout: moving from ";
+                if (!entry.message.starts_with(prefix)) {
+                    continue;
+                }
+                str rest = entry.message.substr(prefix.size(), entry.message.size());
+                match (rest.index_of(" to ")) {
+                    case Some(int at): {
+                        str target = rest.substr(at + 4, rest.size());
+                        str noid = entry.new;
+                        str name = abbrev(noid);
+                        List<str> candidates = [target, "refs/" + target, "refs/tags/" + target, "refs/heads/" + target, "refs/remotes/" + target];
+                        for (str candidate in candidates) {
+                            if (candidate != "HEAD" && !candidate.starts_with("refs/")) {
+                                continue;
+                            }
+                            if (candidate != "HEAD" && !GIT_refs.has_ref(gitdir, candidate)) {
+                                continue;
+                            }
+                            match (GIT_refs.resolve(gitdir, candidate)) {
+                                case Ok(str found): {
+                                    if (found == noid) {
+                                        name = candidate;
+                                        if (name.starts_with("refs/tags/")) {
+                                            name = name.substr(10, name.size());
+                                        } else if (name.starts_with("refs/heads/")) {
+                                            name = name.substr(11, name.size());
+                                        } else if (name.starts_with("refs/remotes/")) {
+                                            name = name.substr(13, name.size());
+                                        } else if (name.starts_with("refs/")) {
+                                            name = name.substr(5, name.size());
+                                        }
+                                    }
+                                }
+                                case Err: {
+                                }
+                            }
+                            break;
+                        }
+                        snap.detached_name = name;
+                        snap.is_detached_at = noid == head_id;
+                        return;
+                    }
+                    case None: {
+                        return;
+                    }
+                }
+            }
+        }
+        case Err: {
+        }
+    }
+}
+
+// Untracked and ignored paths as git lists them: whole directories that hold
+// nothing tracked collapse to `dir/` (not with -uall), nested repositories
+// are always one `dir/`.
+List<str> collapse(List<str> paths, Map<str, bool> tracked_dirs, bool is_all, Map<str, bool> blocked) {
+    // Directories that are repositories of their own: shown as `dir/`, never
+    // looked into, whatever the mode.
+    Map<str, bool> repos = {};
+    for (str path in paths) {
+        List<str> parts = path.split("/");
+        str dir = "";
+        for (int i in 0 .. parts.size() - 1) {
+            if (parts[i + 1] == ".git") {
+                if (dir == "") {
+                    dir = parts[i];
+                } else {
+                    dir = dir + "/" + parts[i];
+                }
+                repos.set(dir, true);
+                break;
+            }
+            if (dir == "") {
+                dir = parts[i];
+            } else {
+                dir = dir + "/" + parts[i];
+            }
+        }
+    }
+    Map<str, bool> seen = {};
+    List<str> out = [];
+    for (str path in paths) {
+        str shown = path;
+        List<str> parts = path.split("/");
+        str dir = "";
+        for (int i in 0 .. parts.size() - 1) {
+            if (dir == "") {
+                dir = parts[i];
+            } else {
+                dir = dir + "/" + parts[i];
+            }
+            if (repos.contains(dir)) {
+                shown = dir + "/";
+                break;
+            }
+            if (!is_all && !tracked_dirs.contains(dir) && !blocked.contains(dir)) {
+                shown = dir + "/";
+                break;
+            }
+        }
+        if (!seen.contains(shown)) {
+            seen.set(shown, true);
+            out.push(shown);
+        }
+    }
+    out.sort();
+    return out;
+}
+
+// All the directories above every path of `paths`.
+void add_dirs(Map<str, bool> dirs, str path) {
+    List<str> parts = path.split("/");
+    str dir = "";
+    for (int i in 0 .. parts.size() - 1) {
+        if (dir == "") {
+            dir = parts[i];
+        } else {
+            dir = dir + "/" + parts[i];
+        }
+        dirs.set(dir, true);
+    }
+}
+
+// One tracked path's mode comparison with the working tree, which the
+// content comparison in `GIT_status` cannot see: an executable bit, a file
+// that became a symlink or the reverse.
+void mode_pass(str root, str path, GIT_index.Entry entry, bool is_filemode, Map<str, Change> by_path, Map<str, HeadItem> head) {
+    if (entry.is_gitlink()) {
+        return;
+    }
+    str full = fs.join(root, path);
+    bool is_link = fs.is_link(full);
+    if (!fs.is_present(full) && !is_link) {
+        return;
+    }
+    Change change = Change(path);
+    match (by_path.get(path)) {
+        case Some(Change known): {
+            change = known;
+        }
+        case None: {
+            HeadItem was = head.get(path).or(HeadItem(0, ""));
+            change.mode_head = was.mode;
+            change.mode_index = entry.mode;
+            change.id_head = was.id;
+            change.id_index = entry.id;
+        }
+    }
+    str y = change.y;
+    int mode_wt = entry.mode;
+    if (is_link && !entry.is_link()) {
+        y = "T";
+        mode_wt = 0o120000;
+    } else if (!is_link && entry.is_link()) {
+        if (fs.is_file(full)) {
+            y = "T";
+            mode_wt = worktree_mode(path, root, entry.mode);
+        }
+    } else if (!is_link && is_regular_mode(entry.mode)) {
+        mode_wt = worktree_mode(path, root, entry.mode);
+        if (is_filemode && canonical(mode_wt) != canonical(entry.mode) && y == " ") {
+            y = "M";
+        }
+        if (!is_filemode) {
+            mode_wt = entry.mode;
+        }
+    }
+    if (change.y == " " && y != " ") {
+        change.y = y;
+    }
+    if (change.y != " ") {
+        change.mode_wt = mode_wt;
+        by_path.set(path, change);
+    }
+}
+
+Result<Snapshot, GIT_status.Error> gather(str gitdir, str root, Opts opts, List<str> specs) {
+    Snapshot snap = Snapshot();
+    // --- HEAD
+    Map<str, HeadItem> head = {};
+    match (GIT_refs.head(gitdir)) {
+        case Ok(GIT_refs.Head state): {
+            match (state) {
+                case Unborn(str name): {
+                    snap.is_initial = true;
+                    snap.branch = name;
+                    if (snap.branch.starts_with("refs/heads/")) {
+                        snap.branch = snap.branch.substr(11, snap.branch.size());
+                    }
+                }
+                case Born(str name, str id): {
+                    snap.branch = name;
+                    if (snap.branch.starts_with("refs/heads/")) {
+                        snap.branch = snap.branch.substr(11, snap.branch.size());
+                    }
+                    snap.head_id = id;
+                    str tree = tree_of(gitdir, id)?;
+                    walk_head(gitdir, tree, "", head)?;
+                }
+                case Detached(str id): {
+                    snap.is_detached = true;
+                    snap.head_id = id;
+                    str tree = tree_of(gitdir, id)?;
+                    walk_head(gitdir, tree, "", head)?;
+                    detached_from(gitdir, id, snap);
+                }
+            }
+        }
+        case Err(GIT_refs.Error error): {
+            return Result<Snapshot, GIT_status.Error>.Err(GIT_status.Error.Refs(error));
+        }
+    }
+    // --- the library's view of the index and the working tree
+    GIT_status.Status lib = GIT_status.status(gitdir, root)?;
+    Map<str, HeadItem> staged_index = {};
+    Map<str, GIT_index.Entry> entries = {};
+    Map<str, bool> tracked_dirs = {};
+    match (GIT_index.read(gitdir)) {
+        case Ok(GIT_index.Index index): {
+            for (GIT_index.Entry entry in index.entries) {
+                match (entry.path.utf8()) {
+                    case Some(str path): {
+                        add_dirs(tracked_dirs, path);
+                        if (entry.stage == 0) {
+                            staged_index.set(path, HeadItem(entry.mode, entry.id));
+                            entries.set(path, entry);
+                        }
+                    }
+                    case None: {
+                    }
+                }
+            }
+        }
+        case Err: {
+        }
+    }
+    Map<str, Change> by_path = {};
+    // --- unmerged
+    Map<str, bool> conflicted = {};
+    for (GIT_status.Unmerged each in lib.unmerged) {
+        match (each.path.utf8()) {
+            case Some(str path): {
+                Change change = Change(path);
+                change.unmerged = each.kind.code();
+                change.mode_base = each.base_mode;
+                change.mode_ours = each.ours_mode;
+                change.mode_theirs = each.theirs_mode;
+                change.id_base = each.base_id;
+                change.id_ours = each.ours_id;
+                change.id_theirs = each.theirs_id;
+                change.mode_wt = worktree_mode(path, root, 0);
+                by_path.set(path, change);
+                conflicted.set(path, true);
+            }
+            case None: {
+            }
+        }
+    }
+    // --- staged: the index against HEAD, ids and modes
+    List<str> added = [];
+    List<str> deleted = [];
+    List<str> index_paths = staged_index.keys();
+    index_paths.sort();
+    for (str path in index_paths) {
+        HeadItem now = staged_index.get(path).or(HeadItem(0, ""));
+        match (head.get(path)) {
+            case Some(HeadItem was): {
+                if (was.id != now.id || canonical(was.mode) != canonical(now.mode)) {
+                    Change change = Change(path);
+                    change.mode_head = was.mode;
+                    change.mode_index = now.mode;
+                    change.id_head = was.id;
+                    change.id_index = now.id;
+                    change.x = "M";
+                    if (type_of(was.mode) != type_of(now.mode)) {
+                        change.x = "T";
+                    }
+                    by_path.set(path, change);
+                }
+            }
+            case None: {
+                if (!conflicted.contains(path)) {
+                    Change change = Change(path);
+                    change.mode_index = now.mode;
+                    change.id_index = now.id;
+                    change.x = "A";
+                    by_path.set(path, change);
+                    added.push(path);
+                }
+            }
+        }
+    }
+    List<str> head_paths = head.keys();
+    head_paths.sort();
+    for (str path in head_paths) {
+        if (!staged_index.contains(path) && !conflicted.contains(path)) {
+            HeadItem was = head.get(path).or(HeadItem(0, ""));
+            Change change = Change(path);
+            change.mode_head = was.mode;
+            change.id_head = was.id;
+            change.x = "D";
+            by_path.set(path, change);
+            deleted.push(path);
+        }
+    }
+    // --- renames
+    if (opts.is_renames && added.size() > 0 && deleted.size() > 0) {
+        Map<str, str> source_of = {};
+        Map<str, int> score_of = {};
+        List<str> in_added = [];
+        List<str> in_deleted = [];
+        for (str path in added) {
+            if (in_spec(specs, path)) {
+                in_added.push(path);
+            }
+        }
+        for (str path in deleted) {
+            if (in_spec(specs, path)) {
+                in_deleted.push(path);
+            }
+        }
+        detect_renames(gitdir, in_added, in_deleted, head, staged_index, source_of, score_of);
+        for (str dst in source_of.keys()) {
+            str src = source_of.get(dst).or("");
+            match (by_path.get(dst)) {
+                case Some(Change change): {
+                    HeadItem was = head.get(src).or(HeadItem(0, ""));
+                    change.x = "R";
+                    change.orig = src;
+                    change.id_head = was.id;
+                    change.mode_head = was.mode;
+                    change.score = score_of.get(dst).or(0) * 100 / 60000;
+                }
+                case None: {
+                }
+            }
+            by_path.remove(src);
+        }
+    }
+    // --- unstaged
+    for (GIT_status.Delta delta in lib.unstaged) {
+        match (delta.path.utf8()) {
+            case Some(str path): {
+                Change change = Change(path);
+                match (by_path.get(path)) {
+                    case Some(Change known): {
+                        change = known;
+                    }
+                    case None: {
+                        HeadItem now = staged_index.get(path).or(HeadItem(0, ""));
+                        HeadItem was = head.get(path).or(HeadItem(0, ""));
+                        change.mode_head = was.mode;
+                        change.mode_index = now.mode;
+                        change.id_head = was.id;
+                        change.id_index = now.id;
+                    }
+                }
+                match (delta.kind) {
+                    case Deleted: {
+                        change.y = "D";
+                        change.mode_wt = 0;
+                        snap.has_deleted_unstaged = true;
+                    }
+                    case Modified: {
+                        change.y = "M";
+                    }
+                    case Added: {
+                        change.y = "A";
+                    }
+                }
+                by_path.set(path, change);
+            }
+            case None: {
+            }
+        }
+    }
+    // mode changes and typechanges the content comparison cannot see
+    bool is_filemode = true;
+    Option<str> config_mode = Option<str>.None;
+    GIT_config.Config config = GIT_config.effective(gitdir);
+    config_mode = config_value(opts, config, "core", "filemode");
+    match (config_mode) {
+        case Some(str value): {
+            is_filemode = bool_value(value, true);
+        }
+        case None: {
+        }
+    }
+    for (str path in index_paths) {
+        match (entries.get(path)) {
+            case Some(GIT_index.Entry entry): {
+                mode_pass(root, path, entry, is_filemode, by_path, head);
+            }
+            case None: {
+            }
+        }
+    }
+    // --- the pathspec, and the facts the footer needs
+    List<str> keys = by_path.keys();
+    keys.sort();
+    for (str path in keys) {
+        Change change = by_path.get(path).or(Change(path));
+        if (!in_spec(specs, path) && !(change.orig != "" && in_spec(specs, change.orig))) {
+            continue;
+        }
+        snap.changes.push(change);
+        if (change.unmerged != "") {
+            snap.has_unmerged = true;
+            if (change.unmerged == "DD") {
+                snap.has_both_deleted = true;
+            } else if (change.unmerged == "UD" || change.unmerged == "DU") {
+                snap.has_del_mod = true;
+            } else {
+                snap.has_not_deleted = true;
+            }
+        }
+        if (change.unmerged == "") {
+            if (change.x != " ") {
+                snap.has_staged = true;
+            }
+            if (change.y != " ") {
+                snap.has_unstaged = true;
+            }
+        }
+    }
+    // --- untracked, ignored
+    if (opts.untracked > 0) {
+        List<str> raw = [];
+        for (bytes each in lib.untracked) {
+            match (each.utf8()) {
+                case Some(str path): {
+                    raw.push(path);
+                }
+                case None: {
+                }
+            }
+        }
+        Map<str, bool> blocked = {};
+        List<str> shown = collapse(raw, tracked_dirs, opts.untracked == 2, blocked);
+        for (str path in shown) {
+            if (in_spec(specs, path)) {
+                snap.untracked.push(path);
+            }
+        }
+    }
+    if (opts.ignored > 0) {
+        collect_ignored(gitdir, root, entries, tracked_dirs, snap, opts, specs);
+    }
+    // --- upstream
+    if (snap.branch != "" && !snap.is_detached && !snap.is_initial) {
+        match (GIT_branches.tracking(gitdir, snap.branch)) {
+            case Some(GIT_branches.Tracking found): {
+                snap.is_upstream = true;
+                snap.upstream = found.upstream;
+                snap.is_gone = found.is_gone;
+                snap.ahead = found.ahead;
+                snap.behind = found.behind;
+            }
+            case None: {
+            }
+        }
+    } else if (snap.is_initial) {
+        match (GIT_branches.tracking(gitdir, snap.branch)) {
+            case Some(GIT_branches.Tracking found): {
+                snap.is_upstream = true;
+                snap.upstream = found.upstream;
+                snap.is_gone = found.is_gone;
+            }
+            case None: {
+            }
+        }
+    }
+    return Result<Snapshot, GIT_status.Error>.Ok(snap);
+}
+
+// Ignored paths, collapsed to a directory when nothing in it is tracked or
+// untracked.
+void collect_ignored(str gitdir, str root, Map<str, GIT_index.Entry> entries, Map<str, bool> tracked_dirs, Snapshot snap, Opts opts, List<str> specs) {
+    match (GIT_ignore.load(gitdir, root)) {
+        case Ok(GIT_ignore.Ignore ignore): {
+            ignored_with(ignore, root, entries, tracked_dirs, snap, opts, specs);
+        }
+        case Err: {
+        }
+    }
+}
+
+void ignored_with(GIT_ignore.Ignore ignore, str root, Map<str, GIT_index.Entry> entries, Map<str, bool> tracked_dirs, Snapshot snap, Opts opts, List<str> specs) {
+    List<str> files = [];
+    Map<str, bool> blocked = {};
+    match (fs.walk(root)) {
+        case Ok(List<str> paths): {
+            str base = fs.join(root, "");
+            for (str path in paths) {
+                str relative = path;
+                if (path.starts_with(base)) {
+                    relative = path.substr(base.size(), path.size());
+                }
+                if (relative == ".git" || relative.starts_with(".git/")) {
+                    continue;
+                }
+                if (fs.is_directory(path) && !fs.is_link(path)) {
+                    continue;
+                }
+                if (entries.contains(relative)) {
+                    continue;
+                }
+                if (ignore.is_ignored(relative)) {
+                    files.push(relative);
+                } else {
+                    add_dirs(blocked, relative);
+                }
+            }
+        }
+        case Err: {
+            return;
+        }
+    }
+    List<str> shown = collapse(files, tracked_dirs, false, blocked);
+    for (str path in shown) {
+        if (in_spec(specs, path)) {
+            snap.ignored.push(path);
+        }
+    }
+}
+
+// --- the formats --------------------------------------------------------------------
+
+type Printer {
+    Opts opts;
+    Palette palette;
+    Snapshot snap;
+    str prefix;
+    GIT_config.Config config;
+    str gitdir;
+    str nul = "";
+}
+
+str Printer.shown(str path, bool is_relative, bool quote_space) {
+    str text = path;
+    if (is_relative) {
+        text = relative_to(path, prefix);
+    }
+    if (opts.is_nul) {
+        return text;
+    }
+    return quote(text, quote_space);
+}
+
+// What an interrupted operation has to say (git's `wt_longstatus_print_state`).
+str Printer.state_text() {
+    bool is_unmerged = snap.has_unmerged;
+    str out = "";
+    if (fs.is_file(fs.join(gitdir, "MERGE_HEAD"))) {
+        if (is_unmerged) {
+            out = out + "You have unmerged paths.\n  (fix conflicts and run \"git commit\")\n  (use \"git merge --abort\" to abort the merge)\n";
+        } else {
+            out = out + "All conflicts fixed but you are still merging.\n  (use \"git commit\" to conclude merge)\n";
+        }
+        return out + "\n";
+    }
+    str picked = one_line(fs.join(gitdir, "CHERRY_PICK_HEAD"));
+    if (picked != "") {
+        out = "You are currently cherry-picking commit " + abbrev(picked) + ".\n";
+        if (is_unmerged) {
+            out = out + "  (fix conflicts and run \"git cherry-pick --continue\")\n";
+        } else {
+            out = out + "  (all conflicts fixed: run \"git cherry-pick --continue\")\n";
+        }
+        out = out + "  (use \"git cherry-pick --skip\" to skip this patch)\n  (use \"git cherry-pick --abort\" to cancel the cherry-pick operation)\n";
+        return out + "\n";
+    }
+    str reverting = one_line(fs.join(gitdir, "REVERT_HEAD"));
+    if (reverting != "") {
+        out = "You are currently reverting commit " + abbrev(reverting) + ".\n";
+        if (is_unmerged) {
+            out = out + "  (fix conflicts and run \"git revert --continue\")\n";
+        } else {
+            out = out + "  (all conflicts fixed: run \"git revert --continue\")\n";
+        }
+        out = out + "  (use \"git revert --skip\" to skip this patch)\n  (use \"git revert --abort\" to cancel the revert operation)\n";
+        return out + "\n";
+    }
+    return "";
+}
+
+bool Printer.is_in_progress() {
+    // A revert is still "from commit" as far as the hints go (git's `whence`).
+    return fs.is_file(fs.join(gitdir, "MERGE_HEAD")) || fs.is_file(fs.join(gitdir, "CHERRY_PICK_HEAD"));
+}
+
+// The directory a rebase keeps its state in, or "".
+str Printer.rebase_dir() {
+    str merge_dir = fs.join(gitdir, "rebase-merge");
+    if (fs.is_directory(merge_dir)) {
+        return merge_dir;
+    }
+    str apply_dir = fs.join(gitdir, "rebase-apply");
+    if (fs.is_directory(apply_dir) && fs.is_file(fs.join(apply_dir, "rebasing"))) {
+        return apply_dir;
+    }
+    return "";
+}
+
+bool Printer.is_rebasing() {
+    return rebase_dir() != "";
+}
+
+// "interactive rebase in progress; onto abc1234" and the progress lines
+// (`show_rebase_information`), then the "currently rebasing" hints.
+str Printer.rebase_text() {
+    str dir = rebase_dir();
+    if (dir == "") {
+        return "";
+    }
+    str out = "";
+    bool is_interactive = fs.is_file(fs.join(dir, "interactive"));
+    if (is_interactive) {
+        List<str> done = todo_lines(fs.join(dir, "done"));
+        List<str> todo = todo_lines(fs.join(dir, "git-rebase-todo"));
+        if (done.size() == 0) {
+            out = out + "No commands done.\n";
+        } else {
+            if (done.size() == 1) {
+                out = out + "Last command done (1 command done):\n";
+            } else {
+                out = out + "Last commands done (" + done.size().to_str() + " commands done):\n";
+            }
+            int from = 0;
+            if (done.size() > 2) {
+                from = done.size() - 2;
+            }
+            for (int i in from .. done.size()) {
+                out = out + "   " + done[i] + "\n";
+            }
+            if (done.size() > 2) {
+                out = out + "  (see more in file " + fs.join(gitdir, "rebase-merge/done") + ")\n";
+            }
+        }
+        if (todo.size() == 0) {
+            out = out + "No commands remaining.\n";
+        } else {
+            if (todo.size() == 1) {
+                out = out + "Next command to do (1 remaining command):\n";
+            } else {
+                out = out + "Next commands to do (" + todo.size().to_str() + " remaining commands):\n";
+            }
+            int upto = todo.size();
+            if (upto > 2) {
+                upto = 2;
+            }
+            for (int i in 0 .. upto) {
+                out = out + "   " + todo[i] + "\n";
+            }
+            if (todo.size() > 2) {
+                out = out + "  (see more in file " + fs.join(gitdir, "rebase-merge/git-rebase-todo") + ")\n";
+            }
+            out = out + "  (use \"git rebase --edit-todo\" to view and edit)\n";
+        }
+    }
+    str branch = one_line(fs.join(dir, "head-name"));
+    if (branch.starts_with("refs/heads/")) {
+        branch = branch.substr(11, branch.size());
+    }
+    if (branch == "detached HEAD") {
+        branch = "";
+    }
+    str onto = abbrev(one_line(fs.join(dir, "onto")));
+    if (branch != "") {
+        out = out + "You are currently rebasing branch '" + branch + "' on '" + onto + "'.\n";
+    } else {
+        out = out + "You are currently rebasing.\n";
+    }
+    if (snap.has_unmerged) {
+        out = out + "  (fix conflicts and then run \"git rebase --continue\")\n  (use \"git rebase --skip\" to skip this patch)\n  (use \"git rebase --abort\" to check out the original branch)\n";
+    } else {
+        out = out + "  (all conflicts fixed: run \"git rebase --continue\")\n";
+    }
+    return out + "\n";
+}
+
+str Printer.tracking_text() {
+    if (!snap.is_upstream || snap.is_detached || snap.is_initial) {
+        return "";
+    }
+    str name = snap.upstream;
+    if (snap.is_gone) {
+        return "Your branch is based on '" + name + "', but the upstream is gone.\n  (use \"git branch --unset-upstream\" to fixup)\n\n";
+    }
+    if (!opts.is_ahead_behind) {
+        return "Your branch and '" + name + "' refer to different commits.\n  (use \"git status --ahead-behind\" for details)\n\n";
+    }
+    if (snap.ahead == 0 && snap.behind == 0) {
+        return "Your branch is up to date with '" + name + "'.\n\n";
+    }
+    if (snap.behind == 0) {
+        return "Your branch is ahead of '" + name + "' by " + plural(snap.ahead, "commit", "commits") + ".\n  (use \"git push\" to publish your local commits)\n\n";
+    }
+    if (snap.ahead == 0) {
+        return "Your branch is behind '" + name + "' by " + plural(snap.behind, "commit", "commits") + ", and can be fast-forwarded.\n  (use \"git pull\" to update your local branch)\n\n";
+    }
+    return "Your branch and '" + name + "' have diverged,\nand have " + snap.ahead.to_str() + " and " + snap.behind.to_str() + " different commits each, respectively.\n  (use \"git pull\" if you want to integrate the remote branch with yours)\n\n";
+}
+
+str Printer.long_text() {
+    Palette p = palette;
+    str out = "";
+    str rebase_dir_now = rebase_dir();
+    if (rebase_dir_now != "") {
+        str kind = "rebase in progress; onto ";
+        if (fs.is_file(fs.join(rebase_dir_now, "interactive"))) {
+            kind = "interactive rebase in progress; onto ";
+        }
+        out = out + paint(p, p.nobranch, kind) + paint(p, p.nobranch, abbrev(one_line(fs.join(rebase_dir_now, "onto")))) + "\n";
+    } else if (snap.is_detached) {
+        if (snap.detached_name == "") {
+            out = out + paint(p, p.nobranch, "Not currently on any branch.") + "\n";
+        } else if (snap.is_detached_at) {
+            out = out + paint(p, p.nobranch, "HEAD detached at ") + paint(p, p.nobranch, snap.detached_name) + "\n";
+        } else {
+            out = out + paint(p, p.nobranch, "HEAD detached from ") + paint(p, p.nobranch, snap.detached_name) + "\n";
+        }
+    } else {
+        out = out + paint(p, p.header, "On branch ") + paint(p, p.onbranch, snap.branch) + "\n";
+        out = out + tracking_text();
+    }
+    out = out + state_text() + rebase_text();
+    if (snap.is_initial) {
+        out = out + "\nNo commits yet\n\n";
+    }
+    bool is_commit = !is_in_progress();
+    // staged
+    List<Change> staged = [];
+    List<Change> unstaged = [];
+    List<Change> unmerged = [];
+    for (Change change in snap.changes) {
+        if (change.unmerged != "") {
+            unmerged.push(change);
+            continue;
+        }
+        if (change.x != " ") {
+            staged.push(change);
+        }
+        if (change.y != " ") {
+            unstaged.push(change);
+        }
+    }
+    if (staged.size() > 0) {
+        out = out + "Changes to be committed:\n";
+        if (is_commit && snap.is_initial) {
+            out = out + "  (use \"git rm --cached <file>...\" to unstage)\n";
+        } else if (is_commit) {
+            out = out + "  (use \"git restore --staged <file>...\" to unstage)\n";
+        }
+        for (Change change in staged) {
+            str body = padded(label_staged(change.x), 12);
+            str name = shown(change.path, true, false);
+            if (change.x == "R") {
+                name = shown(change.orig, true, false) + " -> " + name;
+            }
+            out = out + paint(p, p.header, "\t") + paint(p, p.updated, body + name) + "\n";
+        }
+        out = out + "\n";
+    }
+    if (unmerged.size() > 0) {
+        out = out + "Unmerged paths:\n";
+        if (is_commit && snap.is_initial) {
+            out = out + "  (use \"git rm --cached <file>...\" to unstage)\n";
+        } else if (is_commit) {
+            out = out + "  (use \"git restore --staged <file>...\" to unstage)\n";
+        }
+        if (!snap.has_both_deleted) {
+            if (!snap.has_del_mod) {
+                out = out + "  (use \"git add <file>...\" to mark resolution)\n";
+            } else {
+                out = out + "  (use \"git add/rm <file>...\" as appropriate to mark resolution)\n";
+            }
+        } else if (!snap.has_del_mod && !snap.has_not_deleted) {
+            out = out + "  (use \"git rm <file>...\" as appropriate to mark resolution)\n";
+        } else {
+            out = out + "  (use \"git add/rm <file>...\" as appropriate to mark resolution)\n";
+        }
+        for (Change change in unmerged) {
+            str body = padded(label_unmerged(change.unmerged), 17);
+            out = out + paint(p, p.header, "\t") + paint(p, p.unmerged, body + shown(change.path, true, false)) + "\n";
+        }
+        out = out + "\n";
+    }
+    if (unstaged.size() > 0) {
+        bool has_deleted = false;
+        for (Change change in unstaged) {
+            if (change.y == "D") {
+                has_deleted = true;
+            }
+        }
+        out = out + "Changes not staged for commit:\n";
+        if (has_deleted) {
+            out = out + "  (use \"git add/rm <file>...\" to update what will be committed)\n";
+        } else {
+            out = out + "  (use \"git add <file>...\" to update what will be committed)\n";
+        }
+        out = out + "  (use \"git restore <file>...\" to discard changes in working directory)\n";
+        for (Change change in unstaged) {
+            str body = padded(label_staged(change.y), 12);
+            out = out + paint(p, p.header, "\t") + paint(p, p.changed, body + shown(change.path, true, false)) + "\n";
+        }
+        out = out + "\n";
+    }
+    if (opts.untracked > 0) {
+        if (snap.untracked.size() > 0) {
+            out = out + "Untracked files:\n  (use \"git add <file>...\" to include in what will be committed)\n";
+            for (str path in snap.untracked) {
+                out = out + paint(p, p.header, "\t") + paint(p, p.untracked, shown(path, true, false)) + "\n";
+            }
+            out = out + "\n";
+        }
+        if (opts.ignored > 0 && snap.ignored.size() > 0) {
+            out = out + "Ignored files:\n  (use \"git add -f <file>...\" to include in what will be committed)\n";
+            for (str path in snap.ignored) {
+                out = out + paint(p, p.header, "\t") + paint(p, p.untracked, shown(path, true, false)) + "\n";
+            }
+            out = out + "\n";
+        }
+    } else if (snap.has_staged || (fs.is_file(fs.join(gitdir, "MERGE_HEAD")) && !snap.has_unmerged)) {
+        out = out + "Untracked files not listed (use -u option to show untracked files)\n";
+    }
+    bool is_committable = snap.has_staged || (fs.is_file(fs.join(gitdir, "MERGE_HEAD")) && !snap.has_unmerged);
+    if (!is_committable) {
+        bool is_dirty = snap.has_unstaged || snap.has_unmerged;
+        if (is_dirty) {
+            out = out + "no changes added to commit (use \"git add\" and/or \"git commit -a\")\n";
+        } else if (snap.untracked.size() > 0) {
+            out = out + "nothing added to commit but untracked files present (use \"git add\" to track)\n";
+        } else if (snap.is_initial) {
+            out = out + "nothing to commit (create/copy files and use \"git add\" to track)\n";
+        } else if (opts.untracked == 0) {
+            out = out + "nothing to commit (use -u to show untracked files)\n";
+        } else {
+            out = out + "nothing to commit, working tree clean\n";
+        }
+    }
+    if (opts.is_stash) {
+        int count = stash_count();
+        if (count > 0) {
+            out = out + "Your stash currently has " + plural(count, "entry", "entries") + "\n";
+        }
+    }
+    return out;
+}
+
+int Printer.stash_count() {
+    match (GIT_reflog.read(GIT_repository.common(gitdir), "refs/stash")) {
+        case Ok(List<GIT_reflog.Entry> entries): {
+            return entries.size();
+        }
+        case Err: {
+            return 0;
+        }
+    }
+}
+
+str Printer.branch_line() {
+    Palette p = palette;
+    str out = paint(p, p.header, "## ");
+    if (snap.is_detached) {
+        out = out + paint(p, p.nobranch, "HEAD (no branch)");
+        return out;
+    }
+    if (snap.is_initial) {
+        out = out + paint(p, p.header, "No commits yet on ") + paint(p, p.local, snap.branch);
+    } else {
+        out = out + paint(p, p.local, snap.branch);
+    }
+    if (!snap.is_upstream) {
+        return out;
+    }
+    out = out + paint(p, p.header, "...") + paint(p, p.remote, snap.upstream);
+    if (snap.is_initial) {
+        return out;
+    }
+    if (snap.is_gone) {
+        out = out + paint(p, p.header, " [") + paint(p, p.header, "gone") + paint(p, p.header, "]");
+        return out;
+    }
+    if (opts.is_ahead_behind && (snap.ahead > 0 || snap.behind > 0)) {
+        out = out + paint(p, p.header, " [");
+        if (snap.ahead > 0) {
+            out = out + paint(p, p.header, "ahead ") + paint(p, p.local, snap.ahead.to_str());
+        }
+        if (snap.ahead > 0 && snap.behind > 0) {
+            out = out + paint(p, p.header, ", ");
+        }
+        if (snap.behind > 0) {
+            out = out + paint(p, p.header, "behind ") + paint(p, p.remote, snap.behind.to_str());
+        }
+        out = out + paint(p, p.header, "]");
+    }
+    return out;
+}
+
+str Printer.short_text(bool is_porcelain) {
+    Palette p = palette;
+    str end = "\n";
+    if (opts.is_nul) {
+        end = "\x00";
+    }
+    str out = "";
+    bool is_relative = !is_porcelain;
+    if (opts.is_branch) {
+        out = out + branch_line() + end;
+    }
+    for (Change change in snap.changes) {
+        if (change.unmerged != "") {
+            out = out + paint(p, p.unmerged, change.unmerged) + " " + shown(change.path, is_relative, true) + end;
+            continue;
+        }
+        str x = " ";
+        str y = " ";
+        if (change.x != " ") {
+            x = paint(p, p.updated, change.x);
+        }
+        if (change.y != " ") {
+            y = paint(p, p.changed, change.y);
+        }
+        if (opts.is_nul) {
+            out = out + x + y + " " + change.path + end;
+            if (change.orig != "") {
+                out = out + change.orig + end;
+            }
+        } else if (change.orig != "") {
+            out = out + x + y + " " + shown(change.orig, is_relative, true) + " -> " + shown(change.path, is_relative, true) + end;
+        } else {
+            out = out + x + y + " " + shown(change.path, is_relative, true) + end;
+        }
+    }
+    for (str path in snap.untracked) {
+        if (opts.is_nul) {
+            out = out + "?? " + path + end;
+        } else {
+            out = out + paint(p, p.untracked, "??") + " " + shown(path, is_relative, true) + end;
+        }
+    }
+    if (opts.ignored > 0) {
+        for (str path in snap.ignored) {
+            if (opts.is_nul) {
+                out = out + "!! " + path + end;
+            } else {
+                out = out + paint(p, p.untracked, "!!") + " " + shown(path, is_relative, true) + end;
+            }
+        }
+    }
+    return out;
+}
+
+str Printer.v2_text() {
+    str end = "\n";
+    str tab = "\t";
+    if (opts.is_nul) {
+        end = "\x00";
+        tab = "\x00";
+    }
+    str zero = GIT_reflog.zero(gitdir);
+    str out = "";
+    if (opts.is_branch) {
+        if (snap.is_initial) {
+            out = out + "# branch.oid (initial)" + end;
+        } else {
+            out = out + "# branch.oid " + snap.head_id + end;
+        }
+        if (snap.is_detached) {
+            out = out + "# branch.head (detached)" + end;
+        } else {
+            out = out + "# branch.head " + snap.branch + end;
+        }
+        if (snap.is_upstream) {
+            out = out + "# branch.upstream " + snap.upstream + end;
+            if (!snap.is_gone && !snap.is_initial && opts.is_ahead_behind) {
+                out = out + "# branch.ab +" + snap.ahead.to_str() + " -" + snap.behind.to_str() + end;
+            }
+        }
+    }
+    if (opts.is_stash) {
+        int count = stash_count();
+        if (count > 0) {
+            out = out + "# stash " + count.to_str() + end;
+        }
+    }
+    for (Change change in snap.changes) {
+        str path = shown(change.path, false, false);
+        if (change.unmerged != "") {
+            out = out + "u " + change.unmerged + " N... " + mode_text(change.mode_base) + " " + mode_text(change.mode_ours) + " " + mode_text(change.mode_theirs) + " " + mode_text(change.mode_wt) + " ";
+            out = out + id_or_zero(change.id_base, zero) + " " + id_or_zero(change.id_ours, zero) + " " + id_or_zero(change.id_theirs, zero) + " " + path + end;
+            continue;
+        }
+        str xy = dotted(change.x) + dotted(change.y);
+        int mode_wt = change.mode_wt;
+        if (change.y == " ") {
+            mode_wt = change.mode_index;
+        }
+        str head_part = mode_text(change.mode_head) + " " + mode_text(change.mode_index) + " " + mode_text(mode_wt) + " " + id_or_zero(change.id_head, zero) + " " + id_or_zero(change.id_index, zero);
+        if (change.orig != "") {
+            str score = change.score.to_str();
+            out = out + "2 " + xy + " N... " + head_part + " R" + score + " " + path + tab + shown(change.orig, false, false) + end;
+        } else {
+            out = out + "1 " + xy + " N... " + head_part + " " + path + end;
+        }
+    }
+    for (str path in snap.untracked) {
+        out = out + "? " + shown(path, false, false) + end;
+    }
+    if (opts.ignored > 0) {
+        for (str path in snap.ignored) {
+            out = out + "! " + shown(path, false, false) + end;
+        }
+    }
+    return out;
+}
+
+str label_staged(str letter) {
+    if (letter == "A") {
+        return "new file:";
+    }
+    if (letter == "M") {
+        return "modified:";
+    }
+    if (letter == "D") {
+        return "deleted:";
+    }
+    if (letter == "R") {
+        return "renamed:";
+    }
+    if (letter == "T") {
+        return "typechange:";
+    }
+    return "unknown:";
+}
+
+str label_unmerged(str code) {
+    if (code == "DD") {
+        return "both deleted:";
+    }
+    if (code == "AU") {
+        return "added by us:";
+    }
+    if (code == "UD") {
+        return "deleted by them:";
+    }
+    if (code == "UA") {
+        return "added by them:";
+    }
+    if (code == "DU") {
+        return "deleted by us:";
+    }
+    if (code == "AA") {
+        return "both added:";
+    }
+    return "both modified:";
+}
+
+str padded(str label, int width) {
+    str out = label;
+    while (out.size() < width) {
+        out = out + " ";
+    }
+    return out;
+}
+
+str plural(int n, str one, str many) {
+    if (n == 1) {
+        return n.to_str() + " " + one;
+    }
+    return n.to_str() + " " + many;
+}
+
+// --- long
+
+str one_line(str path) {
+    if (!fs.is_file(path)) {
+        return "";
+    }
+    match (io.read(path)) {
+        case Ok(str body): {
+            return body.trim();
+        }
+        case Err: {
+            return "";
+        }
+    }
+}
+
+// The lines of a rebase todo file git shows: comments and blanks dropped.
+List<str> todo_lines(str path) {
+    List<str> out = [];
+    if (!fs.is_file(path)) {
+        return out;
+    }
+    match (io.read(path)) {
+        case Ok(str body): {
+            for (str line in body.split("\n")) {
+                str trimmed = line.trim();
+                if (trimmed == "" || trimmed.starts_with("#")) {
+                    continue;
+                }
+                out.push(abbreviate_todo(trimmed));
+            }
+        }
+        case Err: {
+        }
+    }
+    return out;
+}
+
+// `pick <40 hex> subject` as git shows it: the object name abbreviated.
+str abbreviate_todo(str line) {
+    List<str> words = line.split(" ");
+    if (words.size() >= 2 && (words[1].size() == 40 || words[1].size() == 64)) {
+        bool is_hex = true;
+        for (int c in words[1].to_bytes()) {
+            if (hex_digit(c) < 0) {
+                is_hex = false;
+            }
+        }
+        if (is_hex) {
+            words[1] = abbrev(words[1]);
+            return words.join(" ");
+        }
+    }
+    return line;
+}
+
+// --- short and porcelain v1
+
+// --- porcelain v2
+
+str dotted(str letter) {
+    if (letter == " ") {
+        return ".";
+    }
+    return letter;
+}
+
+str id_or_zero(str id, str zero) {
+    if (id == "") {
+        return zero;
+    }
+    return id;
+}
+
+// --- the command --------------------------------------------------------------------
+
+void say_error(str message) {
+    io.eprint(message);
+}
+
+void put(str text) {
+    io.File out = io.stdout();
+    match (out.write(text.to_bytes())) {
+        case Ok: {
+        }
+        case Err: {
+            os.exit(0);
+        }
+    }
+}
+
+str usage_text() {
+    return "usage: git status [<options>] [--] [<pathspec>...]\n\n    -v, --verbose         be verbose\n    -s, --short           show status concisely\n    -b, --branch          show branch information\n    --show-stash          show stash information\n    --ahead-behind        compute full ahead/behind values\n    --porcelain[=<version>]\n                          machine-readable output\n    --long                show status in long format (default)\n    -z, --null            terminate entries with NUL\n    -u, --untracked-files[=<mode>]\n                          show untracked files, optional modes: all, normal, no. (Default: all)\n    --ignored[=<mode>]    show ignored files, optional modes: traditional, matching, no. (Default: traditional)\n    --renames             detect renames\n    -M, --find-renames[=<n>]\n                          detect renames, optionally set similarity index\n";
+}
+
+int bad_switch(str what) {
+    say_error("error: " + what);
+    io.eprint(usage_text());
+    return 129;
+}
+
+// Parse the arguments after `status`; returns 0, or the exit status to quit with.
+int parse_args(Opts opts, List<str> argv) {
+    bool is_done = false;
+    int i = 0;
+    while (i < argv.size()) {
+        str arg = argv[i];
+        i = i + 1;
+        if (is_done || arg == "" || !arg.starts_with("-") || arg == "-") {
+            opts.paths.push(arg);
+            continue;
+        }
+        if (arg == "--") {
+            is_done = true;
+            continue;
+        }
+        if (arg.starts_with("--")) {
+            str name = arg;
+            str value = "";
+            bool has_value = false;
+            match (arg.index_of("=")) {
+                case Some(int at): {
+                    name = arg.substr(0, at);
+                    value = arg.substr(at + 1, arg.size());
+                    has_value = true;
+                }
+                case None: {
+                }
+            }
+            if (name == "--short") {
+                opts.format = 1;
+                opts.is_format_set = true;
+            } else if (name == "--long") {
+                opts.format = 0;
+                opts.is_format_set = true;
+            } else if (name == "--branch") {
+                opts.is_branch = true;
+                opts.is_branch_set = true;
+            } else if (name == "--no-branch") {
+                opts.is_branch = false;
+                opts.is_branch_set = true;
+            } else if (name == "--porcelain") {
+                if (!has_value || value == "v1" || value == "1") {
+                    opts.format = 2;
+                } else if (value == "v2" || value == "2") {
+                    opts.format = 3;
+                } else {
+                    say_error("fatal: unsupported porcelain version '" + value + "'");
+                    return 128;
+                }
+                opts.is_format_set = true;
+            } else if (name == "--null") {
+                opts.is_nul = true;
+            } else if (name == "--untracked-files") {
+                if (!set_untracked(opts, value)) {
+                    say_error("fatal: Invalid untracked files mode '" + value + "'");
+                    return 128;
+                }
+            } else if (name == "--ignored") {
+                if (!has_value || value == "traditional") {
+                    opts.ignored = 1;
+                } else if (value == "matching") {
+                    opts.ignored = 2;
+                } else if (value == "no") {
+                    opts.ignored = 0;
+                } else {
+                    say_error("fatal: Invalid ignored mode '" + value + "'");
+                    return 128;
+                }
+            } else if (name == "--renames" || name == "--find-renames") {
+                opts.is_renames = true;
+            } else if (name == "--no-renames") {
+                opts.is_renames = false;
+            } else if (name == "--ahead-behind") {
+                opts.is_ahead_behind = true;
+            } else if (name == "--no-ahead-behind") {
+                opts.is_ahead_behind = false;
+            } else if (name == "--show-stash") {
+                opts.is_stash = true;
+                opts.is_stash_set = true;
+            } else if (name == "--color") {
+                if (!has_value) {
+                    opts.color = "always";
+                } else {
+                    opts.color = color_mode(value);
+                }
+            } else if (name == "--no-color") {
+                opts.color = "never";
+            } else if (name == "--no-column" || name == "--column" || name == "--no-verbose") {
+            } else if (name == "--help") {
+                io.eprint(usage_text());
+                return 129;
+            } else {
+                return bad_switch("unknown option `" + arg.substr(2, arg.size()) + "'");
+            }
+            continue;
+        }
+        // a bundle of short switches: -sb, -sbz, -uall
+        int at = 1;
+        while (at < arg.size()) {
+            int c = arg.byte_at(at);
+            at = at + 1;
+            if (c == 's') {
+                opts.format = 1;
+                opts.is_format_set = true;
+            } else if (c == 'b') {
+                opts.is_branch = true;
+                opts.is_branch_set = true;
+            } else if (c == 'z') {
+                opts.is_nul = true;
+            } else if (c == 'M') {
+                opts.is_renames = true;
+            } else if (c == 'v') {
+                say_error("fatal: status -v is not supported by this client");
+                return 128;
+            } else if (c == 'u') {
+                str value = arg.substr(at, arg.size());
+                at = arg.size();
+                if (!set_untracked(opts, value)) {
+                    say_error("fatal: Invalid untracked files mode '" + value + "'");
+                    return 128;
+                }
+            } else {
+                return bad_switch("unknown switch `" + str.from_chars([c]) + "'");
+            }
+        }
+    }
+    return 0;
+}
+
+bool set_untracked(Opts opts, str value) {
+    opts.is_untracked_set = true;
+    if (value == "" || value == "all") {
+        opts.untracked = 2;
+        return true;
+    }
+    if (value == "normal") {
+        opts.untracked = 1;
+        return true;
+    }
+    if (value == "no") {
+        opts.untracked = 0;
+        return true;
+    }
+    return false;
+}
+
+/// `dir` as given to `-C`, resolved against the directory `base`.
+pub str resolve_dir(str base, str dir) {
+    if (dir.starts_with("/")) {
+        return normalize(dir);
+    }
+    return normalize(base + "/" + dir);
+}
+
+// The repository root above `start` (absolute), or "".
+str find_root(str start) {
+    str current = start;
+    for (int i in 0 .. 256) {
+        str inner = fs.join(current, ".git");
+        if (fs.is_directory(inner) || fs.is_file(inner)) {
+            return current;
+        }
+        if (current == "/" || current == "" || current == ".") {
+            return "";
+        }
+        match (current.index_of("/")) {
+            case Some(_): {
+                List<str> parts = current.split("/");
+                parts.pop();
+                current = parts.join("/");
+                if (current == "") {
+                    current = "/";
+                }
+            }
+            case None: {
+                return "";
+            }
+        }
+    }
+    return "";
+}
+
+/// `git status`. `start` is the directory the command runs in (already
+/// absolute and normalised), `overrides` the `-c name=value` pairs, `argv`
+/// what followed the word `status`. Returns the process exit status.
+pub int run(str start, List<str> overrides, List<str> argv) {
+    Opts opts = Opts();
+    opts.overrides = overrides;
+    int parsed = parse_args(opts, argv);
+    if (parsed != 0) {
+        return parsed;
+    }
+    str root = find_root(start);
+    if (root == "") {
+        say_error("fatal: not a git repository (or any of the parent directories): .git");
+        return 128;
+    }
+    str gitdir = GIT_repository.find(root);
+    if (gitdir == "") {
+        say_error("fatal: not a git repository (or any of the parent directories): .git");
+        return 128;
+    }
+    GIT_config.Config config = GIT_config.effective(gitdir);
+    // The directory relative to the root, for `../` in the paths.
+    str prefix = "";
+    if (start != root) {
+        if (root == "/") {
+            prefix = start.substr(1, start.size());
+        } else if (start.starts_with(root + "/")) {
+            prefix = start.substr(root.size() + 1, start.size());
+        }
+    }
+    // configuration that picks the format and the options
+    if (!opts.is_format_set && !opts.is_nul) {
+        match (config_value(opts, config, "status", "short")) {
+            case Some(str value): {
+                if (bool_value(value, false)) {
+                    opts.format = 1;
+                }
+            }
+            case None: {
+            }
+        }
+    }
+    if (!opts.is_branch_set) {
+        match (config_value(opts, config, "status", "branch")) {
+            case Some(str value): {
+                opts.is_branch = bool_value(value, false);
+            }
+            case None: {
+            }
+        }
+    }
+    if (!opts.is_untracked_set) {
+        match (config_value(opts, config, "status", "showuntrackedfiles")) {
+            case Some(str value): {
+                if (!set_untracked(opts, value)) {
+                    opts.untracked = 1;
+                }
+                opts.is_untracked_set = false;
+            }
+            case None: {
+            }
+        }
+    }
+    if (!opts.is_stash_set) {
+        match (config_value(opts, config, "status", "showstash")) {
+            case Some(str value): {
+                opts.is_stash = bool_value(value, false);
+            }
+            case None: {
+            }
+        }
+    }
+    match (config_value(opts, config, "status", "renames")) {
+        case Some(str value): {
+            opts.is_renames = bool_value(value, true);
+        }
+        case None: {
+            match (config_value(opts, config, "diff", "renames")) {
+                case Some(str value): {
+                    if (value.to_lower() != "copy" && value.to_lower() != "copies") {
+                        opts.is_renames = bool_value(value, true);
+                    }
+                }
+                case None: {
+                }
+            }
+        }
+    }
+    match (config_value(opts, config, "status", "aheadbehind")) {
+        case Some(str value): {
+            opts.is_ahead_behind = bool_value(value, true);
+        }
+        case None: {
+        }
+    }
+    // -z alone is the porcelain format; a format given wins
+    int format = opts.format;
+    if (opts.is_nul && !opts.is_format_set) {
+        format = 2;
+    }
+    // pathspecs are relative to where the command runs
+    List<str> specs = [];
+    for (str arg in opts.paths) {
+        str joined = arg;
+        if (prefix != "") {
+            joined = prefix + "/" + arg;
+        }
+        specs.push(normalize(joined));
+    }
+    match (gather(gitdir, root, opts, specs)) {
+        case Ok(Snapshot snap): {
+            Palette palette = Palette();
+            if (format < 2) {
+                palette = build_palette(opts, config);
+            }
+            Printer printer = Printer(opts, palette, snap, prefix, config, gitdir);
+            if (format == 0) {
+                put(printer.long_text());
+            } else if (format == 1) {
+                put(printer.short_text(false));
+            } else if (format == 2) {
+                put(printer.short_text(true));
+            } else {
+                put(printer.v2_text());
+            }
+            return 0;
+        }
+        case Err(GIT_status.Error error): {
+            say_error("fatal: " + error.to_str());
+            return 128;
+        }
+    }
+}

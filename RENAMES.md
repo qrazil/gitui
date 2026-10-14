@@ -1,3 +1,16 @@
+# gitui 0.11.0: `1git status` in git's spelling
+
+Version 0.11.0, from master 1e4e669 (0.10.0). No module was renamed or
+removed; one module was added, `core/GIT_gitstatus.m31` (git's `status`:
+long, `--short`, `--porcelain[=v2]`, `-z`, `-b`, `-u<mode>`, `--ignored`,
+pathspecs, colour). `1git` now reads git's own grammar when its first word
+(after any `-C <dir>`, `-c name=value`, `--no-pager`) is a git subcommand:
+`1git status`, not `1git -status`. The existing `-log`-style commands
+(`-cat-file`, `-ls-tree`, `-log`, `-rev-parse`, `-refs`, `--git-dir`) are
+unchanged. `scripts/compare_status.sh` runs real `git status` beside `1git
+status` on disposable fixtures and compares the bytes; `tests/test.sh` runs
+it. Nothing to migrate.
+
 # gitui 0.10.0: `mgit` and `1git`
 
 Version 0.10.0, from master 35e6d98 (0.9.0). The interactive client's binary

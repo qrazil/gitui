@@ -4,6 +4,8 @@
 #
 #   bash scripts/compare.sh <our-binary> <repo> [workdir]
 #
+# (`1git status` has its own fixtures: scripts/compare_status.sh.)
+#
 # `git` is only ever READ from here: `cat-file`, `ls-tree`, `log`,
 # `rev-parse`, `show-ref`. Nothing in this script writes to a repository.
 #

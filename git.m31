@@ -13,6 +13,14 @@
 //   1git -refs
 //   1git [--git-dir DIR] ...             # default: `.git` here or above
 //
+// and, in git's own grammar (a first word without a dash, `docs/GIT-COMPAT.md`):
+//
+//   1git [-C DIR] [-c name=value] status [-s] [-b] [--porcelain[=v2]] [-z]
+//        [-u[mode]] [--ignored] [--] [pathspec...]
+//
+// `core/GIT_gitstatus.m31` is that command; `scripts/compare_status.sh` diffs
+// it against the real `git status`.
+//
 // --- why the command is `-cat-file` and not `cat-file` ------------------------
 //
 // `lib/args` has one grammar and it is not git's: a command is `-word`, an
@@ -49,6 +57,7 @@ import core.GIT_refs;
 import core.GIT_repository;
 import core.GIT_revparse;
 import core.GIT_log;
+import core.GIT_gitstatus;
 
 args.Parser parser = args.Parser("1git", summary: "read-only git plumbing over loose objects");
 parser.value("git-dir", help: "the repository's git directory", placeholder: "DIR");
@@ -66,6 +75,10 @@ args.Parser rev_parse_command = parser.command("rev-parse", "the object names a 
 rev_parse_command.positional("rev", help: "a revision: a ref, an object name, HEAD~2, main^{tree}, v1:path, A..B, ...", placeholder: "REV");
 args.Parser refs_command = parser.command("refs", "every ref in the repository, with what it points at");
 List<str> argv = os.arguments();
+int git_spelled = git_spelling(argv);
+if (git_spelled >= 0) {
+    os.exit(git_spelled);
+}
 match (parser.parse(argv.slice(1, argv.size()))) {
     case Ok(args.Parsed parsed): {
         match (parsed.help()) {
@@ -82,6 +95,37 @@ match (parser.parse(argv.slice(1, argv.size()))) {
         io.eprint(parser.usage());
         os.exit(2);
     }
+}
+
+/// git's own spelling: `1git [-C dir] [-c name=value] status ...`. A first
+/// word that is a subcommand of git's grammar (no leading dash) takes this
+/// path; everything else is the `-log`-style grammar below, untouched.
+/// Returns the exit status, or -1 when the line is not in git's spelling.
+int git_spelling(List<str> argv) {
+    str cwd = os.env("PWD").or("/");
+    List<str> overrides = [];
+    int index = 1;
+    while (index < argv.size()) {
+        str word = argv[index];
+        if (word == "-C" && index + 1 < argv.size()) {
+            cwd = GIT_gitstatus.resolve_dir(cwd, argv[index + 1]);
+            index = index + 2;
+        } else if (word == "-c" && index + 1 < argv.size()) {
+            overrides.push(argv[index + 1]);
+            index = index + 2;
+        } else if (word == "--no-pager" || word == "--no-optional-locks" || word == "--no-replace-objects") {
+            index = index + 1;
+        } else {
+            break;
+        }
+    }
+    if (index >= argv.size()) {
+        return -1;
+    }
+    if (argv[index] == "status") {
+        return GIT_gitstatus.run(cwd, overrides, argv.slice(index + 1, argv.size()));
+    }
+    return -1;
 }
 
 /// Run every command on the line, in the order it was typed. The exit status

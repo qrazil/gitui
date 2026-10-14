@@ -296,6 +296,16 @@ if build git; then
     done
 fi
 
+# --- `1git status` in git's spelling, against the real `git status` -----------
+
+if build git; then
+    if out=$(bash scripts/compare_status.sh "$WORK/git" "$WORK/status-fixtures" 2>&1); then
+        note "git status: ${out## }"
+    else
+        bad "git status" "$out"
+    fi
+fi
+
 # --- the write path: .git/index, loose objects, refs, status -------------------
 #
 # `test_write.sh` shares this script's shell, `$WORK`, `$LANGC`, `build`,
