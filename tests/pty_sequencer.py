@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
-"""The cherry-pick and revert UI of the compiled `ourgitui`, driven under a real
+"""The cherry-pick and revert UI of the compiled `mgit`, driven under a real
 pty against disposable git fixtures this script builds and destroys itself. Real
 `git` is the oracle both ways: what the UI leaves is compared with what git does
 in a copy of the same fixture (trees, messages, authors, state files, reflog,
 `fsck --strict`), and sequences that git started are finished in the UI.
 
-    python3 tests/pty_sequencer.py <ourgitui-binary> <scratch-dir>
+    python3 tests/pty_sequencer.py <mgit-binary> <scratch-dir>
 
 Every `ok` / `FAIL` line is one check; the exit status says whether any failed.
 """
@@ -136,7 +136,7 @@ def same_result(fx, other, what, fmt="%an|%ae|%s%n%b"):
 
 def main():
     if len(sys.argv) != 3:
-        print("usage: pty_sequencer.py <ourgitui-binary> <scratch-dir>", file=sys.stderr)
+        print("usage: pty_sequencer.py <mgit-binary> <scratch-dir>", file=sys.stderr)
         return 2
     binpath = os.path.abspath(sys.argv[1])
     root = os.path.abspath(sys.argv[2])

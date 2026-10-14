@@ -1,6 +1,6 @@
 name: Release
 
-# Build ourgit (the read-only CLI) and ourgitui (the interactive client)
+# Build mgit (the interactive client)
 # release binaries for each platform and attach them to the GitHub Release
 # for a pushed version tag -- the same pattern qrazil/httpserver and
 # qrazil/term-markdown's own release.yml use, against a pinned release of
@@ -50,8 +50,7 @@ jobs:
           set -euo pipefail
           OUT=dist/gitui-linux-x86_64
           mkdir -p "$OUT"
-          bash scripts/build.sh git.m31 -o "$OUT/ourgit"
-          bash scripts/build.sh gitui.m31 -o "$OUT/ourgitui"
+          bash scripts/build.sh gitui.m31 -o "$OUT/mgit"
           cp README.md docs/design.md docs/FRICTION.md "$OUT/" 2>/dev/null || true
           sed 's/^ *//' > "$OUT/NOTES.txt" <<EOF
           gitui — Linux x86-64 release build
@@ -59,8 +58,7 @@ jobs:
           Tag: ${GITHUB_REF_NAME}
           Built against m31 ${{ env.M31_REF }}, tui $(awk '$1=="tui"{print $3}' deps)
 
-          ourgit                        ./ourgit -log --max 5
-          ourgitui                      ./ourgitui  (run from a repository's own top level)
+          mgit                          ./mgit (run from a repository's own top level)
           EOF
 
       - name: Package
@@ -95,8 +93,7 @@ jobs:
           set -euo pipefail
           OUT=dist/gitui-linux-aarch64
           mkdir -p "$OUT"
-          bash scripts/build.sh git.m31 -o "$OUT/ourgit"
-          bash scripts/build.sh gitui.m31 -o "$OUT/ourgitui"
+          bash scripts/build.sh gitui.m31 -o "$OUT/mgit"
           cp README.md docs/design.md docs/FRICTION.md "$OUT/" 2>/dev/null || true
           sed 's/^ *//' > "$OUT/NOTES.txt" <<EOF
           gitui — Linux aarch64 release build
@@ -104,8 +101,7 @@ jobs:
           Tag: ${GITHUB_REF_NAME}
           Built against m31 ${{ env.M31_REF }}, tui $(awk '$1=="tui"{print $3}' deps)
 
-          ourgit                        ./ourgit -log --max 5
-          ourgitui                      ./ourgitui  (run from a repository's own top level)
+          mgit                          ./mgit (run from a repository's own top level)
           EOF
 
       - name: Package
@@ -140,8 +136,7 @@ jobs:
           set -euo pipefail
           OUT=dist/gitui-macos-arm64
           mkdir -p "$OUT"
-          bash scripts/build.sh git.m31 -o "$OUT/ourgit"
-          bash scripts/build.sh gitui.m31 -o "$OUT/ourgitui"
+          bash scripts/build.sh gitui.m31 -o "$OUT/mgit"
           cp README.md docs/design.md docs/FRICTION.md "$OUT/" 2>/dev/null || true
           sed 's/^ *//' > "$OUT/NOTES.txt" <<EOF
           gitui — macOS arm64 (Apple Silicon) release build
@@ -149,8 +144,7 @@ jobs:
           Tag: ${GITHUB_REF_NAME}
           Built against m31 ${{ env.M31_REF }}, tui $(awk '$1=="tui"{print $3}' deps)
 
-          ourgit                        ./ourgit -log --max 5
-          ourgitui                      ./ourgitui  (run from a repository's own top level)
+          mgit                          ./mgit (run from a repository's own top level)
           EOF
 
       - name: Package

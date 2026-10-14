@@ -2,10 +2,10 @@
 """Syntax highlighting under a real pty: a diff, scrolling it, the toggle and
 the switches.
 
-    python3 tests/pty_highlight.py <ourgitui-binary> <scratch-dir>
+    python3 tests/pty_highlight.py <mgit-binary> <scratch-dir>
 
 A fixture repository with a modified C file (and a Python file, a commit to
-show) is opened in `ourgitui`, the file's diff is opened with `d`, and the
+show) is opened in `mgit`, the file's diff is opened with `d`, and the
 bytes the client writes are read back for their SGR colours: a C keyword is
 magenta (palette 5) and bold, a string green (2), a comment bright black (8),
 the `+`/`-` markers keep green/red. Then a 5000-line diff is scrolled, the
@@ -114,7 +114,7 @@ def open_diff(session, section_rows=2):
 
 def main():
     if len(sys.argv) != 3:
-        print("usage: pty_highlight.py <ourgitui-binary> <scratch-dir>", file=sys.stderr)
+        print("usage: pty_highlight.py <mgit-binary> <scratch-dir>", file=sys.stderr)
         return 2
     binpath = os.path.abspath(sys.argv[1])
     root = os.path.abspath(sys.argv[2])

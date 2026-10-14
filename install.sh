@@ -15,7 +15,7 @@ set -eu
 
 REPO=gitui
 ASSET=gitui          # release asset prefix: <ASSET>-<os>-<arch>.tar.gz
-BINS="ourgitui ourgit"          # programs linked into $PREFIX/bin
+BINS="mgit"          # programs linked into $PREFIX/bin
 PREFIX=${PREFIX:-$HOME/.local}
 OPT="$PREFIX/opt/$REPO"
 BIN="$PREFIX/bin"
@@ -67,6 +67,10 @@ tar -xzf "$tmp/$file" -C "$tmp/x" || die "could not unpack $file"
 
 rm -rf "$dest"
 mv "$tmp/x" "$dest"
+# 0.9.0 linked the program as ourgitui (and ourgit).
+for old in ourgitui ourgit; do  # ourgit is no longer shipped
+    [ -L "$BIN/$old" ] && case "$(readlink "$BIN/$old")" in "$OPT"/*) rm -f "$BIN/$old" ;; esac
+done
 for b in $BINS; do
     [ -x "$dest/$b" ] || die "$b is not in the release ($dest)"
     ln -sf "$dest/$b" "$BIN/$b"

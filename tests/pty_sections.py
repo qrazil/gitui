@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Sections and the statusline under a real pty.
 
-    python3 tests/pty_sections.py <ourgitui-binary> <scratch-dir>
+    python3 tests/pty_sections.py <mgit-binary> <scratch-dir>
 
 Disposable fixtures, real `git` as the oracle where there is one:
 
@@ -103,7 +103,7 @@ class SizedSession(Session):
 
 def main():
     if len(sys.argv) != 3:
-        print("usage: pty_sections.py <ourgitui-binary> <scratch-dir>", file=sys.stderr)
+        print("usage: pty_sections.py <mgit-binary> <scratch-dir>", file=sys.stderr)
         return 2
     binpath = os.path.abspath(sys.argv[1])
     root = os.path.abspath(sys.argv[2])

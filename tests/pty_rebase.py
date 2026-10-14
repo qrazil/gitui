@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""The rebase UI of the compiled `ourgitui`, driven under a real pty against
+"""The rebase UI of the compiled `mgit`, driven under a real pty against
 disposable git fixtures this script builds and destroys itself. Real `git` is
 the oracle both ways: every flow is run in a copy of the same fixture with
 `git rebase` (interactive ones with a GIT_SEQUENCE_EDITOR script) and compared
@@ -7,7 +7,7 @@ by trees, authors and messages; `git fsck --strict` and the reflog are read
 back; and rebases that git started are finished in the UI and the other way
 round. (Commit ids differ: the client commits under its own identity.)
 
-    python3 tests/pty_rebase.py <ourgitui-binary> <scratch-dir>
+    python3 tests/pty_rebase.py <mgit-binary> <scratch-dir>
 
 Every `ok` / `FAIL` line is one check; the exit status says whether any failed.
 """
@@ -183,7 +183,7 @@ def reflog_of(fx, ref):
 
 def main():
     if len(sys.argv) != 3:
-        print("usage: pty_rebase.py <ourgitui-binary> <scratch-dir>", file=sys.stderr)
+        print("usage: pty_rebase.py <mgit-binary> <scratch-dir>", file=sys.stderr)
         return 2
     binpath = os.path.abspath(sys.argv[1])
     root = os.path.abspath(sys.argv[2])

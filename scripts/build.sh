@@ -3,7 +3,7 @@
 # (`git.m31`) into a real executable, like the other qrazil apps' one
 # scripts/build.sh.
 #
-#   M31_ROOT=/path/to/m31 bash scripts/build.sh                  -> ./ourgitui
+#   M31_ROOT=/path/to/m31 bash scripts/build.sh                  -> ./mgit
 #   M31_ROOT=/path/to/m31 bash scripts/build.sh -o name          -> ./name
 #   M31_ROOT=/path/to/m31 bash scripts/build.sh git.m31          -> ./ourgit
 #   M31_ROOT=/path/to/m31 bash scripts/build.sh tests/t_x.m31 -o t_x
@@ -49,7 +49,7 @@ while [ $# -gt 0 ]; do
 done
 if [ -z "$out" ]; then
     case $src in
-        gitui.m31) out=ourgitui ;;
+        gitui.m31) out=mgit ;;
         git.m31)   out=ourgit ;;
         *)         out=$(basename "$src" ".$LANG_EXT") ;;
     esac

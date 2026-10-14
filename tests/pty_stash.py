@@ -2,9 +2,9 @@
 """The stash UI (`z`, the Stashes section, the list overlay) driven under a real
 pty, against real git as the oracle.
 
-    python3 tests/pty_stash.py <ourgitui-binary> <scratch-dir>
+    python3 tests/pty_stash.py <mgit-binary> <scratch-dir>
 
-Each case builds the same fixture twice. In one copy `ourgitui` is driven; in the
+Each case builds the same fixture twice. In one copy `mgit` is driven; in the
 other, real `git stash ...` does the same job. With the identity and the dates
 fixed the two repositories must then be indistinguishable: same HEAD, same
 `refs/stash`, same stash log, same index and status and files. `git fsck --strict`
@@ -108,7 +108,7 @@ def same(name, ours, theirs):
 
 
 def pair(root, name, prepare=None):
-    """Two identical fixtures (-ours driven by ourgitui, -git by git); `prepare(fx)` runs on both."""
+    """Two identical fixtures (-ours driven by mgit, -git by git); `prepare(fx)` runs on both."""
     base = fixture(root, name + "-src")
     ours, theirs = os.path.join(root, name + "-ours"), os.path.join(root, name + "-git")
     copy_repo(base, ours)

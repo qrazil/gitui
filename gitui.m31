@@ -4,8 +4,8 @@
 // commit; a persistent footer of the base commands; a which-key overlay for
 // commit's follow-ups; and a synced jump list, toggled on demand.
 //
-//   bash scripts/build.sh                  # -> ./ourgitui
-//   ./ourgitui [path]                      # default: "."
+//   bash scripts/build.sh                  # -> ./mgit
+//   ./mgit [path]                      # default: "."
 //
 // `path` is where the repository is, exactly like `git status` run from
 // that directory -- it is not walked up through parents the way `ourgit`'s

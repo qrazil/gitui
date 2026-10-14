@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
-"""The merge UI of the compiled `ourgitui`, driven under a real pty against
+"""The merge UI of the compiled `mgit`, driven under a real pty against
 disposable git fixtures this script builds and destroys itself. Real `git` is
 the oracle both ways: what the UI leaves is read back with `git status`,
 `ls-files -u`, `cat-file`, `reflog` and `fsck --strict`, and merges that real
 git started are finished in the UI (and the other way round).
 
-    python3 tests/pty_merge.py <ourgitui-binary> <scratch-dir>
+    python3 tests/pty_merge.py <mgit-binary> <scratch-dir>
 
 Every `ok` / `FAIL` line is one check; the exit status says whether any failed.
 """
@@ -156,7 +156,7 @@ def start_server(root):
 
 def main():
     if len(sys.argv) != 3:
-        print("usage: pty_merge.py <ourgitui-binary> <scratch-dir>", file=sys.stderr)
+        print("usage: pty_merge.py <mgit-binary> <scratch-dir>", file=sys.stderr)
         return 2
     binpath = os.path.abspath(sys.argv[1])
     root = os.path.abspath(sys.argv[2])

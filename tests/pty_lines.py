@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """Line-level staging in the diff view, driven under a real pty, against `git apply`.
 
-    python3 tests/pty_lines.py <ourgitui-binary> <scratch-dir>
+    python3 tests/pty_lines.py <mgit-binary> <scratch-dir>
 
 For each case of `oracles/oracle_lines.NAMED` (add-only, delete-only, mixed, new and
 deleted files, a missing newline at the end of the file, CRLF...) this builds a
-fixture repository and an identical copy, opens the file's diff in `ourgitui`, selects
+fixture repository and an identical copy, opens the file's diff in `mgit`, selects
 a range of rows with `v`/`j` and acts on it:
 
     space  in the unstaged / untracked view   stage the lines

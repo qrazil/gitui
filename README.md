@@ -54,8 +54,8 @@ bash tests/test.sh <repo> [<repo>…]   # those, and each repository named
 bash scripts/build.sh git.m31         # the read-only CLI -> ./ourgit
 ./ourgit -log --max 5
 
-bash scripts/build.sh                 # gitui.m31 -> ./ourgitui   (-o name to rename)
-./ourgitui                         # run from a repository's own top level
+bash scripts/build.sh                 # gitui.m31 -> ./mgit   (-o name to rename)
+./mgit                         # run from a repository's own top level
 ```
 
 | file | what it is |
@@ -104,12 +104,12 @@ bash scripts/build.sh                 # gitui.m31 -> ./ourgitui   (-o name to re
 | `GIT_reflog.m31` | `.git/logs/<ref>` in git's own format: read, append, delete with `--rewrite`; `GIT_refs.update` writes it for every ref move |
 | `GIT_graph.m31` | the commit graph: ancestors, `is_ancestor`, `merge_bases` (criss-cross gives several), `ahead_behind`, `rev_list(include, exclude)` |
 | `deps` | the project manifest: name, version and the pinned qrazil/tui commit (`deps.lock` records what was fetched) |
-| `scripts/build.sh` | builds `gitui.m31` (default, `./ourgitui`), `git.m31` (`./ourgit`) or any other `.m31` file; gitui's `import tui.TUI_app;` lines resolve through `deps`, so nothing is staged or copied |
+| `scripts/build.sh` | builds `gitui.m31` (default, `./mgit`), `git.m31` (`./ourgit`) or any other `.m31` file; gitui's `import tui.TUI_app;` lines resolve through `deps`, so nothing is staged or copied |
 | `tests/t_*.m31` | test programs, each printing what a Python oracle prints, or asserting against its own expectations |
 | `tests/oracles/oracle_*.py` | the oracles: `hashlib`, `zlib`, and a from-scratch format reader |
 | `tests/t_sections.m31`, `tests/pty_sections.py` | the section model and statusline text, and the section keys, folds, hunk folds, statusline and overview under a pty |
 | `tests/t_highlight.m31`, `tests/pty_highlight.py` | the syntax colouring: pure line styling, and the SGR colours, scrolling and switches under a pty |
-| `tests/pty_e2e.py`, `tests/pty_blame_undo.py` | drive `ourgitui` under a real pty against disposable fixtures, real `git` as the oracle (the second file: blame, history, undo, tags, ahead/behind, `push -u`, auto-refresh) |
+| `tests/pty_e2e.py`, `tests/pty_blame_undo.py` | drive `mgit` under a real pty against disposable fixtures, real `git` as the oracle (the second file: blame, history, undo, tags, ahead/behind, `push -u`, auto-refresh) |
 | `scripts/compare.sh` | every command beside the real `git`, compared octet for octet |
 | `GIT_merge.m31` | `git merge` with conflicts: `start` (fast-forward, no-ff, ff-only, already up to date, unrelated histories), `merge_trees`/`merge_with_base` (per-path three-way merge, stages 1/2/3, rename-free like `merge.renames=false`), a virtual merge base when there are several (criss-cross, like git's recursive/ort), `continue_merge`, `abort_merge`, `mark_resolved` and `take_side` for the resolution view; writes MERGE_HEAD/MERGE_MSG/MERGE_MODE/ORIG_HEAD and reflogs as git does |
 | `GIT_ui_merge.m31`, `GIT_ui_merge_model.m31` | the merge layer: the `m` menu and branch picker, the abort prompt, the conflict-resolution view, the "Unmerged paths" outline section and the MERGING banner (the model is pure and unit-testable) |
@@ -703,7 +703,7 @@ Each of these was checked against the code when this section was written.
 
 ## Push (`GIT_pack_write.m31`, `GIT_http_push.m31`, `GIT_config.m31`)
 
-`P` then `p` in `ourgitui` pushes the current branch to the same-named
+`P` then `p` in `mgit` pushes the current branch to the same-named
 branch on `origin`: `GIT_config.m31` reads `remote.origin.url` from
 `.git/config`, `GIT_http_push.m31` fetches the receive-pack advertisement, refuses
 anything but a fast-forward (the remote tip must be an ancestor of what is
@@ -730,7 +730,7 @@ wrong) are covered against an authenticating server.
 
 ## Pull (`GIT_pull.m31`, `GIT_pack.read_pack`)
 
-`F` then `p` in `ourgitui` pulls the current branch from the same-named
+`F` then `p` in `mgit` pulls the current branch from the same-named
 branch on `origin`, fast-forward only. `GIT_pull.m31` reads the advertisement
 (`GIT_http_fetch.discover`), and a remote tip that is the local tip or one of its
 ancestors is "already up to date". Anything else is fetched with the local tip
@@ -739,7 +739,7 @@ REF deltas, and thin packs, whose missing bases come from the repository) and
 each object is written loose with `GIT_object.write`. The pull is then refused when
 the working tree or index is dirty, when HEAD is detached or unborn, when the
 remote has no such branch, and when the local tip is not an ancestor of the
-remote one (`not a fast-forward; merge/rebase not supported yet`); in `ourgitui`
+remote one (`not a fast-forward; merge/rebase not supported yet`); in `mgit`
 that last refusal offers to merge or rebase onto `origin/<branch>` instead (see Merge and Rebase). The fetched
 objects are kept in that case, and `refs/remotes/origin/<branch>` is updated so
 there is something to merge.
@@ -761,7 +761,7 @@ and `p` for real.
 
 ## Merge (`GIT_merge.m31`, `GIT_ui_merge.m31`)
 
-`m` in `ourgitui` opens the merge overlay. `f` / `n` / `o` pick a local branch
+`m` in `mgit` opens the merge overlay. `f` / `n` / `o` pick a local branch
 with the fuzzy picker and merge it (default, `--no-ff`, `--ff-only`); every
 write goes to the command log and to the reflogs in git's own wording, so a
 merge started here can be finished by `git merge --continue` and the other way
@@ -791,7 +791,7 @@ by us, and compares HEAD, index, status, working tree, state files and reflogs;
 
 ## Rebase (`GIT_rebase.m31`, `GIT_rebase_todo.m31`, `GIT_ui_rebase.m31`)
 
-`r` in `ourgitui` opens the rebase menu (see Keys). A rebase onto a branch whose
+`r` in `mgit` opens the rebase menu (see Keys). A rebase onto a branch whose
 upstream is already behind HEAD is a no-op and says so; one that can fast-forward
 does, as git does; commits already upstream (same patch-id, looked back 1000 commits)
 are left out. `-i` and `h` open the todo editor before anything is touched: `p`, `r`,

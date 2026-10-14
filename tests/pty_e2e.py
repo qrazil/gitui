@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Drive the compiled `ourgitui` binary under a real pty, against disposable
+"""Drive the compiled `mgit` binary under a real pty, against disposable
 git fixtures this script builds and destroys itself -- the same discipline
 `tests/test.sh`/`test_write.sh` already use for the write-path work, and
 `docs/design.md`'s own "Safety" section names for this client
@@ -7,7 +7,7 @@ specifically: never a real repository, real `git` as the oracle throughout.
 
 Run from anywhere:
 
-    python3 tests/pty_e2e.py <ourgitui-binary> <scratch-dir>
+    python3 tests/pty_e2e.py <mgit-binary> <scratch-dir>
 
 `<scratch-dir>` is created fresh (and removed first if it already exists) --
 `test_gitui.sh` passes it a directory under its own `mktemp -d`, never
@@ -158,7 +158,7 @@ class Screen:
 
 
 class Session:
-    """One `ourgitui` process on a pty, in one fixture directory."""
+    """One `mgit` process on a pty, in one fixture directory."""
 
     def __init__(self, binpath, fixture, env=None):
         self.screen = Screen()
@@ -274,7 +274,7 @@ class Context:
 
 def main():
     if len(sys.argv) != 3:
-        print("usage: pty_e2e.py <ourgitui-binary> <scratch-dir>", file=sys.stderr)
+        print("usage: pty_e2e.py <mgit-binary> <scratch-dir>", file=sys.stderr)
         return 2
     binpath = os.path.abspath(sys.argv[1])
     root = os.path.abspath(sys.argv[2])
@@ -626,7 +626,7 @@ def main():
     # and the alternate screen are genuinely suspended (ed reads and echoes
     # ordinary cooked-mode input; it would not work at all, or would garble
     # the screen, sitting on top of this program's own raw mode) and cleanly
-    # resumed afterward (this session keeps talking to `ourgitui` right up to
+    # resumed afterward (this session keeps talking to `mgit` right up to
     # a normal quit once `ed` exits).
     ed_path = shutil.which("ed")
     if ed_path is None:
@@ -646,18 +646,18 @@ def main():
         s9.send("an ed-authored commit message\n")
         s9.send(".\n")  # end the append
         s9.send("w\n")  # write the file
-        after_ed = s9.send("q\n")  # quit ed -- ourgitui resumes right here
+        after_ed = s9.send("q\n")  # quit ed -- mgit resumes right here
         time.sleep(0.2)
         after_ed += s9.drain()
         if b"\x1b[?1049h" in after_ed:
-            ok("commit: ourgitui re-enters the alternate screen after a real interactive $EDITOR exits")
+            ok("commit: mgit re-enters the alternate screen after a real interactive $EDITOR exits")
         else:
-            fail("commit: ourgitui re-enters the alternate screen after a real interactive $EDITOR exits", repr(after_ed[:200]))
-        rc = s9.quit()  # a plain "q" still reaches ourgitui and ends it cleanly
+            fail("commit: mgit re-enters the alternate screen after a real interactive $EDITOR exits", repr(after_ed[:200]))
+        rc = s9.quit()  # a plain "q" still reaches mgit and ends it cleanly
         if rc == 0:
-            ok("commit: ourgitui still responds to input and exits cleanly after the $EDITOR handoff")
+            ok("commit: mgit still responds to input and exits cleanly after the $EDITOR handoff")
         else:
-            fail("commit: ourgitui still responds to input and exits cleanly after the $EDITOR handoff", "returncode=%r" % rc)
+            fail("commit: mgit still responds to input and exits cleanly after the $EDITOR handoff", "returncode=%r" % rc)
 
         log_out, _, log_rc = git(fx6, "log", "--oneline")
         if log_rc == 0 and log_out.endswith("an ed-authored commit message"):

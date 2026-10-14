@@ -1,3 +1,12 @@
+# gitui 0.10.0: the program is `mgit`
+
+Version 0.10.0, from master 35e6d98 (0.9.0). The interactive client's binary
+is now `mgit` (it was `ourgitui`); the repository and release assets keep the
+name gitui. The read-only CLI `ourgit` is no longer shipped in releases (it is the
+library's test harness: build it with `scripts/build.sh git.m31`). `bash scripts/build.sh`
+writes `./mgit`. Scripts that ran `ourgitui` need the new name; `install.sh`
+removes the stale `~/.local/bin/ourgitui` and `ourgit` links of 0.9.0.
+
 # gitui 0.9.0: syntax library
 
 Version 0.9.0, from master 5b9a2a1 (0.8.0). No module was renamed or removed.
