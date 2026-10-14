@@ -13,6 +13,14 @@ build and records it in `deps.lock`. The two entry points (`git.m31`, `gitui.m31
 stay at the root; the library modules live in `core/`, `diff/`, `net/` and `ui/`
 (see Layout below); `tests/`, `tests/oracles/`, `scripts/` and `docs/` hold the rest.
 
+## Install
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/qrazil/gitui/master/install.sh | sh
+```
+
+Picks the release for your OS and CPU, unpacks it under `~/.local/opt/gitui/<version>` and links the programs into `~/.local/bin`. `VERSION=v1.2.3` pins a release, `PREFIX=...` moves the install, `sh install.sh --uninstall` removes it.
+
 ## Layout
 
 A module is imported by its folder path and used by its last segment:
