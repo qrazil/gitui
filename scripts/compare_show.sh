@@ -23,7 +23,6 @@ export GIT_TEST_DATE_NOW=1800000000
 
 bad=0
 n=0
-known=0
 
 # git 2.55 shows the header of a commit named on the command line even when
 # the pathspec leaves no diff; older gits print nothing.
@@ -36,14 +35,6 @@ compare() {
     git -C "$repo" "$@" > "$WORK/want" 2> "$WORK/want.err"; local want_rc=$?
     "$OURS" -C "$repo" "$@" > "$WORK/got" 2> "$WORK/got.err"; local got_rc=$?
     if ! cmp -s "$WORK/want" "$WORK/got" || [ $want_rc -ne $got_rc ]; then
-        # known divergence: a merge's combined diff (`diff --cc`) is not
-        # implemented; the header, message and every other form still match
-        if [ $want_rc -eq $got_rc ] && { { grep -q 'diff --\(cc\|combined\) ' "$WORK/want" &&
-            ! grep -q 'diff --\(cc\|combined\) ' "$WORK/got"; } ||
-            { [ "$label" = merges ] && [[ " $* " =~ \ --(name-only|name-status|raw)\  ]]; }; }; then
-            known=$((known + 1))
-            return
-        fi
         printf '\033[31mdiffer\033[0m %s: %s\n' "$label" "$*"
         printf '       exit: git %s, 1git %s\n' "$want_rc" "$got_rc"
         diff <(sed 's/$/$/' "$WORK/want" | cat -v) <(sed 's/$/$/' "$WORK/got" | cat -v) | head -12 | sed 's/^/       /'
@@ -116,6 +107,49 @@ one merges-merge "$WORK/fx/merges" HEAD~1
 one cross-merge "$WORK/fx/cross" HEAD
 one cross-merge "$WORK/fx/cross" HEAD~2
 
+# the diff of a merge: --cc (the default), -c, -m, --first-parent, --dd,
+# --diff-merges=<mode>, in every output format, on every merge of the
+# fixtures (hand-resolved conflicts, an evil merge, an octopus, a union)
+merge_forms() {
+    local l=$1 r=$2 obj=$3
+    local form
+    for form in "" -c --cc -m --dd --first-parent "-m --first-parent" "--no-diff-merges" "--diff-merges=off" "--diff-merges=first-parent" "--diff-merges=separate" "--diff-merges=on" "--diff-merges=c" "--diff-merges=cc" "--diff-merges=dense-combined" "-c --first-parent" "-m -c" "-c -m" "-c -m -p" "--cc -m" "--cc --no-diff-merges"; do
+        for fmt in "" "--stat" "--numstat" "--shortstat" "--summary" "--name-only" "--name-status" "--raw" "-s" "--stat -p" "--raw -p" "--raw --stat" "--name-status --stat" "--stat --summary --raw -p" "-U0" "-U1" "-U10" "-w" "-b" "--color=always" "--color=always --raw" "--color=always --stat" "--oneline" "--oneline --raw" "--oneline -s" "--format=%h" "--pretty=raw" "--abbrev=12" "--full-index" "--no-prefix" "--src-prefix=x/ --dst-prefix=y/" "-a" "-z --raw" "-z --name-only" "-z --name-status" "-z -p" "--diff-filter=M" "--no-renames" "-M20%" "--graph" "--graph --oneline --raw" "-p --stat --graph"; do
+            # shellcheck disable=SC2086
+            compare "$l-merge" "$r" show $form $fmt "$obj"
+        done
+    done
+}
+
+mm="$WORK/fx/combined"
+for c in $(git -C "$mm" rev-list --merges HEAD); do
+    merge_forms combined "$mm" "$c"
+done
+mm="$WORK/fx/links"
+merge_forms links "$mm" HEAD
+mm="$WORK/fx/merges"
+for c in $(git -C "$mm" rev-list --merges HEAD); do
+    merge_forms merges "$mm" "$c"
+done
+mm="$WORK/fx/combined"
+c=$(git -C "$mm" rev-list --merges HEAD | tail -n 1)
+compare combined-paths "$mm" show "$c" -- both.txt
+compare combined-paths "$mm" show -c "$c" -- both.txt conflict.txt
+compare combined-paths "$mm" show --cc "$c" -- nothing
+compare combined-paths "$mm" show --raw "$c" -- code.c
+compare combined-paths "$mm" show -m --raw "$c" -- code.c
+compare combined-paths "$mm" show --name-status "$c" -- '*.txt'
+compare combined-paths "$mm" show --cc HEAD~5 HEAD
+compare combined-paths "$mm" show --cc "$c" "$c"~1
+compare combined-config "$mm" -c log.diffMerges=first-parent show -m "$c"
+compare combined-config "$mm" -c log.diffMerges=separate show --diff-merges=on "$c"
+compare combined-config "$mm" -c log.diffMerges=first-parent show --diff-merges=on "$c"
+compare combined-config "$mm" -c core.abbrev=10 show "$c"
+compare combined-config "$mm" -c diff.context=1 show "$c"
+compare combined-config "$mm" -c diff.renames=false show --raw "$c"
+compare combined-config "$mm" -c diff.noprefix=true show "$c"
+compare combined-config "$mm" -c color.diff.frag=magenta -c color.diff.old=blue -c color.diff.new=yellow -c color.diff.meta=green show --color=always "$c"
+
 # tags: annotated, lightweight, tag of a tag, tag of a tree
 t="$WORK/fx/tags"
 one tags "$t" v1.0
@@ -177,7 +211,7 @@ compare linear-sub "$WORK/fx/linear/src" show HEAD -- .
 compare linear-sub "$WORK/fx/linear/src" show HEAD:main.c
 
 if [ "$bad" -eq 0 ]; then
-    echo "show: all $n forms byte-identical to git ($known with a merge's combined diff, not implemented, are excluded)"
+    echo "show: all $n forms byte-identical to git"
     exit 0
 fi
 echo "show: $bad of $n forms differ"

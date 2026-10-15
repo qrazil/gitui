@@ -166,9 +166,24 @@ fixtures() {
 }
 
 fixtures "$WORK/fx"
-for f in linear merges cross renames modes binary empty large tags crlf unicode space orphan links; do
+for f in linear merges cross renames modes binary empty large tags crlf unicode space orphan links combined; do
     forms "$f" "$WORK/fx/$f"
 done
+
+# merges: -m, -c, --cc, --dd, --diff-merges=, --first-parent; a diff is
+# shown for a merge only when asked for (and by -c, --cc, --dd and
+# --diff-merges=, which imply -p)
+for fx in combined merges links cross; do
+    for form in "-m" "-c" "--cc" "--dd" "-m -p" "-c -p" "--cc -p" "-p --first-parent" "-m --first-parent -p" "--first-parent --stat" "-m --stat" "-c --stat" "--cc --stat" "--cc --raw" "-c --name-status" "-c --name-only" "-m --name-status" "--diff-merges=on" "--diff-merges=on -p" "--diff-merges=off -p" "--diff-merges=separate -p" "--diff-merges=first-parent" "--diff-merges=c" "--diff-merges=cc --stat" "-p --cc -m" "-p -m -c" "--no-diff-merges -c" "-c --no-diff-merges" "--cc --graph" "-m --graph -p" "--cc --oneline" "-c --oneline" "-m -p --oneline" "-p -c -U1" "--cc -w" "-m --color=always -p" "-c --color=always" "--cc --color=always --stat" "--cc -z" "-c --raw -z" "-m -p --no-prefix" "-c --summary" "--cc --numstat" "--cc -s" "-m -s" "--merges -c" "--merges --cc --raw" "--no-merges -c" "-c -- both.txt" "--cc -- code.c conflict.txt"; do
+        # shellcheck disable=SC2086
+        compare "merges-$fx" "$WORK/fx/$fx" log --oneline -8 $form
+        # shellcheck disable=SC2086
+        compare "merges-$fx" "$WORK/fx/$fx" log -8 $form
+    done
+done
+compare merges-config "$WORK/fx/combined" -c log.diffMerges=first-parent log -m -p -4
+compare merges-config "$WORK/fx/combined" -c log.diffMerges=combined log --diff-merges=on -4
+compare merges-config "$WORK/fx/combined" -c log.diffMerges=dense-combined log --diff-merges=on -4 --stat
 
 # forms that need a particular history
 compare renames "$WORK/fx/renames" log --follow --oneline -- docs.txt

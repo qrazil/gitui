@@ -16,12 +16,77 @@ import core.GIT_gitstatus;
 import core.GIT_gitstore;
 import ui.GIT_ui_highlight;
 import diff.GIT_gitdiff;
+import diff.GIT_combine;
+
+/// The merge mode a name stands for (`--diff-merges=<name>`, `log.diffMerges`),
+/// or -1 when there is no such mode (or it is not implemented).
+pub int merge_mode_of(str name, int on_means) {
+    if (name == "off" || name == "none") {
+        return 0;
+    }
+    if (name == "1" || name == "first-parent") {
+        return 1;
+    }
+    if (name == "on" || name == "m") {
+        return on_means;
+    }
+    if (name == "separate") {
+        return 2;
+    }
+    if (name == "c" || name == "combined") {
+        return 3;
+    }
+    if (name == "cc" || name == "dense-combined") {
+        return 4;
+    }
+    return -1;
+}
 
 /// A diff option that `diff`, `log` and `show` share. `args` is the
 /// command's own words and `index` the one being looked at; returns how many
 /// words it used (0: not a diff option, -1: an error was printed).
 pub int parse_diff_option(GIT_gitdiff.DOpts opts, List<str> args, int index, Settings settings) {
     str arg = args[index];
+    if (arg == "-m") {
+        opts.merge_mode = settings.merges_default;
+        opts.is_merges_patch = false;
+        settings.is_merges_imply_patch = false;
+        return 1;
+    }
+    if (arg == "-c") {
+        opts.merge_mode = 3;
+        opts.is_merges_patch = false;
+        settings.is_merges_imply_patch = true;
+        return 1;
+    }
+    if (arg == "--cc") {
+        opts.merge_mode = 4;
+        opts.is_merges_patch = false;
+        settings.is_merges_imply_patch = true;
+        return 1;
+    }
+    if (arg == "--dd") {
+        opts.merge_mode = 1;
+        opts.is_merges_patch = false;
+        settings.is_merges_imply_patch = true;
+        return 1;
+    }
+    if (arg == "--no-diff-merges") {
+        opts.merge_mode = 0;
+        opts.is_merges_patch = false;
+        settings.is_merges_imply_patch = false;
+        return 1;
+    }
+    if (arg.starts_with("--diff-merges=")) {
+        int mode = merge_mode_of(arg.substr(14, arg.size()), settings.merges_default);
+        if (mode < 0) {
+            io.eprint("fatal: invalid value for '--diff-merges': '" + arg.substr(14, arg.size()) + "'");
+            return -1;
+        }
+        opts.merge_mode = mode;
+        opts.is_merges_patch = true;
+        return 1;
+    }
     if (arg == "-p" || arg == "-u" || arg == "--patch") {
         opts.is_patch = true;
         settings.is_no_output = false;
@@ -276,6 +341,10 @@ pub type Settings {
     // a message for `fatal:` when the options contradict each other
     pub str fatal = "";
     pub bool is_context_given = false;
+    // -c, --cc, --dd, --diff-merges=<mode>: a patch is shown unless a format is
+    pub bool is_merges_imply_patch = false;
+    // log.diffMerges: what -m and --diff-merges=on mean
+    pub int merges_default = 2;
     // "" none, else always / never / auto
     pub str color = "";
 }
@@ -303,7 +372,7 @@ int rename_score(str value) {
 /// `core.abbrev`, `diff.context`, and the format defaults.
 pub GIT_gitdiff.DOpts finish_options(GIT_gitcommon.Ctx ctx, GIT_gitdiff.DOpts opts, Settings settings, bool is_patch_default) {
     bool is_given = opts.is_patch || opts.is_stat || opts.is_numstat || opts.is_shortstat || opts.is_name_only || opts.is_name_status || opts.is_raw || opts.is_summary || settings.is_no_output;
-    if (!is_given && is_patch_default) {
+    if (!is_given && (is_patch_default || settings.is_merges_imply_patch)) {
         opts.is_patch = true;
     }
     int exclusive = 0;
@@ -386,6 +455,7 @@ pub void config_defaults(GIT_gitcommon.Ctx ctx, GIT_gitdiff.DOpts opts) {
     opts.stat_name_width_default = GIT_gitcommon.cfg_int(ctx, "diff", "", "statnamewidth", 0);
     opts.stat_graph_width_default = GIT_gitcommon.cfg_int(ctx, "diff", "", "statgraphwidth", 0);
     opts.abbrev = GIT_gitcommon.default_abbrev(ctx);
+    opts.abbrev_default = opts.abbrev;
 }
 
 /// The tree of HEAD, "" when HEAD is unborn.
@@ -517,6 +587,7 @@ pub int run(str start, List<str> overrides, List<str> argv) {
     }
     List<GIT_gitcommon.Spec> specs = GIT_gitcommon.parse_specs(paths, ctx.prefix);
     List<GIT_gitdiff.Item> items = [];
+    bytes combined_text = [];
     bool is_filemode = GIT_gitcommon.cfg_bool(ctx, "core", "", "filemode", true);
     if (revs.size() == 0) {
         List<str> unmerged = [];
@@ -538,9 +609,62 @@ pub int run(str start, List<str> overrides, List<str> argv) {
                 items = GIT_gitdiff.reverse_items(items);
             }
         }
-        for (str path in unmerged) {
-            if (GIT_gitcommon.spec_match(specs, path)) {
-                items.push(GIT_gitdiff.Item("U", path, path, GIT_gitdiff.nothing(), GIT_gitdiff.nothing()));
+        bool is_combining = opts.merge_mode >= 3 || (opts.is_patch && opts.merge_mode <= 0);
+        List<str> combined_paths = [];
+        if (is_combining && unmerged.size() > 0 && !is_cached) {
+            // a path with both sides is shown as a combined diff against
+            // them, before the rest (git prints these while it walks the
+            // index and flushes the queue after)
+            List<GIT_combine.CPath> found = GIT_combine.unmerged_paths(gitdir, ctx.root, specs);
+            if (found.size() > 0 && !opts.is_quiet) {
+                bytes text = [];
+                if (opts.is_raw || opts.is_name_only || opts.is_name_status) {
+                    text = GIT_combine.raw_bytes(repo, found, opts);
+                } else if (opts.is_patch) {
+                    for (GIT_combine.CPath one in found) {
+                        text.extend(GIT_combine.patch_bytes(repo, one, opts, opts.merge_mode != 3));
+                    }
+                }
+                combined_text.extend(text);
+            }
+            for (GIT_combine.CPath one in found) {
+                combined_paths.push(one.path);
+            }
+        }
+        if (!is_cached) {
+            // the files-against-index walk: a `U` pair for the path, then
+            // "ours" against the work-tree file when both sides are there
+            // (and the path was not combined)
+            for (GIT_gitdiff.Unmerged one in GIT_gitdiff.unmerged_entries(repo)) {
+                if (!GIT_gitcommon.spec_match(specs, one.path)) {
+                    continue;
+                }
+                if (combined_paths.contains(one.path)) {
+                    continue;
+                }
+                GIT_gitdiff.Side shown = GIT_gitdiff.Side(one.lowest.mode, "", "");
+                shown.is_known = false;
+                items.push(GIT_gitdiff.Item("U", one.path, one.path, GIT_gitdiff.nothing(), shown));
+                if (one.has_both) {
+                    match (GIT_gitdiff.worktree_side(fs.join(ctx.root, one.path), one.ours, is_filemode, Option<GIT_index.Entry>.None)) {
+                        case None: {
+                            items.push(GIT_gitdiff.Item("D", one.path, one.path, one.ours, GIT_gitdiff.nothing()));
+                        }
+                        case Some(GIT_gitdiff.Side wt): {
+                            if (wt.id != one.ours.id || wt.mode != one.ours.mode) {
+                                items.push(GIT_gitdiff.Item("M", one.path, one.path, one.ours, wt));
+                            }
+                        }
+                    }
+                }
+            }
+        } else {
+            // an unmerged path is the tree's entry against nothing
+            Map<str, GIT_gitdiff.Side> in_head = GIT_gitdiff.tree_sides(repo, head_tree(gitdir), "", specs);
+            for (str path in unmerged) {
+                if (GIT_gitcommon.spec_match(specs, path)) {
+                    items.push(GIT_gitdiff.Item("U", path, path, in_head.get(path).or(GIT_gitdiff.nothing()), GIT_gitdiff.nothing()));
+                }
             }
         }
         items = sorted_items(items);
@@ -618,9 +742,21 @@ pub int run(str start, List<str> overrides, List<str> argv) {
             Map<str, GIT_gitdiff.Side> from = GIT_gitdiff.tree_sides(repo, left_tree, "", specs);
             items = GIT_gitdiff.maps_diff(from, filtered, unmerged);
             items = finish_items(repo, items, opts);
+            for (str path in unmerged) {
+                if (GIT_gitcommon.spec_match(specs, path)) {
+                    items.push(GIT_gitdiff.Item("U", path, path, from.get(path).or(GIT_gitdiff.nothing()), GIT_gitdiff.nothing()));
+                }
+            }
+            items = sorted_items(items);
         } else {
             List<str> unmerged = [];
             Map<str, GIT_gitdiff.Side> entries = GIT_gitdiff.index_sides(repo, unmerged);
+            // an unmerged path is compared by its work-tree file
+            for (GIT_gitdiff.Unmerged one in GIT_gitdiff.unmerged_entries(repo)) {
+                if (!entries.contains(one.path)) {
+                    entries.set(one.path, one.lowest);
+                }
+            }
             items = GIT_gitdiff.tree_vs_worktree(repo, ctx.root, left_tree, entries, specs, is_filemode, index_cache(gitdir));
             items = finish_items(repo, items, opts);
         }
@@ -632,6 +768,7 @@ pub int run(str start, List<str> overrides, List<str> argv) {
         has = GIT_gitdiff.has_changes(repo, items, opts);
     }
     if (!opts.is_quiet) {
+        out.put(combined_text);
         out.put(GIT_gitdiff.render(repo, items, opts));
     }
     out.flush();
@@ -645,7 +782,11 @@ pub List<GIT_gitdiff.Item> sorted_items(List<GIT_gitdiff.Item> items) {
     List<str> keys = [];
     Map<str, GIT_gitdiff.Item> by = {};
     for (GIT_gitdiff.Item item in items) {
-        str key = item.path + "\x00" + item.status;
+        str rank = item.status;
+        if (item.status == "U") {
+            rank = "!";
+        }
+        str key = item.path + "\x00" + rank;
         keys.push(key);
         by.set(key, item);
     }

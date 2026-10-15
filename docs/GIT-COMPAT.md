@@ -280,11 +280,20 @@ deciding whether a file changed; `--color[=when]` is accepted though git's
 Known divergences of `log`, `show` and `diff` (everything else listed above
 matches; these do not):
 
-- **Merge diffs** (`-m`, `-c`, `--cc`, `--diff-merges`, and the combined
-  `diff --cc` that `show` prints for a merge that changes a path against
-  every parent) are not implemented: `-m`/`-c`/`--cc` are an error, and
-  such a `show` prints the header and the stat formats only. `log` prints
-  no diff for a merge, as git does by default.
+- **Merge diffs** follow git (0.15.0): `show <merge>` combines
+  (`diff --cc`) by default; `-c`, `--cc`, `-m` (a header `commit X (from P)`
+  and a diff per parent), `--first-parent` / `--dd` (a diff against the first
+  parent), `--no-diff-merges`, `--diff-merges=<off|none|on|m|1|first-parent|
+  separate|c|combined|cc|dense-combined>` and `log.diffMerges` work for
+  `show` and `log`, with `-p`, `--stat`/`--numstat`/`--shortstat`/`--summary`
+  (against the first parent, as git does), `--raw`, `--name-only` and
+  `--name-status` (the `::100644 100644 100644 a b c MM<TAB>path` lines),
+  `-U<n>`, `-w`/`-b`, `-z`, colour, `--abbrev`/`--full-index` and
+  pathspecs. `git diff` of a conflicted merge prints `diff --cc` for a path
+  with both stages (and `-c`/`--cc` explicitly), the `* Unmerged path` lines
+  after them. Not done: `--remerge-diff`, `--combined-all-paths`,
+  `--word-diff` of a combined diff, and a rename of the combined path is
+  detected per parent with the same score as for a plain diff only.
 - **`--word-diff-regex`, `--color-moved`, `-G`, `-O`, `-B`,
   `-C`, `--find-copies-harder`, `-L`, `--ignore-blank-lines`, `-I`,
   `--ignore-space-at-eol`, `--patience`, `--histogram`, `--minimal`**:
@@ -346,6 +355,4 @@ The oracle is the newest released git (2.55 on CI). Where releases differ
 1git follows the newest: since 2.55 a commit named on the command line is
 shown with its real header and parents even when a pathspec leaves no diff
 (`show HEAD -- path`); `compare_show.sh` runs those forms only against git
-2.55 or later. Known gap: the combined diff (`diff --cc`) a merge commit
-prints in `show` is not implemented (`compare_show.sh` counts those forms
-as excluded and says how many).
+2.55 or later.

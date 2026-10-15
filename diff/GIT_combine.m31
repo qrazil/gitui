@@ -1,0 +1,843 @@
+// Combined diffs: what `git show` prints for a merge (`diff --cc`), what
+// `-c` prints (`diff --combined`) and what `git diff` prints for an unmerged
+// path of a conflicted merge, in git's bytes (`combine-diff.c`).
+//
+// A result (a blob of the merge, or the work-tree file) is compared with each
+// of its parents. Every line of the result carries one bit per parent: set
+// where that parent does not have the line. A line a parent had and the
+// result lacks is a "lost" line, hung in front of the next result line with a
+// bit per parent that lost it (the same text lost by several parents is one
+// line). The hunks are the stretches of lines with any bit or any lost line
+// plus context; with `dense` (`--cc`) a stretch is dropped when the result
+// merely agrees with one parent (only one parent's version of the lines
+// differs, or every changed line differs the same way from every parent...
+// see `make_hunks`, which follows git's rule line for line).
+//
+// What is left out: `--combined-all-paths`, `--remerge-diff`, word diffs and
+// whitespace colouring.
+
+import io;
+import fs;
+import text.diff;
+import core.GIT_index;
+import core.GIT_gitstore;
+import core.GIT_gitcommon;
+import diff.GIT_gitdiff;
+import diff.GIT_xdiff;
+
+/// One path of a combined diff: the result and what each parent had there.
+pub type CPath {
+    pub str path;
+    // per parent: the status letter against it (M, A, D, R, T)
+    pub List<str> status;
+    // per parent: its mode and object (mode 0 and id "" when it had none)
+    pub List<GIT_gitdiff.Side> parents;
+    // the result: a blob, or a work-tree file (`wt`)
+    pub GIT_gitdiff.Side result;
+}
+
+// --- which paths -----------------------------------------------------------------------------
+
+/// The paths of `tree` that differ from every one of `parent_trees`, in path
+/// order, with what each parent had (git's `intersect_paths` after a
+/// `diff_tree` and `diffcore_std` against each parent).
+pub List<CPath> merge_paths(GIT_gitstore.Store repo, List<str> parent_trees, str tree, List<GIT_gitcommon.Spec> specs, GIT_gitdiff.DOpts opts) {
+    List<Map<str, GIT_gitdiff.Item>> per = [];
+    List<str> order = [];
+    for (int n in 0 .. parent_trees.size()) {
+        List<GIT_gitdiff.Item> items = GIT_gitdiff.tree_vs_tree(repo, parent_trees[n], tree, specs);
+        if (opts.is_renames) {
+            items = GIT_gitdiff.detect_renames(repo, items, opts.rename_score);
+        }
+        items = GIT_gitdiff.apply_filter(items, opts);
+        Map<str, GIT_gitdiff.Item> by = {};
+        for (GIT_gitdiff.Item item in items) {
+            by.set(item.path, item);
+            if (n == 0) {
+                order.push(item.path);
+            }
+        }
+        per.push(by);
+    }
+    List<CPath> out = [];
+    for (str path in order) {
+        bool is_all = true;
+        for (int n in 0 .. per.size()) {
+            if (!per[n].contains(path)) {
+                is_all = false;
+            }
+        }
+        if (!is_all) {
+            continue;
+        }
+        CPath one = CPath(path, [], [], GIT_gitdiff.nothing());
+        for (int n in 0 .. per.size()) {
+            GIT_gitdiff.Item item = per[n].get(path).or(GIT_gitdiff.Item("M", path, path, GIT_gitdiff.nothing(), GIT_gitdiff.nothing()));
+            one.status.push(item.status);
+            one.parents.push(item.old);
+            one.result = item.new;
+        }
+        out.push(one);
+    }
+    return out;
+}
+
+/// The unmerged paths of the index that have both an "ours" and a "theirs"
+/// side (stage 2 and 3), in path order, with the work-tree file as the
+/// result: what `git diff` combines (the merge base is not used). A file
+/// missing from the work tree is a deleted result.
+pub List<CPath> unmerged_paths(str gitdir, str root, List<GIT_gitcommon.Spec> specs) {
+    List<CPath> out = [];
+    match (GIT_index.read(gitdir)) {
+        case Err(_): {
+            return out;
+        }
+        case Ok(GIT_index.Index index): {
+            Map<str, GIT_gitdiff.Side> ours = {};
+            Map<str, GIT_gitdiff.Side> theirs = {};
+            List<str> order = [];
+            for (GIT_index.Entry entry in index.entries) {
+                if (entry.stage != 2 && entry.stage != 3) {
+                    continue;
+                }
+                match (entry.path.utf8()) {
+                    case None: {
+                        continue;
+                    }
+                    case Some(str path): {
+                        if (entry.stage == 2) {
+                            ours.set(path, GIT_gitdiff.Side(entry.mode, entry.id, ""));
+                            order.push(path);
+                        } else {
+                            theirs.set(path, GIT_gitdiff.Side(entry.mode, entry.id, ""));
+                        }
+                    }
+                }
+            }
+            for (str path in order) {
+                if (!theirs.contains(path) || !GIT_gitcommon.spec_match(specs, path)) {
+                    continue;
+                }
+                CPath one = CPath(path, ["M", "M"], [], GIT_gitdiff.nothing());
+                one.parents.push(ours.get(path).or(GIT_gitdiff.nothing()));
+                one.parents.push(theirs.get(path).or(GIT_gitdiff.nothing()));
+                str full = fs.join(root, path);
+                GIT_gitdiff.Side result = GIT_gitdiff.nothing();
+                if (fs.is_link(full)) {
+                    result = GIT_gitdiff.Side(0o120000, "", full);
+                } else if (fs.is_file(full)) {
+                    int mode = 0o100644;
+                    match (fs.stat(full)) {
+                        case Ok(fs.Stat stat): {
+                            if (stat.perm() & 0o100 != 0) {
+                                mode = 0o100755;
+                            }
+                        }
+                        case Err(_): {
+                        }
+                    }
+                    result = GIT_gitdiff.Side(mode, "", full);
+                }
+                result.is_known = false;
+                one.result = result;
+                out.push(one);
+            }
+        }
+    }
+    return out;
+}
+
+// --- names and raw lines ---------------------------------------------------------------------
+
+/// `--raw`, `--name-only` and `--name-status` for combined paths
+/// (`show_raw_diff`): `::100644 100644 100644 abc def 012 MM<TAB>path`.
+pub bytes raw_bytes(GIT_gitstore.Store repo, List<CPath> paths, GIT_gitdiff.DOpts opts) {
+    bytes out = [];
+    int width = GIT_gitdiff.abbrev_of(opts, false);
+    for (CPath one in paths) {
+        int np = one.parents.size();
+        if (opts.is_raw) {
+            str head = ":".repeat(np);
+            for (int n in 0 .. np) {
+                if (n > 0) {
+                    head = head + " ";
+                }
+                head = head + GIT_gitdiff.octal6(one.parents[n].mode);
+            }
+            head = head + " " + GIT_gitdiff.octal6(one.result.mode);
+            for (int n in 0 .. np) {
+                head = head + " " + GIT_gitdiff.abbrev_id(repo, one.parents[n].id, width);
+            }
+            str result_id = one.result.id;
+            if (!one.result.is_known) {
+                result_id = "";
+            }
+            head = head + " " + GIT_gitdiff.abbrev_id(repo, result_id, width) + " ";
+            out.extend(head.to_bytes());
+        }
+        if (opts.is_raw || opts.is_name_status) {
+            str letters = "";
+            for (str letter in one.status) {
+                letters = letters + letter;
+            }
+            out.extend(letters.to_bytes());
+            if (opts.is_nul) {
+                out.push(0);
+            } else {
+                out.push('\t');
+            }
+        }
+        if (opts.is_nul) {
+            out.extend(one.path.to_bytes());
+            out.push(0);
+        } else {
+            out.extend((GIT_gitdiff.quoted(opts, one.path) + "\n").to_bytes());
+        }
+    }
+    return out;
+}
+
+// --- the line table -------------------------------------------------------------------------
+
+// find_next: the first line from `i` that is marked (or, with
+// `look_for_uninteresting`, not marked); `cnt + 1` when there is none
+int find_next(List<int> flags, int mark, int i, int cnt, bool look_for_uninteresting) {
+    int at = i;
+    while (at <= cnt) {
+        bool is_marked = flags[at] & mark != 0;
+        if (look_for_uninteresting) {
+            if (!is_marked) {
+                return at;
+            }
+        } else if (is_marked) {
+            return at;
+        }
+        at = at + 1;
+    }
+    return at;
+}
+
+// adjust_hunk_tail: a hunk whose last line is interesting only through
+// deletions gives no trailing context of its own
+int adjust_hunk_tail(List<int> flags, int all_mask, int hunk_begin, int i) {
+    if (hunk_begin + 1 <= i && flags[i - 1] & all_mask == 0) {
+        return i - 1;
+    }
+    return i;
+}
+
+bool give_context(List<int> flags, int cnt, int np, int context) {
+    int all_mask = (1 << np) - 1;
+    int mark = 1 << np;
+    int no_pre_delete = 2 << np;
+    int i = find_next(flags, mark, 0, cnt, false);
+    if (cnt < i) {
+        return false;
+    }
+    while (i <= cnt) {
+        int j = 0;
+        if (context < i) {
+            j = i - context;
+        }
+        while (j < i) {
+            flags[j] = flags[j] | mark | no_pre_delete;
+            j = j + 1;
+        }
+        bool is_again = true;
+        bool is_done = false;
+        while (is_again) {
+            is_again = false;
+            j = find_next(flags, mark, i, cnt, true);
+            if (cnt < j) {
+                is_done = true;
+                break;
+            }
+            int k = find_next(flags, mark, j, cnt, false);
+            if (k < j + context) {
+                while (j < k) {
+                    flags[j] = flags[j] | mark;
+                    j = j + 1;
+                }
+                i = k;
+                is_again = true;
+                continue;
+            }
+            j = adjust_hunk_tail(flags, all_mask, i, j);
+            int tail = j + context;
+            if (tail > cnt + 1) {
+                tail = cnt + 1;
+            }
+            while (j < tail) {
+                flags[j] = flags[j] | mark;
+                j = j + 1;
+            }
+            i = k;
+        }
+        if (is_done) {
+            break;
+        }
+    }
+    return true;
+}
+
+// make_hunks: mark the lines to show; false when there is nothing to show
+bool make_hunks(List<int> flags, List<List<int>> lost_maps, int cnt, int np, bool is_dense, int context) {
+    int all_mask = (1 << np) - 1;
+    int mark = 1 << np;
+    for (int i in 0 .. cnt + 1) {
+        if (flags[i] & all_mask != 0 || lost_maps[i].size() > 0) {
+            flags[i] = flags[i] | mark;
+        } else {
+            flags[i] = flags[i] - (flags[i] & mark);
+        }
+    }
+    if (!is_dense) {
+        return give_context(flags, cnt, np, context);
+    }
+    int i = 0;
+    while (i <= cnt) {
+        while (i <= cnt && flags[i] & mark == 0) {
+            i = i + 1;
+        }
+        if (cnt < i) {
+            break;
+        }
+        int hunk_begin = i;
+        int j = i + 1;
+        while (j <= cnt) {
+            if (flags[j] & mark == 0) {
+                int la = adjust_hunk_tail(flags, all_mask, hunk_begin, j);
+                la = la + context;
+                if (la > cnt + 1) {
+                    la = cnt + 1;
+                }
+                bool is_continuing = false;
+                while (la != 0) {
+                    la = la - 1;
+                    if (j > la) {
+                        break;
+                    }
+                    if (flags[la] & mark != 0) {
+                        is_continuing = true;
+                        break;
+                    }
+                }
+                if (!is_continuing) {
+                    break;
+                }
+                j = la;
+            }
+            j = j + 1;
+        }
+        int hunk_end = j;
+        int same_diff = 0;
+        bool is_interesting = false;
+        int at = i;
+        while (at < hunk_end && !is_interesting) {
+            int this_diff = flags[at] & all_mask;
+            if (this_diff != 0) {
+                if (same_diff == 0) {
+                    same_diff = this_diff;
+                } else if (same_diff != this_diff) {
+                    is_interesting = true;
+                    break;
+                }
+            }
+            for (int map in lost_maps[at]) {
+                if (is_interesting) {
+                    break;
+                }
+                if (same_diff == 0) {
+                    same_diff = map;
+                } else if (same_diff != map) {
+                    is_interesting = true;
+                }
+            }
+            at = at + 1;
+        }
+        if (!is_interesting && same_diff != all_mask) {
+            for (int k in hunk_begin .. hunk_end) {
+                flags[k] = flags[k] - (flags[k] & mark);
+            }
+        }
+        i = hunk_end;
+    }
+    return give_context(flags, cnt, np, context);
+}
+
+// Hang the lines a parent lost (`group`, in order) on the lines already lost
+// at this place by earlier parents: the two lists are matched by a longest
+// common subsequence, found from their ends (git's choice among equal
+// lines: the later ones pair up); a shared line gets the parent's bit, the
+// others stay where they fall, those of the earlier parents first.
+void merge_lost(List<bytes> have, List<int> maps, List<bytes> group, int nmask) {
+    int n = have.size();
+    int m = group.size();
+    if (n == 0) {
+        for (bytes text in group) {
+            have.push(text);
+            maps.push(nmask);
+        }
+        return;
+    }
+    // equal ends pair up whatever else happens
+    int tail = 0;
+    while (tail < n && tail < m && have[n - 1 - tail] == group[m - 1 - tail]) {
+        tail = tail + 1;
+    }
+    int rows = n - tail;
+    int cols = m - tail;
+    List<int> pair_a = [];
+    List<int> pair_b = [];
+    if (rows > 0 && cols > 0) {
+        int width = cols + 1;
+        List<int> table = [0; (rows + 1) * width];
+        if (rows * cols > 4000000) {
+            // too big for the table: greedy, front to back
+            int at = 0;
+            for (int j in 0 .. cols) {
+                int k = at;
+                while (k < rows && have[k] != group[j]) {
+                    k = k + 1;
+                }
+                if (k < rows) {
+                    pair_a.push(k);
+                    pair_b.push(j);
+                    at = k + 1;
+                }
+            }
+        } else {
+            for (int i in 1 .. rows + 1) {
+                for (int j in 1 .. cols + 1) {
+                    if (have[i - 1] == group[j - 1]) {
+                        table[i * width + j] = table[(i - 1) * width + j - 1] + 1;
+                    } else if (table[(i - 1) * width + j] >= table[i * width + j - 1]) {
+                        table[i * width + j] = table[(i - 1) * width + j];
+                    } else {
+                        table[i * width + j] = table[i * width + j - 1];
+                    }
+                }
+            }
+            int i = rows;
+            int j = cols;
+            while (i > 0 && j > 0) {
+                if (have[i - 1] == group[j - 1]) {
+                    pair_a.push(i - 1);
+                    pair_b.push(j - 1);
+                    i = i - 1;
+                    j = j - 1;
+                } else if (table[(i - 1) * width + j] > table[i * width + j - 1]) {
+                    i = i - 1;
+                } else {
+                    j = j - 1;
+                }
+            }
+            pair_a.reverse();
+            pair_b.reverse();
+        }
+    }
+    for (int k in 0 .. tail) {
+        pair_a.push(rows + k);
+        pair_b.push(cols + k);
+    }
+    List<bytes> out_lines = [];
+    List<int> out_maps = [];
+    int ai = 0;
+    int bi = 0;
+    for (int k in 0 .. pair_a.size()) {
+        while (ai < pair_a[k]) {
+            out_lines.push(have[ai]);
+            out_maps.push(maps[ai]);
+            ai = ai + 1;
+        }
+        while (bi < pair_b[k]) {
+            out_lines.push(group[bi]);
+            out_maps.push(nmask);
+            bi = bi + 1;
+        }
+        out_lines.push(have[ai]);
+        out_maps.push(maps[ai] | nmask);
+        ai = ai + 1;
+        bi = bi + 1;
+    }
+    while (ai < n) {
+        out_lines.push(have[ai]);
+        out_maps.push(maps[ai]);
+        ai = ai + 1;
+    }
+    while (bi < m) {
+        out_lines.push(group[bi]);
+        out_maps.push(nmask);
+        bi = bi + 1;
+    }
+    have.clear();
+    maps.clear();
+    for (int k in 0 .. out_lines.size()) {
+        have.push(out_lines[k]);
+        maps.push(out_maps[k]);
+    }
+}
+
+// 0 kept, 1 removed, 2 added
+int kind_code(diff.Op op) {
+    match (op.kind) {
+        case Keep: {
+            return 0;
+        }
+        case Remove: {
+            return 1;
+        }
+        case Add: {
+            return 2;
+        }
+    }
+}
+
+// git prints these counts as unsigned long: a count that went below zero
+// shows as 2^64 less
+str unsigned_text(int value) {
+    if (value >= 0) {
+        return value.to_str();
+    }
+    int below = 0 - value;
+    if (below <= 6) {
+        return "1844674407370955161" + (6 - below).to_str();
+    }
+    return "184467440737095516" + (16 - below).to_str();
+}
+
+// the line without its terminator
+bytes bare(bytes line) {
+    if (line.size() > 0 && line[line.size() - 1] == '\n') {
+        return line.substr(0, line.size() - 1);
+    }
+    return line;
+}
+
+bool is_comment_start(bytes line) {
+    if (line.size() == 0) {
+        return false;
+    }
+    int c = line[0];
+    return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || c == '_' || c == '$';
+}
+
+bool is_space(int c) {
+    return c == ' ' || c == '\t' || c == '\n' || c == '\r' || c == 11 || c == 12;
+}
+
+// --- one path ---------------------------------------------------------------------------------
+
+str modes_text(List<GIT_gitdiff.Side> parents) {
+    str out = "";
+    for (int n in 0 .. parents.size()) {
+        if (n > 0) {
+            out = out + ",";
+        }
+        out = out + GIT_gitdiff.octal6(parents[n].mode);
+    }
+    return out;
+}
+
+/// The patch of one path: `diff --cc` (or `--combined`), `index`, mode lines,
+/// `---`/`+++`, the hunks; empty when `--cc` finds nothing interesting and
+/// the modes agree.
+pub bytes patch_bytes(GIT_gitstore.Store repo, CPath one, GIT_gitdiff.DOpts opts, bool is_dense) {
+    bytes out = [];
+    GIT_gitdiff.Pal pal = opts.pal;
+    int np = one.parents.size();
+    bool is_deleted = one.result.mode == 0;
+    bool is_work = one.result.wt != "";
+    bytes result = [];
+    if (!is_deleted) {
+        result = GIT_gitdiff.content_of(repo, one.result);
+    }
+    List<bytes> parent_data = [];
+    bool is_binary = false;
+    if (diff.is_binary(result)) {
+        is_binary = true;
+    }
+    for (int n in 0 .. np) {
+        bytes data = [];
+        if (one.parents[n].mode != 0) {
+            data = GIT_gitdiff.content_of(repo, one.parents[n]);
+        }
+        if (diff.is_binary(data)) {
+            is_binary = true;
+        }
+        parent_data.push(data);
+    }
+    // the line table
+    List<bytes> lines = GIT_xdiff.split_lines(result);
+    int cnt = lines.size();
+    List<int> flags = [0; cnt + 2];
+    List<List<bytes>> lost = [];
+    List<List<int>> lost_maps = [];
+    for (int i in 0 .. cnt + 2) {
+        lost.push([]);
+        lost_maps.push([]);
+    }
+    bool is_hunks = false;
+    if (!is_binary) {
+        for (int n in 0 .. np) {
+            int nmask = 1 << n;
+            List<diff.Op> ops = GIT_gitdiff.make_ops(parent_data[n], result, opts.ws, 0);
+            int at = 0;
+            int bpos = 0;
+            while (at < ops.size()) {
+                if (kind_code(ops[at]) == 0) {
+                    bpos = bpos + 1;
+                    at = at + 1;
+                    continue;
+                }
+                int bucket = bpos;
+                if (bucket > cnt) {
+                    bucket = cnt;
+                }
+                List<bytes> group = [];
+                while (at < ops.size() && kind_code(ops[at]) == 1) {
+                    group.push(bare(ops[at].line));
+                    at = at + 1;
+                }
+                merge_lost(lost[bucket], lost_maps[bucket], group, nmask);
+                while (at < ops.size() && kind_code(ops[at]) == 2) {
+                    if (bpos < cnt) {
+                        flags[bpos] = flags[bpos] | nmask;
+                    }
+                    bpos = bpos + 1;
+                    at = at + 1;
+                }
+            }
+        }
+        is_hunks = make_hunks(flags, lost_maps, cnt, np, is_dense, opts.context);
+        if (is_deleted && !one.result.is_known) {
+            // a work-tree file that is gone: git shows the header only
+            is_hunks = false;
+        }
+    }
+    bool is_mode_differs = false;
+    for (int n in 0 .. np) {
+        if (one.parents[n].mode != one.result.mode) {
+            is_mode_differs = true;
+        }
+    }
+    if (!is_binary && !is_hunks && !is_mode_differs && !is_work) {
+        return out;
+    }
+    int width = opts.abbrev_default;
+    if (opts.is_full_index) {
+        width = 40;
+    }
+    str name = "diff --combined ";
+    if (is_dense) {
+        name = "diff --cc ";
+    }
+    GIT_gitdiff.meta_line(out, name + GIT_gitdiff.quoted(opts, one.path), pal);
+    str index_line = "index ";
+    for (int n in 0 .. np) {
+        if (n > 0) {
+            index_line = index_line + ",";
+        }
+        index_line = index_line + GIT_gitdiff.abbrev_id(repo, one.parents[n].id, width);
+    }
+    str result_id = one.result.id;
+    if (!one.result.is_known || is_work) {
+        result_id = "";
+    }
+    index_line = index_line + ".." + GIT_gitdiff.abbrev_id(repo, result_id, width);
+    GIT_gitdiff.meta_line(out, index_line, pal);
+    bool is_added = false;
+    if (is_mode_differs) {
+        is_added = !is_deleted;
+        for (int n in 0 .. np) {
+            if (one.status[n] != "A") {
+                is_added = false;
+            }
+        }
+        if (is_added) {
+            GIT_gitdiff.meta_line(out, "new file mode " + GIT_gitdiff.octal6(one.result.mode), pal);
+        } else {
+            str line = "mode " + modes_text(one.parents);
+            if (is_deleted) {
+                line = "deleted file " + line;
+            } else {
+                line = line + ".." + GIT_gitdiff.octal6(one.result.mode);
+            }
+            GIT_gitdiff.meta_line(out, line, pal);
+        }
+    }
+    if (is_binary) {
+        out.extend("Binary files differ\n".to_bytes());
+        return out;
+    }
+    str from_name = "--- " + GIT_gitdiff.quoted(opts, opts.src_prefix + one.path);
+    if (is_added) {
+        from_name = "--- /dev/null";
+    }
+    str to_name = "+++ " + GIT_gitdiff.quoted(opts, opts.dst_prefix + one.path);
+    if (is_deleted) {
+        to_name = "+++ /dev/null";
+    }
+    GIT_gitdiff.meta_line(out, from_name, pal);
+    GIT_gitdiff.meta_line(out, to_name, pal);
+    if (is_hunks) {
+        dump(out, one, lines, flags, lost, lost_maps, cnt, np, opts);
+    }
+    return out;
+}
+
+// dump_sline
+void dump(bytes out, CPath one, List<bytes> lines, List<int> flags, List<List<bytes>> lost, List<List<int>> lost_maps, int cnt, int np, GIT_gitdiff.DOpts opts) {
+    GIT_gitdiff.Pal pal = opts.pal;
+    int mark = 1 << np;
+    int no_pre_delete = 2 << np;
+    int context = opts.context;
+    // p[n][i]: the line of parent n that is next at result line i, before
+    // the lost lines hung there
+    List<List<int>> p_lno = [];
+    for (int n in 0 .. np) {
+        int nmask = 1 << n;
+        List<int> row = [0; cnt + 2];
+        int at = 1;
+        for (int i in 0 .. cnt + 1) {
+            row[i] = at;
+            for (int map in lost_maps[i]) {
+                if (map & nmask != 0) {
+                    at = at + 1;
+                }
+            }
+            if (i < cnt && flags[i] & nmask == 0) {
+                at = at + 1;
+            }
+        }
+        row[cnt + 1] = at;
+        p_lno.push(row);
+    }
+    int lno = 0;
+    while (true) {
+        bytes comment = [];
+        bool has_comment = false;
+        while (lno <= cnt && flags[lno] & mark == 0) {
+            if (lno < cnt && is_comment_start(lines[lno])) {
+                comment = lines[lno];
+                has_comment = true;
+            }
+            lno = lno + 1;
+        }
+        if (cnt < lno) {
+            break;
+        }
+        int hunk_end = lno + 1;
+        while (hunk_end <= cnt) {
+            if (flags[hunk_end] & mark == 0) {
+                break;
+            }
+            hunk_end = hunk_end + 1;
+        }
+        int rlines = hunk_end - lno;
+        if (cnt < hunk_end) {
+            rlines = rlines - 1;
+        }
+        int null_context = 0;
+        if (context == 0) {
+            for (int j in lno .. hunk_end) {
+                if (flags[j] & (mark - 1) == 0) {
+                    null_context = null_context + 1;
+                }
+            }
+            rlines = rlines - null_context;
+        }
+        str head = "@".repeat(np + 1);
+        for (int n in 0 .. np) {
+            int l0 = p_lno[n][lno];
+            int l1 = p_lno[n][hunk_end];
+            head = head + " -" + l0.to_str() + "," + unsigned_text(l1 - l0 - null_context);
+        }
+        head = head + " +" + (lno + 1).to_str() + "," + unsigned_text(rlines) + " " + "@".repeat(np + 1);
+        bytes comment_bytes = [];
+        if (has_comment) {
+            int comment_end = 0;
+            for (int k in 0 .. 40) {
+                if (k >= comment.size()) {
+                    break;
+                }
+                int c = comment[k];
+                if (c == '\n') {
+                    break;
+                }
+                if (!is_space(c)) {
+                    comment_end = k;
+                }
+            }
+            comment_bytes = comment.substr(0, comment_end);
+        }
+        if (pal.is_on) {
+            out.extend((pal.frag + head).to_bytes());
+            if (comment_bytes.size() > 0) {
+                out.extend((pal.reset + pal.context + " " + pal.reset + pal.func).to_bytes());
+                out.extend(comment_bytes);
+            }
+            out.extend((pal.reset + "\n").to_bytes());
+        } else {
+            out.extend(head.to_bytes());
+            if (comment_bytes.size() > 0) {
+                out.push(' ');
+                out.extend(comment_bytes);
+            }
+            out.push('\n');
+        }
+        while (lno < hunk_end) {
+            int at = lno;
+            lno = lno + 1;
+            if (flags[at] & no_pre_delete == 0) {
+                for (int d in 0 .. lost[at].size()) {
+                    bytes line = [];
+                    if (pal.is_on) {
+                        line.extend(pal.old.to_bytes());
+                    }
+                    for (int n in 0 .. np) {
+                        if (lost_maps[at][d] & (1 << n) != 0) {
+                            line.push('-');
+                        } else {
+                            line.push(' ');
+                        }
+                    }
+                    line.extend(lost[at][d]);
+                    if (pal.is_on) {
+                        line.extend(pal.reset.to_bytes());
+                    }
+                    line.push('\n');
+                    out.extend(line);
+                }
+            }
+            if (cnt < lno) {
+                break;
+            }
+            bytes line = [];
+            if (flags[at] & (mark - 1) == 0) {
+                if (context == 0) {
+                    continue;
+                }
+                if (pal.is_on) {
+                    line.extend(pal.context.to_bytes());
+                }
+            } else if (pal.is_on) {
+                line.extend(pal.new.to_bytes());
+            }
+            for (int n in 0 .. np) {
+                if (flags[at] & (1 << n) != 0) {
+                    line.push('+');
+                } else {
+                    line.push(' ');
+                }
+            }
+            line.extend(bare(lines[at]));
+            if (pal.is_on) {
+                line.extend(pal.reset.to_bytes());
+            }
+            line.push('\n');
+            out.extend(line);
+        }
+    }
+}
+

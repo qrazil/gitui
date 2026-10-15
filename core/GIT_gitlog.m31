@@ -9,9 +9,10 @@
 // `--format=`), decorations, the diff below the message, and the graph woven
 // in line by line.
 //
-// Left out, and listed in docs/GIT-COMPAT.md: merge diffs (`-m`, `-c`, `--cc`;
-// a merge prints no diff under `log`, and `show` prints only its header),
-// `--word-diff`, `.mailmap`, notes, `--date=local`/`human`, `--since` words
+// Merge diffs (`-m`, `-c`, `--cc`, `--dd`, `--diff-merges=`, `--first-parent`)
+// are `combined_commit` below and `diff/GIT_combine.m31`.
+//
+// Left out, and listed in docs/GIT-COMPAT.md: `.mailmap`, notes, `--date=local`/`human`, `--since` words
 // beyond `N units ago`, `yesterday`, dates and timestamps, the pager.
 
 import io;
@@ -32,6 +33,7 @@ import core.GIT_gitdiffcmd;
 import core.GIT_pathtree;
 import core.GIT_utf8width;
 import diff.GIT_gitdiff;
+import diff.GIT_combine;
 
 // --- options -------------------------------------------------------------------------------
 
@@ -2181,6 +2183,8 @@ type Emitter {
     bool is_missing_newline = false;
     bool is_use_terminator = false;
     bool is_empty_format = false;
+    // -m: the parent this diff is against, named after the commit
+    str from_id = "";
     // the line terminator: '\n', or NUL with -z
     str term = "\n";
 }
@@ -2302,6 +2306,13 @@ void Emitter.show_log(str id, GIT_object.Commit commit, List<str> parents) {
         str label = hash;
         if (!is_oneline) {
             label = "commit " + hash;
+        }
+        if (from_id != "") {
+            str from = from_id;
+            if (opts.is_abbrev_commit) {
+                from = f.abbrev_id(from_id);
+            }
+            label = label + " (from " + from + ")";
         }
         if (f.is_color) {
             out.text(f.pal.commit + label + f.pal.reset);
@@ -2612,6 +2623,18 @@ pub int run(str start, List<str> overrides, List<str> argv, bool is_show) {
     GIT_gitdiffcmd.Settings settings = GIT_gitdiffcmd.Settings();
     List<str> decorate_exclude = [];
     // configuration
+    match (GIT_gitcommon.cfg(ctx, "log", "", "diffmerges")) {
+        case Some(str value): {
+            int mode = GIT_gitdiffcmd.merge_mode_of(value, 2);
+            if (mode < 0 || value == "on" || value == "m") {
+                io.eprint("fatal: invalid value for 'log.diffmerges': '" + value + "'");
+                return 128;
+            }
+            settings.merges_default = mode;
+        }
+        case None: {
+        }
+    }
     match (GIT_gitcommon.cfg(ctx, "log", "", "date")) {
         case Some(str value): {
             opts.date_style = value;
@@ -3009,8 +3032,8 @@ pub int run(str start, List<str> overrides, List<str> argv, bool is_show) {
             io.eprint("error: unsupported option: " + arg);
             return 129;
         }
-        if (arg == "-m" || arg == "-c" || arg == "--cc" || arg == "--dd" || arg.starts_with("--diff-merges")) {
-            io.eprint("error: unsupported option: " + arg + " (merge diffs are not implemented)");
+        if (arg == "--remerge-diff" || arg == "--combined-all-paths") {
+            io.eprint("error: unsupported option: " + arg);
             return 129;
         }
         io.eprint("fatal: unrecognized argument: " + arg);
@@ -3053,7 +3076,24 @@ pub int run(str start, List<str> overrides, List<str> argv, bool is_show) {
         io.eprint("'git <command> [<revision>...] -- [<file>...]'");
         return 128;
     }
+    // the mode for merges: `show` combines unless told otherwise, `log` does
+    // not diff them; --first-parent turns all-or-nothing and -m into a diff
+    // against the first parent
+    if (dopts.merge_mode == -1) {
+        if (opts.is_first_parent) {
+            dopts.merge_mode = 1;
+        } else if (is_show) {
+            dopts.merge_mode = 4;
+        } else {
+            dopts.merge_mode = 0;
+        }
+    } else if (dopts.merge_mode == 2 && opts.is_first_parent) {
+        dopts.merge_mode = 1;
+    }
     dopts = GIT_gitdiffcmd.finish_options(ctx, dopts, settings, is_show);
+    if (settings.is_no_output) {
+        dopts.is_merges_patch = false;
+    }
     if (settings.fatal != "") {
         io.eprint("fatal: " + settings.fatal);
         return 128;
@@ -3212,7 +3252,7 @@ pub int run(str start, List<str> overrides, List<str> argv, bool is_show) {
         }
     }
     Emitter emitter = make_emitter(ctx, repo, opts, dopts, out, is_color, decorate_exclude);
-    bool is_needs_diff = DOpts_any(dopts) || opts.pickaxe != "" || opts.is_follow || dopts.filter != "" || dopts.filter_not != "";
+    bool is_needs_diff = DOpts_any(dopts) || dopts.is_merges_patch || (is_show && settings.is_no_output) || opts.pickaxe != "" || opts.is_follow || dopts.filter != "" || dopts.filter_not != "";
     int max_count = opts.max_count;
     int skip = opts.skip;
     List<str> collected = [];
@@ -3266,6 +3306,20 @@ pub int run(str start, List<str> overrides, List<str> argv, bool is_show) {
 
 /// `log_tree_commit`: print one commit; returns whether anything was shown.
 bool log_tree_commit(Walk walk, Emitter emitter, str id, bool is_needs_diff, List<GIT_gitcommon.Spec> specs, GIT_gitdiff.DOpts dopts) {
+    if (dopts.is_merges_patch && !DOpts_any(dopts)) {
+        // --diff-merges=<mode>: a patch for a merge, nothing for the rest
+        if (walk.parents_of(id).size() > 1) {
+            dopts.is_patch = true;
+            bool is_shown = log_tree_commit_with(walk, emitter, id, true, specs, dopts);
+            dopts.is_patch = false;
+            return is_shown;
+        }
+        return log_tree_commit_with(walk, emitter, id, false, specs, dopts);
+    }
+    return log_tree_commit_with(walk, emitter, id, is_needs_diff, specs, dopts);
+}
+
+bool log_tree_commit_with(Walk walk, Emitter emitter, str id, bool is_needs_diff, List<GIT_gitcommon.Spec> specs, GIT_gitdiff.DOpts dopts) {
     GIT_object.Commit commit = walk.commit(id);
     List<str> parents = walk.parents_of(id);
     bool is_always_show_header = walk.opts.pickaxe == "" && !walk.opts.is_follow && dopts.filter == "" && dopts.filter_not == "";
@@ -3275,41 +3329,34 @@ bool log_tree_commit(Walk walk, Emitter emitter, str id, bool is_needs_diff, Lis
         bool is_wanted = true;
         if (walk.opts.is_follow && parents.size() <= 1) {
             items = walk.follow_diff(commit, parents);
-        } else if (parents.size() > 1 && walk.is_no_walk) {
-            // a merge under `show`: the header, a blank line and, for the stat
-            // formats, the stat against the first parent; combined patches of
-            // paths every parent differs on are not implemented
-            emitter.show_log(id, commit, parents);
-            if (DOpts_any(dopts) && !emitter.is_empty_format) {
-                if (emitter.has_graph) {
-                    emitter.out.text(emitter.graph.padding_line());
+        } else if (parents.size() > 1 && dopts.merge_mode >= 3) {
+            // a combined diff: `diff --combined` / `diff --cc`
+            return combined_commit(walk, emitter, id, commit, parents, specs, dopts);
+        } else if (parents.size() > 1 && dopts.merge_mode == 2) {
+            // -m: a separate diff, and header, for each parent
+            bool is_any = false;
+            for (str parent in parents) {
+                List<GIT_gitdiff.Item> against = GIT_gitdiff.tree_vs_tree(walk.repo, walk.commit(parent).tree, commit.tree, specs);
+                if (dopts.is_reverse) {
+                    against = GIT_gitdiff.reverse_items(against);
                 }
-                emitter.out.text(emitter.term);
-            }
-            GIT_gitdiff.DOpts stat_only = clone(dopts);
-            stat_only.is_patch = false;
-            stat_only.is_name_only = false;
-            stat_only.is_name_status = false;
-            stat_only.is_raw = false;
-            if (stat_only.is_stat || stat_only.is_numstat || stat_only.is_shortstat || stat_only.is_summary) {
-                str first_tree = walk.commit(parents[0]).tree;
-                List<GIT_gitdiff.Item> stat_items = GIT_gitdiff.tree_vs_tree(walk.repo, first_tree, commit.tree, specs);
                 if (dopts.is_renames) {
-                    stat_items = GIT_gitdiff.detect_renames(walk.repo, stat_items, dopts.rename_score);
+                    against = GIT_gitdiff.detect_renames(walk.repo, against, dopts.rename_score);
                 }
-                if (stat_items.size() > 0) {
-                    if (emitter.has_graph) {
-                        stat_only.prefix_len = emitter.graph.padding_line().size();
-                    }
-                    emitter.diff_put(GIT_gitdiff.render(walk.repo, stat_items, stat_only));
+                against = GIT_gitdiff.apply_filter(against, dopts);
+                emitter.from_id = parent;
+                if (emitter.diff_flush(id, commit, parents, against)) {
+                    is_any = true;
                 }
             }
-            return true;
-        } else if (parents.size() > 1) {
+            emitter.from_id = "";
+            is_shown = is_any;
+            is_wanted = false;
+        } else if (parents.size() > 1 && dopts.merge_mode != 1) {
             is_wanted = false;
         } else {
             str parent_tree = "";
-            if (parents.size() == 1) {
+            if (parents.size() >= 1) {
                 parent_tree = walk.commit(parents[0]).tree;
             }
             items = GIT_gitdiff.tree_vs_tree(walk.repo, parent_tree, commit.tree, specs);
@@ -3342,6 +3389,71 @@ bool log_tree_commit(Walk walk, Emitter emitter, str id, bool is_needs_diff, Lis
         is_shown = true;
     }
     return is_shown;
+}
+
+/// A merge under `-c` / `--cc` (and `show`'s default): the header, a blank
+/// line, the stat formats against the first parent, the raw and name lines,
+/// then the patch of every path that differs from all parents
+/// (`diff_tree_combined`). Returns true: the header is always shown.
+bool combined_commit(Walk walk, Emitter emitter, str id, GIT_object.Commit commit, List<str> parents, List<GIT_gitcommon.Spec> specs, GIT_gitdiff.DOpts dopts) {
+    emitter.show_log(id, commit, parents);
+    if (DOpts_any(dopts) && !emitter.is_empty_format) {
+        if (emitter.has_graph) {
+            emitter.out.text(emitter.graph.padding_line());
+        }
+        emitter.out.text(emitter.term);
+    }
+    bool is_stat = dopts.is_stat || dopts.is_numstat || dopts.is_shortstat || dopts.is_summary;
+    if (is_stat) {
+        GIT_gitdiff.DOpts stat_only = clone(dopts);
+        stat_only.is_patch = false;
+        stat_only.is_name_only = false;
+        stat_only.is_name_status = false;
+        stat_only.is_raw = false;
+        str first_tree = walk.commit(parents[0]).tree;
+        List<GIT_gitdiff.Item> stat_items = GIT_gitdiff.tree_vs_tree(walk.repo, first_tree, commit.tree, specs);
+        if (dopts.is_renames) {
+            stat_items = GIT_gitdiff.detect_renames(walk.repo, stat_items, dopts.rename_score);
+        }
+        if (stat_items.size() > 0) {
+            if (emitter.has_graph) {
+                stat_only.prefix_len = emitter.graph.padding_line().size();
+            }
+            emitter.diff_put(GIT_gitdiff.render(walk.repo, stat_items, stat_only));
+        }
+    }
+    if (!dopts.is_raw && !dopts.is_name_only && !dopts.is_name_status && !dopts.is_patch) {
+        return true;
+    }
+    List<str> trees = [];
+    for (str parent in parents) {
+        trees.push(walk.commit(parent).tree);
+    }
+    List<GIT_combine.CPath> paths = GIT_combine.merge_paths(walk.repo, trees, commit.tree, specs, dopts);
+    if (paths.size() == 0) {
+        return true;
+    }
+    bool is_sep = false;
+    if (dopts.is_raw || dopts.is_name_only || dopts.is_name_status) {
+        emitter.diff_put(GIT_combine.raw_bytes(walk.repo, paths, dopts));
+        is_sep = true;
+    } else if (dopts.is_stat || dopts.is_numstat || dopts.is_shortstat) {
+        is_sep = true;
+    }
+    if (dopts.is_patch) {
+        bytes body = [];
+        for (GIT_combine.CPath one in paths) {
+            body.extend(GIT_combine.patch_bytes(walk.repo, one, dopts, dopts.merge_mode == 4));
+        }
+        if (is_sep) {
+            if (emitter.has_graph) {
+                emitter.out.text(emitter.graph.padding_line());
+            }
+            emitter.out.text(emitter.term);
+        }
+        emitter.diff_put(body);
+    }
+    return true;
 }
 
 // --- show -----------------------------------------------------------------------------------------------
@@ -3466,7 +3578,8 @@ int show_objects(GIT_gitcommon.Ctx ctx, GIT_gitstore.Store repo, LOpts opts, GIT
                             walk.parse(id);
                             walk.set_flag(id, F_SEEN);
                             walk.list = [id];
-                            bool is_diff = DOpts_any(dopts);
+                            // `show` always diffs (even under -s: -m names each parent)
+                            bool is_diff = true;
                             str next = walk.next_commit();
                             if (next != "") {
                                 walk.set_flag(next, F_SHOWN);

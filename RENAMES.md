@@ -7,7 +7,14 @@ A symlink in the work tree is read by target: `status`, `diff`, `show`,
 `add` (new and retargeted links, `-A`, `-u`), `commit -a`, `rm`, `restore`,
 `reset` and `checkout` treat it as git does, and the library status
 (`GIT_status`, `GIT_checkout.worktree_state`) used by gitui sees a retargeted
-link too. Nothing to migrate. `docs/GIT-COMPAT.md` lists what differs.
+link too. Merges have a combined diff: `diff/GIT_combine.m31` is new
+(`diff --cc` / `--combined`, the `::` raw lines, the lost-line table of git's
+`combine-diff.c`), and `show`, `log` and `diff` read `-m`, `-c`, `--cc`,
+`--dd`, `--diff-merges=`, `--first-parent` and `log.diffMerges`; `git diff`
+of a conflicted merge prints `diff --cc` for a path with both sides. In
+`diff/GIT_gitdiff.m31` a few helpers became `pub`, and `DOpts` gained
+`merge_mode`, `is_merges_patch` and `abbrev_default`. Nothing to migrate.
+`docs/GIT-COMPAT.md` lists what differs.
 
 # gitui 0.13.0: `1git` change commands in git's spelling
 

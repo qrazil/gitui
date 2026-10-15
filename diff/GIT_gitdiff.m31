@@ -11,8 +11,9 @@
 //
 // What is left out, and listed in docs/GIT-COMPAT.md: `.gitattributes` (diff drivers, `-diff`,
 // textconv, eol conversion) and `core.autocrlf` are not consulted; submodules
-// are shown by their commit id only; unmerged paths print as `* Unmerged
-// path` instead of a combined diff; copies (`-C`) and break (`-B`) are not
+// are shown by their commit id only; unmerged paths without both sides
+// print `* Unmerged path` (with both, `diff/GIT_combine.m31` writes the
+// combined diff); copies (`-C`) and break (`-B`) are not
 // detected.
 
 import io;
@@ -82,6 +83,11 @@ pub type DOpts {
     pub bool is_quiet = false;
     pub bool is_exit_code = false;
     pub bool is_reverse = false;
+    // how a merge is diffed: -1 not chosen, 0 none, 1 first parent, 2 each
+    // parent (-m), 3 combined (-c), 4 dense combined (--cc)
+    pub int merge_mode = -1;
+    // --diff-merges=<mode>: a merge gets a patch when no format was chosen
+    pub bool is_merges_patch = false;
     pub bool is_text = false;
     pub bool is_full_index = false;
     // core.quotePath=false: bytes above 127 are left as they are in names
@@ -95,6 +101,8 @@ pub type DOpts {
     pub str filter = "";
     pub str filter_not = "";
     pub int abbrev = 7;
+    // core.abbrev: what the combined diff's `index` line uses, whatever --abbrev says
+    pub int abbrev_default = 7;
     // -1: the terminal's width (or the config), 0: git's 80
     pub int stat_width = -1;
     pub int stat_name_width = -1;
@@ -376,6 +384,53 @@ pub Map<str, Side> index_sides(GIT_gitstore.Store repo, List<str> unmerged) {
     return out;
 }
 
+/// An unmerged path of the index: its lowest stage (what the raw format
+/// shows as the mode), the "ours" side and whether "theirs" is there too.
+pub type Unmerged {
+    pub str path;
+    pub Side lowest;
+    pub Side ours;
+    pub bool has_ours = false;
+    pub bool has_both = false;
+}
+
+/// The unmerged paths in path order.
+pub List<Unmerged> unmerged_entries(GIT_gitstore.Store repo) {
+    List<Unmerged> out = [];
+    Map<str, int> at = {};
+    match (GIT_index.read(repo.path)) {
+        case Ok(GIT_index.Index index): {
+            for (GIT_index.Entry entry in index.entries) {
+                if (entry.stage == 0) {
+                    continue;
+                }
+                match (entry.path.utf8()) {
+                    case Some(str path): {
+                        Side side = Side(entry.mode, entry.id, "");
+                        if (!at.contains(path)) {
+                            at.set(path, out.size());
+                            out.push(Unmerged(path, side, nothing()));
+                        }
+                        Unmerged one = out[at.get(path).or(0)];
+                        if (entry.stage == 2) {
+                            one.ours = side;
+                            one.has_ours = true;
+                        }
+                        if (entry.stage == 3 && one.has_ours) {
+                            one.has_both = true;
+                        }
+                    }
+                    case None: {
+                    }
+                }
+            }
+        }
+        case Err(_): {
+        }
+    }
+    return out;
+}
+
 /// The flat map of a tree.
 pub Map<str, Side> tree_sides(GIT_gitstore.Store repo, str tree, str base, List<GIT_gitcommon.Spec> specs) {
     Map<str, Side> out = {};
@@ -457,7 +512,7 @@ int wt_mode(fs.Stat stat) {
 /// nothing there (missing, or a directory). The id is the blob id of what is
 /// on disk, taken from the index entry when the stat data say nothing
 /// changed.
-Option<Side> worktree_side(str full, Side indexed, bool is_filemode, Option<GIT_index.Entry> cached) {
+pub Option<Side> worktree_side(str full, Side indexed, bool is_filemode, Option<GIT_index.Entry> cached) {
     if (fs.is_link(full)) {
         // the blob of a link is its target text
         match (fs.readlink(full)) {
@@ -1069,7 +1124,7 @@ pub Loaded load(GIT_gitstore.Store repo, Item item, DOpts opts, bool want_ops) {
 
 // --- names -------------------------------------------------------------------------------
 
-str quoted(DOpts opts, str name) {
+pub str quoted(DOpts opts, str name) {
     return GIT_gitcommon.quote_name(name, opts.is_raw_names);
 }
 
@@ -1078,7 +1133,7 @@ str prefixed(DOpts opts, str prefix, str path) {
     return quoted(opts, prefix + path);
 }
 
-str octal6(int mode) {
+pub str octal6(int mode) {
     return GIT_gitstatus.mode_text(mode);
 }
 
@@ -1505,7 +1560,7 @@ void emit_plain(bytes out, int sign, bytes text, str color, str reset) {
 }
 
 // A header line in the meta colour.
-void meta_line(bytes out, str line, Pal pal) {
+pub void meta_line(bytes out, str line, Pal pal) {
     if (pal.is_on && pal.meta != "") {
         out.extend((pal.meta + line + pal.reset + "\n").to_bytes());
     } else {
@@ -1527,7 +1582,7 @@ void file_line(bytes out, str sign, str name, Pal pal) {
     }
 }
 
-int abbrev_of(DOpts opts, bool is_binary_full) {
+pub int abbrev_of(DOpts opts, bool is_binary_full) {
     if (opts.is_full_index) {
         return 40;
     }
@@ -1758,6 +1813,9 @@ str graph_run(str ch, int n, str color, str reset) {
 
 /// The summary line `N files changed, ...`.
 pub str summary_line(int files, int insertions, int deletions) {
+    if (files == 0) {
+        return " 0 files changed\n";
+    }
     str out = " " + files.to_str() + plural_word(files, " file changed", " files changed");
     if (insertions > 0 || deletions == 0) {
         out = out + ", " + insertions.to_str() + plural_word(insertions, " insertion(+)", " insertions(+)");
@@ -2175,7 +2233,7 @@ pub bytes raw_bytes(GIT_gitstore.Store repo, List<Item> items, DOpts opts) {
 
 // an object name abbreviated to `length` digits, unique in the repository;
 // the zero name stays zeroes
-str abbrev_id(GIT_gitstore.Store repo, str id, int length) {
+pub str abbrev_id(GIT_gitstore.Store repo, str id, int length) {
     if (id == "") {
         return "0".repeat(length);
     }
@@ -2236,16 +2294,19 @@ pub bytes render(GIT_gitstore.Store repo, List<Item> items, DOpts opts) {
     if (items.size() == 0) {
         return out;
     }
+    int separator = 0;
     if (opts.is_raw) {
         out.extend(raw_bytes(repo, items, opts));
+        separator = separator + 1;
     }
     if (opts.is_name_only) {
         out.extend(name_only_bytes(items, opts));
+        separator = separator + 1;
     }
     if (opts.is_name_status) {
         out.extend(name_status_bytes(items, opts));
+        separator = separator + 1;
     }
-    int separator = 0;
     if (opts.is_numstat) {
         out.extend(numstat_bytes(repo, items, opts));
         separator = separator + 1;
@@ -2267,7 +2328,11 @@ pub bytes render(GIT_gitstore.Store repo, List<Item> items, DOpts opts) {
     }
     if (opts.is_patch) {
         if (separator > 0) {
-            out.push('\n');
+            if (opts.is_nul) {
+                out.push(0);
+            } else {
+                out.push('\n');
+            }
         }
         for (Item item in items) {
             out.extend(patch_bytes(repo, item, opts));

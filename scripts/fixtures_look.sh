@@ -17,6 +17,7 @@
 #   unicode    names with spaces, quotes, tabs and non-ASCII letters
 #   space      whitespace-only changes for -w and -b
 #   orphan     two unrelated roots merged
+#   combined   merges with combined diffs: conflicts resolved by hand, evil, octopus
 #   links      symlinks to files, directories, nothing; retargeted; merged
 #
 # Every commit is made by `commit_at`, which advances a clock by 1 hour.
@@ -292,6 +293,113 @@ fx_links() {
     commit_at "merge side, resolving both"
 }
 
+# merges whose diff is combined: both sides edit a file (cleanly and in
+# conflict, resolved by hand, one side's text taken whole), an evil merge
+# that adds, deletes and changes the mode of files, a binary file, a file
+# without a final newline, a rename on one side, an octopus with a
+# resolution of its own, and a merge that is a plain union
+fx_combined() {
+    new_repo "$1/combined"
+    local i
+    for i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do printf 'line %s\n' "$i"; done > both.txt
+    for i in 1 2 3 4 5 6 7 8 9 10; do printf 'c%s\n' "$i"; done > conflict.txt
+    printf 'int main(void)\n{\n    return 0;\n}\n' > code.c
+    printf 'keep\n' > keep.txt
+    printf 'gone\n' > gone.txt
+    printf 'mode\n' > mode.sh
+    printf 'tail' > noeol.txt
+    printf 'bin\000one\n' > data.bin
+    printf 'oldname 1\noldname 2\noldname 3\noldname 4\noldname 5\n' > moved.txt
+    ln -s keep.txt link
+    g add -A
+    commit_at "base"
+    g checkout -q -b side
+    sed -i 's/^line 3$/line 3 side/; s/^line 18$/line 18 side/' both.txt
+    sed -i 's/^c5$/c5 side/' conflict.txt
+    sed -i 's/return 0/return 1/' code.c
+    printf 'tail side' > noeol.txt
+    printf 'bin\000side\n' > data.bin
+    printf 'added on side\n' > side-only.txt
+    g mv moved.txt renamed.txt
+    printf 'oldname 1\noldname 2 side\noldname 3\noldname 4\noldname 5\n' > renamed.txt
+    rm link
+    ln -s side-target link
+    g add -A
+    commit_at "side work"
+    g checkout -q main
+    sed -i 's/^line 10$/line 10 main/' both.txt
+    sed -i 's/^c5$/c5 main/' conflict.txt
+    sed -i 's/return 0/return 2/' code.c
+    printf 'tail main' > noeol.txt
+    printf 'bin\000main\n' > data.bin
+    printf 'main only\n' > main-only.txt
+    chmod +x mode.sh
+    printf 'oldname 1\noldname 2\noldname 3\noldname 4\noldname 5 main\n' > moved.txt
+    g add -A
+    commit_at "main work"
+    tick
+    g merge -q --no-commit side > /dev/null 2>&1
+    printf 'c1\nc2\nc3\nc4\nc5 resolved both\nc6\nc7\nc8\nc9\nc10\n' > conflict.txt
+    printf 'int main(void)\n{\n    return 3;\n}\n' > code.c
+    printf 'tail merged' > noeol.txt
+    printf 'bin\000merged\n' > data.bin
+    printf 'evil\n' > evil.txt
+    g rm -q -f gone.txt
+    ln -sfn merged-target link
+    g add -A
+    commit_at "Merge side into main with hand edits"
+    g checkout -q -b b1
+    printf 'b1\n' > b1.txt
+    sed -i 's/^line 1$/line 1 b1/' both.txt
+    g add -A
+    commit_at "b1"
+    g checkout -q main
+    g checkout -q -b b2
+    printf 'b2\n' > b2.txt
+    sed -i 's/^line 20$/line 20 b2/' both.txt
+    g add -A
+    commit_at "b2"
+    g checkout -q main
+    g checkout -q -b b3
+    printf 'b3\n' > b3.txt
+    sed -i 's/^line 7$/line 7 b3/' both.txt
+    g add -A
+    commit_at "b3"
+    g checkout -q main
+    tick
+    g merge -q --no-commit b1 b2 b3 > /dev/null 2>&1
+    printf 'octopus\n' > octo.txt
+    g add -A
+    commit_at "Octopus with its own file"
+    g checkout -q -b u1
+    printf 'u1\n' > u1.txt
+    g add -A
+    commit_at "u1"
+    g checkout -q main
+    printf 'm\n' > um.txt
+    g add -A
+    commit_at "um"
+    merge_at "Union merge" u1
+    g checkout -q -b w1
+    printf 'one\ntwo\nthree\n' > w.txt
+    g add -A
+    commit_at "w1"
+    g checkout -q main
+    printf 'one\ntwo\nthree\nfour\n' > w.txt
+    g add -A
+    commit_at "w main"
+    g checkout -q w1
+    printf 'one\ntwo\nthree\n\n' > w.txt
+    g add -A
+    commit_at "w1 again"
+    g checkout -q main
+    tick
+    g merge -q --no-commit w1 > /dev/null 2>&1
+    printf 'one\n  two\nthree\nfour\n' > w.txt
+    g add -A
+    commit_at "Merge with whitespace-ish resolution"
+}
+
 fx_binary() {
     new_repo "$1/binary"
     printf 'text\n' > t.txt
@@ -483,7 +591,7 @@ fx_dirty() {
 build_all() {
     local base=$1
     mkdir -p "$base"
-    for f in linear merges cross renames modes binary empty large tags crlf unicode space orphan links dirty; do
+    for f in linear merges cross renames modes binary empty large tags crlf unicode space orphan links combined dirty; do
         CLOCK=1700000000
         ( "fx_$f" "$base" ) || { echo "fixture $f failed" >&2; return 1; }
     done

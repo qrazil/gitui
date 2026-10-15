@@ -265,6 +265,77 @@ compare symlinks-history "$WORK/wt/symlinks" diff HEAD~1 HEAD --stat --summary
 compare symlinks-history "$WORK/wt/symlinks" diff HEAD~1 HEAD --raw
 compare symlinks-history "$WORK/wt/symlinks" show HEAD
 
+# a conflicted merge: both sides edit, both add, one deletes and the other
+# edits (each way), a mode change, a binary conflict, a resolved path left
+# in the work tree, and a deleted conflicted file
+wt conflict
+for i in 1 2 3 4 5 6 7 8 9 10 11 12; do printf 'line %s\n' "$i"; done > f.txt
+printf 'x\n' > del-us.txt
+printf 'y\n' > del-them.txt
+printf 'm\n' > mode.sh
+printf 'bin\000base\n' > data.bin
+printf 'ok\n' > clean.txt
+printf 'r\n' > resolved.txt
+printf 'gone\n' > gone.txt
+printf 'ln\n' > ln-target
+ln -s ln-target link
+g add -A; commit_at base
+g checkout -q -b other
+sed -i 's/^line 2$/line 2 other/; s/^line 11$/line 11 other/' f.txt
+printf 'other add\n' > both-add.txt
+printf 'y changed\n' > del-them.txt
+g rm -q del-us.txt
+chmod +x mode.sh
+printf 'bin\000other\n' > data.bin
+printf 'r other\n' > resolved.txt
+printf 'gone other\n' > gone.txt
+rm link; ln -s other-target link
+g add -A; commit_at other
+g checkout -q main
+sed -i 's/^line 2$/line 2 main/; s/^line 6$/line 6 main/' f.txt
+printf 'main add\n' > both-add.txt
+printf 'x changed\n' > del-us.txt
+g rm -q del-them.txt
+printf 'bin\000main\n' > data.bin
+printf 'r main\n' > resolved.txt
+g rm -q gone.txt
+rm link; ln -s main-target link
+g add -A; commit_at main
+g merge other > /dev/null 2>&1
+printf 'r resolved\n' > resolved.txt
+echo more >> clean.txt
+shapes conflict "$WORK/wt/conflict"
+shapes conflict-cached "$WORK/wt/conflict" --cached
+shapes conflict-head "$WORK/wt/conflict" HEAD
+shapes conflict-cc "$WORK/wt/conflict" --cc
+shapes conflict-c "$WORK/wt/conflict" -c
+compare conflict "$WORK/wt/conflict" diff -- f.txt
+compare conflict "$WORK/wt/conflict" diff --cc -- f.txt data.bin
+compare conflict "$WORK/wt/conflict" diff -c -U1
+compare conflict "$WORK/wt/conflict" diff -U0
+compare conflict "$WORK/wt/conflict" diff --no-diff-merges
+compare conflict "$WORK/wt/conflict" diff -w
+compare conflict "$WORK/wt/conflict" diff --color=always
+compare conflict "$WORK/wt/conflict" diff -z --raw
+compare conflict "$WORK/wt/conflict" diff -c -z --name-only
+compare conflict "$WORK/wt/conflict" diff --cached HEAD --raw
+compare conflict "$WORK/wt/conflict" diff MERGE_HEAD
+compare conflict "$WORK/wt/conflict" diff HEAD MERGE_HEAD
+compare conflict "$WORK/wt/conflict" diff --exit-code
+compare conflict "$WORK/wt/conflict" diff --quiet
+compare conflict "$WORK/wt/conflict/." diff
+rm "$WORK/wt/conflict/f.txt"
+compare conflict-deleted "$WORK/wt/conflict" diff
+compare conflict-deleted "$WORK/wt/conflict" diff --cc --raw
+compare conflict-deleted "$WORK/wt/conflict" diff --stat
+printf 'line 1\nline 3\n' > "$WORK/wt/conflict/f.txt"
+compare conflict-rewritten "$WORK/wt/conflict" diff
+compare conflict-rewritten "$WORK/wt/conflict" diff -U0
+printf '' > "$WORK/wt/conflict/f.txt"
+compare conflict-empty "$WORK/wt/conflict" diff
+chmod +x "$WORK/wt/conflict/both-add.txt"
+compare conflict-mode "$WORK/wt/conflict" diff
+
 # which output format wins when several are given
 for combo in "--name-only --numstat" "-s --stat" "-s -p" "--stat -s" "-p -s" "--name-only -s" "-s --name-only" "--name-only --name-status" "--quiet -p" "-p --quiet" "-U1 -s" "-s -U1" "--name-status --stat" "--raw --stat -p" "--summary --shortstat" "--numstat --stat --shortstat --summary -p"; do
     # shellcheck disable=SC2086
