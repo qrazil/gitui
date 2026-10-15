@@ -996,8 +996,31 @@ Map<str, str> directory_renames(Map<str, Side> base, Map<str, Side> side, Map<st
     return out;
 }
 
+// Does the change from `old_tree` to `new_tree` both remove and add a file?
+// (Only then can there be a rename; the tree diff skips equal subtrees.)
+bool has_removed_and_added(GIT_gitstore.Store store, str old_tree, str new_tree) {
+    if (old_tree == new_tree) {
+        return false;
+    }
+    bool has_removed = false;
+    bool has_added = false;
+    List<GIT_gitdiff.Item> items = GIT_gitdiff.tree_vs_tree(store, old_tree, new_tree, []);
+    for (GIT_gitdiff.Item item in items) {
+        if (item.status == "D") {
+            has_removed = true;
+        } else if (item.status == "A") {
+            has_added = true;
+        }
+    }
+    return has_removed && has_added;
+}
+
 Result<RenamePlan, Error> plan_renames(Ctx context, str base_tree, str ours_tree, str theirs_tree) {
     RenamePlan plan = RenamePlan();
+    GIT_gitstore.Store store = GIT_gitstore.open(context.gitdir);
+    if (!has_removed_and_added(store, base_tree, ours_tree) && !has_removed_and_added(store, base_tree, theirs_tree)) {
+        return Result<RenamePlan, Error>.Ok(plan);
+    }
     Map<str, Side> base = flatten(context.gitdir, base_tree)?;
     Map<str, Side> ours = flatten(context.gitdir, ours_tree)?;
     Map<str, Side> theirs = flatten(context.gitdir, theirs_tree)?;
