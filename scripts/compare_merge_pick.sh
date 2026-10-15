@@ -50,6 +50,12 @@ if wanted pick; then
     case_ "pick: --edit with an empty message" fx_branches ':' 'GIT_EDITOR="cp /dev/null" G cherry-pick -e feat~1'
     case_ "pick: a tag" fx_branches 'git tag t1 feat~1' 'G cherry-pick t1'
     case_ "pick: --continue after commit by hand" fx_branches 'git cherry-pick clash clash feat; printf "r\n" > f.txt; git add f.txt; git commit -qm "by hand"' 'G cherry-pick --continue'
+    case_ "pick: --signoff" fx_branches ':' 'G cherry-pick -s feat~1'
+    case_ "pick: -x --signoff" fx_branches ':' 'G cherry-pick -x -s feat~1'
+    case_ "pick: --signoff twice does not repeat" fx_branches 'git checkout -q feat; git commit -q --amend -s -m "feat: g signed" ; git checkout -q main' 'G cherry-pick -s feat'
+    case_ "pick: --signoff keeps a trailer block" fx_branches 'git checkout -q feat; git commit -q --amend -m "subject" -m "Reviewed-by: Rev <r@x>" ; git checkout -q main' 'G cherry-pick -s feat'
+    case_ "pick: -X theirs" fx_branches 'git checkout -q clash; printf "CLASH2\n" > h.txt; git commit -qam c2; git checkout -q main' 'G cherry-pick -X theirs clash'
+    case_ "pick: -X ours" fx_branches ':' 'G cherry-pick -X ours clash'
     case_ "pick: a root commit" fx_branches 'git checkout -q -b rooted; git checkout -q --orphan r2; git rm -rfq .; echo r > r.txt; git add r.txt; git commit -qm "second root"; git checkout -q main' 'G cherry-pick r2'
 fi
 
@@ -78,6 +84,7 @@ if wanted revert; then
     case_ "revert: dirty work tree" fx_branches 'echo x >> f.txt' 'G revert --no-edit main'
     case_ "revert: nothing in progress" fx_branches ':' 'G revert --continue; G revert --abort'
     case_ "revert: bad revision" fx_branches ':' 'G revert --no-edit nope'
+    case_ "revert: --signoff" fx_branches 'git cherry-pick feat~2' 'G revert --no-edit -s HEAD'
     case_ "revert: quiet" fx_branches ':' 'G revert -q --no-edit HEAD'
     case_ "revert: subject of a revert of a revert" fx_branches 'git revert --no-edit HEAD; git revert --no-edit HEAD' 'G revert --no-edit HEAD'
     case_ "revert: detached HEAD" fx_branches 'git checkout -q --detach' 'G revert --no-edit HEAD'

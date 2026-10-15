@@ -1,0 +1,35 @@
+// The history-changing commands of `1git` in git's grammar: one entry point
+// for `git.m31`, which only has to ask. `run` answers -1 for a word that is
+// not one of these, else the command's exit status.
+
+import core.GIT_gitclean;
+import core.GIT_gitmerge;
+import core.GIT_gitpick;
+import core.GIT_gitrebase;
+import core.GIT_gitstash;
+import core.GIT_gitworktree;
+
+pub int run(str word, str start, List<str> overrides, List<str> args) {
+    if (word == "stash") {
+        return GIT_gitstash.run_stash(start, overrides, args);
+    }
+    if (word == "cherry-pick") {
+        return GIT_gitpick.run_pick(start, overrides, args, false);
+    }
+    if (word == "revert") {
+        return GIT_gitpick.run_pick(start, overrides, args, true);
+    }
+    if (word == "merge") {
+        return GIT_gitmerge.run_merge(start, overrides, args);
+    }
+    if (word == "rebase") {
+        return GIT_gitrebase.run_rebase(start, overrides, args);
+    }
+    if (word == "clean") {
+        return GIT_gitclean.run_clean(start, overrides, args);
+    }
+    if (word == "worktree") {
+        return GIT_gitworktree.run_worktree(start, overrides, args);
+    }
+    return -1;
+}

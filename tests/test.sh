@@ -328,6 +328,16 @@ if build git; then
     fi
 fi
 
+# --- `1git stash`, `cherry-pick`, `revert`, `merge`, `rebase`, `clean`, `worktree` ---
+
+if build git; then
+    if out=$(bash scripts/compare_merge.sh "$WORK/git" "$WORK/merge-fixtures" 2>&1); then
+        note "git history commands: ${out## }"
+    else
+        bad "git history commands" "$out"
+    fi
+fi
+
 # --- the write path: .git/index, loose objects, refs, status -------------------
 #
 # `test_write.sh` shares this script's shell, `$WORK`, `$LANGC`, `build`,

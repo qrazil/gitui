@@ -1,3 +1,26 @@
+# gitui 0.14.0: `1git` stash, cherry-pick, revert, merge, rebase, clean, worktree
+
+Version 0.14.0, from master c5185f7 (0.13.0). No module was renamed or
+removed; six modules were added to `core/`: `GIT_gitstash.m31`, `GIT_gitpick.m31`
+(cherry-pick and revert), `GIT_gitmerge.m31`, `GIT_gitrebase.m31`,
+`GIT_gitclean.m31` and `GIT_gitworktree.m31`. `1git stash|cherry-pick|revert|
+merge|rebase|clean|worktree` take git's own arguments and print git's bytes on
+standard output; `scripts/compare_merge.sh` (with the `compare_merge_*.sh`
+case files it sources) runs 300 cases beside real git and compares output,
+exit status, index (stages included), refs, reflogs, work tree and every
+state file, with identical object ids. Library changes, none breaking:
+`GIT_merge` detects renames (file and directory, through the diff engine's
+diffcore-rename), has `Style.ZDiff3` (in `GIT_diff3`), `favor` for `-X
+ours|theirs`, `StartOpts.should_commit` / `is_squash`, `merge_ours` and
+`commit_prepared`; `GIT_sequencer` has `should_signoff`, `favor` and the
+`Report.trace` of what each step said; `GIT_stash` has `clear`, a create-only
+push, `apply_reporting`, and leaves `ORIG_HEAD` and HEAD's reset line as git
+does; `GIT_rebase` writes git 2.55's todo help in the backup, has
+`StartOpts.should_replay_all`; `GIT_index` reads and writes the index of the
+git directory it is given (a linked worktree's own, not the common one's).
+`status` names git's files relative to the directory and tells editing and
+splitting a commit apart while rebasing. Nothing to migrate.
+
 # gitui 0.13.0: `1git` change commands in git's spelling
 
 Version 0.13.0, from master eb774bc (0.12.0). No module was renamed or

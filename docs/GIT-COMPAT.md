@@ -83,7 +83,9 @@ deliberately differ.
 ## Status
 
 Done: `status` (0.11.0), `log`, `show` and `diff` (0.12.0), `add`, `rm`, `mv`,
-`restore`, `reset`, `commit`, `switch`, `checkout`, `branch` and `tag` (0.13.0).
+`restore`, `reset`, `commit`, `switch`, `checkout`, `branch` and `tag` (0.13.0),
+`stash`, `cherry-pick`, `revert`, `merge`, `rebase`, `clean` and `worktree`
+(0.14.0).
 
 `1git status` is git's grammar and git's bytes: long form (branch, upstream
 ahead/behind/diverged/gone, detached at/from, merge / cherry-pick / revert /
@@ -268,6 +270,100 @@ Known divergences and gaps (everything else listed above matches):
 - `commit` does not run `post-rewrite`/`post-checkout` hooks and sets only
   `GIT_DIR` for hooks.
 
+### History-changing commands, batch 2 (0.14.0)
+
+`scripts/compare_merge.sh` is `compare_write.sh`'s method (two identical
+repositories, fixed identities and dates, real git on one and `1git` on the
+other) for `stash`, `cherry-pick`, `revert`, `merge`, `rebase`, `clean` and
+`worktree`: stdout and exit status of every call, then index with its
+stages, refs, HEAD, `status --porcelain=v2`, reflog bytes, the work tree,
+`.git/config`, and every state file (`MERGE_HEAD`, `MERGE_MSG`, `MERGE_MODE`,
+`AUTO_MERGE`, `ORIG_HEAD`, `CHERRY_PICK_HEAD`, `REVERT_HEAD`, `SQUASH_MSG`,
+`sequencer/*`, `rebase-merge/*`, `worktrees/*`); `fsck --strict` clean on
+ours; object ids identical. ~300 cases against git 2.55, which is the oracle:
+a conflict left by `1git` can be continued by `git` and the other way round.
+
+Forms that match git (stdout, status, repository state, object ids):
+
+- `stash`: `push` (`-u`, `-k`/`--keep-index`, `-m`, `-q`), `save <msg>`,
+  `list`, `show` (stat by default, `-p`, `--name-only` and the other diff
+  options, `-u`, `--only-untracked`, `stash.showStat`/`showPatch`/
+  `showIncludeUntracked`), `apply`/`pop` (`--index`, `-q`, `stash@{n}` and
+  `n`, the merge when HEAD moved, conflicts with `The stash entry is kept`,
+  untracked files restored around one in the way), `drop`, `clear`,
+  `branch`, `create`, `store`.
+- `cherry-pick` and `revert`: commits, ranges (`A..B`, `^A`, several words,
+  a commit named twice picked once), `-x`, `-n`, `-m <n>`, `-s`,
+  `--allow-empty`, `--keep-redundant-commits`, `-X ours|theirs`, `--edit` /
+  `--no-edit` (revert opens the editor by default only on a terminal, as
+  git), `--continue`, `--skip`, `--abort`, `--quit`, the stop on an empty
+  result, `-m` for merge commits, `merge.conflictStyle` merge, diff3 and
+  zdiff3, reflog lines, the summary of each commit made.
+- `merge`: fast-forward, `--no-ff`, `--ff-only`, `merge.ff`, `--squash`
+  (`SQUASH_MSG` as git writes it), `--no-commit`, `-m` (several are
+  paragraphs), `-F`, `--edit`/`--no-edit` (editor only on a terminal unless
+  asked), `-s ours`, `-X ours|theirs`, `--allow-unrelated-histories`,
+  `--abort`, `--continue` (it is `git commit`), `--quit`, up to date, dirty
+  and staged refusals (exit 2), unrelated histories, criss-cross bases (the
+  recursive virtual base, `merged common ancestors` in diff3), `MERGE_MSG`
+  with its `# Conflicts:` block, `MERGE_MODE`, `AUTO_MERGE`, the stat and
+  `create mode` lines.
+  **Rename detection** as ort has it: exact and 50%-similar renames on
+  either side, a renamed file merged under its new name with `HEAD:old`
+  / `other:new` markers, rename/delete, rename/rename (1to2), rename on
+  both sides to one name, and directory renames in `merge.directoryRenames=
+  conflict` mode (a file added to a renamed directory moves with `CONFLICT
+  (file location)`). `cherry-pick`, `revert`, `stash` and `rebase` use the
+  same merge. `zdiff3` is git's zealous diff3.
+- `rebase`: `<upstream> [<branch>]`, `--onto`, `--keep-base`, `--root`,
+  `-i` through `GIT_SEQUENCE_EDITOR` / `sequence.editor` / the editor (all
+  verbs of the merge backend: pick, reword, edit, squash, fixup, drop, exec,
+  break), `--autosquash` (with and without `-i`, `rebase.autoSquash`),
+  `--autostash` (`rebase.autoStash`), `-x`/`--exec`, `--force-rebase`,
+  `--continue`, `--skip`, `--abort`, `--quit`, `--edit-todo`,
+  `--show-current-patch`, up to date and fast-forward, the commits that
+  become empty, `rebase-merge/*` (todo, backup with git 2.55's help, done,
+  `patch`, ...), reflog lines, ORIG_HEAD, `status` while rebasing.
+- `clean`: `-n`, `-f`, `-ff`, `-d`, `-x`, `-X`, `-q`, pathspecs and globs,
+  from a subdirectory, `clean.requireForce`, nested repositories (kept
+  unless `-ff`), empty directories, ignored-only directories.
+- `worktree`: `add` (`-b`, `-B`, `--detach`, `-f`, `-q`, a branch, a
+  commit-ish, the directory-named branch, unique names), `list` (and
+  `--porcelain`, `prunable`), `remove` (`-f`), `prune` (`-n`, `-v`), with
+  git's files under `.git/worktrees/<name>` and the `.git` file.
+
+Known divergences and gaps (everything else listed above matches):
+
+- **stash**: `push` with pathspecs, `-p`, `-S`, `-a`/`--all`,
+  `--pathspec-from-file`, and options of `list` (`git log` options) are an
+  error; a symlink in the work tree is neither stashed nor restored.
+- **cherry-pick / revert**: `--ff`, `--empty=`, `--allow-empty-message`,
+  `-S`, `--strategy`, `-X` other than `ours`/`theirs`, editing several
+  commits (`--no-edit` is needed for ranges), a pick onto an unborn branch,
+  `post-commit` and `prepare-commit-msg` hooks.
+- **merge**: octopus (several heads), `--log`, `--autostash`, `--signoff`,
+  `-s` other than `ort`, `recursive`, `resolve` (taken as ort) and `ours`,
+  `-X` other than `ours`/`theirs` (`no-renames`, `renormalize`,
+  `ignore-space-*`, `patience`, `find-renames=` are errors), merging into an
+  unborn branch, `.gitattributes` merge drivers and `rerere`, the hooks
+  (`pre-merge-commit`, `post-merge`), `merge.renameLimit`, rename/rename
+  (2to1) and some rename/add layouts, directory renames below the nearest
+  directory level or with ties. After a merge refused for local changes
+  `AUTO_MERGE` is not written (git leaves a tree of what it had started).
+- **rebase**: `--rebase-merges`, `--update-refs`, `--empty=`, `-s`/`-X`,
+  `--signoff`, `--fork-point`, `--reapply-cherry-picks`, the apply backend,
+  the `post-rewrite` hook and notes copying, and the `Rebasing (n/m)`
+  progress on stderr. Commits upstream already has are found by a patch-id
+  equivalent of git's, among the first 1000 of `head..upstream`.
+- **clean**: `-i`, `-e <pattern>`, and git's `Would refuse to remove current
+  working directory`.
+- **worktree**: `lock`, `unlock`, `move`, `repair`, `--orphan`, `--track`,
+  `list -v` annotations, the `post-checkout` hook.
+- Messages on stderr (hints, advice, `fatal:` text, `Rebasing (n/m)`) are
+  shorter than git's and not compared; stdout and exit status are. Where git
+  prints a message on stdout (`Auto-merging`, `CONFLICT (...)`, `Updating`,
+  the stat) 1git does too.
+
 Known divergences of `status`: object names are seven digits (git sizes the
 abbreviation by object count; `core.abbrev` is not read); `status -v`
 (the diff), `--column`, submodule summaries, `rebase-apply` / `am` state and
@@ -334,8 +430,8 @@ matches; these do not):
    `ls-tree` `ls-files` `rev-parse` `rev-list` `branch` `tag` `describe`
    `shortlog` `grep` `config`.
 2. Write side: ~~`add`~~ ~~`rm`~~ ~~`mv`~~ ~~`restore`~~ ~~`reset`~~ ~~`commit`~~
-   ~~`checkout`~~ ~~`switch`~~ ~~`branch`~~ ~~`tag`~~ (done, 0.13.0) `stash`
-   `cherry-pick` `revert` `merge` `rebase` (non-interactive first).
+   ~~`checkout`~~ ~~`switch`~~ ~~`branch`~~ ~~`tag`~~ (done, 0.13.0) ~~`stash`~~
+   ~~`cherry-pick`~~ ~~`revert`~~ ~~`merge`~~ ~~`rebase`~~ ~~`clean`~~ ~~`worktree`~~ (done, 0.14.0).
 3. Network: `clone` `fetch` `pull` `push` `remote` (HTTP(S) smart protocol
    exists; ssh when m31 grows a client).
 4. The long tail: hooks, `.gitattributes`, filters, worktrees, submodules,

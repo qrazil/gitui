@@ -222,7 +222,7 @@ pub int run_pick(str start, List<str> overrides, List<str> argv, bool is_revert)
     if (bad >= 0) {
         return bad;
     }
-    List<str> unsupported = ["signoff", "ff", "gpg-sign", "strategy", "strategy-option", "cleanup", "empty", "allow-empty-message"];
+    List<str> unsupported = ["ff", "gpg-sign", "strategy", "cleanup", "empty", "allow-empty-message"];
     for (str name in unsupported) {
         if (opts.has(name)) {
             io.eprint("error: option '" + name + "' of " + verb_word(is_revert) + " is not in 1git (see docs/GIT-COMPAT.md)");
@@ -301,6 +301,17 @@ pub int run_pick(str start, List<str> overrides, List<str> argv, bool is_revert)
     GIT_sequencer.Options sopts = GIT_sequencer.Options();
     sopts.should_skip_commit = opts.flag("no-commit");
     sopts.should_record_origin = opts.flag("x") && !is_revert;
+    sopts.should_signoff = opts.flag("signoff");
+    for (str option in opts.all("strategy-option")) {
+        if (option == "ours") {
+            sopts.favor = 1;
+        } else if (option == "theirs") {
+            sopts.favor = 2;
+        } else {
+            io.eprint("error: merge option '" + option + "' is not in 1git (see docs/GIT-COMPAT.md)");
+            return 129;
+        }
+    }
     sopts.is_empty_allowed = opts.flag("allow-empty");
     sopts.should_keep_redundant = opts.flag("keep-redundant-commits");
     if (opts.has("mainline")) {
