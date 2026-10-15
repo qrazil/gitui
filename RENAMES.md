@@ -1,6 +1,6 @@
 # gitui 0.16.0: `1git` stash, cherry-pick, revert, merge, rebase, clean, worktree
 
-Version 0.14.0, from master 40bd10a (0.15.0). No module was renamed or
+Version 0.16.0, from master 40bd10a (0.15.0). No module was renamed or
 removed; six modules were added to `core/`: `GIT_gitstash.m31`, `GIT_gitpick.m31`
 (cherry-pick and revert), `GIT_gitmerge.m31`, `GIT_gitrebase.m31`,
 `GIT_gitclean.m31` and `GIT_gitworktree.m31`. `1git stash|cherry-pick|revert|
