@@ -4,7 +4,7 @@ if wanted merge; then
     case_ "merge: clean three-way" fx_branches ':' 'G merge feat'
     case_ "merge: -m message" fx_branches ':' 'G merge -m "custom message" feat'
     case_ "merge: -m twice" fx_branches ':' 'G merge -m one -m two feat'
-    case_ "merge: -F file" fx_branches 'printf "from file\n\nbody\n" > /tmp/claude-1000/msg.txt' 'G merge -F /tmp/claude-1000/msg.txt feat'
+    case_ "merge: -F file" fx_branches 'printf "from file\n\nbody\n" > /tmp/1git-merge-msg.txt' 'G merge -F /tmp/1git-merge-msg.txt feat'
     case_ "merge: --no-ff on a fast-forward" fx_base 'git switch -q side; git merge -q main 2>/dev/null; git reset -q --hard main~1' 'G merge --no-ff main'
     case_ "merge: fast-forward" fx_base 'git switch -q side' 'G merge main'
     case_ "merge: --ff-only possible" fx_base 'git switch -q side' 'G merge --ff-only main'
