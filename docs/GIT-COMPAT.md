@@ -537,9 +537,9 @@ Deliberate departures, and gaps:
   ~40 s at `-O0`, a 21 MB repository 7 s at `-O2`). This is an m31 library
   limit, not worked around.
 - `init` writes no templates (no sample hooks, `info/exclude`, `description`).
-- The advertised user agent is `1git/0.19.0`.
+- The advertised user agent is `1git/0.19.1`.
 
-## Case-insensitive and Unicode-normalizing volumes (0.19.0)
+## Case-insensitive and Unicode-normalizing volumes (0.19.0, 0.19.1)
 
 `init` and `clone` probe the volume the way git's `create_default_files`
 does (`setup.c`, git 2.55): `core.ignorecase = true` is written when
@@ -571,7 +571,24 @@ With `core.ignorecase=true` the commands follow git's `dir.c`, `name-hash.c`,
   file itself (git's `icase_exists`), so a merge that renames `a.txt` to
   `A.txt` does not report an untracked file in the way;
 - the index keeps its entries' spelling: nothing renames an entry for a
-  work-tree file's case.
+  work-tree file's case;
+- (0.19.1) a tracked file is "there" when `lstat` of the index spelling
+  succeeds, as in git, not when `readdir` lists that spelling: on a real
+  folding volume the old spelling of a file renamed `a.txt` -> `A.txt` still
+  answers, so `status`, `add -A/-u`, `commit -a`, `checkout`/`restore`,
+  `mv`, `stash` and `switch` show no phantom ` D a.txt`. A racily clean
+  entry (size 0 in the index) whose stat data says it is the same file is
+  compared by content;
+- (0.19.1) `add` matches a literal pathspec case-folded against the
+  untracked scan only (git scans from the directory the pathspec names and
+  names the files in the pathspec's spelling: `add -v Dir/new.txt` says
+  `add 'Dir/new.txt'`, then stages `dir/new.txt`); tracked paths are matched
+  as typed, so `add B.TXT` does not stage a modified `b.txt`;
+- (0.19.1) `mv -f a.txt B.TXT` onto another spelling lets `rename(2)` keep
+  the name the volume has, as git does, instead of deleting the target first;
+- (0.19.1) `stash` puts a path HEAD has and the index lacks back into the
+  work-tree commit when the file is there (`update-index --add --remove`),
+  with or without `core.ignorecase`.
 
 With `core.precomposeunicode=true` (macOS only: elsewhere git does not
 compile the conversion in, and the key is inert here too) every argument after
@@ -585,10 +602,21 @@ undo engines and `mgit`); `-c core.ignorecase=true` is honoured by `status`,
 only. A case conflict between refs (`refs/heads/foo` and `refs/heads/Foo/bar`
 with `ignorecase`), the "the following paths have collided" warning of a clone
 onto a folding volume, and `git mv dir Dir` (which git itself refuses on such
-a volume) are not reproduced. Tests run on a case-sensitive volume with the
-config set, and a hard link standing in for the same file under another case
-(`scripts/compare_write.sh icase`, `scripts/compare_merge_icase.sh`); on
-macOS they run on the real volume.
+a volume) are not reproduced. Not special-cased (and so as in a
+case-sensitive git): a glob pathspec with a differently spelled directory
+(`add 'DIR/*.txt'`) and a new untracked directory named by a variant
+pathspec (`add NEWDIR/x` where the disk says `newdir`: git stages the
+pathspec's spelling, 1git the disk's). No behaviour was left out for lack of a
+real volume; the cases below are what pins them.
+
+Tests: on macOS `scripts/compare_write.sh icase` and the `icase:` cases of
+`scripts/compare_merge*.sh` run on the real APFS volume. On Linux (6.13+, with
+unprivileged user namespaces) the same cases are run a second time on a real
+folding volume: a tmpfs mounted `casefold` inside `unshare -Urm`, where lstat
+and open of the other spelling succeed and readdir has one name, exactly as on
+APFS (a case-only `rename(2)` keeps the old spelling there, so the fixtures
+rename in two steps, `mvc`). Every Linux run also does the case-sensitive
+run with the hard link standing in for the same file under another case.
 
 ## Order
 

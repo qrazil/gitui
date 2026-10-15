@@ -50,7 +50,7 @@ import core.GIT_object;
 import core.GIT_config;
 import core.GIT_gitcommon;
 
-pub const str AGENT = "1git/0.19.0";
+pub const str AGENT = "1git/0.19.1";
 
 /// One ref as listed: `peeled` is the commit a tag points at ("" when the
 /// ref is not an annotated tag), `symref` the target of a symbolic ref.

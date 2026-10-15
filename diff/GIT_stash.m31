@@ -706,6 +706,28 @@ pub Result<Saved, Error> push(str gitdir, str worktree, bool should_include_untr
             }
         }
     }
+    // a path HEAD has and the index lacks is named by `diff-index HEAD` as
+    // deleted, and `update-index --add --remove` puts it back when the file
+    // is there (`rm --cached f` with f kept; on a volume that folds case the
+    // old spelling of a renamed file answers too)
+    if (head.tree != "") {
+        Map<str, GIT_udiff.Leaf> head_leaves = flat(gitdir, head.tree)?;
+        Map<str, bool> has_entry = {};
+        for (GIT_index.Entry entry in index.entries) {
+            has_entry.set(entry.path.utf8().or(""), true);
+        }
+        for (str path in head_leaves.keys()) {
+            if (has_entry.contains(path)) {
+                continue;
+            }
+            str full = fs.join(worktree, path);
+            if (fs.is_link(full) || !fs.is_file(full)) {
+                continue;
+            }
+            str blob_id = put_blob(gitdir, read_file(full))?;
+            work_leaves.push(Lf(mode_of_file(full, path.to_bytes()), blob_id, path.to_bytes()));
+        }
+    }
     str work_tree = tree_of(gitdir, work_leaves)?;
     str index_tree = tree_of_entries(gitdir, index.entries)?;
     GIT_object.Ident author = author_ident(gitdir);

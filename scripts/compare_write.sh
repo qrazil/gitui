@@ -35,12 +35,31 @@ shift
 shift || true
 GROUPS_WANTED=${*:-add rm mv restore reset commit switch checkout branch tag gerrit misc patch icase}
 
+# --- group icase on a real case-insensitive volume ---------------------------------------
+# macOS runs the group natively on APFS (case-insensitive: lstat and open of
+# the other spelling succeed, readdir has the one on-disk spelling). A Linux
+# 6.13+ with unprivileged user namespaces gets the same kind of volume from a
+# tmpfs mounted with `casefold` (chattr +F on its root), so the group is run a
+# second time inside `unshare -Urm` on it; this is a real folding volume, not
+# the hard-link stand-in the case-sensitive run below uses (see the notes at
+# the group). Where neither exists the group runs on the work directory only
+# and the real-volume behaviours are not asserted there.
+if [ -z "${ICASE_NS:-}" ] && [[ " $GROUPS_WANTED " == *" icase "* ]] \
+    && command -v unshare > /dev/null 2>&1 && command -v chattr > /dev/null 2>&1; then
+    cf=$WORK/casefold
+    mkdir -p "$cf"
+    if unshare -Urm sh -c 'mount -t tmpfs -o casefold tmpfs "$1" && chattr +F "$1" && : > "$1/Zz" && [ -e "$1/zZ" ]' _ "$cf" 2> /dev/null; then
+        echo "compare_write: group icase on a casefold tmpfs (real insensitive volume)"
+        ICASE_NS=1 unshare -Urm bash -c 'mount -t tmpfs -o casefold tmpfs "$1" && chattr +F "$1" && exec bash "$2" "$3" "$1" icase' _ "$cf" "$HERE/compare_write.sh" "$OURS"
+        [ $? -eq 0 ] || ns_bad=1
+    fi
+fi
 # shellcheck source=fixtures_look.sh
 . "$HERE/fixtures_look.sh"
 export GIT_AUTHOR_DATE="1800000000 +0000" GIT_COMMITTER_DATE="1800000000 +0000"
 umask 022
 
-bad=0
+bad=${ns_bad:-0}
 n=0
 
 # --- fixtures -------------------------------------------------------------------------
@@ -962,8 +981,17 @@ fi
 
 
 # --- core.ignorecase -----------------------------------------------------------------------
-# The work tree here is case-sensitive; `core.ignorecase=true` makes git (and 1git)
-# compare names against the index the way it does on a case-insensitive volume.
+# Two kinds of volume run these cases (see the notes at the top of the script):
+#   - the work directory itself. On macOS that is a real case-insensitive APFS
+#     volume. On Linux it is case-sensitive: `core.ignorecase=true` makes git
+#     (and 1git) compare names against the index the way they do on a folding
+#     volume, and a hard link stands in for the same file under another case.
+#   - on Linux, a tmpfs mounted `casefold` in a user namespace (when the kernel
+#     and `unshare` allow it): a real folding volume, where lstat of the other
+#     spelling succeeds and readdir lists one name. Cases whose fixture says
+#     `mkdir DIR` or `ln a.txt A.txt` mean "the same directory/file" there.
+# No case is skipped on either; a Linux without the namespace runs only the
+# first kind, and says so by not printing the "casefold tmpfs" line.
 
 fx_case() {
     fx_base "$1"
@@ -975,19 +1003,23 @@ fx_case() {
 }
 
 IC='git config core.ignorecase true'
+# `mv a.txt A.txt` of a case-only rename as every volume does it: rename(2)
+# onto a name that folds to the source is a no-op on some kernels (tmpfs
+# casefold keeps the old spelling), APFS spells it anew; two steps give both.
+mvc() { mv "$1" "$1.mvc.tmp" && mv "$1.mvc.tmp" "$2"; }
 fx_dir() { rm -rf "$1"; mkdir -p "$1"; }
 if wanted icase; then
-    case_ "icase: status after a case-only rename" fx_case "$IC; mv a.txt A.txt" 'G status -s; G status --porcelain=v2 -b'
+    case_ "icase: status after a case-only rename" fx_case "$IC; mvc a.txt A.txt" 'G status -s; G status --porcelain=v2 -b'
     case_ "icase: untracked case variant of a tracked file" fx_case "$IC; echo n > B.TXT" 'G status -s; G status --porcelain=v2 -b'
     case_ "icase: untracked case variant of a tracked directory" fx_case "$IC; mkdir DIR; echo n > DIR/new.txt" 'G status -s -uall; G status -s'
     case_ "icase: untracked variant, nested" fx_case "$IC; mkdir -p docs; echo n > docs/README.MD; echo m > docs/new.md" 'G status -s -uall'
     case_ "icase: add a case variant of a tracked file" fx_case "$IC; echo n > B.TXT" 'G add B.TXT; G status -s; git ls-files -s'
-    case_ "icase: add after a case-only rename" fx_case "$IC; mv a.txt A.txt" 'G add A.txt; G status -s; git ls-files'
-    case_ "icase: add -A after a case-only rename" fx_case "$IC; mv a.txt A.txt" 'G add -A; G status -s; git ls-files'
-    case_ "icase: add . after a case-only rename" fx_case "$IC; mv a.txt A.txt" 'G add .; G status -s; git ls-files'
+    case_ "icase: add after a case-only rename" fx_case "$IC; mvc a.txt A.txt" 'G add A.txt; G status -s; git ls-files'
+    case_ "icase: add -A after a case-only rename" fx_case "$IC; mvc a.txt A.txt" 'G add -A; G status -s; git ls-files'
+    case_ "icase: add . after a case-only rename" fx_case "$IC; mvc a.txt A.txt" 'G add .; G status -s; git ls-files'
     case_ "icase: add a new file in a case variant directory" fx_case "$IC; mkdir DIR; echo n > DIR/new.txt" 'G add DIR/new.txt; git ls-files'
     case_ "icase: add changed file by variant name" fx_case "$IC; echo m >> a.txt" 'G add A.TXT; G status -s'
-    case_ "icase: add -u after rename" fx_case "$IC; mv a.txt A.txt" 'G add -u; G status -s; git ls-files'
+    case_ "icase: add -u after rename" fx_case "$IC; mvc a.txt A.txt" 'G add -u; G status -s; git ls-files'
     case_ "icase: rm by variant name" fx_case "$IC" 'G rm A.TXT; G status -s'
     case_ "icase: rm --cached by variant name" fx_case "$IC" 'G rm --cached B.txt; G status -s'
     case_ "icase: rm -r by variant directory" fx_case "$IC" 'G rm -r DIR; G status -s'
@@ -1026,8 +1058,8 @@ if wanted icase; then
     case_ "icase: untracked directory spelled differently" fx_case "$IC; mkdir -p Dir/sub; echo n > Dir/sub/new.txt; echo m > Dir/c.txt" 'G status -s; G status -s -uall; G add -A; G status -s; git ls-files'
     case_ "icase: add --dry-run -v with a variant directory" fx_case "$IC; mkdir -p Dir; echo n > Dir/new.txt" 'G add -n -v Dir/new.txt; G add -v Dir/new.txt; git ls-files'
     case_ "icase: add -f with a variant name" fx_case "$IC; echo n > B.TXT" 'G add -f B.TXT; G status -s; git ls-files'
-    case_ "icase: commit -a with a case-only rename" fx_case "$IC; mv a.txt A.txt" 'G commit -am x; git ls-files; G status -s'
-    case_ "icase: rm a case-only renamed file" fx_case "$IC; mv a.txt A.txt" 'G rm a.txt; G status -s'
+    case_ "icase: commit -a with a case-only rename" fx_case "$IC; mvc a.txt A.txt" 'G commit -am x; git ls-files; G status -s'
+    case_ "icase: rm a case-only renamed file" fx_case "$IC; mvc a.txt A.txt" 'G rm a.txt; G status -s'
     case_ "icase: mv an untracked variant" fx_case "$IC; echo n > B.TXT" 'G mv B.TXT c.txt; G status -s'
     case_ "icase: ignored file shadows nothing" fx_case "$IC; echo '*.log' > .gitignore; echo n > X.LOG; echo n > a.LOG" 'G status -s --ignored; G add .; G status -s'
     case_ "icase: mv onto the same file under another case" fx_case "$IC; ln a.txt A.txt" 'G mv a.txt A.txt; G status -s; git ls-files'
@@ -1046,7 +1078,7 @@ if wanted icase; then
     case_ "icase: init sha256 on a case-sensitive volume" fx_dir ':' 'G init -q --object-format=sha256 .; cat .git/config >> "$log"'
     # the same through `-c` on the command line, without the repository's config
     case_ "icase: -c core.ignorecase on status" fx_case "echo n > B.TXT; mkdir DIR; echo n > DIR/new.txt" 'G -c core.ignorecase=true status -s -uall; G status -s -uall'
-    case_ "icase: -c core.ignorecase on add -A" fx_case "mv a.txt A.txt; echo n > B.TXT; mkdir DIR; echo n > DIR/new.txt" 'G -c core.ignorecase=true add -A; G status -s; git ls-files'
+    case_ "icase: -c core.ignorecase on add -A" fx_case "mvc a.txt A.txt; echo n > B.TXT; mkdir DIR; echo n > DIR/new.txt" 'G -c core.ignorecase=true add -A; G status -s; git ls-files'
     case_ "icase: -c core.ignorecase on clean" fx_case "echo n > B.TXT; echo z > zzz.txt" 'G -c core.ignorecase=true clean -n; G clean -n'
     case_ "icase: -c core.ignorecase on mv" fx_case "ln a.txt A.txt" 'G -c core.ignorecase=true mv a.txt A.txt; G status -s'
 fi

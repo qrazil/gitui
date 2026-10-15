@@ -76,6 +76,31 @@ pub List<str> walk_files_with(str root, str dir, bool is_pre) {
     return out;
 }
 
+// A path the scan found below a directory the pathspec spelled in another
+// case, named as the pathspec spells that directory (only with
+// `core.ignorecase`, whose specs fold; otherwise `path` itself).
+str spelled_by_spec(List<GIT_gitcommon.Spec> specs, str path) {
+    for (GIT_gitcommon.Spec spec in specs) {
+        if (spec.is_exclude || spec.is_glob || spec.pattern == "") {
+            continue;
+        }
+        if (path == spec.pattern || path.starts_with(spec.pattern + "/")) {
+            return path;
+        }
+    }
+    for (GIT_gitcommon.Spec spec in specs) {
+        if (spec.is_exclude || !spec.is_icase || spec.pattern == "") {
+            continue;
+        }
+        str folded = GIT_icase.fold(path);
+        str want = GIT_icase.fold(spec.pattern);
+        if (folded == want || folded.starts_with(want + "/")) {
+            return spec.pattern + path.substr(spec.pattern.size(), path.size());
+        }
+    }
+    return path;
+}
+
 // Make the entry for the file at `path`; "" on success, else why not.
 pub str stage_file(GIT_gitcommon.Ctx ctx, GIT_gitwrite.Idx idx, str named, bool filemode, int chmod) {
     str full = fs.join(ctx.root, named);
@@ -275,8 +300,17 @@ pub int run_add(str start, List<str> overrides, List<str> argv) {
     }
     GIT_gitwrite.Idx idx = loaded.idx;
     bool is_icase = GIT_gitcommon.cfg_bool(ctx, "core", "", "ignorecase", false);
+    List<GIT_gitcommon.Spec> folded_specs = specs;
     if (is_icase) {
         idx.enable_icase();
+        // git scans the untracked files from the directory the pathspec
+        // names (opendir answers for any spelling) and matches that scan's
+        // names, in the pathspec's spelling, against the pathspec; tracked
+        // paths are matched as typed
+        if (given.size() > 0) {
+            folded_specs = GIT_gitcommon.parse_specs(given, ctx.prefix);
+            GIT_gitcommon.fold_specs(folded_specs);
+        }
     }
     List<bool> failed = [];
     GIT_status.Status lib = status_or_die(ctx, failed);
@@ -311,7 +345,7 @@ pub int run_add(str start, List<str> overrides, List<str> argv) {
         if (spec.is_exclude || spec.pattern == "") {
             continue;
         }
-        bool is_hit = spec_hits_any(spec, known) || spec_hits_any(spec, untracked);
+        bool is_hit = spec_hits_any(spec, known) || spec_hits_any(folded_specs[i], untracked);
         int kind = 0;
         if (!spec.is_glob) {
             kind = GIT_gitwrite.kind_of(fs.join(ctx.root, spec.pattern));
@@ -443,8 +477,8 @@ pub int run_add(str start, List<str> overrides, List<str> argv) {
             }
         } else {
             for (str path in untracked) {
-                if (GIT_gitcommon.spec_match(specs, path)) {
-                    fresh.push(path);
+                if (GIT_gitcommon.spec_match(folded_specs, path)) {
+                    fresh.push(spelled_by_spec(folded_specs, path));
                 }
             }
         }
@@ -835,9 +869,10 @@ pub int run_mv(str start, List<str> overrides, List<str> argv) {
         }
         str from_full = fs.join(ctx.root, move.from);
         str to_full = fs.join(ctx.root, move.to);
-        bool is_same_file = is_icase && GIT_icase.fold(move.from) == GIT_icase.fold(move.to);
-        if (!is_same_file && (GIT_gitwrite.kind_of(to_full) == 1 || GIT_gitwrite.kind_of(to_full) == 2)) {
-            // (on a volume that folds case `A.txt` may be the file itself)
+        // (on a volume that folds case the target may be the file itself or
+        // another spelling of a file: rename(2) alone, as git does it, keeps
+        // the name the volume has)
+        if (!is_icase && (GIT_gitwrite.kind_of(to_full) == 1 || GIT_gitwrite.kind_of(to_full) == 2)) {
             GIT_gitwrite.rm_quiet(to_full);
         }
         match (fs.rename(from_full, to_full)) {

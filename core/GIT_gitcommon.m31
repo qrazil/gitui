@@ -602,6 +602,18 @@ pub type Spec {
     pub str pattern;
     pub bool is_exclude = false;
     pub bool is_glob = false;
+    // `core.ignorecase`: a literal spec names a path that folds to it
+    pub bool is_icase = false;
+}
+
+/// Specs that compare their literal names folded (`core.ignorecase`).
+pub void fold_specs(List<Spec> specs) {
+    for (int i in 0 .. specs.size()) {
+        Spec spec = specs[i];
+        if (!spec.is_glob) {
+            spec.is_icase = true;
+        }
+    }
 }
 
 /// Pathspecs as typed (relative to `prefix`) into root-relative ones.
@@ -741,6 +753,11 @@ bool spec_hits(Spec spec, str path) {
         }
         // a glob that names a directory's name also takes what is below it
         return false;
+    }
+    if (spec.is_icase) {
+        str folded = GIT_icase.fold(path);
+        str want = GIT_icase.fold(spec.pattern);
+        return folded == want || folded.starts_with(want + "/");
     }
     return path == spec.pattern || path.starts_with(spec.pattern + "/");
 }

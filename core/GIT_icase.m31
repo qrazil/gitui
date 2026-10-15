@@ -30,6 +30,8 @@
 import fs;
 import core.GIT_config;
 import core.GIT_index;
+import core.GIT_object;
+import io;
 import text.unicode;
 
 /// `core.ignorecase` from `config` (false when unset).
@@ -184,7 +186,26 @@ pub bool Names.is_alias_of_tracked(Map<str, GIT_index.Entry> entries, str full, 
                         return false;
                     }
                     int stamp = entry.mtime_s * 1_000_000_000 + entry.mtime_ns;
-                    return stat.size == entry.size && stat.mtime_ns == stamp && (stat.perm() & 0o111 != 0) == (entry.mode & 0o111 != 0);
+                    if (stat.mtime_ns != stamp || (stat.perm() & 0o111 != 0) != (entry.mode & 0o111 != 0)) {
+                        return false;
+                    }
+                    if (stat.size == entry.size) {
+                        return true;
+                    }
+                    if (entry.size != 0) {
+                        return false;
+                    }
+                    // a racily clean entry is written with size 0 (as git
+                    // does too); the stat data still says it is the same
+                    // file, so the content has the last word
+                    match (io.read_bytes(full)) {
+                        case Ok(bytes content): {
+                            return GIT_object.blob_id_like(entry.id, content) == entry.id;
+                        }
+                        case Err(_): {
+                            return false;
+                        }
+                    }
                 }
                 case Err(_): {
                     return false;

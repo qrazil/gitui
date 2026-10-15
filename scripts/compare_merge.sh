@@ -33,12 +33,27 @@ shift
 shift || true
 GROUPS_WANTED=${*:-stash pick revert merge rebase clean worktree}
 
+# --- the icase cases on a real case-insensitive volume -----------------------------------
+# As in compare_write.sh: where Linux can mount a tmpfs with `casefold` in a
+# user namespace the `icase:` cases are run a second time on it (a real
+# folding volume: lstat of the other spelling succeeds, readdir has one
+# name), besides the run below on the hard-link stand-in (compare_merge_icase.sh).
+if [ -z "${ICASE_NS:-}" ] && command -v unshare > /dev/null 2>&1 && command -v chattr > /dev/null 2>&1; then
+    cf=$WORK/casefold
+    mkdir -p "$cf"
+    if unshare -Urm sh -c 'mount -t tmpfs -o casefold tmpfs "$1" && chattr +F "$1" && : > "$1/Zz" && [ -e "$1/zZ" ]' _ "$cf" 2> /dev/null; then
+        echo "compare_merge: icase cases on a casefold tmpfs (real insensitive volume)"
+        ICASE_NS=1 ONLY="icase:" unshare -Urm bash -c 'mount -t tmpfs -o casefold tmpfs "$1" && chattr +F "$1" && exec bash "$2" "$3" "$1" $4' _ "$cf" "$HERE/compare_merge.sh" "$OURS" "$GROUPS_WANTED"
+        [ $? -eq 0 ] || ns_bad=1
+    fi
+fi
+
 # shellcheck source=fixtures_look.sh
 . "$HERE/fixtures_look.sh"
 export GIT_AUTHOR_DATE="1800000000 +0000" GIT_COMMITTER_DATE="1800000000 +0000"
 umask 022
 
-bad=0
+bad=${ns_bad:-0}
 n=0
 
 # --- fixtures -------------------------------------------------------------------------

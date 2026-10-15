@@ -293,6 +293,26 @@ pub Result<Status, Error> status_with(str gitdir, str worktree, bool is_icase) {
         }
     }
     List<WFile> worktree_files = list_worktree(worktree, is_pre)?;
+    if (is_icase) {
+        // git decides that a tracked file is there by `lstat` of the index
+        // spelling, not by what readdir lists: on a volume that folds case
+        // the old spelling of a renamed file still answers
+        Map<str, bool> listed = {};
+        for (WFile file in worktree_files) {
+            listed.set(file.path, true);
+        }
+        for (str path in staged_entries.keys()) {
+            if (listed.contains(path)) {
+                continue;
+            }
+            str named = fs.join(worktree, path);
+            if (fs.is_link(named)) {
+                worktree_files.push(WFile(path, true));
+            } else if (fs.is_file(named)) {
+                worktree_files.push(WFile(path, false));
+            }
+        }
+    }
     Map<str, bool> wt_link = {};
     for (WFile file in worktree_files) {
         wt_link.set(file.path, file.is_link);
