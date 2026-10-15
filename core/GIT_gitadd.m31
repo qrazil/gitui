@@ -73,16 +73,27 @@ pub str stage_file(GIT_gitcommon.Ctx ctx, GIT_gitwrite.Idx idx, str path, bool f
     str full = fs.join(ctx.root, path);
     int kind = GIT_gitwrite.kind_of(full);
     if (kind == 2) {
-        match (idx.entries.get(path)) {
-            case Some(GIT_index.Entry known): {
-                if (known.is_link()) {
-                    return "";
-                }
+        // a link's blob is its target text, as written
+        str target = "";
+        match (fs.readlink(full)) {
+            case Ok(str found): {
+                target = found;
             }
-            case None: {
+            case Err(_): {
+                return "readlink(\"" + path + "\"): Permission denied\nerror: unable to index file '" + path + "'";
             }
         }
-        return "unable to index file '" + path + "': a symbolic link's target cannot be read here (m31 fs has no readlink)";
+        match (GIT_object.write_blob(ctx.gitdir, target.to_bytes())) {
+            case Ok(str written): {
+                int size = target.to_bytes().size();
+                GIT_index.Entry entry = GIT_index.from_stat(path.to_bytes(), fs.Stat(size, 0o120777, 0), true, written);
+                idx.put(entry);
+                return "";
+            }
+            case Err(_): {
+                return "unable to write object for '" + path + "'";
+            }
+        }
     }
     if (kind != 1) {
         return "unable to index file '" + path + "'";
@@ -828,16 +839,14 @@ pub bool file_is(str gitdir, str root, str path, GIT_gitwrite.Flat flat, bool fi
     str full = fs.join(root, path);
     int kind = GIT_gitwrite.kind_of(full);
     if (flat.mode >> 12 == 0o12) {
-        if (kind != 2 || !is_trusting_links) {
-            // there is no readlink: unless the caller trusts the index, a
-            // link is rewritten rather than assumed to be right
+        if (kind != 2) {
             return false;
         }
-        match (index_before.get(path)) {
-            case Some(GIT_gitwrite.Flat entry): {
-                return entry.id == flat.id && entry.mode == flat.mode;
+        match (fs.readlink(full)) {
+            case Ok(str target): {
+                return GIT_object.blob_id_like(flat.id, target.to_bytes()) == flat.id;
             }
-            case None: {
+            case Err(_): {
                 return false;
             }
         }

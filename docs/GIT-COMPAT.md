@@ -236,13 +236,13 @@ Forms that match git (stdout, status, repository state, object ids):
 
 Known divergences and gaps (everything else listed above matches):
 
-- **Symlinks in the work tree** (m31 v0.4.2's `fs` has no `readlink`; v0.4.5
-  has it, which would also let `status`/`diff` see retargeted links): `add`
-  of a new or changed symlink is an error naming this; a link already
-  tracked is assumed unchanged by `add -A`, `commit -a` and `rm`'s check;
-  `restore`, `reset --hard` and `checkout` always rewrite the links they
-  are asked about; writing links (`fs.symlink`) and everything about links
-  in commits is exact.
+- **Symlinks** are read with `fs.readlink` (m31 v0.4.5): a work-tree link
+  is compared, staged (`add`, `add -A`/`-u`, `commit -a`), checked (`rm`,
+  `restore`, `reset --hard`, `checkout`/`switch`) and written like git does,
+  by its target text. Not done: a target that is not valid UTF-8 (`fs`
+  gives a `str`), and the stat data of a link in the index entry are the
+  target's length and a zero mtime (there is no `lstat`), so real git
+  re-checks content of links once.
 - `add -p`, `-N` (intent-to-add), `-e`, `-i`, `--pathspec-from-file`;
   `restore -p`/`-m`, `checkout -p`/`-m`/`--orphan`, `switch -m`/`--orphan`,
   `reset -p`/`--merge`, `commit --interactive`/`-p`/`--trailer`/`--short`/
@@ -280,11 +280,6 @@ deciding whether a file changed; `--color[=when]` is accepted though git's
 Known divergences of `log`, `show` and `diff` (everything else listed above
 matches; these do not):
 
-- **Symlinks in the working tree** cannot be read: m31 v0.4.2's `fs` has no
-  `readlink` (a later m31 does). A work-tree symlink is therefore taken to
-  be what the index says, so `diff` does not show a retargeted symlink, or a
-  file replaced by one, and `diff HEAD` shows the index's symlink. Symlinks
-  in commits are read and shown correctly.
 - **Merge diffs** (`-m`, `-c`, `--cc`, `--diff-merges`, and the combined
   `diff --cc` that `show` prints for a merge that changes a path against
   every parent) are not implemented: `-m`/`-c`/`--cc` are an error, and

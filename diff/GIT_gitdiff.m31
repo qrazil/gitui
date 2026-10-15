@@ -9,9 +9,7 @@
 // and the whitespace highlighting, the stat graph and its width arithmetic
 // are git's `diff.c` as written, because a test diffs the bytes.
 //
-// What is left out, and listed in docs/GIT-COMPAT.md: a work-tree symlink
-// cannot be read (the stdlib has no `readlink`), so a symlink is treated as
-// unchanged against the index; `.gitattributes` (diff drivers, `-diff`,
+// What is left out, and listed in docs/GIT-COMPAT.md: `.gitattributes` (diff drivers, `-diff`,
 // textconv, eol conversion) and `core.autocrlf` are not consulted; submodules
 // are shown by their commit id only; unmerged paths print as `* Unmerged
 // path` instead of a combined diff; copies (`-C`) and break (`-B`) are not
@@ -164,6 +162,16 @@ pub bytes content_of(GIT_gitstore.Store repo, Side side) {
     }
     if (is_gitlink(side.mode)) {
         return ("Subproject commit " + side.id + "\n").to_bytes();
+    }
+    if (side.wt != "" && is_symlink(side.mode)) {
+        match (fs.readlink(side.wt)) {
+            case Ok(str target): {
+                return target.to_bytes();
+            }
+            case Err(_): {
+                return [];
+            }
+        }
     }
     if (side.wt != "") {
         match (io.read_bytes(side.wt)) {
@@ -451,9 +459,27 @@ int wt_mode(fs.Stat stat) {
 /// changed.
 Option<Side> worktree_side(str full, Side indexed, bool is_filemode, Option<GIT_index.Entry> cached) {
     if (fs.is_link(full)) {
-        // v0.4.2's `fs` has no `readlink`: the target cannot be read, so a
-        // link in the work tree is taken to be what the index says
-        return Option<Side>.Some(indexed);
+        // the blob of a link is its target text
+        match (fs.readlink(full)) {
+            case Ok(str target): {
+                if (is_symlink(indexed.mode)) {
+                    bytes text = target.to_bytes();
+                    str id = GIT_object.blob_id_like(indexed.id, text);
+                    if (id == indexed.id) {
+                        return Option<Side>.Some(indexed);
+                    }
+                    Side moved = Side(0o120000, id, full);
+                    moved.is_known = false;
+                    return Option<Side>.Some(moved);
+                }
+                Side came = Side(0o120000, GIT_object.blob_id_like(indexed.id, target.to_bytes()), full);
+                came.is_known = false;
+                return Option<Side>.Some(came);
+            }
+            case Err(_): {
+                return Option<Side>.Some(indexed);
+            }
+        }
     }
     match (fs.stat(full)) {
         case Err(_): {

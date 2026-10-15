@@ -90,7 +90,7 @@ one() {
 }
 
 build_all "$WORK/fx" || exit 1
-for f in linear merges cross renames modes binary empty large tags crlf unicode space orphan; do
+for f in linear merges cross renames modes binary empty large tags crlf unicode space orphan links; do
     r="$WORK/fx/$f"
     one "$f" "$r" HEAD
     one "$f" "$r" HEAD~1
@@ -106,7 +106,7 @@ for f in linear merges cross renames modes binary empty large tags crlf unicode 
 done
 
 # the root commit
-for f in linear renames modes binary empty large crlf unicode space orphan; do
+for f in linear renames modes binary empty large crlf unicode space orphan links; do
     root=$(git -C "$WORK/fx/$f" rev-list --max-parents=0 HEAD | head -1)
     one "$f-root" "$WORK/fx/$f" "$root"
 done

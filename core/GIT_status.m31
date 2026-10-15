@@ -50,15 +50,11 @@
 //
 // --- what this cannot do, and why -------------------------------------------
 //
-// **Symlinks are detected but never compared.** git's blob for a symlink
-// holds its target text (what `readlink` returns), not file content, and
-// this standard library's `fs` module has no way to read a link's target --
-// only `fs.is_link`, which asks whether a name is one. So a symlink present
-// in both the index and the working tree is always assumed unchanged; a
-// change to what it points at is a false negative this cannot see. It is
-// never a false positive: a symlink that is untracked or missing is still
-// reported as such, because those only need the *name* to be there, not its
-// target.
+// **Symlinks are compared by target.** git's blob for a symlink holds its
+// target text, which `fs.readlink` (m31 v0.4.5) returns; a link in the index
+// and in the working tree is `Modified` when the two differ, and a link where
+// a file was (or the reverse) is a type change, which `GIT_gitstatus`
+// reports.
 //
 // **Submodules (gitlink entries, mode 0o160000) are ignored** in the
 // unstaged comparison for the same shape of reason -- there is no submodule
@@ -321,10 +317,28 @@ pub Result<Status, Error> status(str gitdir, str worktree) {
             unstaged.push(Delta(path.to_bytes(), Change.Deleted));
             continue;
         }
+        str full = fs.join(worktree, path);
         if (wt_link.get(path).or(false)) {
+            // a link against a link: the blob is the target text. A link
+            // where the index has a file is a type change, which
+            // `GIT_gitstatus.mode_pass` reports.
+            if (entry.is_link()) {
+                match (fs.readlink(full)) {
+                    case Ok(str target): {
+                        if (GIT_object.blob_id_like(entry.id, target.to_bytes()) != entry.id) {
+                            unstaged.push(Delta(path.to_bytes(), Change.Modified));
+                        }
+                    }
+                    case Err(_): {
+                    }
+                }
+            }
             continue;
         }
-        str full = fs.join(worktree, path);
+        if (entry.is_link()) {
+            // a file where the index has a link: a type change
+            continue;
+        }
         match (fs.stat(full)) {
             case Ok(fs.Stat stat): {
                 int mtime = entry.mtime_s * 1_000_000_000 + entry.mtime_ns;

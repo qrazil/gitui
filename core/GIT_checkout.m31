@@ -50,9 +50,8 @@
 //   working tree, the index in memory and `.git/index` as they were. Files
 //   changed on disk and in the index that are not in the diff are never read
 //   as part of it. A write error half way (disk full) is the one case that
-//   can leave a partial result. A symlink in the working tree is "matching"
-//   when it is a symlink at all: the stdlib has no `readlink` yet, so a
-//   changed target is not seen (`GIT_status` has the same blind spot).
+//   can leave a partial result. A symlink in the working tree matches
+//   when its target text is the blob's (`fs.readlink`, m31 v0.4.5).
 //
 //   `reset_hard(gitdir, worktree, commit)` -- `git reset --hard <commit>`:
 //   working tree and index forced to the commit's tree (every local change
@@ -1055,7 +1054,17 @@ bool is_in_index(Map<str, GIT_index.Entry> staged, str path, TreeEntry want) {
 int worktree_state(str full, GIT_index.Entry entry) {
     if (entry.mode >> 12 == 0o12) {
         if (fs.is_link(full)) {
-            return 0;
+            match (fs.readlink(full)) {
+                case Ok(str target): {
+                    if (GIT_object.blob_id_like(entry.id, target.to_bytes()) == entry.id) {
+                        return 0;
+                    }
+                    return 2;
+                }
+                case Err(_): {
+                    return 2;
+                }
+            }
         }
         if (fs.is_present(full)) {
             return 2;

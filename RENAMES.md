@@ -1,3 +1,14 @@
+# gitui 0.15.0: symlinks in the work tree, combined diffs
+
+Version 0.15.0, from master c5185f7 (0.13.0). The build now needs m31
+v0.4.5 (`.github/workflows/*.yml` pin `M31_REF: v0.4.5`): its `fs` has
+`readlink`. No module was renamed or removed and no module was added.
+A symlink in the work tree is read by target: `status`, `diff`, `show`,
+`add` (new and retargeted links, `-A`, `-u`), `commit -a`, `rm`, `restore`,
+`reset` and `checkout` treat it as git does, and the library status
+(`GIT_status`, `GIT_checkout.worktree_state`) used by gitui sees a retargeted
+link too. Nothing to migrate. `docs/GIT-COMPAT.md` lists what differs.
+
 # gitui 0.13.0: `1git` change commands in git's spelling
 
 Version 0.13.0, from master eb774bc (0.12.0). No module was renamed or

@@ -781,8 +781,17 @@ pub bool worktree_matches(str full, GIT_index.Entry entry, bool filemode) {
         return false;
     }
     if (kind == 2) {
-        // no readlink in m31's fs: a link is a link
-        return entry.is_link();
+        if (!entry.is_link()) {
+            return false;
+        }
+        match (fs.readlink(full)) {
+            case Ok(str target): {
+                return GIT_object.blob_id_like(entry.id, target.to_bytes()) == entry.id;
+            }
+            case Err(_): {
+                return false;
+            }
+        }
     }
     if (entry.is_link() || entry.is_gitlink()) {
         return false;

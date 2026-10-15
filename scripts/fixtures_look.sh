@@ -17,6 +17,7 @@
 #   unicode    names with spaces, quotes, tabs and non-ASCII letters
 #   space      whitespace-only changes for -w and -b
 #   orphan     two unrelated roots merged
+#   links      symlinks to files, directories, nothing; retargeted; merged
 #
 # Every commit is made by `commit_at`, which advances a clock by 1 hour.
 
@@ -253,6 +254,44 @@ fx_modes() {
     commit_at "mode and content together"
 }
 
+# symbolic links in history: to a file, to a directory, dangling, retargeted
+# on one side of a merge, replaced by a file, and a conflicting retarget
+# resolved by hand (a merge that is in neither parent)
+fx_links() {
+    new_repo "$1/links"
+    mkdir sub
+    printf 'real\n' > real.txt
+    printf 'inner\n' > sub/i.txt
+    ln -s real.txt link
+    ln -s sub dirlink
+    ln -s nowhere dangling
+    ln -s real.txt becomes-file
+    ln -s real.txt both
+    ln -s 'with space' spaced
+    g add -A
+    commit_at "base with links"
+    g checkout -q -b side
+    rm link dirlink both
+    ln -s sub/i.txt link
+    ln -s real.txt dirlink
+    ln -s side-target both
+    ln -s dangling newlink
+    g add -A
+    commit_at "side retargets links"
+    g checkout -q main
+    rm dangling becomes-file both
+    ln -s elsewhere dangling
+    printf 'now a file\n' > becomes-file
+    ln -s main-target both
+    g add -A
+    commit_at "main changes links"
+    g merge -q side > /dev/null 2>&1
+    rm -f both
+    ln -s resolved-target both
+    g add -A
+    commit_at "merge side, resolving both"
+}
+
 fx_binary() {
     new_repo "$1/binary"
     printf 'text\n' > t.txt
@@ -444,7 +483,7 @@ fx_dirty() {
 build_all() {
     local base=$1
     mkdir -p "$base"
-    for f in linear merges cross renames modes binary empty large tags crlf unicode space orphan dirty; do
+    for f in linear merges cross renames modes binary empty large tags crlf unicode space orphan links dirty; do
         CLOCK=1700000000
         ( "fx_$f" "$base" ) || { echo "fixture $f failed" >&2; return 1; }
     done

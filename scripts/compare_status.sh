@@ -130,6 +130,18 @@ r=$(fixture typechange)
 ( cd "$r" && rm b.txt && ln -s a.txt b.txt && g add b.txt && rm dir/c.txt && ln -s ../a.txt dir/c.txt )
 forms typechange "$r"
 
+r=$(fixture links)
+( cd "$r" && ln -s a.txt lf && ln -s dir ld && ln -s nowhere dang && ln -s a.txt rep && printf 'r\n' > fil \
+    && ln -s a.txt gone && ln -s a.txt same && g add -A && g commit -q -m links )
+forms links-clean "$r"
+( cd "$r" && ln -sfn b.txt lf && ln -sfn dir/c.txt ld && rm dang && ln -s other dang2 \
+    && rm rep && echo now a file > rep && rm fil && ln -s a.txt fil && rm gone )
+forms links-worktree "$r"
+( cd "$r" && g add lf rep && ln -sfn script.sh lf )
+forms links-staged-and-edited "$r"
+( cd "$r" && g add -A && g commit -q -m moved && ln -sfn a.txt lf && rm ld && mkdir ld && echo x > ld/x )
+forms links-dir-replaced "$r"
+
 r=$(fixture ignored)
 ( cd "$r" && printf '*.log\nbuild/\n' > .gitignore && g add .gitignore && g commit -q -m ign \
     && echo l > x.log && mkdir -p build/out && echo o > build/out/f && echo u > untracked.txt && echo e > dir/e.log )

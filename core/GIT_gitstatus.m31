@@ -1075,6 +1075,10 @@ void mode_pass(str root, str path, GIT_index.Entry entry, bool is_filemode, Map<
     if (!fs.is_present(full) && !is_link) {
         return;
     }
+    if (!is_link && fs.is_directory(full)) {
+        // a directory where the entry was: deleted, mode 000000
+        return;
+    }
     Change change = Change(path);
     match (by_path.get(path)) {
         case Some(Change known): {
@@ -1380,6 +1384,12 @@ Result<Snapshot, GIT_status.Error> gather(str gitdir, str root, Opts opts, List<
         Map<str, bool> blocked = {};
         List<str> shown = collapse(raw, tracked_dirs, opts.untracked == 2, blocked);
         for (str path in shown) {
+            // git does not list an untracked directory that stands where
+            // the index has a file (`rm f; mkdir f; echo > f/x`: ` D f`
+            // only), unless -uall lists what is in it
+            if (opts.untracked != 2 && path.ends_with("/") && entries.contains(path.substr(0, path.size() - 1))) {
+                continue;
+            }
             if (in_spec(specs, path)) {
                 snap.untracked.push(path);
             }

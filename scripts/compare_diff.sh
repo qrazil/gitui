@@ -109,7 +109,7 @@ history() {
 
 fixtures_dir="$WORK/fx"
 build_all "$fixtures_dir" || exit 1
-for f in linear merges cross renames modes binary empty large tags crlf unicode space orphan; do
+for f in linear merges cross renames modes binary empty large tags crlf unicode space orphan links; do
     history "$f" "$fixtures_dir/$f"
 done
 shapes dirty "$fixtures_dir/dirty"
@@ -213,6 +213,57 @@ g add -A; commit_at base
 awk 'NR==5 || NR==700 || NR==1500 || NR==2998 { print "EDITED " $0; next } NR==1000 { next } { print } NR==2000 { print "added after 2000" }' big.txt > big.new
 mv big.new big.txt
 shapes bigedit "$WORK/wt/bigedit"
+
+# symbolic links: to a file, to a directory, dangling, retargeted, a file
+# replaced by a link and the reverse, a link staged and then retargeted
+wt symlinks
+mkdir sub
+printf 'target\n' > t.txt
+printf 'inner\n' > sub/i.txt
+ln -s t.txt to-file
+ln -s sub to-dir
+ln -s nowhere dangling
+ln -s t.txt retarget
+ln -s t.txt becomes-file
+printf 'was a file\n' > becomes-link
+ln -s t.txt staged-link
+ln -s t.txt gone-link
+ln -s 'a b/c' spaced
+ln -s sub/i.txt in-sub
+g add -A; commit_at base
+ln -sfn sub/i.txt retarget
+ln -sfn nowhere to-file
+rm becomes-file; printf 'now a file\n' > becomes-file
+rm becomes-link; ln -s t.txt becomes-link
+ln -sfn sub/i.txt staged-link
+g add staged-link
+ln -sfn t.txt staged-link
+rm gone-link
+ln -sfn 'a b/d' spaced
+rm to-dir; mkdir to-dir; printf 'dir now\n' > to-dir/x
+ln -s t.txt new-link
+ln -s newdir new-dangling
+g add new-link
+shapes symlinks "$WORK/wt/symlinks"
+shapes symlinks-cached "$WORK/wt/symlinks" --cached
+shapes symlinks-head "$WORK/wt/symlinks" HEAD
+compare symlinks "$WORK/wt/symlinks" diff -- retarget to-file
+compare symlinks "$WORK/wt/symlinks" diff --name-status
+compare symlinks "$WORK/wt/symlinks" diff --raw HEAD
+compare symlinks "$WORK/wt/symlinks" diff --summary HEAD
+compare symlinks "$WORK/wt/symlinks" diff --numstat
+compare symlinks "$WORK/wt/symlinks" diff -R
+compare symlinks "$WORK/wt/symlinks" diff --word-diff
+g add -A
+compare symlinks-staged "$WORK/wt/symlinks" diff --cached
+compare symlinks-staged "$WORK/wt/symlinks" diff --cached --raw
+compare symlinks-staged "$WORK/wt/symlinks" status --short
+compare symlinks-staged "$WORK/wt/symlinks" diff
+commit_at second
+compare symlinks-history "$WORK/wt/symlinks" diff HEAD~1 HEAD
+compare symlinks-history "$WORK/wt/symlinks" diff HEAD~1 HEAD --stat --summary
+compare symlinks-history "$WORK/wt/symlinks" diff HEAD~1 HEAD --raw
+compare symlinks-history "$WORK/wt/symlinks" show HEAD
 
 # which output format wins when several are given
 for combo in "--name-only --numstat" "-s --stat" "-s -p" "--stat -s" "-p -s" "--name-only -s" "-s --name-only" "--name-only --name-status" "--quiet -p" "-p --quiet" "-U1 -s" "-s -U1" "--name-status --stat" "--raw --stat -p" "--summary --shortstat" "--numstat --stat --shortstat --summary -p"; do

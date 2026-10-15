@@ -166,7 +166,7 @@ fixtures() {
 }
 
 fixtures "$WORK/fx"
-for f in linear merges cross renames modes binary empty large tags crlf unicode space orphan; do
+for f in linear merges cross renames modes binary empty large tags crlf unicode space orphan links; do
     forms "$f" "$WORK/fx/$f"
 done
 
