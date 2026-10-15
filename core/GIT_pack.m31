@@ -174,8 +174,109 @@ const int MAX_DELTA_DEPTH = 1000;
 /// in `resolve_id`, needed for an `OBJ_REF_DELTA` base a thin pack leaves
 /// outside the pack).
 pub Result<Found, Error> read(str gitdir, str id) {
-    List<PackFile> packs = discover(gitdir);
-    return resolve_id(gitdir, packs, id, MAX_DELTA_DEPTH);
+    return read_with(cache(gitdir), gitdir, id);
+}
+
+/// What a program that reads many objects keeps between reads: which packs
+/// there are, and each `.idx` and `.pack` file's bytes once read. `read`
+/// makes a fresh one per call, which is why a lookup that wants speed holds
+/// its own and uses `read_with`.
+pub type Cache {
+    pub List<PackFile> packs = [];
+    pub bool is_loaded = false;
+    pub Map<str, bytes> files = {};
+}
+
+/// A file's bytes, read once.
+pub bytes Cache.bytes_of(str path) {
+    match (files.get(path)) {
+        case Some(bytes known): {
+            return known;
+        }
+        case None: {
+        }
+    }
+    bytes data = [];
+    match (io.read_bytes(path)) {
+        case Ok(bytes found): {
+            data = found;
+        }
+        case Err(_): {
+        }
+    }
+    files.set(path, data);
+    return data;
+}
+
+/// The packed object names (at most `limit`) that begin with the hex digits
+/// `prefix`, by bisection in each `.idx`.
+pub List<str> Cache.with_prefix(str gitdir, str prefix, int limit) {
+    List<str> out = [];
+    if (!is_loaded) {
+        packs = discover(gitdir);
+        is_loaded = true;
+    }
+    int raw_width = GIT_hash.raw_length(gitdir);
+    // the prefix as bytes, the odd digit padded with a zero nibble
+    str padded = prefix;
+    if (padded.size() % 2 == 1) {
+        padded = padded + "0";
+    }
+    bytes low = hex_decode(padded);
+    while (low.size() < raw_width) {
+        low.push(0);
+    }
+    for (PackFile pack_file in packs) {
+        bytes idata = bytes_of(pack_file.index_path);
+        match (parse_index(idata, raw_width)) {
+            case Ok(Idx pack_index): {
+                int first = low[0];
+                int begin = 0;
+                if (first > 0) {
+                    begin = u32be(idata, 8 + (first - 1) * 4);
+                }
+                int end = u32be(idata, 8 + first * 4);
+                int lo = begin;
+                int hi = end;
+                while (lo < hi) {
+                    int mid = lo + (hi - lo) / 2;
+                    if (cmp_raw(idata, pack_index.names_off + mid * raw_width, low) < 0) {
+                        lo = mid + 1;
+                    } else {
+                        hi = mid;
+                    }
+                }
+                int index = lo;
+                while (index < pack_index.entry_count && out.size() < limit) {
+                    str id = idata.substr(pack_index.names_off + index * raw_width, pack_index.names_off + (index + 1) * raw_width).hex();
+                    if (!id.starts_with(prefix)) {
+                        break;
+                    }
+                    if (!out.contains(id)) {
+                        out.push(id);
+                    }
+                    index = index + 1;
+                }
+            }
+            case Err(_): {
+            }
+        }
+    }
+    return out;
+}
+
+/// An empty cache for `gitdir`'s packs (they are listed on first use).
+pub Cache cache(str gitdir) {
+    return Cache();
+}
+
+/// `read`, through `cache`.
+pub Result<Found, Error> read_with(Cache pack_cache, str gitdir, str id) {
+    if (!pack_cache.is_loaded) {
+        pack_cache.packs = discover(gitdir);
+        pack_cache.is_loaded = true;
+    }
+    return resolve_id(pack_cache, gitdir, pack_cache.packs, id, MAX_DELTA_DEPTH);
 }
 
 /// One object of a pack read front to back: its resolved kind and content,
@@ -302,7 +403,7 @@ pub Result<List<Unpacked>, Error> read_pack(str gitdir, bytes pack) {
                 if (by_id.contains(want)) {
                     continue;
                 }
-                match (resolve_id(gitdir, packs, want, MAX_DELTA_DEPTH)) {
+                match (resolve_id(cache(gitdir), gitdir, packs, want, MAX_DELTA_DEPTH)) {
                     case Ok(Found found): {
                         by_id.set(want, Unpacked(want, found.kind, found.content));
                         fetched = fetched + 1;
@@ -376,9 +477,9 @@ pub Result<List<str>, Error> ids(str gitdir) {
 // --- finding the `.idx`/`.pack` pairs -----------------------------------------
 
 // One pack: its index and the packfile it indexes, both real files.
-type PackFile {
-    str index_path;
-    str pack_path;
+pub type PackFile {
+    pub str index_path;
+    pub str pack_path;
 }
 
 // Every `<name>.idx` under `objects/pack/` that has a matching `<name>.pack`
@@ -475,7 +576,7 @@ int find(bytes haystack, int needle, int from) {
 // stack that grows forever. Loose is checked first at every depth, not only
 // at the top: a delta base can be loose two or three hops down a chain just
 // as easily as at the top of one.
-Result<Found, Error> resolve_id(str gitdir, List<PackFile> packs, str id, int depth) {
+Result<Found, Error> resolve_id(Cache pack_cache, str gitdir, List<PackFile> packs, str id, int depth) {
     if (depth <= 0) {
         return Result<Found, Error>.Err(Error.ChainTooDeep);
     }
@@ -488,26 +589,18 @@ Result<Found, Error> resolve_id(str gitdir, List<PackFile> packs, str id, int de
     }
     bytes raw_id = hex_decode(id);
     for (PackFile pack_file in packs) {
-        match (io.read_bytes(pack_file.index_path)) {
-            case Ok(bytes idata): {
-                match (parse_index(idata, raw_id.size())) {
-                    case Ok(Idx pack_index): {
-                        match (pack_index.offset_of(raw_id)) {
-                            case Some(int off): {
-                                match (io.read_bytes(pack_file.pack_path)) {
-                                    case Ok(bytes packbytes): {
-                                        return resolve_offset(gitdir, packs, pack_index, packbytes, off, depth);
-                                    }
-                                    case Err(_): {
-                                        return Result<Found, Error>.Err(Error.Io);
-                                    }
-                                }
-                            }
-                            case None: {
-                            }
+        bytes idata = pack_cache.bytes_of(pack_file.index_path);
+        match (parse_index(idata, raw_id.size())) {
+            case Ok(Idx pack_index): {
+                match (pack_index.offset_of(raw_id)) {
+                    case Some(int off): {
+                        bytes packbytes = pack_cache.bytes_of(pack_file.pack_path);
+                        if (packbytes.size() == 0) {
+                            return Result<Found, Error>.Err(Error.Io);
                         }
+                        return resolve_offset(pack_cache, gitdir, packs, pack_index, packbytes, off, depth);
                     }
-                    case Err(_): {
+                    case None: {
                     }
                 }
             }
@@ -523,7 +616,7 @@ Result<Found, Error> resolve_id(str gitdir, List<PackFile> packs, str id, int de
 // once the chain bottoms out at a real commit/tree/blob/tag. See the module
 // header, "resolving a delta chain", for why this is a loop and not a
 // recursive call for the common case.
-Result<Found, Error> resolve_offset(str gitdir, List<PackFile> packs, Idx pack_index, bytes pack, int start_offset, int depth) {
+Result<Found, Error> resolve_offset(Cache pack_cache, str gitdir, List<PackFile> packs, Idx pack_index, bytes pack, int start_offset, int depth) {
     List<bytes> chain = [];
     int current = start_offset;
     int steps = 0;
@@ -596,7 +689,7 @@ Result<Found, Error> resolve_offset(str gitdir, List<PackFile> packs, Idx pack_i
                     current = base_off;
                 }
                 case None: {
-                    Found found = resolve_id(gitdir, packs, base_sha.hex(), depth - steps)?;
+                    Found found = resolve_id(pack_cache, gitdir, packs, base_sha.hex(), depth - steps)?;
                     base_kind = found.kind;
                     base_content = found.content;
                     is_base_done = true;
@@ -988,3 +1081,5 @@ int hex_value(int digit) {
     }
     return 0;
 }
+
+// --- abbreviations: which objects start with a prefix -------------------------------

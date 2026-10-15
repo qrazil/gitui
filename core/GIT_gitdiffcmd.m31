@@ -13,6 +13,7 @@ import core.GIT_revparse;
 import core.GIT_graph;
 import core.GIT_gitcommon;
 import core.GIT_gitstatus;
+import core.GIT_gitstore;
 import ui.GIT_ui_highlight;
 import diff.GIT_gitdiff;
 
@@ -23,18 +24,25 @@ pub int parse_diff_option(GIT_gitdiff.DOpts opts, List<str> args, int index, Set
     str arg = args[index];
     if (arg == "-p" || arg == "-u" || arg == "--patch") {
         opts.is_patch = true;
-        settings.is_format_given = true;
+        settings.is_no_output = false;
         return 1;
     }
     if (arg == "-s" || arg == "--no-patch") {
+        // output_format = NO_OUTPUT: every format chosen so far is dropped
         opts.is_patch = false;
-        settings.is_format_given = true;
-        settings.is_silent = true;
+        opts.is_stat = false;
+        opts.is_numstat = false;
+        opts.is_shortstat = false;
+        opts.is_name_only = false;
+        opts.is_name_status = false;
+        opts.is_raw = false;
+        opts.is_summary = false;
+        settings.is_no_output = true;
         return 1;
     }
     if (arg == "--stat" || arg.starts_with("--stat=")) {
         opts.is_stat = true;
-        settings.is_format_given = true;
+        settings.is_no_output = false;
         if (arg.starts_with("--stat=")) {
             List<str> parts = arg.substr(7, arg.size()).split(",");
             if (parts.size() > 0 && parts[0] != "") {
@@ -51,56 +59,54 @@ pub int parse_diff_option(GIT_gitdiff.DOpts opts, List<str> args, int index, Set
     }
     if (arg.starts_with("--stat-width=")) {
         opts.is_stat = true;
-        settings.is_format_given = true;
+        settings.is_no_output = false;
         opts.stat_width = arg.substr(13, arg.size()).parse_int().or(0);
         return 1;
     }
     if (arg.starts_with("--stat-name-width=")) {
         opts.is_stat = true;
-        settings.is_format_given = true;
+        settings.is_no_output = false;
         opts.stat_name_width = arg.substr(18, arg.size()).parse_int().or(0);
         return 1;
     }
     if (arg.starts_with("--stat-graph-width=")) {
         opts.is_stat = true;
-        settings.is_format_given = true;
+        settings.is_no_output = false;
         opts.stat_graph_width = arg.substr(19, arg.size()).parse_int().or(0);
         return 1;
     }
     if (arg.starts_with("--stat-count=")) {
         opts.is_stat = true;
-        settings.is_format_given = true;
+        settings.is_no_output = false;
         opts.stat_count = arg.substr(13, arg.size()).parse_int().or(0);
         return 1;
     }
     if (arg == "--numstat") {
         opts.is_numstat = true;
-        settings.is_format_given = true;
+        settings.is_no_output = false;
         return 1;
     }
     if (arg == "--shortstat") {
         opts.is_shortstat = true;
-        settings.is_format_given = true;
+        settings.is_no_output = false;
         return 1;
     }
     if (arg == "--name-only") {
         opts.is_name_only = true;
-        settings.is_format_given = true;
         return 1;
     }
     if (arg == "--name-status") {
         opts.is_name_status = true;
-        settings.is_format_given = true;
         return 1;
     }
     if (arg == "--raw") {
         opts.is_raw = true;
-        settings.is_format_given = true;
+        settings.is_no_output = false;
         return 1;
     }
     if (arg == "--summary") {
         opts.is_summary = true;
-        settings.is_format_given = true;
+        settings.is_no_output = false;
         return 1;
     }
     if (arg == "-z") {
@@ -120,16 +126,22 @@ pub int parse_diff_option(GIT_gitdiff.DOpts opts, List<str> args, int index, Set
     if (arg.starts_with("-U") && arg.size() > 2 && arg.substr(2, arg.size()).parse_int().is_some()) {
         opts.context = arg.substr(2, arg.size()).parse_int().or(3);
         settings.is_context_given = true;
+        opts.is_patch = true;
+        settings.is_no_output = false;
         return 1;
     }
     if (arg.starts_with("--unified=")) {
         opts.context = arg.substr(10, arg.size()).parse_int().or(3);
         settings.is_context_given = true;
+        opts.is_patch = true;
+        settings.is_no_output = false;
         return 1;
     }
     if (arg == "-U" && index + 1 < args.size()) {
         opts.context = args[index + 1].parse_int().or(3);
         settings.is_context_given = true;
+        opts.is_patch = true;
+        settings.is_no_output = false;
         return 2;
     }
     if (arg == "-M" || arg.starts_with("-M") || arg == "--find-renames" || arg.starts_with("--find-renames=")) {
@@ -236,8 +248,9 @@ pub int parse_diff_option(GIT_gitdiff.DOpts opts, List<str> args, int index, Set
 
 /// Facts about the options given that are not part of `DOpts`.
 pub type Settings {
-    pub bool is_format_given = false;
-    pub bool is_silent = false;
+    pub bool is_no_output = false;
+    // a message for `fatal:` when the options contradict each other
+    pub str fatal = "";
     pub bool is_context_given = false;
     // "" none, else always / never / auto
     pub str color = "";
@@ -265,18 +278,34 @@ int rename_score(str value) {
 /// The options with config defaults applied: `diff.renames`, `color.diff`,
 /// `core.abbrev`, `diff.context`, and the format defaults.
 pub GIT_gitdiff.DOpts finish_options(GIT_gitcommon.Ctx ctx, GIT_gitdiff.DOpts opts, Settings settings, bool is_patch_default) {
-    if (!settings.is_format_given && is_patch_default) {
+    bool is_given = opts.is_patch || opts.is_stat || opts.is_numstat || opts.is_shortstat || opts.is_name_only || opts.is_name_status || opts.is_raw || opts.is_summary || settings.is_no_output;
+    if (!is_given && is_patch_default) {
         opts.is_patch = true;
     }
-    if (opts.is_quiet) {
+    int exclusive = 0;
+    if (opts.is_name_only) {
+        exclusive = exclusive + 1;
+    }
+    if (opts.is_name_status) {
+        exclusive = exclusive + 1;
+    }
+    if (settings.is_no_output) {
+        exclusive = exclusive + 1;
+    }
+    if (exclusive > 1) {
+        settings.fatal = "options '--name-only', '--name-status', '--check', and '-s' cannot be used together";
+    }
+    if (opts.is_name_only || opts.is_name_status || settings.is_no_output || opts.is_quiet) {
         opts.is_patch = false;
         opts.is_stat = false;
         opts.is_numstat = false;
         opts.is_shortstat = false;
-        opts.is_name_only = false;
-        opts.is_name_status = false;
         opts.is_raw = false;
         opts.is_summary = false;
+    }
+    if (settings.is_no_output || opts.is_quiet) {
+        opts.is_name_only = false;
+        opts.is_name_status = false;
     }
     match (GIT_gitcommon.cfg(ctx, "diff", "", "renames")) {
         case Some(str value): {
@@ -327,6 +356,9 @@ pub void config_defaults(GIT_gitcommon.Ctx ctx, GIT_gitdiff.DOpts opts) {
         case None: {
         }
     }
+    if (!GIT_gitcommon.cfg_bool(ctx, "core", "", "quotepath", true)) {
+        opts.is_raw_names = true;
+    }
     opts.stat_name_width_default = GIT_gitcommon.cfg_int(ctx, "diff", "", "statnamewidth", 0);
     opts.stat_graph_width_default = GIT_gitcommon.cfg_int(ctx, "diff", "", "statgraphwidth", 0);
     opts.abbrev = GIT_gitcommon.default_abbrev(ctx);
@@ -356,13 +388,13 @@ str tree_of_rev(str gitdir, str spec, bool is_known) {
 }
 
 /// Finish a list of items the way git's `diffcore_std` does: renames.
-pub List<GIT_gitdiff.Item> finish_items(str gitdir, List<GIT_gitdiff.Item> items, GIT_gitdiff.DOpts opts) {
+pub List<GIT_gitdiff.Item> finish_items(GIT_gitstore.Store repo, List<GIT_gitdiff.Item> items, GIT_gitdiff.DOpts opts) {
     List<GIT_gitdiff.Item> seen = items;
     if (opts.is_reverse) {
         seen = GIT_gitdiff.reverse_items(items);
     }
     if (opts.is_renames) {
-        return GIT_gitdiff.detect_renames(gitdir, seen, opts.rename_score);
+        return GIT_gitdiff.detect_renames(repo, seen, opts.rename_score);
     }
     return seen;
 }
@@ -425,7 +457,12 @@ pub int run(str start, List<str> overrides, List<str> argv) {
         i = i + 1;
     }
     opts = finish_options(ctx, opts, settings, true);
+    if (settings.fatal != "") {
+        io.eprint("fatal: " + settings.fatal);
+        return 128;
+    }
     str gitdir = ctx.gitdir;
+    GIT_gitstore.Store repo = GIT_gitstore.open(gitdir);
     // revisions and paths: without `--`, a word that is not a revision must
     // be a path in the work tree
     List<str> revs = [];
@@ -459,10 +496,10 @@ pub int run(str start, List<str> overrides, List<str> argv) {
     bool is_filemode = GIT_gitcommon.cfg_bool(ctx, "core", "", "filemode", true);
     if (revs.size() == 0) {
         List<str> unmerged = [];
-        Map<str, GIT_gitdiff.Side> entries = GIT_gitdiff.index_sides(gitdir, unmerged);
+        Map<str, GIT_gitdiff.Side> entries = GIT_gitdiff.index_sides(repo, unmerged);
         if (is_cached) {
             str tree = head_tree(gitdir);
-            Map<str, GIT_gitdiff.Side> head = GIT_gitdiff.tree_sides(gitdir, tree, "", specs);
+            Map<str, GIT_gitdiff.Side> head = GIT_gitdiff.tree_sides(repo, tree, "", specs);
             Map<str, GIT_gitdiff.Side> filtered = {};
             for (str path in entries.keys()) {
                 if (GIT_gitcommon.spec_match(specs, path)) {
@@ -470,9 +507,9 @@ pub int run(str start, List<str> overrides, List<str> argv) {
                 }
             }
             items = GIT_gitdiff.maps_diff(head, filtered, unmerged);
-            items = finish_items(gitdir, items, opts);
+            items = finish_items(repo, items, opts);
         } else {
-            items = GIT_gitdiff.index_vs_worktree(gitdir, ctx.root, entries, specs, is_filemode, index_cache(gitdir));
+            items = GIT_gitdiff.index_vs_worktree(repo, ctx.root, entries, specs, is_filemode, index_cache(gitdir));
             if (opts.is_reverse) {
                 items = GIT_gitdiff.reverse_items(items);
             }
@@ -543,35 +580,35 @@ pub int run(str start, List<str> overrides, List<str> argv) {
                     return 128;
                 }
             }
-            items = GIT_gitdiff.tree_vs_tree(gitdir, left_tree, right_tree, specs);
-            items = finish_items(gitdir, items, opts);
+            items = GIT_gitdiff.tree_vs_tree(repo, left_tree, right_tree, specs);
+            items = finish_items(repo, items, opts);
         } else if (is_cached) {
             List<str> unmerged = [];
-            Map<str, GIT_gitdiff.Side> entries = GIT_gitdiff.index_sides(gitdir, unmerged);
+            Map<str, GIT_gitdiff.Side> entries = GIT_gitdiff.index_sides(repo, unmerged);
             Map<str, GIT_gitdiff.Side> filtered = {};
             for (str path in entries.keys()) {
                 if (GIT_gitcommon.spec_match(specs, path)) {
                     filtered.set(path, entries.get(path).or(GIT_gitdiff.nothing()));
                 }
             }
-            Map<str, GIT_gitdiff.Side> from = GIT_gitdiff.tree_sides(gitdir, left_tree, "", specs);
+            Map<str, GIT_gitdiff.Side> from = GIT_gitdiff.tree_sides(repo, left_tree, "", specs);
             items = GIT_gitdiff.maps_diff(from, filtered, unmerged);
-            items = finish_items(gitdir, items, opts);
+            items = finish_items(repo, items, opts);
         } else {
             List<str> unmerged = [];
-            Map<str, GIT_gitdiff.Side> entries = GIT_gitdiff.index_sides(gitdir, unmerged);
-            items = GIT_gitdiff.tree_vs_worktree(gitdir, ctx.root, left_tree, entries, specs, is_filemode, index_cache(gitdir));
-            items = finish_items(gitdir, items, opts);
+            Map<str, GIT_gitdiff.Side> entries = GIT_gitdiff.index_sides(repo, unmerged);
+            items = GIT_gitdiff.tree_vs_worktree(repo, ctx.root, left_tree, entries, specs, is_filemode, index_cache(gitdir));
+            items = finish_items(repo, items, opts);
         }
     }
     items = GIT_gitdiff.apply_filter(items, opts);
     GIT_gitcommon.Out out = GIT_gitcommon.Out();
     bool has = false;
     if (opts.is_exit_code) {
-        has = GIT_gitdiff.has_changes(gitdir, items, opts);
+        has = GIT_gitdiff.has_changes(repo, items, opts);
     }
     if (!opts.is_quiet) {
-        out.put(GIT_gitdiff.render(gitdir, items, opts));
+        out.put(GIT_gitdiff.render(repo, items, opts));
     }
     out.flush();
     if (opts.is_exit_code && has) {
@@ -628,7 +665,7 @@ str join_prefix(str prefix, str word) {
 
 pub bool is_known_path(GIT_gitcommon.Ctx ctx, str path) {
     List<str> unmerged = [];
-    Map<str, GIT_gitdiff.Side> entries = GIT_gitdiff.index_sides(ctx.gitdir, unmerged);
+    Map<str, GIT_gitdiff.Side> entries = GIT_gitdiff.index_sides(GIT_gitstore.open(ctx.gitdir), unmerged);
     if (entries.contains(path)) {
         return true;
     }
@@ -638,7 +675,7 @@ pub bool is_known_path(GIT_gitcommon.Ctx ctx, str path) {
         }
     }
     GIT_gitcommon.Spec spec = GIT_gitcommon.Spec(path);
-    Map<str, GIT_gitdiff.Side> head = GIT_gitdiff.tree_sides(ctx.gitdir, head_tree(ctx.gitdir), "", [spec]);
+    Map<str, GIT_gitdiff.Side> head = GIT_gitdiff.tree_sides(GIT_gitstore.open(ctx.gitdir), head_tree(ctx.gitdir), "", [spec]);
     return head.size() > 0;
 }
 

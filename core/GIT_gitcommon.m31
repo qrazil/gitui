@@ -80,10 +80,30 @@ pub type Opened {
 }
 
 pub Opened open(str start, List<str> overrides) {
+    // `--git-dir` and `--work-tree`, passed down as pseudo overrides
+    str forced_dir = "";
+    str forced_tree = "";
+    for (str entry in overrides) {
+        if (entry.starts_with("--git-dir=")) {
+            forced_dir = entry.substr(10, entry.size());
+        } else if (entry.starts_with("--work-tree=")) {
+            forced_tree = entry.substr(12, entry.size());
+        }
+    }
     str root = GIT_gitstatus.find_root(start);
     str gitdir = "";
     bool is_bare = false;
-    if (root != "") {
+    if (forced_dir != "") {
+        gitdir = forced_dir;
+        root = forced_tree;
+        if (root == "") {
+            root = start;
+        }
+        if (!fs.is_file(fs.join(gitdir, "HEAD"))) {
+            io.eprint("fatal: not a git repository: '" + forced_dir + "'");
+            return Opened(false, Ctx("", "", "", overrides, GIT_config.effective("")));
+        }
+    } else if (root != "") {
         gitdir = GIT_repository.find(root);
     } else {
         // a bare repository or a directory inside a .git directory
@@ -497,10 +517,69 @@ pub str quote_path(str name) {
     return GIT_gitstatus.quote(name, false);
 }
 
+/// `quote_c_style` with `core.quotePath=false` (`is_raw`): bytes of a UTF-8
+/// name are left alone, only control characters, `"`, `\` and DEL escape.
+pub str quote_name(str name, bool is_raw) {
+    if (!is_raw) {
+        return GIT_gitstatus.quote(name, false);
+    }
+    bool is_needed = false;
+    for (int b in name.to_bytes()) {
+        if (b < ' ' || b == '"' || b == '\\' || b == 127) {
+            is_needed = true;
+        }
+    }
+    if (!is_needed) {
+        return name;
+    }
+    bytes out = [];
+    out.push('"');
+    for (int b in name.to_bytes()) {
+        if (b == 7) {
+            out.extend("\\a".to_bytes());
+        } else if (b == 8) {
+            out.extend("\\b".to_bytes());
+        } else if (b == '\t') {
+            out.extend("\\t".to_bytes());
+        } else if (b == '\n') {
+            out.extend("\\n".to_bytes());
+        } else if (b == 11) {
+            out.extend("\\v".to_bytes());
+        } else if (b == 12) {
+            out.extend("\\f".to_bytes());
+        } else if (b == '\r') {
+            out.extend("\\r".to_bytes());
+        } else if (b == '"') {
+            out.extend("\\\"".to_bytes());
+        } else if (b == '\\') {
+            out.extend("\\\\".to_bytes());
+        } else if (b < ' ' || b == 127) {
+            out.push('\\');
+            out.push(48 + (b >> 6 & 7));
+            out.push(48 + (b >> 3 & 7));
+            out.push(48 + (b & 7));
+        } else {
+            out.push(b);
+        }
+    }
+    out.push('"');
+    return out.utf8().or(name);
+}
+
 /// Does `name` need quoting?
 pub bool needs_quote(str name) {
     for (int b in name.to_bytes()) {
         if (b < ' ' || b == '"' || b == '\\' || b >= 127) {
+            return true;
+        }
+    }
+    return false;
+}
+
+/// Does `name` need quoting under `core.quotePath=false`?
+pub bool needs_quote_raw(str name) {
+    for (int b in name.to_bytes()) {
+        if (b < ' ' || b == '"' || b == '\\' || b == 127) {
             return true;
         }
     }

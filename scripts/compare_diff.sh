@@ -214,6 +214,12 @@ awk 'NR==5 || NR==700 || NR==1500 || NR==2998 { print "EDITED " $0; next } NR==1
 mv big.new big.txt
 shapes bigedit "$WORK/wt/bigedit"
 
+# which output format wins when several are given
+for combo in "--name-only --numstat" "-s --stat" "-s -p" "--stat -s" "-p -s" "--name-only -s" "-s --name-only" "--name-only --name-status" "--quiet -p" "-p --quiet" "-U1 -s" "-s -U1" "--name-status --stat" "--raw --stat -p" "--summary --shortstat" "--numstat --stat --shortstat --summary -p"; do
+    # shellcheck disable=SC2086
+    compare combos "$WORK/fx/linear" diff $combo
+done
+
 # configuration: diff.noprefix, diff.renames, diff.context, color.diff, core.abbrev
 compare history-config "$fixtures_dir/renames" -c diff.noprefix=true diff HEAD~3 HEAD
 compare history-config "$fixtures_dir/renames" -c diff.renames=false diff --name-status HEAD~3 HEAD
@@ -223,6 +229,13 @@ compare history-config "$fixtures_dir/renames" -c color.ui=always -c color.diff.
 compare history-config "$fixtures_dir/renames" -c core.abbrev=10 diff HEAD~3 HEAD
 compare history-config "$fixtures_dir/renames" -c diff.statNameWidth=12 diff --stat HEAD~3 HEAD
 compare history-config "$fixtures_dir/renames" -c diff.statGraphWidth=5 diff --stat HEAD~3 HEAD
+compare history-config "$fixtures_dir/unicode" -c core.quotePath=false diff --stat --summary HEAD~2 HEAD
+compare history-config "$fixtures_dir/unicode" -c core.quotePath=false diff HEAD~2 HEAD
+compare history-config "$fixtures_dir/unicode" -c core.quotePath=false diff --name-only --numstat HEAD~2 HEAD
+compare history-config "$fixtures_dir/unicode" -c core.quotePath=false diff --raw HEAD~2 HEAD
+compare history-config "$fixtures_dir/unicode" diff --raw HEAD~2 HEAD
+compare history-config "$fixtures_dir/unicode" diff -z --name-status HEAD~2 HEAD
+compare history-config "$fixtures_dir/unicode" diff -z --stat HEAD~2 HEAD
 
 if [ "$bad" -eq 0 ]; then
     echo "diff: all $n forms byte-identical to git"

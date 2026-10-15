@@ -326,6 +326,12 @@ pub str Object.kind() {
 /// them has to know which of the two it was: `NotFound` means genuinely
 /// missing, not merely "not loose".
 pub Result<Object, Error> read(str gitdir, str id) {
+    return read_with(GIT_pack.cache(gitdir), gitdir, id);
+}
+
+/// `read` through a `GIT_pack.Cache`, which keeps the packs' bytes between
+/// reads: what a command that reads thousands of objects holds on to.
+pub Result<Object, Error> read_with(GIT_pack.Cache pack_cache, str gitdir, str id) {
     if (!is_name(id) || !is_full_width(id)) {
         return Result<Object, Error>.Err(Error.BadName);
     }
@@ -350,7 +356,7 @@ pub Result<Object, Error> read(str gitdir, str id) {
             }
         }
     }
-    match (GIT_pack.read(gitdir, id)) {
+    match (GIT_pack.read_with(pack_cache, gitdir, id)) {
         case Ok(GIT_pack.Found found): {
             bytes plain = [];
             plain.extend(found.kind.to_bytes());

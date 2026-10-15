@@ -27,6 +27,7 @@ import core.GIT_graph;
 import core.GIT_gitcommon;
 import core.GIT_gitstatus;
 import core.GIT_gitgraph;
+import core.GIT_gitstore;
 import core.GIT_gitdiffcmd;
 import core.GIT_pathtree;
 import core.GIT_utf8width;
@@ -96,6 +97,7 @@ type Walk {
     str gitdir;
     LOpts opts;
     List<GIT_gitcommon.Spec> specs;
+    GIT_gitstore.Store repo = GIT_gitstore.open("");
     Map<str, GIT_object.Commit> commits = {};
     // git's `commit->parents`: set when a commit is parsed, and replaced by
     // history simplification
@@ -118,7 +120,7 @@ bool Walk.parse(str id) {
     if (parents.contains(id)) {
         return true;
     }
-    match (GIT_object.read(gitdir, id)) {
+    match (repo.read(id)) {
         case Ok(GIT_object.Object object): {
             match (object.body) {
                 case Commit(GIT_object.Commit commit): {
@@ -218,7 +220,7 @@ bool Walk.differs(str tree_a, str tree_b) {
     if (tree_a == tree_b) {
         return false;
     }
-    return GIT_gitdiff.trees_differ(gitdir, tree_a, tree_b, specs);
+    return GIT_gitdiff.trees_differ(repo, tree_a, tree_b, specs);
 }
 
 bool Walk.is_prune() {
@@ -293,17 +295,17 @@ List<GIT_gitdiff.Item> Walk.follow_diff(GIT_object.Commit c, List<str> plist) {
         parent_tree = commit(plist[0]).tree;
     }
     List<GIT_gitcommon.Spec> only = [GIT_gitcommon.Spec(follow_path)];
-    List<GIT_gitdiff.Item> items = GIT_gitdiff.tree_vs_tree(gitdir, parent_tree, c.tree, only);
+    List<GIT_gitdiff.Item> items = GIT_gitdiff.tree_vs_tree(repo, parent_tree, c.tree, only);
     if (plist.size() == 1 && items.size() == 1 && items[0].status == "A" && (items[0].new.mode >> 12) == 0o10) {
         List<GIT_gitcommon.Spec> everything = [];
-        List<GIT_gitdiff.Item> all = GIT_gitdiff.tree_vs_tree(gitdir, parent_tree, c.tree, everything);
+        List<GIT_gitdiff.Item> all = GIT_gitdiff.tree_vs_tree(repo, parent_tree, c.tree, everything);
         List<str> gone = [];
         for (GIT_gitdiff.Item item in all) {
             if (item.status == "D") {
                 gone.push(item.path);
             }
         }
-        match (GIT_gitdiff.follow_source(gitdir, parent_tree, items[0], gone, dopts.rename_score)) {
+        match (GIT_gitdiff.follow_source(repo, parent_tree, items[0], gone, dopts.rename_score)) {
             case Some(GIT_gitdiff.Item found): {
                 follow_path = found.old_path;
                 return [found];
@@ -1103,6 +1105,7 @@ type Ctxf {
     str gitdir;
     LOpts opts;
     Decorations decos;
+    GIT_gitstore.Store repo = GIT_gitstore.open("");
     Palette pal = Palette();
     bool is_color = false;
     int abbrev = 7;
@@ -1114,7 +1117,7 @@ str Ctxf.abbrev_id(str id) {
     if (abbrev <= 0 || abbrev >= id.size()) {
         return id;
     }
-    return GIT_gitdiff.unique_abbrev(gitdir, id, abbrev);
+    return GIT_gitdiff.unique_abbrev(repo, id, abbrev);
 }
 
 str Ctxf.date_text(GIT_object.Ident who, str style) {
@@ -2379,7 +2382,7 @@ bool Emitter.diff_flush(str id, GIT_object.Commit commit, List<str> parents, Lis
         // the stat width loses the graph's prefix when it follows the terminal
         dopts.prefix_len = graph.padding_line().size();
     }
-    bytes diff_bytes = GIT_gitdiff.render(f.gitdir, items, dopts);
+    bytes diff_bytes = GIT_gitdiff.render(f.repo, items, dopts);
     diff_put(diff_bytes);
     return true;
 }
@@ -2557,8 +2560,9 @@ Result<List<Pending>, str> expand_word(str gitdir, str word, bool is_neg) {
     }
 }
 
-Emitter make_emitter(GIT_gitcommon.Ctx ctx, LOpts opts, GIT_gitdiff.DOpts dopts, GIT_gitcommon.Out out, bool is_color, List<str> decorate_exclude) {
+Emitter make_emitter(GIT_gitcommon.Ctx ctx, GIT_gitstore.Store repo, LOpts opts, GIT_gitdiff.DOpts dopts, GIT_gitcommon.Out out, bool is_color, List<str> decorate_exclude) {
     Ctxf f = Ctxf(ctx.gitdir, opts, Decorations());
+    f.repo = repo;
     f.pal = make_palette(ctx, is_color);
     f.is_color = is_color;
     f.abbrev = opts.abbrev;
@@ -2638,6 +2642,14 @@ pub int run(str start, List<str> overrides, List<str> argv, bool is_show) {
         opts.is_abbrev_commit = true;
     }
     opts.abbrev = dopts.abbrev;
+    for (str word in argv) {
+        if (word == "--") {
+            break;
+        }
+        if (word == "--quiet" || word == "-q") {
+            settings.is_no_output = true;
+        }
+    }
     bool is_after_dashes = false;
     bool is_negated = false;
     List<str> words = [];
@@ -2973,6 +2985,11 @@ pub int run(str start, List<str> overrides, List<str> argv, bool is_show) {
             i = i + 1;
             continue;
         }
+        if (arg == "--quiet" || arg == "-q") {
+            // log's own option, read before the diff options: -p clears it
+            i = i + 1;
+            continue;
+        }
         int used = GIT_gitdiffcmd.parse_diff_option(dopts, argv, i, settings);
         if (used < 0) {
             return 129;
@@ -2989,15 +3006,11 @@ pub int run(str start, List<str> overrides, List<str> argv, bool is_show) {
             io.eprint("error: unsupported option: " + arg + " (merge diffs are not implemented)");
             return 129;
         }
-        if (arg == "--quiet" || arg == "-q") {
-            settings.is_silent = true;
-            i = i + 1;
-            continue;
-        }
         io.eprint("fatal: unrecognized argument: " + arg);
         return 128;
     }
     str gitdir = ctx.gitdir;
+    GIT_gitstore.Store repo = GIT_gitstore.open(gitdir);
     if (opts.is_graph && (is_show || opts.is_no_walk)) {
         io.eprint("fatal: options '--no-walk' and '--graph' cannot be used together");
         return 128;
@@ -3033,18 +3046,11 @@ pub int run(str start, List<str> overrides, List<str> argv, bool is_show) {
         io.eprint("'git <command> [<revision>...] -- [<file>...]'");
         return 128;
     }
-    if (settings.is_silent) {
-        dopts.is_patch = false;
-        dopts.is_stat = false;
-        dopts.is_numstat = false;
-        dopts.is_shortstat = false;
-        dopts.is_name_only = false;
-        dopts.is_name_status = false;
-        dopts.is_raw = false;
-        dopts.is_summary = false;
-        settings.is_format_given = true;
-    }
     dopts = GIT_gitdiffcmd.finish_options(ctx, dopts, settings, is_show);
+    if (settings.fatal != "") {
+        io.eprint("fatal: " + settings.fatal);
+        return 128;
+    }
     bool is_color = dopts.is_color;
     GIT_gitcommon.Out out = GIT_gitcommon.Out();
     List<GIT_gitcommon.Spec> specs = GIT_gitcommon.parse_specs(opts.paths, ctx.prefix);
@@ -3053,7 +3059,7 @@ pub int run(str start, List<str> overrides, List<str> argv, bool is_show) {
             rev_words.push("HEAD");
             rev_neg.push(false);
         }
-        return show_objects(ctx, opts, dopts, rev_words, rev_neg, specs, is_color, out, decorate_exclude);
+        return show_objects(ctx, repo, opts, dopts, rev_words, rev_neg, specs, is_color, out, decorate_exclude);
     }
     // the tips, in command-line order
     List<Pending> pending = [];
@@ -3137,6 +3143,7 @@ pub int run(str start, List<str> overrides, List<str> argv, bool is_show) {
         return 128;
     }
     Walk walk = Walk(gitdir, opts, specs);
+    walk.repo = repo;
     walk.dopts = dopts;
     walk.is_want_ancestry = opts.is_graph;
     walk.is_no_walk = opts.is_no_walk;
@@ -3197,7 +3204,7 @@ pub int run(str start, List<str> overrides, List<str> argv, bool is_show) {
             walk.list = walk.topo_sort(walk.list);
         }
     }
-    Emitter emitter = make_emitter(ctx, opts, dopts, out, is_color, decorate_exclude);
+    Emitter emitter = make_emitter(ctx, repo, opts, dopts, out, is_color, decorate_exclude);
     bool is_needs_diff = DOpts_any(dopts) || opts.pickaxe != "" || opts.is_follow || dopts.filter != "" || dopts.filter_not != "";
     int max_count = opts.max_count;
     int skip = opts.skip;
@@ -3279,15 +3286,15 @@ bool log_tree_commit(Walk walk, Emitter emitter, str id, bool is_needs_diff, Lis
             stat_only.is_raw = false;
             if (stat_only.is_stat || stat_only.is_numstat || stat_only.is_shortstat || stat_only.is_summary) {
                 str first_tree = walk.commit(parents[0]).tree;
-                List<GIT_gitdiff.Item> stat_items = GIT_gitdiff.tree_vs_tree(walk.gitdir, first_tree, commit.tree, specs);
+                List<GIT_gitdiff.Item> stat_items = GIT_gitdiff.tree_vs_tree(walk.repo, first_tree, commit.tree, specs);
                 if (dopts.is_renames) {
-                    stat_items = GIT_gitdiff.detect_renames(walk.gitdir, stat_items, dopts.rename_score);
+                    stat_items = GIT_gitdiff.detect_renames(walk.repo, stat_items, dopts.rename_score);
                 }
                 if (stat_items.size() > 0) {
                     if (emitter.has_graph) {
                         stat_only.prefix_len = emitter.graph.padding_line().size();
                     }
-                    emitter.diff_put(GIT_gitdiff.render(walk.gitdir, stat_items, stat_only));
+                    emitter.diff_put(GIT_gitdiff.render(walk.repo, stat_items, stat_only));
                 }
             }
             return true;
@@ -3298,20 +3305,20 @@ bool log_tree_commit(Walk walk, Emitter emitter, str id, bool is_needs_diff, Lis
             if (parents.size() == 1) {
                 parent_tree = walk.commit(parents[0]).tree;
             }
-            items = GIT_gitdiff.tree_vs_tree(walk.gitdir, parent_tree, commit.tree, specs);
+            items = GIT_gitdiff.tree_vs_tree(walk.repo, parent_tree, commit.tree, specs);
             if (dopts.is_reverse) {
                 items = GIT_gitdiff.reverse_items(items);
             }
             if (dopts.is_renames) {
-                items = GIT_gitdiff.detect_renames(walk.gitdir, items, dopts.rename_score);
+                items = GIT_gitdiff.detect_renames(walk.repo, items, dopts.rename_score);
             }
         }
         if (is_wanted && walk.opts.pickaxe != "") {
             List<GIT_gitdiff.Item> kept = [];
             bytes needle = walk.opts.pickaxe.to_bytes();
             for (GIT_gitdiff.Item item in items) {
-                bytes before = GIT_gitdiff.content_of(walk.gitdir, item.old);
-                bytes after = GIT_gitdiff.content_of(walk.gitdir, item.new);
+                bytes before = GIT_gitdiff.content_of(walk.repo, item.old);
+                bytes after = GIT_gitdiff.content_of(walk.repo, item.new);
                 if (count_of(before, needle) != count_of(after, needle)) {
                     kept.push(item);
                 }
@@ -3335,9 +3342,9 @@ bool log_tree_commit(Walk walk, Emitter emitter, str id, bool is_needs_diff, Lis
 /// `git show`: each object in turn, as `cmd_show` does: a blob as it is, a
 /// tag with what it points at, a tree as a listing, a commit as `log` shows
 /// one commit.
-int show_objects(GIT_gitcommon.Ctx ctx, LOpts opts, GIT_gitdiff.DOpts dopts, List<str> words, List<bool> negs, List<GIT_gitcommon.Spec> specs, bool is_color, GIT_gitcommon.Out out, List<str> decorate_exclude) {
+int show_objects(GIT_gitcommon.Ctx ctx, GIT_gitstore.Store repo, LOpts opts, GIT_gitdiff.DOpts dopts, List<str> words, List<bool> negs, List<GIT_gitcommon.Spec> specs, bool is_color, GIT_gitcommon.Out out, List<str> decorate_exclude) {
     str gitdir = ctx.gitdir;
-    Emitter emitter = make_emitter(ctx, opts, dopts, out, is_color, decorate_exclude);
+    Emitter emitter = make_emitter(ctx, repo, opts, dopts, out, is_color, decorate_exclude);
     int status = 0;
     for (int w in 0 .. words.size()) {
         str word = words[w];
@@ -3374,7 +3381,7 @@ int show_objects(GIT_gitcommon.Ctx ctx, LOpts opts, GIT_gitdiff.DOpts dopts, Lis
         while (is_going && guard < 50) {
             guard = guard + 1;
             is_going = false;
-            match (GIT_object.read(gitdir, id)) {
+            match (repo.read(id)) {
                 case Err(GIT_object.Error error): {
                     out.flush();
                     io.eprint("error: could not read object " + id);
@@ -3445,6 +3452,7 @@ int show_objects(GIT_gitcommon.Ctx ctx, LOpts opts, GIT_gitdiff.DOpts dopts, Lis
                         }
                         case Commit(GIT_object.Commit commit): {
                             Walk walk = Walk(gitdir, opts, specs);
+                            walk.repo = repo;
                             walk.dopts = dopts;
                             walk.is_no_walk = true;
                             walk.is_want_ancestry = opts.is_graph;

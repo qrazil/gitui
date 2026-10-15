@@ -1,0 +1,130 @@
+// What `log`, `show` and `diff` read objects through: the repository's path,
+// the packs' bytes (read once), and the objects already parsed, so a command
+// that visits thousands of commits and trees does not open the packs again
+// for each one (the stateless `GIT_object.read` does).
+//
+//   GIT_gitstore.Store s = GIT_gitstore.open(gitdir);
+//   s.read(id)         -> Result<GIT_object.Object, GIT_object.Error>
+//   s.blob(id)         -> bytes ("" when it cannot be read)
+//   s.unique_abbrev(id, min) -> the shortest unambiguous prefix of at least `min`
+
+import fs;
+import core.GIT_object;
+import core.GIT_pack;
+import core.GIT_repository;
+
+pub type Store {
+    pub str path;
+    pub GIT_pack.Cache packs;
+    pub Map<str, GIT_object.Object> objects = {};
+}
+
+pub Result<GIT_object.Object, GIT_object.Error> Store.read(str id) {
+    match (objects.get(id)) {
+        case Some(GIT_object.Object known): {
+            return Result<GIT_object.Object, GIT_object.Error>.Ok(known);
+        }
+        case None: {
+        }
+    }
+    match (GIT_object.read_with(packs, path, id)) {
+        case Ok(GIT_object.Object object): {
+            // blobs are not kept: they are large and read once
+            match (object.body) {
+                case Blob: {
+                }
+                case Commit(_): {
+                    objects.set(id, object);
+                }
+                case Tree(_): {
+                    objects.set(id, object);
+                }
+                case Tag(_): {
+                    objects.set(id, object);
+                }
+            }
+            return Result<GIT_object.Object, GIT_object.Error>.Ok(object);
+        }
+        case Err(GIT_object.Error error): {
+            return Result<GIT_object.Object, GIT_object.Error>.Err(error);
+        }
+    }
+}
+
+/// A blob's bytes, or empty when the object is missing or not a blob.
+pub bytes Store.blob(str id) {
+    match (read(id)) {
+        case Ok(GIT_object.Object object): {
+            match (object.body) {
+                case Blob: {
+                    return object.raw;
+                }
+                case Commit(_): {
+                    return [];
+                }
+                case Tree(_): {
+                    return [];
+                }
+                case Tag(_): {
+                    return [];
+                }
+            }
+        }
+        case Err(_): {
+            return [];
+        }
+    }
+}
+
+// the object names, loose or packed, that begin with `prefix` (at most two)
+List<str> Store.matching(str prefix) {
+    List<str> out = packs.with_prefix(path, prefix, 2);
+    if (prefix.size() >= 2) {
+        str dir = fs.join(fs.join(GIT_repository.common(path), "objects"), prefix.substr(0, 2));
+        if (fs.is_directory(dir)) {
+            match (fs.listdir(dir)) {
+                case Ok(List<str> names): {
+                    str rest = prefix.substr(2, prefix.size());
+                    for (str name in names) {
+                        if (name.starts_with(rest) && out.size() < 2) {
+                            str id = prefix.substr(0, 2) + name;
+                            if (!out.contains(id)) {
+                                out.push(id);
+                            }
+                        }
+                    }
+                }
+                case Err(_): {
+                }
+            }
+        }
+    }
+    return out;
+}
+
+/// `id` cut to the shortest prefix, at least `min` digits, that names no
+/// other object.
+pub str Store.unique_abbrev(str id, int min) {
+    int length = min;
+    if (length >= id.size()) {
+        return id;
+    }
+    while (length < id.size()) {
+        List<str> found = matching(id.substr(0, length));
+        bool is_other = false;
+        for (str other in found) {
+            if (other != id) {
+                is_other = true;
+            }
+        }
+        if (!is_other) {
+            break;
+        }
+        length = length + 1;
+    }
+    return id.substr(0, length);
+}
+
+pub Store open(str gitdir) {
+    return Store(gitdir, GIT_pack.cache(gitdir));
+}

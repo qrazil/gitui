@@ -139,6 +139,12 @@ compare blob "$b" show HEAD~1:zeros.bin
 u="$WORK/fx/unicode"
 compare tree "$u" show 'HEAD^{tree}'
 
+# which output format wins when several are given
+for combo in "--name-only --numstat" "-s --stat" "-s -p" "--stat -s" "-p -s" "--name-only -s" "-s --name-only" "--name-only --name-status" "--quiet -p" "-p --quiet" "-U1 -s" "-s -U1" "--name-status --stat" "--raw --stat -p" "--summary --shortstat" "--numstat --stat --shortstat --summary -p"; do
+    # shellcheck disable=SC2086
+    compare combos "$WORK/fx/linear" show $combo
+done
+
 # from a subdirectory
 compare linear-sub "$WORK/fx/linear/src" show HEAD
 compare linear-sub "$WORK/fx/linear/src" show --name-only HEAD

@@ -26,6 +26,7 @@ import core.GIT_index;
 import core.GIT_gitcommon;
 import core.GIT_gitstatus;
 import core.GIT_utf8width;
+import core.GIT_gitstore;
 import tui.core.TUI_style;
 import tui.core.TUI_syntax;
 import diff.GIT_xdiff;
@@ -85,6 +86,8 @@ pub type DOpts {
     pub bool is_reverse = false;
     pub bool is_text = false;
     pub bool is_full_index = false;
+    // core.quotePath=false: bytes above 127 are left as they are in names
+    pub bool is_raw_names = false;
     // colour the code of added and removed lines by syntax (a terminal only)
     pub bool is_syntax = false;
     pub bool is_dark = true;
@@ -153,7 +156,7 @@ bool is_symlink(int mode) {
 
 /// What `side` holds, as git diffs it: a blob's bytes, a work-tree file's
 /// bytes, or `Subproject commit <id>\n` for a submodule.
-pub bytes content_of(str gitdir, Side side) {
+pub bytes content_of(GIT_gitstore.Store repo, Side side) {
     if (side.id == "" && side.wt == "") {
         return [];
     }
@@ -170,7 +173,7 @@ pub bytes content_of(str gitdir, Side side) {
             }
         }
     }
-    return GIT_gitstatus.blob_of(gitdir, side.id);
+    return repo.blob(side.id);
 }
 
 // --- tree against tree -----------------------------------------------------------------
@@ -196,11 +199,11 @@ bool dir_may_match(List<GIT_gitcommon.Spec> specs, str dir) {
     return !has_positive;
 }
 
-List<GIT_object.Entry> tree_entries(str gitdir, str id) {
+List<GIT_object.Entry> tree_entries(GIT_gitstore.Store repo, str id) {
     if (id == "") {
         return [];
     }
-    match (GIT_object.read(gitdir, id)) {
+    match (repo.read(id)) {
         case Ok(GIT_object.Object object): {
             match (object.body) {
                 case Tree(List<GIT_object.Entry> entries): {
@@ -231,9 +234,9 @@ str entry_key(GIT_object.Entry entry) {
     return name;
 }
 
-void walk_trees(str gitdir, str old_tree, str new_tree, str base, List<GIT_gitcommon.Spec> specs, List<Item> out) {
-    List<GIT_object.Entry> old_entries = tree_entries(gitdir, old_tree);
-    List<GIT_object.Entry> new_entries = tree_entries(gitdir, new_tree);
+void walk_trees(GIT_gitstore.Store repo, str old_tree, str new_tree, str base, List<GIT_gitcommon.Spec> specs, List<Item> out) {
+    List<GIT_object.Entry> old_entries = tree_entries(repo, old_tree);
+    List<GIT_object.Entry> new_entries = tree_entries(repo, new_tree);
     int i = 0;
     int j = 0;
     while (i < old_entries.size() || j < new_entries.size()) {
@@ -293,7 +296,7 @@ void walk_trees(str gitdir, str old_tree, str new_tree, str base, List<GIT_gitco
                         if (is_dir_new) {
                             sub_new = new_entry.id;
                         }
-                        walk_trees(gitdir, sub_old, sub_new, full, specs, out);
+                        walk_trees(repo, sub_old, sub_new, full, specs, out);
                     }
                     // a file replaced by a directory (or the reverse) is
                     // handled by the other half of the pair below
@@ -326,12 +329,12 @@ void walk_trees(str gitdir, str old_tree, str new_tree, str base, List<GIT_gitco
 
 /// The paths that differ between two trees ("" is the empty tree), limited to
 /// `specs`, in path order.
-pub List<Item> tree_vs_tree(str gitdir, str old_tree, str new_tree, List<GIT_gitcommon.Spec> specs) {
+pub List<Item> tree_vs_tree(GIT_gitstore.Store repo, str old_tree, str new_tree, List<GIT_gitcommon.Spec> specs) {
     List<Item> out = [];
     if (old_tree == new_tree) {
         return out;
     }
-    walk_trees(gitdir, old_tree, new_tree, "", specs, out);
+    walk_trees(repo, old_tree, new_tree, "", specs, out);
     return out;
 }
 
@@ -339,9 +342,9 @@ pub List<Item> tree_vs_tree(str gitdir, str old_tree, str new_tree, List<GIT_git
 
 /// The stage-0 entries of the index as sides, by path; `unmerged` gets every
 /// path that has a conflict stage.
-pub Map<str, Side> index_sides(str gitdir, List<str> unmerged) {
+pub Map<str, Side> index_sides(GIT_gitstore.Store repo, List<str> unmerged) {
     Map<str, Side> out = {};
-    match (GIT_index.read(gitdir)) {
+    match (GIT_index.read(repo.path)) {
         case Ok(GIT_index.Index index): {
             for (GIT_index.Entry entry in index.entries) {
                 match (entry.path.utf8()) {
@@ -364,14 +367,14 @@ pub Map<str, Side> index_sides(str gitdir, List<str> unmerged) {
 }
 
 /// The flat map of a tree.
-pub Map<str, Side> tree_sides(str gitdir, str tree, str base, List<GIT_gitcommon.Spec> specs) {
+pub Map<str, Side> tree_sides(GIT_gitstore.Store repo, str tree, str base, List<GIT_gitcommon.Spec> specs) {
     Map<str, Side> out = {};
-    flat_into(gitdir, tree, base, specs, out);
+    flat_into(repo, tree, base, specs, out);
     return out;
 }
 
-void flat_into(str gitdir, str tree, str base, List<GIT_gitcommon.Spec> specs, Map<str, Side> out) {
-    for (GIT_object.Entry entry in tree_entries(gitdir, tree)) {
+void flat_into(GIT_gitstore.Store repo, str tree, str base, List<GIT_gitcommon.Spec> specs, Map<str, Side> out) {
+    for (GIT_object.Entry entry in tree_entries(repo, tree)) {
         match (entry.name.utf8()) {
             case None: {
             }
@@ -382,7 +385,7 @@ void flat_into(str gitdir, str tree, str base, List<GIT_gitcommon.Spec> specs, M
                 }
                 if (entry.is_tree()) {
                     if (dir_may_match(specs, full)) {
-                        flat_into(gitdir, entry.id, full, specs, out);
+                        flat_into(repo, entry.id, full, specs, out);
                     }
                 } else if (GIT_gitcommon.spec_match(specs, full)) {
                     out.set(full, Side(entry.mode, entry.id, ""));
@@ -509,7 +512,7 @@ Item changed_item(str path, Side one, Side two) {
 
 /// Index against the work tree: what `git diff` shows. `entries` is
 /// `index_sides`, `root` the work tree. Returns the items in path order.
-pub List<Item> index_vs_worktree(str gitdir, str root, Map<str, Side> entries, List<GIT_gitcommon.Spec> specs, bool is_filemode, Map<str, GIT_index.Entry> stat_cache) {
+pub List<Item> index_vs_worktree(GIT_gitstore.Store repo, str root, Map<str, Side> entries, List<GIT_gitcommon.Spec> specs, bool is_filemode, Map<str, GIT_index.Entry> stat_cache) {
     List<str> paths = [];
     for (str path in entries.keys()) {
         paths.push(path);
@@ -541,8 +544,8 @@ pub List<Item> index_vs_worktree(str gitdir, str root, Map<str, Side> entries, L
 
 /// A tree against the work tree (`git diff <rev>`): every path of the tree or
 /// the index, with the work-tree file as the new side.
-pub List<Item> tree_vs_worktree(str gitdir, str root, str tree, Map<str, Side> entries, List<GIT_gitcommon.Spec> specs, bool is_filemode, Map<str, GIT_index.Entry> stat_cache) {
-    Map<str, Side> from_tree = tree_sides(gitdir, tree, "", specs);
+pub List<Item> tree_vs_worktree(GIT_gitstore.Store repo, str root, str tree, Map<str, Side> entries, List<GIT_gitcommon.Spec> specs, bool is_filemode, Map<str, GIT_index.Entry> stat_cache) {
+    Map<str, Side> from_tree = tree_sides(repo, tree, "", specs);
     List<str> paths = [];
     for (str path in from_tree.keys()) {
         paths.push(path);
@@ -658,7 +661,7 @@ int same_base(str a, str b) {
 /// git's `diffcore_rename` for `-M`: pair each added file with a deleted one.
 /// `items` is path-ordered; the result is too, with a rename standing where
 /// its destination was and its source's deletion gone.
-pub List<Item> detect_renames(str gitdir, List<Item> items, int minimum) {
+pub List<Item> detect_renames(GIT_gitstore.Store repo, List<Item> items, int minimum) {
     List<int> dsts = [];
     List<int> srcs = [];
     for (int i in 0 .. items.size()) {
@@ -729,14 +732,14 @@ pub List<Item> detect_renames(str gitdir, List<Item> items, int minimum) {
             List<Map<int, int>> spans_of_src = [];
             List<int> size_of_src = [];
             for (int s in rest_src) {
-                bytes data = content_of(gitdir, items[srcs[s]].old);
+                bytes data = content_of(repo, items[srcs[s]].old);
                 spans_of_src.push(GIT_gitstatus.span_counts(data));
                 size_of_src.push(data.size());
             }
             List<Map<int, int>> spans_of_dst = [];
             List<int> size_of_dst = [];
             for (int d in rest_dst) {
-                bytes data = content_of(gitdir, items[dsts[d]].new);
+                bytes data = content_of(repo, items[dsts[d]].new);
                 spans_of_dst.push(GIT_gitstatus.span_counts(data));
                 size_of_dst.push(data.size());
             }
@@ -1008,8 +1011,8 @@ pub List<diff.Op> make_ops(bytes old_full, bytes new_full, int ws, int context) 
 }
 
 /// Load both sides of an item and diff them.
-pub Loaded load(str gitdir, Item item, DOpts opts, bool want_ops) {
-    Loaded loaded = Loaded(content_of(gitdir, item.old), content_of(gitdir, item.new));
+pub Loaded load(GIT_gitstore.Store repo, Item item, DOpts opts, bool want_ops) {
+    Loaded loaded = Loaded(content_of(repo, item.old), content_of(repo, item.new));
     if (!opts.is_text && (diff.is_binary(loaded.old) || diff.is_binary(loaded.new))) {
         loaded.is_binary = true;
         return loaded;
@@ -1038,13 +1041,13 @@ pub Loaded load(str gitdir, Item item, DOpts opts, bool want_ops) {
 
 // --- names -------------------------------------------------------------------------------
 
-str quoted(str name) {
-    return GIT_gitcommon.quote_path(name);
+str quoted(DOpts opts, str name) {
+    return GIT_gitcommon.quote_name(name, opts.is_raw_names);
 }
 
 // `a/<path>` quoted as one name, as git writes it in `diff --git` and `---`.
-str prefixed(str prefix, str path) {
-    return quoted(prefix + path);
+str prefixed(DOpts opts, str prefix, str path) {
+    return quoted(opts, prefix + path);
 }
 
 str octal6(int mode) {
@@ -1510,7 +1513,7 @@ str short_id(str id, int length) {
 }
 
 /// One item as a patch: header, then hunks or the binary notice.
-pub bytes patch_bytes(str gitdir, Item item, DOpts opts) {
+pub bytes patch_bytes(GIT_gitstore.Store repo, Item item, DOpts opts) {
     bytes out = [];
     Pal pal = opts.pal;
     str src = opts.src_prefix;
@@ -1532,13 +1535,13 @@ pub bytes patch_bytes(str gitdir, Item item, DOpts opts) {
         // a typechange is a deletion followed by an addition
         Item gone = Item("D", it.path, it.path, it.old, nothing());
         Item came = Item("A", it.path, it.path, nothing(), it.new);
-        bytes first = patch_bytes(gitdir, gone, opts);
-        bytes second = patch_bytes(gitdir, came, opts);
+        bytes first = patch_bytes(repo, gone, opts);
+        bytes second = patch_bytes(repo, came, opts);
         out.extend(first);
         out.extend(second);
         return out;
     }
-    meta_line(out, "diff --git " + prefixed(src, name_a) + " " + prefixed(dst, name_b), pal);
+    meta_line(out, "diff --git " + prefixed(opts, src, name_a) + " " + prefixed(opts, dst, name_b), pal);
     if (is_added) {
         meta_line(out, "new file mode " + octal6(it.new.mode), pal);
     } else if (is_removed) {
@@ -1553,19 +1556,19 @@ pub bytes patch_bytes(str gitdir, Item item, DOpts opts) {
             word = "copy";
         }
         meta_line(out, "similarity index " + (it.score * 100 / 60000).to_str() + "%", pal);
-        meta_line(out, word + " from " + quoted(it.old_path), pal);
-        meta_line(out, word + " to " + quoted(it.path), pal);
+        meta_line(out, word + " from " + quoted(opts, it.old_path), pal);
+        meta_line(out, word + " to " + quoted(opts, it.path), pal);
     }
     bool has_content_change = it.old.id != it.new.id;
     if (!has_content_change) {
         return out;
     }
-    Loaded loaded = load(gitdir, it, opts, true);
+    Loaded loaded = load(repo, it, opts, true);
     if (opts.is_syntax) {
         loaded.language = TUI_syntax.language_of(it.path, "");
     }
     int width = abbrev_of(opts, false);
-    str index_line = "index " + abbrev_id(gitdir, it.old.id, width) + ".." + abbrev_id(gitdir, it.new.id, width);
+    str index_line = "index " + abbrev_id(repo, it.old.id, width) + ".." + abbrev_id(repo, it.new.id, width);
     if (it.old.mode == it.new.mode) {
         index_line = index_line + " " + octal6(it.new.mode);
     }
@@ -1573,8 +1576,8 @@ pub bytes patch_bytes(str gitdir, Item item, DOpts opts) {
     if ((is_added && loaded.new.size() == 0) || (is_removed && loaded.old.size() == 0)) {
         return out;
     }
-    str from_name = prefixed(src, name_a);
-    str to_name = prefixed(dst, name_b);
+    str from_name = prefixed(opts, src, name_a);
+    str to_name = prefixed(opts, dst, name_b);
     if (is_added) {
         from_name = "/dev/null";
     }
@@ -1624,9 +1627,13 @@ type StatFile {
     str from_name = "";
 }
 
-str rename_name(str a, str b) {
-    if (GIT_gitcommon.needs_quote(a) || GIT_gitcommon.needs_quote(b)) {
-        return quoted(a) + " => " + quoted(b);
+str rename_name(DOpts opts, str a, str b) {
+    bool is_quoted = GIT_gitcommon.needs_quote(a) || GIT_gitcommon.needs_quote(b);
+    if (opts.is_raw_names) {
+        is_quoted = GIT_gitcommon.needs_quote_raw(a) || GIT_gitcommon.needs_quote_raw(b);
+    }
+    if (is_quoted) {
+        return quoted(opts, a) + " => " + quoted(opts, b);
     }
     int len_a = a.size();
     int len_b = b.size();
@@ -1730,22 +1737,22 @@ pub str summary_line(int files, int insertions, int deletions) {
 }
 
 /// The per-file counts of a diff, as `compute_diffstat` makes them.
-List<StatFile> stat_files(str gitdir, List<Item> items, DOpts opts) {
+List<StatFile> stat_files(GIT_gitstore.Store repo, List<Item> items, DOpts opts) {
     List<StatFile> out = [];
     for (Item item in items) {
         // a pair with nothing different is not part of a stat
         if (item.status != "R" && item.status != "C" && item.status != "U" && item.old.id == item.new.id && item.old.mode == item.new.mode) {
             continue;
         }
-        StatFile file = StatFile(item.path, quoted(item.path));
+        StatFile file = StatFile(item.path, quoted(opts, item.path));
         if (item.status == "D") {
             file.name = item.old_path;
-            file.print = quoted(item.old_path);
+            file.print = quoted(opts, item.old_path);
         }
         if (item.status == "R" || item.status == "C") {
             file.is_renamed = true;
             file.from_name = item.old_path;
-            file.print = rename_name(item.old_path, item.path);
+            file.print = rename_name(opts, item.old_path, item.path);
         }
         if (item.status == "U") {
             file.is_unmerged = true;
@@ -1756,8 +1763,8 @@ List<StatFile> stat_files(str gitdir, List<Item> items, DOpts opts) {
         if (item.old.id != it.new.id || item.old.mode != item.new.mode) {
             if (item.status == "T") {
                 // a type change is a deletion and an addition: both counted
-                Loaded gone = load(gitdir, Item("D", item.path, item.path, item.old, nothing()), opts, true);
-                Loaded came = load(gitdir, Item("A", item.path, item.path, nothing(), item.new), opts, true);
+                Loaded gone = load(repo, Item("D", item.path, item.path, item.old, nothing()), opts, true);
+                Loaded came = load(repo, Item("A", item.path, item.path, nothing(), item.new), opts, true);
                 file.added = gone.added + came.added;
                 file.deleted = gone.deleted + came.deleted;
                 file.is_binary = gone.is_binary || came.is_binary;
@@ -1768,7 +1775,7 @@ List<StatFile> stat_files(str gitdir, List<Item> items, DOpts opts) {
                     file.deleted = 0;
                 }
             } else if (item.old.id != item.new.id) {
-                Loaded loaded = load(gitdir, it, opts, true);
+                Loaded loaded = load(repo, it, opts, true);
                 if (loaded.is_binary) {
                     file.is_binary = true;
                     file.old_size = loaded.old.size();
@@ -1789,8 +1796,8 @@ List<StatFile> stat_files(str gitdir, List<Item> items, DOpts opts) {
 }
 
 /// `--stat`, git's `show_stats`.
-pub bytes stat_bytes(str gitdir, List<Item> items, DOpts opts) {
-    List<StatFile> files = stat_files(gitdir, items, opts);
+pub bytes stat_bytes(GIT_gitstore.Store repo, List<Item> items, DOpts opts) {
+    List<StatFile> files = stat_files(repo, items, opts);
     bytes out = [];
     int nr = files.size();
     if (nr == 0) {
@@ -1997,8 +2004,8 @@ str byte_tail(str text, int n) {
 }
 
 /// `--shortstat`.
-pub bytes shortstat_bytes(str gitdir, List<Item> items, DOpts opts) {
-    List<StatFile> files = stat_files(gitdir, items, opts);
+pub bytes shortstat_bytes(GIT_gitstore.Store repo, List<Item> items, DOpts opts) {
+    List<StatFile> files = stat_files(repo, items, opts);
     if (files.size() == 0) {
         return [];
     }
@@ -2017,8 +2024,8 @@ pub bytes shortstat_bytes(str gitdir, List<Item> items, DOpts opts) {
 }
 
 /// `--numstat`.
-pub bytes numstat_bytes(str gitdir, List<Item> items, DOpts opts) {
-    List<StatFile> files = stat_files(gitdir, items, opts);
+pub bytes numstat_bytes(GIT_gitstore.Store repo, List<Item> items, DOpts opts) {
+    List<StatFile> files = stat_files(repo, items, opts);
     bytes out = [];
     for (StatFile file in files) {
         str counts = file.added.to_str() + "\t" + file.deleted.to_str() + "\t";
@@ -2037,7 +2044,7 @@ pub bytes numstat_bytes(str gitdir, List<Item> items, DOpts opts) {
         } else if (file.is_renamed) {
             out.extend((counts + file.print + "\n").to_bytes());
         } else {
-            out.extend((counts + quoted(file.name) + "\n").to_bytes());
+            out.extend((counts + quoted(opts, file.name) + "\n").to_bytes());
         }
     }
     return out;
@@ -2064,7 +2071,7 @@ pub bytes name_only_bytes(List<Item> items, DOpts opts) {
             out.extend(shown.to_bytes());
             out.push(0);
         } else {
-            out.extend((quoted(shown) + "\n").to_bytes());
+            out.extend((quoted(opts, shown) + "\n").to_bytes());
         }
     }
     return out;
@@ -2088,9 +2095,9 @@ pub bytes name_status_bytes(List<Item> items, DOpts opts) {
             out.extend(shown.to_bytes());
             out.push(0);
         } else if (item.status == "R" || item.status == "C") {
-            out.extend((status_text(item) + "\t" + quoted(item.old_path) + "\t" + quoted(item.path) + "\n").to_bytes());
+            out.extend((status_text(item) + "\t" + quoted(opts, item.old_path) + "\t" + quoted(opts, item.path) + "\n").to_bytes());
         } else {
-            out.extend((status_text(item) + "\t" + quoted(shown) + "\n").to_bytes());
+            out.extend((status_text(item) + "\t" + quoted(opts, shown) + "\n").to_bytes());
         }
     }
     return out;
@@ -2098,18 +2105,18 @@ pub bytes name_status_bytes(List<Item> items, DOpts opts) {
 
 /// `--raw`: `:100644 100644 abc1234 def5678 M<TAB>path`, ids abbreviated
 /// without ellipses (git prints them only under GIT_PRINT_SHA1_ELLIPSIS).
-pub bytes raw_bytes(str gitdir, List<Item> items, DOpts opts) {
+pub bytes raw_bytes(GIT_gitstore.Store repo, List<Item> items, DOpts opts) {
     bytes out = [];
     for (Item item in items) {
         int width = abbrev_of(opts, false);
         // ids of work-tree files are not computed by the raw format
-        str old_id = abbrev_id(gitdir, item.old.id, width);
+        str old_id = abbrev_id(repo, item.old.id, width);
         if (!item.old.is_known) {
-            old_id = abbrev_id(gitdir, "", width);
+            old_id = abbrev_id(repo, "", width);
         }
-        str new_id = abbrev_id(gitdir, item.new.id, width);
+        str new_id = abbrev_id(repo, item.new.id, width);
         if (!item.new.is_known) {
-            new_id = abbrev_id(gitdir, "", width);
+            new_id = abbrev_id(repo, "", width);
         }
         str shown = item.path;
         if (item.status == "D") {
@@ -2126,9 +2133,9 @@ pub bytes raw_bytes(str gitdir, List<Item> items, DOpts opts) {
             out.extend(shown.to_bytes());
             out.push(0);
         } else if (item.status == "R" || item.status == "C") {
-            out.extend((head + "\t" + quoted(item.old_path) + "\t" + quoted(item.path) + "\n").to_bytes());
+            out.extend((head + "\t" + quoted(opts, item.old_path) + "\t" + quoted(opts, item.path) + "\n").to_bytes());
         } else {
-            out.extend((head + "\t" + quoted(shown) + "\n").to_bytes());
+            out.extend((head + "\t" + quoted(opts, shown) + "\n").to_bytes());
         }
     }
     return out;
@@ -2136,35 +2143,35 @@ pub bytes raw_bytes(str gitdir, List<Item> items, DOpts opts) {
 
 // an object name abbreviated to `length` digits, unique in the repository;
 // the zero name stays zeroes
-str abbrev_id(str gitdir, str id, int length) {
+str abbrev_id(GIT_gitstore.Store repo, str id, int length) {
     if (id == "") {
         return "0".repeat(length);
     }
     if (length >= id.size()) {
         return id;
     }
-    return unique_abbrev(gitdir, id, length);
+    return unique_abbrev(repo, id, length);
 }
 
 /// `--summary`: create, delete, rename and mode-change lines.
-pub bytes summary_bytes(List<Item> items) {
+pub bytes summary_bytes(List<Item> items, DOpts opts) {
     bytes out = [];
     for (Item item in items) {
         if (item.status == "A") {
-            out.extend((" create mode " + octal6(item.new.mode) + " " + quoted(item.path) + "\n").to_bytes());
+            out.extend((" create mode " + octal6(item.new.mode) + " " + quoted(opts, item.path) + "\n").to_bytes());
         } else if (item.status == "D") {
-            out.extend((" delete mode " + octal6(item.old.mode) + " " + quoted(item.old_path) + "\n").to_bytes());
+            out.extend((" delete mode " + octal6(item.old.mode) + " " + quoted(opts, item.old_path) + "\n").to_bytes());
         } else if (item.status == "R" || item.status == "C") {
             str word = " rename ";
             if (item.status == "C") {
                 word = " copy ";
             }
-            out.extend((word + rename_name(item.old_path, item.path) + " (" + (item.score * 100 / 60000).to_str() + "%)\n").to_bytes());
+            out.extend((word + rename_name(opts, item.old_path, item.path) + " (" + (item.score * 100 / 60000).to_str() + "%)\n").to_bytes());
             if (item.old.mode != item.new.mode) {
                 out.extend((" mode change " + octal6(item.old.mode) + " => " + octal6(item.new.mode) + "\n").to_bytes());
             }
         } else if ((item.status == "M" || item.status == "T") && item.old.mode != item.new.mode) {
-            out.extend((" mode change " + octal6(item.old.mode) + " => " + octal6(item.new.mode) + " " + quoted(item.path) + "\n").to_bytes());
+            out.extend((" mode change " + octal6(item.old.mode) + " => " + octal6(item.new.mode) + " " + quoted(opts, item.path) + "\n").to_bytes());
         }
     }
     return out;
@@ -2174,7 +2181,7 @@ pub bytes summary_bytes(List<Item> items) {
 
 /// Is there output for `items` under `opts`, ignoring-whitespace aware: a
 /// change that `-w`/`-b` ignores is not a change.
-pub bool has_changes(str gitdir, List<Item> items, DOpts opts) {
+pub bool has_changes(GIT_gitstore.Store repo, List<Item> items, DOpts opts) {
     for (Item item in items) {
         if (item.old.id == item.new.id && item.old.mode == item.new.mode && item.status != "R") {
             continue;
@@ -2182,7 +2189,7 @@ pub bool has_changes(str gitdir, List<Item> items, DOpts opts) {
         if (opts.ws == 0 || item.old.id == "" || item.new.id == "" || item.old.mode != item.new.mode || item.status == "R" || item.status == "C") {
             return true;
         }
-        Loaded loaded = load(gitdir, item, opts, true);
+        Loaded loaded = load(repo, item, opts, true);
         if (loaded.is_binary || loaded.added > 0 || loaded.deleted > 0) {
             return true;
         }
@@ -2192,13 +2199,13 @@ pub bool has_changes(str gitdir, List<Item> items, DOpts opts) {
 
 /// The whole output for a set of changes, in git's order: raw / name /
 /// numstat / stat / shortstat / summary, a blank line, then the patch.
-pub bytes render(str gitdir, List<Item> items, DOpts opts) {
+pub bytes render(GIT_gitstore.Store repo, List<Item> items, DOpts opts) {
     bytes out = [];
     if (items.size() == 0) {
         return out;
     }
     if (opts.is_raw) {
-        out.extend(raw_bytes(gitdir, items, opts));
+        out.extend(raw_bytes(repo, items, opts));
     }
     if (opts.is_name_only) {
         out.extend(name_only_bytes(items, opts));
@@ -2208,19 +2215,19 @@ pub bytes render(str gitdir, List<Item> items, DOpts opts) {
     }
     int separator = 0;
     if (opts.is_numstat) {
-        out.extend(numstat_bytes(gitdir, items, opts));
+        out.extend(numstat_bytes(repo, items, opts));
         separator = separator + 1;
     }
     if (opts.is_stat) {
-        out.extend(stat_bytes(gitdir, items, opts));
+        out.extend(stat_bytes(repo, items, opts));
         separator = separator + 1;
     }
     if (opts.is_shortstat) {
-        out.extend(shortstat_bytes(gitdir, items, opts));
+        out.extend(shortstat_bytes(repo, items, opts));
         separator = separator + 1;
     }
     if (opts.is_summary) {
-        bytes summary = summary_bytes(items);
+        bytes summary = summary_bytes(items, opts);
         if (summary.size() > 0) {
             out.extend(summary);
             separator = separator + 1;
@@ -2231,7 +2238,7 @@ pub bytes render(str gitdir, List<Item> items, DOpts opts) {
             out.push('\n');
         }
         for (Item item in items) {
-            out.extend(patch_bytes(gitdir, item, opts));
+            out.extend(patch_bytes(repo, item, opts));
         }
     }
     return out;
@@ -2239,12 +2246,12 @@ pub bytes render(str gitdir, List<Item> items, DOpts opts) {
 
 // --- support for log ---------------------------------------------------------------------------
 
-bool differs_walk(str gitdir, str old_tree, str new_tree, str base, List<GIT_gitcommon.Spec> specs) {
+bool differs_walk(GIT_gitstore.Store repo, str old_tree, str new_tree, str base, List<GIT_gitcommon.Spec> specs) {
     if (old_tree == new_tree) {
         return false;
     }
-    List<GIT_object.Entry> old_entries = tree_entries(gitdir, old_tree);
-    List<GIT_object.Entry> new_entries = tree_entries(gitdir, new_tree);
+    List<GIT_object.Entry> old_entries = tree_entries(repo, old_tree);
+    List<GIT_object.Entry> new_entries = tree_entries(repo, new_tree);
     int i = 0;
     int j = 0;
     while (i < old_entries.size() || j < new_entries.size()) {
@@ -2302,7 +2309,7 @@ bool differs_walk(str gitdir, str old_tree, str new_tree, str base, List<GIT_git
                         if (is_dir_new) {
                             sub_new = new_entry.id;
                         }
-                        if (differs_walk(gitdir, sub_old, sub_new, full, specs)) {
+                        if (differs_walk(repo, sub_old, sub_new, full, specs)) {
                             return true;
                         }
                     }
@@ -2325,24 +2332,14 @@ bool differs_walk(str gitdir, str old_tree, str new_tree, str base, List<GIT_git
 }
 
 /// Do two trees ("" is the empty tree) differ anywhere under the pathspecs?
-pub bool trees_differ(str gitdir, str old_tree, str new_tree, List<GIT_gitcommon.Spec> specs) {
-    return differs_walk(gitdir, old_tree, new_tree, "", specs);
+pub bool trees_differ(GIT_gitstore.Store repo, str old_tree, str new_tree, List<GIT_gitcommon.Spec> specs) {
+    return differs_walk(repo, old_tree, new_tree, "", specs);
 }
 
 /// An abbreviated object name: at least `min` digits, more while the prefix
 /// is shared with another object.
-pub str unique_abbrev(str gitdir, str id, int min) {
-    int length = min;
-    if (length > id.size()) {
-        return id;
-    }
-    while (length < id.size()) {
-        if (GIT_object.matching(gitdir, id.substr(0, length)).size() <= 1) {
-            break;
-        }
-        length = length + 1;
-    }
-    return id.substr(0, length);
+pub str unique_abbrev(GIT_gitstore.Store repo, str id, int min) {
+    return repo.unique_abbrev(id, min);
 }
 
 /// `--diff-filter`: keep the pairs whose status is selected (`*` keeps all
@@ -2487,8 +2484,8 @@ str syntax_runs(str code, List<int> classes, str base, str reset, bool is_dark) 
 /// a vanished source and the same base name; otherwise the most similar of
 /// the best four, vanished sources first. `gone` are the paths of the parent
 /// tree that are not in the new one.
-pub Option<Item> follow_source(str gitdir, str parent_tree, Item added, List<str> gone, int minimum) {
-    Map<str, Side> sources = tree_sides(gitdir, parent_tree, "", []);
+pub Option<Item> follow_source(GIT_gitstore.Store repo, str parent_tree, Item added, List<str> gone, int minimum) {
+    Map<str, Side> sources = tree_sides(repo, parent_tree, "", []);
     List<str> paths = [];
     for (str path in sources.keys()) {
         paths.push(path);
@@ -2527,7 +2524,7 @@ pub Option<Item> follow_source(str gitdir, str parent_tree, Item added, List<str
     if (!is_regular(added.new.mode)) {
         return Option<Item>.None;
     }
-    bytes dst_data = content_of(gitdir, added.new);
+    bytes dst_data = content_of(repo, added.new);
     Map<int, int> dst_spans = GIT_gitstatus.span_counts(dst_data);
     List<Candidate> candidates = [];
     for (int k in 0 .. paths.size()) {
@@ -2535,7 +2532,7 @@ pub Option<Item> follow_source(str gitdir, str parent_tree, Item added, List<str
         if (!is_regular(src.mode)) {
             continue;
         }
-        bytes data = content_of(gitdir, src);
+        bytes data = content_of(repo, src);
         int score = estimate(GIT_gitstatus.span_counts(data), data.size(), dst_spans, dst_data.size(), minimum);
         candidates.push(Candidate(score, same_base(paths[k], added.path), 0, k));
     }

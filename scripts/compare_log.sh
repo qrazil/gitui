@@ -188,6 +188,19 @@ compare large "$WORK/fx/large" log -p --oneline -U5
 compare tags "$WORK/fx/tags" log --decorate --oneline v1.0 light
 compare tags "$WORK/fx/tags" log --tags --no-walk --oneline
 
+# names with bytes above 127, quoted or not
+compare unicode "$WORK/fx/unicode" -c core.quotePath=false log --name-status --oneline
+compare unicode "$WORK/fx/unicode" -c core.quotePath=false log --stat --oneline
+compare unicode "$WORK/fx/unicode" -c core.quotePath=false log -p --oneline
+compare unicode "$WORK/fx/unicode" -c core.quotePath=false log --summary --oneline
+compare unicode "$WORK/fx/unicode" log --summary --oneline
+
+# which output format wins when several are given
+for combo in "--name-only --numstat" "-s --stat" "-s -p" "--stat -s" "-p -s" "--name-only -s" "-s --name-only" "--name-only --name-status" "--quiet -p" "-p --quiet" "-U1 -s" "-s -U1" "--name-status --stat" "--raw --stat -p" "--summary --shortstat" "--numstat --stat --shortstat --summary -p"; do
+    # shellcheck disable=SC2086
+    compare combos "$WORK/fx/linear" log $combo
+done
+
 # a subdirectory as the working directory: paths relative to it
 compare linear-sub "$WORK/fx/linear/src" log --oneline -- main.c
 compare linear-sub "$WORK/fx/linear/src" log --oneline -- ../a.txt

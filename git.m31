@@ -115,7 +115,19 @@ int git_spelling(List<str> argv) {
         } else if (word == "-c" && index + 1 < argv.size()) {
             overrides.push(argv[index + 1]);
             index = index + 2;
-        } else if (word == "--no-pager" || word == "--no-optional-locks" || word == "--no-replace-objects") {
+        } else if (word == "--git-dir" && index + 1 < argv.size()) {
+            overrides.push("--git-dir=" + GIT_gitstatus.resolve_dir(cwd, argv[index + 1]));
+            index = index + 2;
+        } else if (word.starts_with("--git-dir=")) {
+            overrides.push("--git-dir=" + GIT_gitstatus.resolve_dir(cwd, word.substr(10, word.size())));
+            index = index + 1;
+        } else if (word == "--work-tree" && index + 1 < argv.size()) {
+            overrides.push("--work-tree=" + GIT_gitstatus.resolve_dir(cwd, argv[index + 1]));
+            index = index + 2;
+        } else if (word.starts_with("--work-tree=")) {
+            overrides.push("--work-tree=" + GIT_gitstatus.resolve_dir(cwd, word.substr(12, word.size())));
+            index = index + 1;
+        } else if (word == "--no-pager" || word == "--no-optional-locks" || word == "--no-replace-objects" || word == "-p" || word == "--paginate") {
             index = index + 1;
         } else {
             break;
@@ -126,6 +138,14 @@ int git_spelling(List<str> argv) {
     }
     if (argv[index] == "status") {
         return GIT_gitstatus.run(cwd, overrides, argv.slice(index + 1, argv.size()));
+    }
+    if ((argv[index] == "log" || argv[index] == "show" || argv[index] == "diff") && index + 1 < argv.size() && (argv[index + 1] == "-h" || argv[index + 1] == "--help")) {
+        str usage = "usage: 1git log [<options>] [<revision-range>] [[--] <path>...]\n   or: 1git show [<options>] [<object>...] [-- <path>...]\n   or: 1git diff [<options>] [<commit>[..<commit>]] [--cached] [--] [<path>...]\n\nGit's own spelling and bytes; docs/GIT-COMPAT.md lists the options and what differs.\n";
+        write(usage.to_bytes());
+        if (argv[index + 1] == "-h") {
+            return 129;
+        }
+        return 0;
     }
     if (argv[index] == "log" || argv[index] == "show") {
         return GIT_gitlog.run(cwd, overrides, argv.slice(index + 1, argv.size()), argv[index] == "show");
