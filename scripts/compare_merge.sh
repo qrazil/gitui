@@ -327,13 +327,45 @@ fx_branches() {
     g add n.txt
     commit_at "feat: n"
     g checkout -q -b clash main
-    printf 'l1\nl2\nl3\nl4\nl5\nl6\nl7\nC8\n' > f.txt
-    g commit -qam "clash: f"
+    printf 'CLASH\n' > h.txt
+    g commit -qam "clash: h"
     g checkout -q main
     printf 'H1\nh1\n' > h.txt
     g commit -qam "main: h"
     printf 'l0\nl1\nl2\nl3\nl4\nl5\nl6\nl7\nl8\n' > f.txt
     g commit -qam "main: f top"
+}
+
+# main with a merge commit on it (feat merged with --no-ff), a later commit,
+# and an unmerged branch `other` that touches a file feat also touched
+fx_mergecommit() {
+    new_repo "$1"
+    printf 'a1\na2\na3\n' > a.txt
+    printf 'b1\n' > b.txt
+    g add -A
+    commit_at "base"
+    g checkout -q -b feat
+    printf 'a1\na2\na3\na4\n' > a.txt
+    g commit -qam "feat: a4"
+    printf 'f\n' > f.txt
+    g add f.txt
+    commit_at "feat: f"
+    g checkout -q main
+    printf 'b0\nb1\n' > b.txt
+    g commit -qam "main: b0"
+    tick
+    g merge -q --no-ff -m "Merge branch feat" feat > /dev/null
+    printf 'b0\nb1\nb2\n' > b.txt
+    g commit -qam "main: b2"
+    g checkout -q -b other HEAD~3
+    printf 'a1\na2\nOTHER\n' > a.txt
+    printf 'o\n' > o.txt
+    g add o.txt
+    g commit -qam "other: a3 and o"
+    printf 'x\n' > x.txt
+    g add x.txt
+    commit_at "other: x"
+    g checkout -q main
 }
 
 for more in "$HERE"/compare_merge_*.sh; do
