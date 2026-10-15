@@ -230,6 +230,7 @@ run_side() {
         # hook is installed for git, `gerrit.createChangeId` set for 1git)
         if [ "$bin" = git ]; then SIDE=git; else SIDE=ours; fi
         export SIDE
+        mkdir -p .git/hooks
         eval "$setup" > /dev/null 2>&1
         T=$(mktemp -d)
         G() {
