@@ -223,6 +223,9 @@ pub type Plan {
 pub type StartOpts {
     pub bool is_interactive = false;
     pub bool should_autostash = false;
+    /// `--no-ff` / `--force-rebase`: replay commits whose parent is HEAD too,
+    /// as new picks, instead of fast-forwarding over them.
+    pub bool should_replay_all = false;
 }
 
 pub type State {
@@ -726,6 +729,9 @@ Result<bool, GIT_sequencer.Error> begin(str gitdir, str worktree, Plan plan, Lis
     write_state(gitdir, "onto", onto + "\n")?;
     write_state(gitdir, "orig-head", plan.orig_head + "\n")?;
     write_state(gitdir, "interactive", "")?;
+    if (opts.should_replay_all) {
+        write_state(gitdir, "no-ff", "")?;
+    }
     write_state(gitdir, "no-reschedule-failed-exec", "")?;
     if (!opts.is_interactive) {
         write_state(gitdir, "drop_redundant_commits", "")?;
@@ -737,7 +743,18 @@ Result<bool, GIT_sequencer.Error> begin(str gitdir, str worktree, Plan plan, Lis
         write_state(gitdir, "autostash", autostash + "\n")?;
     }
     write_state(gitdir, "git-rebase-todo", GIT_rebase_todo.full_text(rest))?;
-    write_state(gitdir, "git-rebase-todo.backup", GIT_rebase_todo.full_text(plan.commands))?;
+    // git keeps the list as it was started with, with its help comments
+    str backup = GIT_rebase_todo.full_text(todo);
+    str range = GIT_sequencer.abbrev(gitdir, plan.orig_head);
+    if (!plan.is_root && plan.upstream != "") {
+        range = GIT_sequencer.abbrev(gitdir, plan.upstream) + ".." + range;
+    }
+    str count = todo.size().to_str() + " command";
+    if (todo.size() != 1) {
+        count = count + "s";
+    }
+    backup = backup + "\n# Rebase " + range + " onto " + GIT_sequencer.abbrev(gitdir, onto) + " (" + count + ")\n" + GIT_rebase_todo.HELP;
+    write_state(gitdir, "git-rebase-todo.backup", backup)?;
     write_state(gitdir, "done", GIT_rebase_todo.full_text(done))?;
     write_state(gitdir, "end", todo.size().to_str() + "\n")?;
     write_state(gitdir, "msgnum", done.size().to_str() + "\n")?;
@@ -938,7 +955,7 @@ Result<Option<Report>, GIT_sequencer.Error> pick_like(str gitdir, str worktree, 
         parent = read_state_line(gitdir, "squash-onto");
     }
     write_state(gitdir, "author-script", author_script_of(commit.author))?;
-    if (parent != "" && parent == head.id) {
+    if (parent != "" && parent == head.id && !has_state(gitdir, "no-ff")) {
         str head_tree = tree_of(gitdir, head.id)?;
         move_files(gitdir, worktree, head_tree, commit.tree)?;
         move_head(gitdir, head.id, cmd.id, "rebase: fast-forward")?;
@@ -1011,6 +1028,9 @@ Result<Option<Report>, GIT_sequencer.Error> after_pick(str gitdir, str worktree,
                 }
                 str tree = tree_of(gitdir, head.id)?;
                 amend_head(gitdir, tree, text.to_bytes(), "rebase (reword): " + first_line(text))?;
+                // the commit git's own `commit` made says so on standard output
+                Where reworded = where_head(gitdir)?;
+                notes.push("@@commit " + reworded.id);
             }
             case None: {
                 stop_files(gitdir, cmd.id, commit, message_text(commit))?;
@@ -1057,7 +1077,12 @@ Result<Option<Report>, GIT_sequencer.Error> fold(str gitdir, str worktree, GIT_r
     int number = count + 2;
     if (cmd.verb == GIT_rebase_todo.Verb.Squash) {
         remove_state(gitdir, "message-fixup");
-        text = text + "\n# This is the commit message #" + number.to_str() + ":\n\n" + body;
+        str shown = body;
+        if (shown.starts_with("squash! ") || shown.starts_with("fixup! ") || shown.starts_with("amend! ")) {
+            // git comments out the autosquash subject
+            shown = "# " + shown;
+        }
+        text = text + "\n# This is the commit message #" + number.to_str() + ":\n\n" + shown;
     } else {
         text = text + "\n# The commit message #" + number.to_str() + " will be skipped:\n\n" + commented(body);
     }
@@ -1075,7 +1100,7 @@ Result<Option<Report>, GIT_sequencer.Error> fold(str gitdir, str worktree, GIT_r
     if (applied.landed == GIT_sequencer.Landed.Conflicted) {
         stop_files(gitdir, cmd.id, commit, text)?;
         write_state(gitdir, "amend", head.id + "\n")?;
-        if (!is_next_fixup(gitdir)) {
+        if (!is_next_fixup(gitdir) && !has_state(gitdir, "message-fixup")) {
             wr_git(gitdir, "SQUASH_MSG", text)?;
         }
         wr_git(gitdir, "MERGE_MSG", text)?;
@@ -1118,6 +1143,8 @@ Result<Option<Report>, GIT_sequencer.Error> fold_commit(str gitdir, str worktree
             settled(gitdir);
             rm_git(gitdir, "AUTO_MERGE");
             rm_git(gitdir, "SQUASH_MSG");
+            Where squashed = where_head(gitdir)?;
+            notes.push("@@commit " + squashed.id);
             return fold_done(gitdir, cmd);
         }
         case None: {
@@ -1409,6 +1436,7 @@ Result<Option<Report>, GIT_sequencer.Error> needs_message(str gitdir, List<str> 
 
 Result<Option<Report>, GIT_sequencer.Error> after_commit(str gitdir, bool is_final) {
     str stopped = read_state_line(gitdir, "stopped-sha");
+    rm_git(gitdir, "AUTO_MERGE");
     if (is_final) {
         remove_state(gitdir, "message-fixup");
         remove_state(gitdir, "message-squash");

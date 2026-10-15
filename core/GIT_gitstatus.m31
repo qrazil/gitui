@@ -1499,6 +1499,23 @@ str Printer.shown(str path, bool is_relative, bool quote_space) {
     return quote(text, quote_space);
 }
 
+// A file of the git directory as git names it in advice: relative to where
+// the command runs (`.git/rebase-merge/done`, `../.git/...` from a subdirectory).
+str Printer.git_path(str name) {
+    if (gitdir.ends_with("/.git")) {
+        str ups = "";
+        if (prefix != "") {
+            for (str part in prefix.split("/")) {
+                if (part != "") {
+                    ups = ups + "../";
+                }
+            }
+        }
+        return ups + ".git/" + name;
+    }
+    return fs.join(gitdir, name);
+}
+
 // What an interrupted operation has to say (git's `wt_longstatus_print_state`).
 str Printer.state_text() {
     bool is_unmerged = snap.has_unmerged;
@@ -1586,7 +1603,7 @@ str Printer.rebase_text() {
                 out = out + "   " + done[i] + "\n";
             }
             if (done.size() > 2) {
-                out = out + "  (see more in file " + fs.join(gitdir, "rebase-merge/done") + ")\n";
+                out = out + "  (see more in file " + git_path("rebase-merge/done") + ")\n";
             }
         }
         if (todo.size() == 0) {
@@ -1605,7 +1622,7 @@ str Printer.rebase_text() {
                 out = out + "   " + todo[i] + "\n";
             }
             if (todo.size() > 2) {
-                out = out + "  (see more in file " + fs.join(gitdir, "rebase-merge/git-rebase-todo") + ")\n";
+                out = out + "  (see more in file " + git_path("rebase-merge/git-rebase-todo") + ")\n";
             }
             out = out + "  (use \"git rebase --edit-todo\" to view and edit)\n";
         }
@@ -1618,15 +1635,48 @@ str Printer.rebase_text() {
         branch = "";
     }
     str onto = abbrev(one_line(fs.join(dir, "onto")));
-    if (branch != "") {
-        out = out + "You are currently rebasing branch '" + branch + "' on '" + onto + "'.\n";
-    } else {
-        out = out + "You are currently rebasing.\n";
+    // git's show_rebase_in_progress: unmerged paths, a message to commit (or a
+    // non-interactive rebase), a commit being split, a commit being edited
+    bool has_merge_msg = fs.is_present(fs.join(gitdir, "MERGE_MSG"));
+    if (snap.has_unmerged || is_interactive == false || has_merge_msg) {
+        if (branch != "") {
+            out = out + "You are currently rebasing branch '" + branch + "' on '" + onto + "'.\n";
+        } else {
+            out = out + "You are currently rebasing.\n";
+        }
+        if (snap.has_unmerged) {
+            out = out + "  (fix conflicts and then run \"git rebase --continue\")\n  (use \"git rebase --skip\" to skip this patch)\n  (use \"git rebase --abort\" to check out the original branch)\n";
+        } else {
+            out = out + "  (all conflicts fixed: run \"git rebase --continue\")\n";
+        }
+        return out + "\n";
     }
-    if (snap.has_unmerged) {
-        out = out + "  (fix conflicts and then run \"git rebase --continue\")\n  (use \"git rebase --skip\" to skip this patch)\n  (use \"git rebase --abort\" to check out the original branch)\n";
+    // a commit split: HEAD is neither the amended nor the original commit
+    str amend = one_line(fs.join(dir, "amend"));
+    str orig_head = one_line(fs.join(dir, "orig-head"));
+    bool is_split = false;
+    if (amend != "" && orig_head != "") {
+        if (amend == orig_head) {
+            is_split = snap.head_id != amend;
+        } else {
+            // a `git reset` since the stop rewrote ORIG_HEAD
+            is_split = one_line(fs.join(gitdir, "ORIG_HEAD")) != orig_head;
+        }
+    }
+    if (is_split) {
+        if (branch != "") {
+            out = out + "You are currently splitting a commit while rebasing branch '" + branch + "' on '" + onto + "'.\n";
+        } else {
+            out = out + "You are currently splitting a commit during a rebase.\n";
+        }
+        out = out + "  (Once your working directory is clean, run \"git rebase --continue\")\n";
     } else {
-        out = out + "  (all conflicts fixed: run \"git rebase --continue\")\n";
+        if (branch != "") {
+            out = out + "You are currently editing a commit while rebasing branch '" + branch + "' on '" + onto + "'.\n";
+        } else {
+            out = out + "You are currently editing a commit during a rebase.\n";
+        }
+        out = out + "  (use \"git commit --amend\" to amend the current commit)\n  (use \"git rebase --continue\" once you are satisfied with your changes)\n";
     }
     return out + "\n";
 }
