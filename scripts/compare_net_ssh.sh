@@ -77,7 +77,7 @@ run() { # <label> <script using G and $URL>
             eval "$2" >> "$WORK/log-$side" 2>&1
             { echo "## refs"; for d in w .; do [ -d "$d/.git" ] && (cd "$d"; git for-each-ref); done
               echo "## remote"; git -C "$WORK/srv/r.git" for-each-ref; git -C "$WORK/srv/r.git" fsck 2>&1 | head -3
-              [ -d w/.git ] && (cd w; echo "## tree"; git ls-files -s; echo "## fsck"; git fsck --strict 2>&1 | head -3; git config --local --list | sort); } >> "$WORK/log-$side" 2>&1
+              [ -d w/.git ] && (cd w; echo "## tree"; git ls-files -s; echo "## fsck"; git fsck --strict 2>&1 | head -3; git config --local --list | grep -v -E "^core\.(ignorecase|precomposeunicode)=" | sort); } >> "$WORK/log-$side" 2>&1
         )
         sed -i.bak "/templates not found/d; s|$WORK|W|g; s|$PORT|PORT|g" "$WORK/log-$side"; rm -f "$WORK/log-$side.bak"
     done

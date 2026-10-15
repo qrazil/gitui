@@ -17,7 +17,7 @@ if wanted merge; then
     case_ "rename: two files swap names" fx_rbase "$(rn 'git mv a.txt t.txt; git mv b.txt a.txt; git mv t.txt b.txt' 'echo x >> k.txt')" 'G merge other'
     case_ "rename: renamed and edited on both with a conflict" fx_rbase "$(rn 'git mv a.txt moved.txt; sed -i.bak s/line\ 5/THEIRS\ 5/ moved.txt; rm moved.txt.bak' 'sed -i.bak s/line\ 5/OURS\ 5/ a.txt; rm a.txt.bak')" 'G merge other'
     case_ "rename: inexact rename" fx_rbase "$(rn 'git mv a.txt moved.txt; echo extra >> moved.txt; sed -i.bak s/line\ 2/two/ moved.txt; rm moved.txt.bak' 'echo m >> k.txt')" 'G merge other'
-    case_ "rename: below the similarity threshold is a delete and an add" fx_rbase "$(rn 'git rm -q b.txt; printf "x\ny\nz\n" > B.txt' 'echo edit >> b.txt')" 'G merge other'
+    case_ "rename: below the similarity threshold is a delete and an add" fx_rbase "$(rn 'git rm -q b.txt; printf "x\ny\nz\n" > moved.txt' 'echo edit >> b.txt')" 'G merge other'
     case_ "rename: a copy is not a rename" fx_rbase "$(rn 'cp a.txt a2.txt' 'echo edit >> a.txt')" 'G merge other'
     case_ "rename: directory rename with an edit inside" fx_rbase "$(rn 'git mv docs documentation' 'echo more >> docs/d.txt')" 'G merge other'
     case_ "rename: directory rename with a file added on the other side" fx_rbase "$(rn 'git mv docs documentation' 'echo new > docs/n.txt')" 'G merge other'
