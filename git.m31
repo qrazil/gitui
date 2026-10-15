@@ -115,7 +115,16 @@ match (parser.parse(argv.slice(1, argv.size()))) {
 /// path; everything else is the `-log`-style grammar below, untouched.
 /// Returns the exit status, or -1 when the line is not in git's spelling.
 int git_spelling(List<str> argv) {
+    // git works on the physical directory (getcwd), so a work tree reached
+    // through a link (macOS: /tmp, /var) is recorded by its real path.
     str cwd = os.env("PWD").or("/");
+    match (fs.realpath(cwd)) {
+        case Ok(str real): {
+            cwd = real;
+        }
+        case Err(io.Error failed): {
+        }
+    }
     List<str> overrides = [];
     int index = 1;
     while (index < argv.size()) {

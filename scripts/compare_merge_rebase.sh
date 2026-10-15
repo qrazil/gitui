@@ -58,5 +58,5 @@ if wanted rebase; then
     case_ "rebase: reflog of the branch" fx_branches 'git checkout -q feat' 'G rebase main; git reflog -3'
     case_ "rebase: ORIG_HEAD" fx_branches 'git checkout -q feat' 'G rebase main; git rev-parse ORIG_HEAD'
     case_ "rebase: merge commits are flattened" fx_mergecommit 'git checkout -q -b topic other' 'G rebase main'
-    case_ "rebase: renamed file in the range" fx_rbase 'git checkout -q other; git mv a.txt A.txt; git commit -qm mv; git checkout -q main; echo more >> a.txt; git commit -qam edit; git checkout -q other' 'G rebase main'
+    case_ "rebase: renamed file in the range" fx_rbase 'git checkout -q other; git mv a.txt moved.txt; git commit -qm mv; git checkout -q main; echo more >> a.txt; git commit -qam edit; git checkout -q other' 'G rebase main'
 fi
