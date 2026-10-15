@@ -1,0 +1,1443 @@
+// `1git reset` and `1git commit`: git's grammar and git's bytes (object ids
+// included) over the library. See docs/GIT-COMPAT.md for what differs.
+
+import io;
+import os;
+import fs;
+import core.GIT_object;
+import core.GIT_refs;
+import core.GIT_index;
+import core.GIT_status;
+import core.GIT_config;
+import core.GIT_reflog;
+import core.GIT_revparse;
+import core.GIT_gitcommon;
+import core.GIT_gitstore;
+import core.GIT_gitstatus;
+import core.GIT_gitwrite;
+import core.GIT_gitadd;
+import core.GIT_gitdiffcmd;
+import core.GIT_checkoutplan;
+import diff.GIT_gitdiff;
+
+// --- state files ----------------------------------------------------------------------------
+
+/// What `remove_branch_state` unlinks: the unfinished merge, cherry-pick or
+/// revert and its message.
+pub void remove_branch_state(str gitdir) {
+    List<str> names = ["MERGE_HEAD", "MERGE_MSG", "MERGE_MODE", "MERGE_RR", "CHERRY_PICK_HEAD", "REVERT_HEAD", "SQUASH_MSG", "AUTO_MERGE"];
+    for (str name in names) {
+        str path = fs.join(gitdir, name);
+        if (fs.is_present(path)) {
+            GIT_gitwrite.rm_quiet(path);
+        }
+    }
+}
+
+pub bool has_state(str gitdir, str name) {
+    return fs.is_present(fs.join(gitdir, name));
+}
+
+/// The ids in a file of object names (MERGE_HEAD), one per line.
+List<str> ids_in(str path) {
+    List<str> out = [];
+    match (io.read(path)) {
+        case Ok(str body): {
+            for (str line in body.split("\n")) {
+                str word = line.trim();
+                if (word != "") {
+                    out.push(word);
+                }
+            }
+        }
+        case Err(_): {
+        }
+    }
+    return out;
+}
+
+// --- shared bits ---------------------------------------------------------------------------
+
+/// `M\tpath` / `D\tpath` for each tracked path whose work tree file differs
+/// from the index, in path order.
+List<str> unstaged_lines(GIT_gitcommon.Ctx ctx, GIT_gitwrite.Idx idx) {
+    bool is_filemode_on = GIT_gitadd.is_filemode(ctx);
+    List<str> out = [];
+    for (str path in idx.sorted_paths()) {
+        GIT_index.Entry entry = idx.entries.get(path).or(GIT_gitwrite.blank_entry());
+        str full = fs.join(ctx.root, path);
+        int kind = GIT_gitwrite.kind_of(full);
+        if (kind == 0 || kind == 3) {
+            out.push("D\t" + path);
+        } else if (!GIT_gitwrite.worktree_matches(full, entry, is_filemode_on)) {
+            out.push("M\t" + path);
+        }
+    }
+    return out;
+}
+
+void print_unstaged(GIT_gitcommon.Ctx ctx, GIT_gitwrite.Idx idx) {
+    List<str> lines = unstaged_lines(ctx, idx);
+    if (lines.size() > 0) {
+        GIT_gitwrite.say("Unstaged changes after reset:");
+        for (str line in lines) {
+            GIT_gitwrite.say(line);
+        }
+    }
+}
+
+// --- reset ---------------------------------------------------------------------------------
+
+pub int run_reset(str start, List<str> overrides, List<str> argv) {
+    GIT_gitcommon.Opened opened = GIT_gitcommon.open(start, overrides);
+    if (!opened.ok) {
+        return 128;
+    }
+    GIT_gitcommon.Ctx ctx = opened.ctx;
+    str usage = "usage: git reset [--mixed | --soft | --hard | --merge | --keep] [-q] [<commit>]\n   or: git reset [-q] [<tree-ish>] [--] <pathspec>...";
+    GIT_gitwrite.Opts opts = GIT_gitwrite.parse_opts(argv, ["--soft", "--mixed", "--hard", "--merge", "--keep", "-q --quiet", "-p --patch", "--refresh", "-N --intent-to-add", "--recurse-submodules", "--pathspec-from-file=", "--pathspec-file-nul"]);
+    int bad = GIT_gitwrite.check_opts(opts, usage);
+    if (bad >= 0) {
+        return bad;
+    }
+    if (opts.flag("patch") || opts.flag("merge") || opts.flag("intent-to-add") || opts.has("pathspec-from-file")) {
+        io.eprint("error: this option of reset is not in 1git (see docs/GIT-COMPAT.md)");
+        return 129;
+    }
+    str mode = "mixed";
+    int mode_count = 0;
+    List<str> mode_names = ["soft", "mixed", "hard", "keep"];
+    for (str name in mode_names) {
+        if (opts.flag(name)) {
+            mode = name;
+            mode_count = mode_count + 1;
+        }
+    }
+    if (mode_count > 1) {
+        io.eprint("fatal: options '--" + mode + "' and another reset mode cannot be used together");
+        return 128;
+    }
+    bool is_quiet = opts.flag("quiet");
+    GIT_gitstore.Store store = GIT_gitstore.open(ctx.gitdir);
+    GIT_gitwrite.IdxLoaded loaded = GIT_gitwrite.read_idx(ctx.gitdir);
+    if (!loaded.ok) {
+        return 128;
+    }
+    GIT_gitwrite.Idx idx = loaded.idx;
+    // `<tree-ish> [--] <paths>`
+    str rev = "";
+    bool has_rev = false;
+    List<str> path_words = [];
+    if (opts.has_dashes) {
+        if (opts.words.size() > 1) {
+            return GIT_gitcommon.fatal("only one revision may come before --");
+        }
+        if (opts.words.size() == 1) {
+            rev = opts.words[0];
+            has_rev = true;
+        }
+        path_words = opts.after;
+    } else if (opts.words.size() > 0) {
+        str first = opts.words[0];
+        bool is_rev = false;
+        match (GIT_revparse.tree_id(ctx.gitdir, first)) {
+            case Ok(_): {
+                is_rev = true;
+            }
+            case Err(_): {
+            }
+        }
+        if (is_rev) {
+            if (!ctx.is_bare && GIT_gitwrite.kind_of(fs.join(ctx.root, GIT_gitwrite.rooted(ctx.prefix, first))) != 0) {
+                io.eprint("fatal: ambiguous argument '" + first + "': both revision and filename");
+                io.eprint("Use '--' to separate paths from revisions, like this:");
+                io.eprint("'git <command> [<revision>...] -- [<file>...]'");
+                return 128;
+            }
+            rev = first;
+            has_rev = true;
+            for (int i in 1 .. opts.words.size()) {
+                path_words.push(opts.words[i]);
+            }
+        } else {
+            for (str word in opts.words) {
+                str rooted = GIT_gitwrite.rooted(ctx.prefix, word);
+                if (GIT_gitwrite.kind_of(fs.join(ctx.root, rooted)) == 0 && !idx.entries.contains(rooted)) {
+                    io.eprint("fatal: ambiguous argument '" + word + "': unknown revision or path not in the working tree.");
+                    io.eprint("Use '--' to separate paths from revisions, like this:");
+                    io.eprint("'git <command> [<revision>...] -- [<file>...]'");
+                    return 128;
+                }
+                path_words.push(word);
+            }
+        }
+    }
+    GIT_gitwrite.HeadInfo head = GIT_gitwrite.read_head(ctx.gitdir);
+    if (!head.ok) {
+        return GIT_gitcommon.fatal("HEAD is broken");
+    }
+    // the tree to reset to
+    str target_commit = "";
+    Map<str, GIT_gitwrite.Flat> target = {};
+    str spec_text = rev;
+    if (!has_rev) {
+        spec_text = "HEAD";
+    }
+    if (has_rev || head.is_born) {
+        if (path_words.size() > 0) {
+            match (GIT_revparse.tree_id(ctx.gitdir, spec_text)) {
+                case Ok(str tree): {
+                    GIT_gitwrite.flatten(store, tree, "", target);
+                }
+                case Err(_): {
+                    return GIT_gitcommon.fatal("Failed to resolve '" + spec_text + "' as a valid revision.");
+                }
+            }
+        } else {
+            match (GIT_revparse.commit_id(ctx.gitdir, spec_text)) {
+                case Ok(str id): {
+                    target_commit = id;
+                    target = GIT_gitwrite.commit_flat(store, id);
+                }
+                case Err(_): {
+                    match (GIT_revparse.object_id(ctx.gitdir, spec_text)) {
+                        case Ok(_): {
+                            return GIT_gitcommon.fatal("Could not parse object '" + spec_text + "'.");
+                        }
+                        case Err(_): {
+                        }
+                    }
+                    return GIT_gitcommon.fatal("ambiguous argument '" + spec_text + "': unknown revision or path not in the working tree.");
+                }
+            }
+        }
+    }
+    // --- paths: only the index
+    if (path_words.size() > 0) {
+        if (mode != "mixed" || opts.flag("soft") || opts.flag("hard") || opts.flag("keep")) {
+            return GIT_gitcommon.fatal("Cannot do " + mode + " reset with paths.");
+        }
+        List<GIT_gitcommon.Spec> specs = GIT_gitcommon.parse_specs(path_words, ctx.prefix);
+        List<str> universe = [];
+        Map<str, bool> seen = {};
+        for (str path in target.keys()) {
+            seen.set(path, true);
+            universe.push(path);
+        }
+        for (str path in idx.entries.keys()) {
+            if (!seen.contains(path)) {
+                seen.set(path, true);
+                universe.push(path);
+            }
+        }
+        for (str path in idx.conflicted_paths()) {
+            if (!seen.contains(path)) {
+                seen.set(path, true);
+                universe.push(path);
+            }
+        }
+        bool is_dirty = false;
+        for (str path in universe) {
+            if (!GIT_gitcommon.spec_match(specs, path)) {
+                continue;
+            }
+            match (target.get(path)) {
+                case Some(GIT_gitwrite.Flat flat): {
+                    GIT_index.Entry old = idx.entries.get(path).or(GIT_gitwrite.blank_entry());
+                    if (idx.entries.contains(path) && old.id == flat.id && old.mode == flat.mode && !idx.is_conflicted(path)) {
+                        continue;
+                    }
+                    idx.put(GIT_gitwrite.entry_from_flat(path, flat));
+                    is_dirty = true;
+                }
+                case None: {
+                    if (idx.entries.contains(path) || idx.is_conflicted(path)) {
+                        idx.remove(path);
+                        is_dirty = true;
+                    }
+                }
+            }
+        }
+        if (is_dirty) {
+            if (!GIT_gitwrite.write_idx(ctx.gitdir, idx)) {
+                return 128;
+            }
+        }
+        if (!is_quiet) {
+            print_unstaged(ctx, idx);
+        }
+        return 0;
+    }
+    // --- the whole reset
+    if (mode == "soft" && has_state(ctx.gitdir, "MERGE_HEAD")) {
+        return GIT_gitcommon.fatal("Cannot do a soft reset in the middle of a merge.");
+    }
+    if ((mode == "hard" || mode == "keep") && ctx.is_bare) {
+        return GIT_gitcommon.fatal(mode + " reset requires a work tree");
+    }
+    if (mode == "hard" || mode == "mixed" || mode == "keep") {
+        Map<str, GIT_gitwrite.Flat> current = {};
+        if (head.is_born) {
+            current = GIT_gitwrite.commit_flat(store, head.id);
+        }
+        if (mode == "keep") {
+            GIT_checkoutplan.Plan plan = GIT_checkoutplan.two_way(ctx, store, idx, current, target, false, "reset");
+            if (plan.refused) {
+                io.eprint("fatal: Could not reset index file to revision '" + spec_text + "'.");
+                return 128;
+            }
+            if (!GIT_checkoutplan.apply(ctx, idx, plan)) {
+                return 128;
+            }
+        } else if (mode == "hard") {
+            if (!reset_hard_tree(ctx, idx, target)) {
+                return 128;
+            }
+        } else {
+            GIT_gitwrite.Idx fresh = GIT_gitwrite.Idx();
+            fresh.opaque = idx.opaque;
+            for (str path in target.keys()) {
+                GIT_gitwrite.Flat flat = target.get(path).or(GIT_gitwrite.Flat(0, ""));
+                GIT_index.Entry old = idx.entries.get(path).or(GIT_gitwrite.blank_entry());
+                if (idx.entries.contains(path) && old.id == flat.id && old.mode == flat.mode) {
+                    fresh.put(old);
+                } else {
+                    fresh.put(GIT_gitwrite.entry_from_flat(path, flat));
+                }
+            }
+            idx = fresh;
+            if (!GIT_gitwrite.write_idx(ctx.gitdir, idx)) {
+                return 128;
+            }
+        }
+    }
+    // --- HEAD
+    if (target_commit != "") {
+        if (head.is_born) {
+            match (GIT_refs.update(ctx.gitdir, "ORIG_HEAD", head.id, Option<str>.None, reflog_message: "updating ORIG_HEAD")) {
+                case Ok(_): {
+                }
+                case Err(_): {
+                }
+            }
+        }
+        str ref = "HEAD";
+        if (!head.is_detached && head.ref != "") {
+            ref = head.ref;
+        }
+        if (head.is_born && head.id == target_commit) {
+            // nothing moves: only HEAD's log says so
+            GIT_gitwrite.log_only(ctx.gitdir, "HEAD", head.id, head.id, "reset: moving to " + spec_text);
+        } else {
+            match (GIT_refs.update(ctx.gitdir, ref, target_commit, Option<str>.None, reflog_message: "reset: moving to " + spec_text)) {
+                case Ok(_): {
+                }
+                case Err(GIT_refs.Error error): {
+                    return GIT_gitcommon.fatal("Could not update " + ref + ": " + error.to_str());
+                }
+            }
+        }
+    }
+    remove_branch_state(ctx.gitdir);
+    if (mode == "hard" && !is_quiet && target_commit != "") {
+        GIT_gitwrite.say("HEAD is now at " + store.unique_abbrev(target_commit, GIT_gitcommon.default_abbrev(ctx)) + " " + commit_subject(store, target_commit));
+    }
+    if (mode == "mixed" && !is_quiet && !ctx.is_bare) {
+        print_unstaged(ctx, idx);
+    }
+    return 0;
+}
+
+pub str commit_subject(GIT_gitstore.Store store, str id) {
+    match (store.read(id)) {
+        case Ok(GIT_object.Object object): {
+            match (object.body) {
+                case Commit(GIT_object.Commit commit): {
+                    return GIT_gitwrite.subject_of(commit.message.utf8().or(""));
+                }
+                case Blob: {
+                    return "";
+                }
+                case Tree(_): {
+                    return "";
+                }
+                case Tag(_): {
+                    return "";
+                }
+            }
+        }
+        case Err(_): {
+            return "";
+        }
+    }
+}
+
+/// Index and work tree forced to `target`; untracked files in the way are
+/// overwritten (git's `reset --hard`).
+pub bool reset_hard_tree(GIT_gitcommon.Ctx ctx, GIT_gitwrite.Idx idx, Map<str, GIT_gitwrite.Flat> target) {
+    bool is_filemode_on = GIT_gitadd.is_filemode(ctx);
+    List<str> gone = [];
+    for (str path in idx.entries.keys()) {
+        if (!target.contains(path)) {
+            gone.push(path);
+        }
+    }
+    for (str path in idx.conflicted_paths()) {
+        if (!target.contains(path) && !idx.entries.contains(path)) {
+            gone.push(path);
+        }
+    }
+    gone.sort();
+    for (str path in gone) {
+        int kind = GIT_gitwrite.kind_of(fs.join(ctx.root, path));
+        if (kind == 1 || kind == 2) {
+            GIT_gitwrite.remove_file(ctx.root, path);
+        }
+        idx.remove(path);
+    }
+    List<str> paths = target.keys();
+    paths.sort();
+    Map<str, GIT_gitwrite.Flat> no_index = {};
+    for (str path in paths) {
+        GIT_gitwrite.Flat flat = target.get(path).or(GIT_gitwrite.Flat(0, ""));
+        GIT_index.Entry old = idx.entries.get(path).or(GIT_gitwrite.blank_entry());
+        bool is_same = idx.entries.contains(path) && old.id == flat.id && old.mode == flat.mode && !idx.is_conflicted(path);
+        if (is_same && GIT_gitadd.file_is(ctx.gitdir, ctx.root, path, flat, is_filemode_on, no_index, false)) {
+            continue;
+        }
+        if (!GIT_gitwrite.write_blob_to(ctx.gitdir, ctx.root, path, flat.mode, flat.id)) {
+            io.eprint("error: unable to write '" + path + "'");
+            return false;
+        }
+        if (flat.mode >> 12 == 0o16) {
+            idx.put(GIT_gitwrite.entry_from_flat(path, flat));
+        } else {
+            idx.put(GIT_gitwrite.fresh_entry(ctx.root, path, flat.mode, flat.id));
+        }
+    }
+    return GIT_gitwrite.write_idx(ctx.gitdir, idx);
+}
+
+// --- commit --------------------------------------------------------------------------------
+
+/// `^[A-Za-z0-9-]+:` at the start of `line`?
+bool is_trailer_key(str line) {
+    int i = 0;
+    while (i < line.size()) {
+        int c = line.byte_at(i);
+        bool is_word = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '-';
+        if (!is_word) {
+            break;
+        }
+        i = i + 1;
+    }
+    return i > 0 && i < line.size() && line.byte_at(i) == ':';
+}
+
+/// `git commit -s`: the trailer goes in the last paragraph if that is a
+/// trailer block, else after a blank line.
+str add_signoff(str message, str signoff) {
+    str body = message;
+    while (body.ends_with("\n")) {
+        body = body.substr(0, body.size() - 1);
+    }
+    if (body == "") {
+        return "\n" + signoff + "\n";
+    }
+    List<str> lines = body.split("\n");
+    // the last paragraph
+    int start = lines.size();
+    while (start > 0 && lines[start - 1] != "") {
+        start = start - 1;
+    }
+    bool is_block = start > 0 && start < lines.size();
+    if (is_block) {
+        for (int i in start .. lines.size()) {
+            if (!is_trailer_key(lines[i]) && !lines[i].starts_with(" ") && !lines[i].starts_with("(cherry picked from commit ")) {
+                is_block = false;
+            }
+        }
+    }
+    if (is_block) {
+        if (lines[lines.size() - 1] == signoff) {
+            return body + "\n";
+        }
+        return body + "\n" + signoff + "\n";
+    }
+    return body + "\n\n" + signoff + "\n";
+}
+
+bool is_key_line(str line) {
+    // ^\[?[a-zA-Z0-9-]+:
+    str rest = line;
+    if (rest.starts_with("[")) {
+        rest = rest.substr(1, rest.size());
+    }
+    return is_trailer_key(rest);
+}
+
+bool is_url_key(str line) {
+    // ^[a-zA-Z0-9-]+://
+    int i = 0;
+    while (i < line.size()) {
+        int c = line.byte_at(i);
+        bool is_word = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '-';
+        if (!is_word) {
+            break;
+        }
+        i = i + 1;
+    }
+    return i > 0 && line.substr(i, line.size()).starts_with("://");
+}
+
+/// Gerrit's commit-msg hook, as its `awk` places the footer.
+str place_change_id(str message, str id, str comment) {
+    List<str> out = [];
+    str lines = "";
+    int is_footer = 0;
+    int footer_comment = 0;
+    int blank = 0;
+    for (str line in message.split("\n")) {
+        if (comment != "" && line.starts_with(comment)) {
+            continue;
+        }
+        if (line.starts_with("diff --git ")) {
+            blank = 0;
+            break;
+        }
+        if (line == "" && footer_comment == 0) {
+            blank = blank + 1;
+            continue;
+        }
+        if (is_footer == 1 && line.starts_with("[") && is_key_line(line)) {
+            footer_comment = 1;
+        }
+        if (footer_comment == 1 && line.ends_with("]")) {
+            footer_comment = 2;
+        }
+        if (blank > 0) {
+            out.push(lines);
+            for (int i in 0 .. blank) {
+                out.push("");
+            }
+            lines = "";
+            blank = 0;
+            is_footer = 1;
+            footer_comment = 0;
+        }
+        if (footer_comment == 0 && (!is_key_line(line) || is_url_key(line))) {
+            is_footer = 0;
+        }
+        if (footer_comment == 2) {
+            footer_comment = 0;
+        }
+        if (lines != "") {
+            lines = lines + "\n";
+        }
+        lines = lines + line;
+    }
+    bool is_unprinted = true;
+    if (is_footer == 0) {
+        out.push(lines);
+        out.push("");
+        lines = "";
+    }
+    List<str> footer = [];
+    if (lines != "") {
+        footer = lines.split("\n");
+    }
+    for (str line in footer) {
+        str lower = line.to_lower();
+        bool is_after = false;
+        List<str> after_keys = ["bug:", "depends-on:", "issue:", "test:", "feature:", "fixes:", "fixed:"];
+        for (str key in after_keys) {
+            if (lower.starts_with(key)) {
+                is_after = true;
+            }
+        }
+        if (is_unprinted && !is_after) {
+            is_unprinted = false;
+            out.push("Change-Id: I" + id);
+        }
+        out.push(line);
+    }
+    if (is_unprinted) {
+        out.push("Change-Id: I" + id);
+    }
+    return out.join("\n") + "\n";
+}
+
+/// The id Gerrit's hook derives: the hash of a commit made of the tree, the
+/// parent, both identities and the cleaned message.
+str change_id_of(str gitdir, str tree, str parent, str author_line, str committer_line, str clean) {
+    str text = "tree " + tree + "\n";
+    if (parent != "") {
+        text = text + "parent " + parent + "\n";
+    }
+    text = text + "author " + author_line + "\ncommitter " + committer_line + "\n\n" + clean;
+    return GIT_object.object_id(gitdir, "commit", text.to_bytes());
+}
+
+/// The `Change-Id` footer added to `message` the way the hook does, or the
+/// message unchanged when the hook would leave it.
+str with_change_id(GIT_gitcommon.Ctx ctx, str message, str comment, str tree, str parent, GIT_object.Ident author, GIT_object.Ident committer) {
+    // the sed: stop at a diff, drop Signed-off-by: and comment lines
+    List<str> kept = [];
+    for (str line in message.split("\n")) {
+        if (line.starts_with("diff --git ")) {
+            kept.push("");
+            break;
+        }
+        if (line.starts_with("Signed-off-by:")) {
+            continue;
+        }
+        if (comment != "" && line.starts_with(comment)) {
+            continue;
+        }
+        kept.push(line);
+    }
+    str clean = GIT_gitwrite.stripspace(kept.join("\n"), "");
+    while (clean.ends_with("\n")) {
+        clean = clean.substr(0, clean.size() - 1);
+    }
+    if (clean == "") {
+        return message;
+    }
+    str first = clean.split("\n")[0];
+    if (first.starts_with("fixup!") || first.starts_with("squash!")) {
+        return message;
+    }
+    for (str line in message.split("\n")) {
+        if (line.to_lower().starts_with("change-id:")) {
+            return message;
+        }
+    }
+    str id = change_id_of(ctx.gitdir, tree, parent, GIT_gitwrite.ident_with_date(author), GIT_gitwrite.ident_with_date(committer), clean);
+    return place_change_id(message, id, comment);
+}
+
+str commit_usage() {
+    return "usage: git commit [-a | --interactive | --patch] [-s] [-v] [-u<mode>] [--amend]\n                  [--dry-run] [(-c | -C | --squash) <commit> | --fixup [(amend|reword):]<commit>)]\n                  [-F <file> | -m <msg>] [--reset-author] [--allow-empty]\n                  [--allow-empty-message] [--no-verify] [-e] [--author=<author>]\n                  [--date=<date>] [--cleanup=<mode>] [--[no-]status]\n                  [-i | -o] [--pathspec-from-file=<file> [--pathspec-file-nul]]\n                  [(--trailer <token>[(=|:)<value>])...] [-S[<keyid>]]\n                  [--] [<pathspec>...]";
+}
+
+pub int run_commit(str start, List<str> overrides, List<str> argv) {
+    GIT_gitcommon.Opened opened = GIT_gitcommon.open(start, overrides);
+    if (!opened.ok) {
+        return 128;
+    }
+    GIT_gitcommon.Ctx ctx = opened.ctx;
+    GIT_gitwrite.Opts opts = GIT_gitwrite.parse_opts(argv, ["-m --message=", "-F --file=", "-a --all", "--amend", "-e --edit", "--allow-empty", "--allow-empty-message", "--author=", "--date=", "-s --signoff", "--fixup=", "--squash=", "-n --no-verify", "-q --quiet", "-v --verbose", "-t --template=", "-C --reuse-message=", "-c --reedit-message=", "--cleanup=", "--reset-author", "--dry-run", "--short", "--porcelain", "--long", "-z", "--status", "-o --only", "-i --include", "--change-id", "--no-post-rewrite", "-u --untracked-files", "--branch", "--pathspec-from-file=", "--pathspec-file-nul", "-S --gpg-sign", "--no-gpg-sign", "--trailer=", "--interactive", "-p --patch", "--verify"]);
+    int bad = GIT_gitwrite.check_opts(opts, commit_usage());
+    if (bad >= 0) {
+        return bad;
+    }
+    if (ctx.is_bare) {
+        return GIT_gitcommon.fatal("this operation must be run in a work tree");
+    }
+    if (opts.flag("interactive") || opts.flag("patch") || opts.has("trailer") || opts.has("pathspec-from-file") || opts.flag("short") || opts.flag("porcelain")) {
+        io.eprint("error: this option of commit is not in 1git (see docs/GIT-COMPAT.md)");
+        return 129;
+    }
+    bool is_amend = opts.flag("amend");
+    bool is_all = opts.flag("all");
+    bool is_quiet = opts.flag("quiet");
+    bool is_dry = opts.flag("dry-run");
+    bool is_signoff = opts.flag("signoff");
+    bool is_no_verify = opts.flag("no-verify") || (opts.has("verify") && !opts.flag("verify"));
+    bool is_allow_empty = opts.flag("allow-empty");
+    bool is_allow_empty_message = opts.flag("allow-empty-message");
+    if (!opts.has("no-gpg-sign") && !opts.has("gpg-sign") && GIT_config.is_commit_gpgsign_enabled(ctx.gitdir)) {
+        if (!GIT_gitcommon.cfg_bool(ctx, "commit", "", "gpgsign", false)) {
+            // an override turned it off
+        } else {
+            return GIT_gitcommon.fatal(GIT_config.GPGSIGN_REFUSAL);
+        }
+    }
+    if (opts.has("gpg-sign") && opts.flag("gpg-sign")) {
+        return GIT_gitcommon.fatal("this client does not sign commits (-S)");
+    }
+    List<str> given = opts.paths();
+    if (is_all && given.size() > 0) {
+        return GIT_gitcommon.fatal("paths '" + given.join(" ") + " ...' with -a does not make sense");
+    }
+    if (opts.flag("only") && opts.flag("include")) {
+        return GIT_gitcommon.fatal("options '--include/--only' cannot be used together");
+    }
+    GIT_gitstore.Store store = GIT_gitstore.open(ctx.gitdir);
+    GIT_gitwrite.IdxLoaded loaded = GIT_gitwrite.read_idx(ctx.gitdir);
+    if (!loaded.ok) {
+        return 128;
+    }
+    GIT_gitwrite.Idx idx = loaded.idx;
+    if (idx.opaque.size() > 0) {
+        return GIT_gitcommon.fatal("the index has paths that are not valid UTF-8, which 1git does not handle");
+    }
+    GIT_gitwrite.HeadInfo head = GIT_gitwrite.read_head(ctx.gitdir);
+    if (!head.ok) {
+        return GIT_gitcommon.fatal("HEAD is broken");
+    }
+    bool is_merge = has_state(ctx.gitdir, "MERGE_HEAD");
+    bool is_pick = has_state(ctx.gitdir, "CHERRY_PICK_HEAD");
+    // the commit to amend, or the parents
+    GIT_object.Commit old = GIT_object.Commit("", [], GIT_gitwrite.no_ident(), GIT_gitwrite.no_ident(), [], "".to_bytes());
+    if (is_amend) {
+        if (!head.is_born) {
+            return GIT_gitcommon.fatal("You have nothing to amend.");
+        }
+        if (is_merge) {
+            return GIT_gitcommon.fatal("You are in the middle of a merge -- cannot amend.");
+        }
+        match (store.read(head.id)) {
+            case Ok(GIT_object.Object object): {
+                match (object.body) {
+                    case Commit(GIT_object.Commit found): {
+                        old = found;
+                    }
+                    case Blob: {
+                        return GIT_gitcommon.fatal("HEAD is not a commit");
+                    }
+                    case Tree(_): {
+                        return GIT_gitcommon.fatal("HEAD is not a commit");
+                    }
+                    case Tag(_): {
+                        return GIT_gitcommon.fatal("HEAD is not a commit");
+                    }
+                }
+            }
+            case Err(_): {
+                return GIT_gitcommon.fatal("could not read HEAD");
+            }
+        }
+    }
+    // unmerged paths stop every commit
+    if (idx.conflicts.size() > 0) {
+        io.eprint("error: Committing is not possible because you have unmerged files.");
+        io.eprint("hint: Fix them up in the work tree, and then use 'git add/rm <file>'");
+        io.eprint("hint: as appropriate to mark resolution and make a commit.");
+        for (str path in idx.conflicted_paths()) {
+            GIT_gitwrite.say("U\t" + path);
+        }
+        return GIT_gitcommon.fatal("Exiting because of an unresolved conflict.");
+    }
+    if (is_merge && given.size() > 0) {
+        return GIT_gitcommon.fatal("cannot do a partial commit during a merge.");
+    }
+    if (is_pick && given.size() > 0) {
+        return GIT_gitcommon.fatal("cannot do a partial commit during a cherry-pick.");
+    }
+    bool is_filemode_on = GIT_gitadd.is_filemode(ctx);
+    // --- what goes into the tree
+    List<GIT_gitcommon.Spec> specs = [];
+    Map<str, GIT_gitwrite.Flat> head_flat = {};
+    if (head.is_born) {
+        head_flat = GIT_gitwrite.commit_flat(store, head.id);
+    }
+    bool is_only = given.size() > 0 && !opts.flag("include");
+    Map<str, GIT_gitwrite.Flat> tree_flat = {};
+    if (is_all || given.size() > 0) {
+        List<bool> failed = [];
+        GIT_status.Status lib = GIT_gitadd.status_or_die(ctx, failed);
+        if (failed.size() > 0) {
+            return 128;
+        }
+        if (given.size() > 0) {
+            specs = GIT_gitcommon.parse_specs(given, ctx.prefix);
+            List<str> universe = idx.sorted_paths();
+            for (int i in 0 .. specs.size()) {
+                bool is_hit = false;
+                for (str path in universe) {
+                    if (GIT_gitcommon.spec_match([specs[i]], path)) {
+                        is_hit = true;
+                        break;
+                    }
+                }
+                if (!is_hit) {
+                    for (str path in head_flat.keys()) {
+                        if (GIT_gitcommon.spec_match([specs[i]], path)) {
+                            is_hit = true;
+                            break;
+                        }
+                    }
+                }
+                if (!is_hit) {
+                    io.eprint("error: pathspec '" + given[i] + "' did not match any file(s) known to git");
+                    return 1;
+                }
+            }
+        }
+        // refresh tracked paths from the work tree (all of them with -a)
+        Map<str, bool> touched = {};
+        for (str path in idx.sorted_paths()) {
+            if (given.size() > 0 && !GIT_gitcommon.spec_match(specs, path)) {
+                continue;
+            }
+            str full = fs.join(ctx.root, path);
+            int kind = GIT_gitwrite.kind_of(full);
+            GIT_index.Entry entry = idx.entries.get(path).or(GIT_gitwrite.blank_entry());
+            if (kind == 0 || kind == 3) {
+                touched.set(path, true);
+                continue;
+            }
+            if (GIT_gitwrite.worktree_matches(full, entry, is_filemode_on)) {
+                continue;
+            }
+            touched.set(path, true);
+        }
+        if (is_only) {
+            // the commit is HEAD plus these paths from the work tree; the
+            // index gets the same paths staged
+            tree_flat = head_flat;
+            List<str> merged = idx.sorted_paths();
+            for (str path in head_flat.keys()) {
+                if (!idx.entries.contains(path)) {
+                    merged.push(path);
+                }
+            }
+            for (str path in merged) {
+                if (!GIT_gitcommon.spec_match(specs, path)) {
+                    continue;
+                }
+                str full = fs.join(ctx.root, path);
+                int kind = GIT_gitwrite.kind_of(full);
+                if (kind == 0 || kind == 3) {
+                    tree_flat.remove(path);
+                    idx.remove(path);
+                    continue;
+                }
+                str why = GIT_gitadd.stage_file(ctx, idx, path, is_filemode_on, 0);
+                if (why != "") {
+                    io.eprint("error: " + why);
+                    return 128;
+                }
+                GIT_index.Entry staged = idx.entries.get(path).or(GIT_gitwrite.blank_entry());
+                tree_flat.set(path, GIT_gitwrite.Flat(staged.mode, staged.id));
+            }
+        } else {
+            for (str path in touched.keys()) {
+                str full = fs.join(ctx.root, path);
+                int kind = GIT_gitwrite.kind_of(full);
+                if (kind == 0 || kind == 3) {
+                    idx.remove(path);
+                    continue;
+                }
+                str why = GIT_gitadd.stage_file(ctx, idx, path, is_filemode_on, 0);
+                if (why != "") {
+                    io.eprint("error: " + why);
+                    return 128;
+                }
+            }
+            if (given.size() > 0) {
+                // --include: new files named are staged too
+                for (str path in GIT_gitadd.untracked_names(lib)) {
+                    if (GIT_gitcommon.spec_match(specs, path)) {
+                        str why = GIT_gitadd.stage_file(ctx, idx, path, is_filemode_on, 0);
+                        if (why != "") {
+                            io.eprint("error: " + why);
+                            return 128;
+                        }
+                    }
+                }
+            }
+            tree_flat = GIT_gitwrite.idx_flat(idx);
+        }
+    } else {
+        tree_flat = GIT_gitwrite.idx_flat(idx);
+    }
+    str tree = GIT_gitwrite.build_tree(ctx.gitdir, tree_flat);
+    if (tree == "") {
+        return GIT_gitcommon.fatal("unable to write the tree");
+    }
+    // --- parents and the emptiness check
+    List<str> parents = [];
+    str base_tree = "";
+    if (is_amend) {
+        parents = old.parents;
+        if (parents.size() > 0) {
+            base_tree = GIT_gitwrite.tree_of_commit(store, parents[0]);
+        }
+    } else {
+        if (head.is_born) {
+            parents.push(head.id);
+            base_tree = GIT_gitwrite.tree_of_commit(store, head.id);
+        }
+        if (is_merge) {
+            for (str other in ids_in(fs.join(ctx.gitdir, "MERGE_HEAD"))) {
+                parents.push(other);
+            }
+        }
+    }
+    str empty_tree = GIT_gitwrite.build_tree(ctx.gitdir, {});
+    if (base_tree == "") {
+        base_tree = empty_tree;
+    }
+    bool is_committable = tree != base_tree || is_merge || parents.size() > 1;
+    if (!is_committable && !is_allow_empty) {
+        if (is_amend) {
+            io.eprint("You asked to amend the most recent commit, but doing so would make");
+            io.eprint("it empty. You can repeat your command with --allow-empty, or you can");
+            io.eprint("remove the commit entirely with \"git reset HEAD^\".");
+            return nothing_to_commit(ctx, true);
+        }
+        if (is_dry) {
+            return 1;
+        }
+        return nothing_to_commit(ctx, false);
+    }
+    if (is_dry) {
+        return report_dry(ctx);
+    }
+    // --- the message
+    str comment = "#";
+    match (GIT_gitcommon.cfg(ctx, "core", "", "commentChar")) {
+        case Some(str value): {
+            if (value != "" && value != "auto") {
+                comment = value.substr(0, 1);
+            }
+        }
+        case None: {
+        }
+    }
+    str raw = "";
+    bool has_message = false;
+    str template_text = "";
+    bool is_from_template = false;
+    // authorship that rides along with a reused message
+    bool has_author_message = false;
+    GIT_object.Ident message_author = GIT_gitwrite.no_ident();
+    bool is_edit = opts.flag("edit");
+    bool is_edit_set = opts.has("edit");
+    bool must_edit_by_default = true;
+    if (opts.has("file")) {
+        str file = opts.value("file", "");
+        if (opts.all("file").size() > 1 || opts.has("message")) {
+            return GIT_gitcommon.fatal("options '-m' and '-F' cannot be used together");
+        }
+        if (file == "-") {
+            match (io.stdin().read_all()) {
+                case Ok(bytes data): {
+                    raw = data.utf8().or("");
+                }
+                case Err(_): {
+                    return GIT_gitcommon.fatal("could not read the message from standard input");
+                }
+            }
+        } else {
+            match (io.read(file)) {
+                case Ok(str body): {
+                    raw = body;
+                }
+                case Err(_): {
+                    return GIT_gitcommon.fatal("could not read log file '" + file + "': No such file or directory");
+                }
+            }
+        }
+        has_message = true;
+        must_edit_by_default = false;
+    } else if (opts.has("message")) {
+        raw = opts.all("message").join("\n\n") + "\n";
+        has_message = true;
+        must_edit_by_default = false;
+    }
+    str reuse_from = "";
+    bool is_reedit = false;
+    if (opts.has("reuse-message")) {
+        reuse_from = opts.value("reuse-message", "");
+    }
+    if (opts.has("reedit-message")) {
+        reuse_from = opts.value("reedit-message", "");
+        is_reedit = true;
+    }
+    if (reuse_from != "" && !has_message) {
+        match (GIT_revparse.commit_id(ctx.gitdir, reuse_from)) {
+            case Ok(str id): {
+                match (store.read(id)) {
+                    case Ok(GIT_object.Object object): {
+                        match (object.body) {
+                            case Commit(GIT_object.Commit found): {
+                                raw = found.message.utf8().or("");
+                                message_author = found.author;
+                                has_author_message = true;
+                                has_message = true;
+                                must_edit_by_default = is_reedit;
+                            }
+                            case Blob: {
+                            }
+                            case Tree(_): {
+                            }
+                            case Tag(_): {
+                            }
+                        }
+                    }
+                    case Err(_): {
+                    }
+                }
+            }
+            case Err(_): {
+                return GIT_gitcommon.fatal("could not lookup commit " + reuse_from);
+            }
+        }
+    }
+    if (opts.has("fixup") || opts.has("squash")) {
+        str prefix = "fixup";
+        str target = opts.value("fixup", "");
+        if (opts.has("squash")) {
+            prefix = "squash";
+            target = opts.value("squash", "");
+        }
+        match (GIT_revparse.commit_id(ctx.gitdir, target)) {
+            case Ok(str id): {
+                str subject = commit_subject(store, id);
+                str text = prefix + "! " + subject + "\n";
+                if (has_message && raw != "") {
+                    text = text + "\n" + raw;
+                }
+                raw = text;
+                has_message = true;
+                if (prefix == "fixup") {
+                    must_edit_by_default = false;
+                } else if (!opts.has("message")) {
+                    must_edit_by_default = true;
+                } else {
+                    must_edit_by_default = false;
+                }
+            }
+            case Err(_): {
+                return GIT_gitcommon.fatal("could not lookup commit " + target);
+            }
+        }
+    }
+    if (!has_message && is_amend) {
+        raw = old.message.utf8().or("");
+        has_message = true;
+        must_edit_by_default = true;
+    }
+    if (!has_message) {
+        if (is_merge || is_pick || has_state(ctx.gitdir, "SQUASH_MSG")) {
+            str file = "MERGE_MSG";
+            if (!has_state(ctx.gitdir, file)) {
+                file = "SQUASH_MSG";
+            }
+            match (io.read(fs.join(ctx.gitdir, file))) {
+                case Ok(str body): {
+                    raw = body;
+                    has_message = true;
+                }
+                case Err(_): {
+                }
+            }
+        }
+        if (!has_message) {
+            match (GIT_gitcommon.cfg(ctx, "commit", "", "template")) {
+                case Some(str path): {
+                    str full = path;
+                    if (path.starts_with("~/")) {
+                        full = os.env("HOME").or("") + path.substr(1, path.size());
+                    } else if (!path.starts_with("/")) {
+                        full = fs.join(ctx.root, path);
+                    }
+                    match (io.read(full)) {
+                        case Ok(str body): {
+                            raw = body;
+                            has_message = true;
+                            template_text = body;
+                            is_from_template = true;
+                        }
+                        case Err(_): {
+                            return GIT_gitcommon.fatal("could not read '" + path + "'");
+                        }
+                    }
+                }
+                case None: {
+                }
+            }
+        }
+    }
+    if (opts.has("template") && !has_message) {
+        match (io.read(opts.value("template", ""))) {
+            case Ok(str body): {
+                raw = body;
+                has_message = true;
+                template_text = body;
+                is_from_template = true;
+            }
+            case Err(_): {
+                return GIT_gitcommon.fatal("could not read '" + opts.value("template", "") + "'");
+            }
+        }
+    }
+    bool is_editing = must_edit_by_default;
+    if (is_edit_set) {
+        is_editing = is_edit;
+    }
+    // identities
+    GIT_gitwrite.When forced_date = GIT_gitwrite.no_date();
+    if (opts.has("date")) {
+        forced_date = GIT_gitwrite.parse_date(opts.value("date", ""));
+        if (!forced_date.ok) {
+            return GIT_gitcommon.fatal("invalid date format: " + opts.value("date", ""));
+        }
+    }
+    GIT_object.Ident author = GIT_gitwrite.ident_for(ctx.gitdir, "AUTHOR", forced_date);
+    bool has_picked_author = false;
+    if (is_amend && !opts.flag("reset-author")) {
+        message_author = old.author;
+        has_author_message = true;
+    }
+    if (is_pick && !is_amend && !has_author_message) {
+        List<str> pick_ids = ids_in(fs.join(ctx.gitdir, "CHERRY_PICK_HEAD"));
+        if (pick_ids.size() > 0) {
+            match (store.read(pick_ids[0])) {
+                case Ok(GIT_object.Object object): {
+                    match (object.body) {
+                        case Commit(GIT_object.Commit found): {
+                            message_author = found.author;
+                            has_author_message = true;
+                            has_picked_author = true;
+                        }
+                        case Blob: {
+                        }
+                        case Tree(_): {
+                        }
+                        case Tag(_): {
+                        }
+                    }
+                }
+                case Err(_): {
+                }
+            }
+        }
+    }
+    if (opts.flag("reset-author")) {
+        has_author_message = false;
+    }
+    if (has_author_message) {
+        author = GIT_object.Ident(message_author.name, message_author.email, message_author.when, message_author.offset, message_author.zone);
+        if (forced_date.ok) {
+            author = GIT_object.Ident(author.name, author.email, forced_date.when, forced_date.offset, forced_date.zone);
+        }
+    }
+    if (opts.has("author")) {
+        match (GIT_gitwrite.parse_author(opts.value("author", ""), author)) {
+            case Some(GIT_object.Ident parsed): {
+                author = parsed;
+            }
+            case None: {
+                return GIT_gitcommon.fatal("--author '" + opts.value("author", "") + "' is not 'Name <email>' and matches no existing author");
+            }
+        }
+    }
+    GIT_object.Ident committer = GIT_gitwrite.ident_for(ctx.gitdir, "COMMITTER", GIT_gitwrite.no_date());
+    // sign-off
+    if (is_signoff) {
+        raw = add_signoff(raw, "Signed-off-by: " + GIT_gitwrite.ident_text(committer));
+    }
+    // the file the hooks and the editor see
+    str edit_path = fs.join(ctx.gitdir, "COMMIT_EDITMSG");
+    str staged_text = raw;
+    if (is_editing) {
+        staged_text = raw;
+        if (staged_text != "" && !staged_text.ends_with("\n")) {
+            staged_text = staged_text + "\n";
+        }
+        staged_text = staged_text + "\n" + editor_comment(ctx, comment, is_amend);
+    }
+    match (io.write(edit_path, staged_text)) {
+        case Ok(_): {
+        }
+        case Err(_): {
+            return GIT_gitcommon.fatal("could not write " + edit_path);
+        }
+    }
+    // pre-commit
+    if (!is_no_verify) {
+        int hook_rc = GIT_gitwrite.run_hook(ctx, "pre-commit", []);
+        if (hook_rc > 0) {
+            return 1;
+        }
+    }
+    if (true) {
+        List<str> hook_args = [edit_path];
+        str source = "";
+        if (opts.has("message") || opts.has("file")) {
+            source = "message";
+        } else if (reuse_from != "" || is_amend) {
+            source = "commit";
+        } else if (is_merge) {
+            source = "merge";
+        } else if (has_state(ctx.gitdir, "SQUASH_MSG")) {
+            source = "squash";
+        } else if (opts.has("template") || GIT_gitcommon.cfg(ctx, "commit", "", "template").is_some()) {
+            source = "template";
+        }
+        if (source != "") {
+            hook_args.push(source);
+        }
+        if (source == "commit") {
+            if (is_amend) {
+                hook_args.push("HEAD");
+            } else {
+                hook_args.push(reuse_from);
+            }
+        }
+        int hook_rc = GIT_gitwrite.run_hook(ctx, "prepare-commit-msg", hook_args);
+        if (hook_rc > 0) {
+            return 1;
+        }
+    }
+    if (is_editing) {
+        if (!GIT_gitwrite.run_editor(ctx, edit_path)) {
+            io.eprint("error: There was a problem with the editor '" + GIT_gitwrite.editor_command(ctx) + "'.");
+            io.eprint("Please supply the message using either -m or -F option.");
+            return 1;
+        }
+    }
+    // Gerrit's Change-Id, where the hook would have put it
+    bool is_change_id = opts.flag("change-id") || GIT_gitcommon.cfg_bool(ctx, "gerrit", "", "createChangeId", false);
+    if (is_change_id && GIT_gitcommon.cfg(ctx, "gerrit", "", "createChangeId").or("") != "false") {
+        str current = "";
+        match (io.read(edit_path)) {
+            case Ok(str body): {
+                current = body;
+            }
+            case Err(_): {
+            }
+        }
+        str parent_for_id = "";
+        if (head.is_born) {
+            parent_for_id = head.id;
+        }
+        str changed = with_change_id(ctx, current, comment, tree, parent_for_id, author, committer);
+        if (changed != current) {
+            match (io.write(edit_path, changed)) {
+                case Ok(_): {
+                }
+                case Err(_): {
+                }
+            }
+        }
+    }
+    if (!is_no_verify) {
+        int hook_rc = GIT_gitwrite.run_hook(ctx, "commit-msg", [edit_path]);
+        if (hook_rc > 0) {
+            return 1;
+        }
+    }
+    match (io.read(edit_path)) {
+        case Ok(str body): {
+            raw = body;
+        }
+        case Err(_): {
+        }
+    }
+    // cleanup
+    str mode = opts.value("cleanup", "");
+    if (mode == "") {
+        mode = GIT_gitcommon.cfg(ctx, "commit", "", "cleanup").or("");
+    }
+    if (mode == "" || mode == "default") {
+        mode = "whitespace";
+        if (is_editing) {
+            mode = "strip";
+        }
+    }
+    str message = raw;
+    if (mode == "strip") {
+        message = GIT_gitwrite.stripspace(raw, comment);
+    } else if (mode == "whitespace") {
+        message = GIT_gitwrite.stripspace(raw, "");
+    } else if (mode == "scissors") {
+        str marker = comment + " ------------------------ >8 ------------------------";
+        List<str> kept = [];
+        for (str line in raw.split("\n")) {
+            if (line == marker) {
+                break;
+            }
+            kept.push(line);
+        }
+        message = GIT_gitwrite.stripspace(kept.join("\n"), "");
+    } else if (mode == "verbatim") {
+        message = raw;
+    } else {
+        return GIT_gitcommon.fatal("Invalid cleanup mode " + mode);
+    }
+    if (is_from_template && is_editing && message == GIT_gitwrite.stripspace(template_text, comment)) {
+        io.eprint("Aborting commit; you did not edit the message.");
+        return 1;
+    }
+    if (GIT_gitwrite.stripspace(message, "") == "" && !is_allow_empty_message) {
+        io.eprint("Aborting commit due to empty commit message.");
+        return 1;
+    }
+    // --- the object
+    GIT_object.Commit made = GIT_object.Commit(tree, parents, author, committer, [], message.to_bytes());
+    str new_id = "";
+    match (GIT_object.write_commit(ctx.gitdir, made)) {
+        case Ok(str id): {
+            new_id = id;
+        }
+        case Err(GIT_object.Error error): {
+            return GIT_gitcommon.fatal("unable to write the commit: " + error.to_str());
+        }
+    }
+    // the index only changed for -a / paths
+    if (is_all || given.size() > 0) {
+        if (!GIT_gitwrite.write_idx(ctx.gitdir, idx)) {
+            return 128;
+        }
+    }
+    str action = "commit";
+    if (is_amend) {
+        action = "commit (amend)";
+    } else if (!head.is_born) {
+        action = "commit (initial)";
+    } else if (is_merge) {
+        action = "commit (merge)";
+    } else if (is_pick) {
+        action = "commit (cherry-pick)";
+    }
+    str log_subject = message;
+    match (log_subject.index_of("\n")) {
+        case Some(int cut): {
+            log_subject = log_subject.substr(0, cut);
+        }
+        case None: {
+        }
+    }
+    str log_message = action + ": " + log_subject;
+    str ref = "HEAD";
+    if (!head.is_detached && head.ref != "") {
+        ref = head.ref;
+    }
+    Option<str> expect = Option<str>.Some("");
+    if (head.is_born) {
+        expect = Option<str>.Some(head.id);
+    }
+    if (head.is_born && head.id == new_id) {
+        GIT_gitwrite.log_only(ctx.gitdir, "HEAD", new_id, new_id, log_message);
+    } else {
+        match (GIT_refs.update(ctx.gitdir, ref, new_id, expect, reflog_message: log_message)) {
+            case Ok(_): {
+            }
+            case Err(GIT_refs.Error error): {
+                return GIT_gitcommon.fatal("cannot update the ref '" + ref + "': " + error.to_str());
+            }
+        }
+    }
+    remove_branch_state(ctx.gitdir);
+    if (!is_quiet) {
+        print_summary(ctx, store, head, new_id, made, base_tree, has_author_message || forced_date.ok, committer);
+    }
+    GIT_gitwrite.run_hook(ctx, "post-commit", []);
+    return 0;
+}
+
+/// What `git commit` prints when there is nothing to commit: `git status`
+/// as the long format, and status 1.
+int nothing_to_commit(GIT_gitcommon.Ctx ctx, bool is_amend) {
+    str where = ctx.root;
+    if (ctx.prefix != "") {
+        where = ctx.root + "/" + ctx.prefix;
+    }
+    List<str> flags = ["--commit-header"];
+    if (is_amend) {
+        flags.push("--amend-footer");
+    }
+    GIT_gitstatus.run(where, ctx.overrides, flags);
+    return 1;
+}
+
+int report_dry(GIT_gitcommon.Ctx ctx) {
+    str where = ctx.root;
+    if (ctx.prefix != "") {
+        where = ctx.root + "/" + ctx.prefix;
+    }
+    GIT_gitstatus.run(where, ctx.overrides, ["--commit-header"]);
+    return 0;
+}
+
+// The comment block the editor shows under the message.
+str editor_comment(GIT_gitcommon.Ctx ctx, str comment, bool is_amend) {
+    str text = comment + " Please enter the commit message for your changes. Lines starting\n";
+    text = text + comment + " with '" + comment + "' will be ignored, and an empty message aborts the commit.\n";
+    List<str> sink = [];
+    str where = ctx.root;
+    if (ctx.prefix != "") {
+        where = ctx.root + "/" + ctx.prefix;
+    }
+    GIT_gitstatus.run_into(where, ctx.overrides, ["--color=never", "--commit-header"], true, sink);
+    if (sink.size() > 0) {
+        text = text + comment + "\n";
+        for (str line in sink[0].split("\n")) {
+            if (line == "") {
+                continue;
+            }
+            if (line.starts_with("\t")) {
+                text = text + comment + line + "\n";
+            } else {
+                text = text + comment + " " + line + "\n";
+            }
+        }
+    }
+    return text;
+}
+
+void print_summary(GIT_gitcommon.Ctx ctx, GIT_gitstore.Store store, GIT_gitwrite.HeadInfo head, str id, GIT_object.Commit made, str base_tree, bool is_date_interesting, GIT_object.Ident committer) {
+    str branch = "detached HEAD";
+    if (!head.is_detached && head.ref != "") {
+        branch = GIT_gitwrite.short_ref(head.ref);
+    }
+    str root_word = "";
+    if (!head.is_born) {
+        root_word = " (root-commit)";
+    }
+    str subject = GIT_gitwrite.subject_of(made.message.utf8().or(""));
+    while (subject.ends_with(" ") || subject.ends_with("\t")) {
+        subject = subject.substr(0, subject.size() - 1);
+    }
+    GIT_gitwrite.say("[" + branch + root_word + " " + store.unique_abbrev(id, GIT_gitcommon.default_abbrev(ctx)) + "] " + subject);
+    str author_text = GIT_gitwrite.ident_text(made.author);
+    if (author_text != GIT_gitwrite.ident_text(committer)) {
+        GIT_gitwrite.say(" Author: " + author_text);
+    }
+    if (is_date_interesting) {
+        GIT_gitwrite.say(" Date: " + GIT_gitcommon.format_date(made.author.when, made.author.offset, "default"));
+    }
+    if (!is_committer_given(ctx)) {
+        GIT_gitwrite.say(" Committer: " + GIT_gitwrite.ident_text(committer));
+        GIT_gitwrite.say("Your name and email address were configured automatically based");
+        GIT_gitwrite.say("on your username and hostname. Please check that they are accurate.");
+        GIT_gitwrite.say("You can suppress this message by setting them explicitly. Run the");
+        GIT_gitwrite.say("following command and follow the instructions in your editor to edit");
+        GIT_gitwrite.say("your configuration file:");
+        GIT_gitwrite.say("");
+        GIT_gitwrite.say("    git config --global --edit");
+        GIT_gitwrite.say("");
+        GIT_gitwrite.say("After doing this, you may fix the identity used for this commit with:");
+        GIT_gitwrite.say("");
+        GIT_gitwrite.say("    git commit --amend --reset-author");
+        GIT_gitwrite.say("");
+    }
+    if (made.parents.size() > 1) {
+        return;
+    }
+    GIT_gitdiff.DOpts dopts = GIT_gitdiff.DOpts();
+    dopts.is_shortstat = true;
+    dopts.is_summary = true;
+    dopts.is_renames = true;
+    str new_tree = made.tree;
+    str old_tree = base_tree;
+    if (made.parents.size() == 0) {
+        old_tree = "";
+    } else {
+        old_tree = GIT_gitwrite.tree_of_commit(store, made.parents[0]);
+    }
+    List<GIT_gitdiff.Item> items = GIT_gitdiff.tree_vs_tree(store, old_tree, new_tree, []);
+    items = GIT_gitdiffcmd.finish_items(store, items, dopts);
+    GIT_gitwrite.put_bytes(GIT_gitdiff.render(store, items, dopts));
+}
+
+bool is_committer_given(GIT_gitcommon.Ctx ctx) {
+    bool has_name = os.env("GIT_COMMITTER_NAME").or("") != "" || GIT_gitcommon.cfg(ctx, "user", "", "name").or("") != "" || GIT_gitcommon.cfg(ctx, "committer", "", "name").or("") != "";
+    bool has_mail = os.env("GIT_COMMITTER_EMAIL").or("") != "" || GIT_gitcommon.cfg(ctx, "user", "", "email").or("") != "" || GIT_gitcommon.cfg(ctx, "committer", "", "email").or("") != "" || os.env("EMAIL").or("") != "";
+    return has_name && has_mail;
+}

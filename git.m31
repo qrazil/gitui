@@ -61,6 +61,7 @@ import core.GIT_gitstatus;
 import core.GIT_gitdiffcmd;
 import core.GIT_gitlog;
 import core.GIT_gitadd;
+import core.GIT_gitcommit;
 
 args.Parser parser = args.Parser("1git", summary: "read-only git plumbing over loose objects");
 parser.value("git-dir", help: "the repository's git directory", placeholder: "DIR");
@@ -159,6 +160,12 @@ int git_spelling(List<str> argv) {
     }
     if (argv[index] == "mv") {
         return GIT_gitadd.run_mv(cwd, overrides, argv.slice(index + 1, argv.size()));
+    }
+    if (argv[index] == "reset") {
+        return GIT_gitcommit.run_reset(cwd, overrides, argv.slice(index + 1, argv.size()));
+    }
+    if (argv[index] == "commit") {
+        return GIT_gitcommit.run_commit(cwd, overrides, argv.slice(index + 1, argv.size()));
     }
     if (argv[index] == "restore") {
         return GIT_gitadd.run_restore(cwd, overrides, argv.slice(index + 1, argv.size()));

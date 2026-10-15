@@ -1,0 +1,280 @@
+// A branch switch decided before anything is written: git's `twoway_merge`
+// (unpack-trees.c) over HEAD's tree, the target's tree and the index, with
+// the work tree checks `verify_uptodate` and `verify_absent` make. A
+// refusal names every path, writes nothing and leaves HEAD where it was.
+
+import io;
+import fs;
+import core.GIT_index;
+import core.GIT_ignore;
+import core.GIT_gitcommon;
+import core.GIT_gitstore;
+import core.GIT_gitwrite;
+import core.GIT_gitadd;
+
+/// One thing to do to the work tree and the index: write `flat` at `path`,
+/// or remove it.
+pub type Action {
+    pub str path;
+    pub bool is_remove;
+    pub GIT_gitwrite.Flat flat;
+}
+
+pub type Plan {
+    pub bool refused = false;
+    pub List<Action> actions = [];
+}
+
+bool same(Option<GIT_gitwrite.Flat> left, Option<GIT_gitwrite.Flat> right) {
+    match (left) {
+        case Some(GIT_gitwrite.Flat a): {
+            match (right) {
+                case Some(GIT_gitwrite.Flat b): {
+                    return a.id == b.id && a.mode == b.mode;
+                }
+                case None: {
+                    return false;
+                }
+            }
+        }
+        case None: {
+            match (right) {
+                case Some(_): {
+                    return false;
+                }
+                case None: {
+                    return true;
+                }
+            }
+        }
+    }
+}
+
+Option<GIT_gitwrite.Flat> index_flat_at(GIT_gitwrite.Idx idx, str path) {
+    match (idx.entries.get(path)) {
+        case Some(GIT_index.Entry entry): {
+            return Option<GIT_gitwrite.Flat>.Some(GIT_gitwrite.Flat(entry.mode, entry.id));
+        }
+        case None: {
+            return Option<GIT_gitwrite.Flat>.None;
+        }
+    }
+}
+
+// Is the work tree at `path` something an untracked file or directory of
+// ours would be lost to? Ignored files do not count.
+bool is_in_the_way(GIT_gitcommon.Ctx ctx, str path, Option<GIT_ignore.Ignore> ignore, Map<str, bool> going) {
+    str full = fs.join(ctx.root, path);
+    int kind = GIT_gitwrite.kind_of(full);
+    if (kind == 0) {
+        // a file standing where a parent directory has to be
+        str up = GIT_gitwrite.dirname(path);
+        while (up != "") {
+            int up_kind = GIT_gitwrite.kind_of(fs.join(ctx.root, up));
+            if (up_kind == 1 || up_kind == 2) {
+                if (going.contains(up) || is_ignored(ignore, up)) {
+                    return false;
+                }
+                return true;
+            }
+            up = GIT_gitwrite.dirname(up);
+        }
+        return false;
+    }
+    if (is_ignored(ignore, path)) {
+        return false;
+    }
+    if (kind == 3) {
+        // an empty directory may go; so may one whose files all go
+        List<str> inside = GIT_gitadd.walk_files(ctx.root, path);
+        for (str file in inside) {
+            if (!going.contains(file)) {
+                return true;
+            }
+        }
+        return false;
+    }
+    return true;
+}
+
+bool is_ignored(Option<GIT_ignore.Ignore> ignore, str path) {
+    match (ignore) {
+        case Some(GIT_ignore.Ignore found): {
+            return found.is_ignored(path);
+        }
+        case None: {
+            return false;
+        }
+    }
+}
+
+/// Plan the move from `head` to `target`. `verb` is what the refusal says the
+/// operation is ("checkout", "reset").
+pub Plan two_way(GIT_gitcommon.Ctx ctx, GIT_gitstore.Store store, GIT_gitwrite.Idx idx, Map<str, GIT_gitwrite.Flat> head, Map<str, GIT_gitwrite.Flat> target, bool is_force, str verb) {
+    Plan plan = Plan();
+    bool is_filemode_on = GIT_gitcommon.cfg_bool(ctx, "core", "", "filemode", true);
+    Option<GIT_ignore.Ignore> ignore = Option<GIT_ignore.Ignore>.None;
+    match (GIT_ignore.load(ctx.gitdir, ctx.root)) {
+        case Ok(GIT_ignore.Ignore loaded): {
+            ignore = Option<GIT_ignore.Ignore>.Some(loaded);
+        }
+        case Err(_): {
+        }
+    }
+    // every path any side knows
+    Map<str, bool> seen = {};
+    List<str> paths = [];
+    for (str path in head.keys()) {
+        seen.set(path, true);
+        paths.push(path);
+    }
+    for (str path in target.keys()) {
+        if (!seen.contains(path)) {
+            seen.set(path, true);
+            paths.push(path);
+        }
+    }
+    paths.sort();
+    List<str> local = [];
+    List<str> untracked = [];
+    List<str> removals = [];
+    // paths the move deletes: a file there is no obstacle to what replaces it
+    Map<str, bool> going = {};
+    for (str path in paths) {
+        if (head.contains(path) && !target.contains(path) && idx.entries.contains(path)) {
+            GIT_gitwrite.Flat was = head.get(path).or(GIT_gitwrite.Flat(0, ""));
+            GIT_index.Entry entry = idx.entries.get(path).or(GIT_gitwrite.blank_entry());
+            if (entry.id == was.id && entry.mode == was.mode) {
+                going.set(path, true);
+            }
+        }
+    }
+    for (str path in paths) {
+        Option<GIT_gitwrite.Flat> old = Option<GIT_gitwrite.Flat>.None;
+        match (head.get(path)) {
+            case Some(GIT_gitwrite.Flat found): {
+                old = Option<GIT_gitwrite.Flat>.Some(found);
+            }
+            case None: {
+            }
+        }
+        Option<GIT_gitwrite.Flat> new = Option<GIT_gitwrite.Flat>.None;
+        match (target.get(path)) {
+            case Some(GIT_gitwrite.Flat found): {
+                new = Option<GIT_gitwrite.Flat>.Some(found);
+            }
+            case None: {
+            }
+        }
+        Option<GIT_gitwrite.Flat> current = index_flat_at(idx, path);
+        str full = fs.join(ctx.root, path);
+        bool has_current = idx.entries.contains(path);
+        if (has_current) {
+            if (same(old, new)) {
+                continue;
+            }
+            if (same(current, new)) {
+                continue;
+            }
+            bool is_old_none = !old.is_some();
+            if (same(current, old) && !is_old_none) {
+                // 10/11 and 20/21: the file must be what the index says
+                GIT_index.Entry entry = idx.entries.get(path).or(GIT_gitwrite.blank_entry());
+                int kind = GIT_gitwrite.kind_of(full);
+                bool is_clean = kind == 0 || GIT_gitwrite.worktree_matches(full, entry, is_filemode_on);
+                if (!is_clean) {
+                    local.push(path);
+                    continue;
+                }
+                match (new) {
+                    case Some(GIT_gitwrite.Flat flat): {
+                        plan.actions.push(Action(path, false, flat));
+                    }
+                    case None: {
+                        removals.push(path);
+                        plan.actions.push(Action(path, true, GIT_gitwrite.Flat(0, "")));
+                    }
+                }
+                continue;
+            }
+            local.push(path);
+            continue;
+        }
+        // not in the index
+        match (new) {
+            case Some(GIT_gitwrite.Flat flat): {
+                if (old.is_some()) {
+                    // the deletion was staged: fine only if the two sides agree
+                    if (same(old, new)) {
+                        continue;
+                    }
+                    local.push(path);
+                    continue;
+                }
+                if (is_in_the_way(ctx, path, ignore, going)) {
+                    untracked.push(path);
+                    continue;
+                }
+                plan.actions.push(Action(path, false, flat));
+            }
+            case None: {
+            }
+        }
+    }
+    if (local.size() > 0 || untracked.size() > 0) {
+        plan.refused = true;
+        if (local.size() > 0) {
+            io.eprint("error: Your local changes to the following files would be overwritten by " + verb + ":");
+            for (str path in local) {
+                io.eprint("\t" + path);
+            }
+            if (verb == "checkout") {
+                io.eprint("Please commit your changes or stash them before you switch branches.");
+            } else {
+                io.eprint("Please commit your changes or stash them before you " + verb + ".");
+            }
+        }
+        if (untracked.size() > 0) {
+            io.eprint("error: The following untracked working tree files would be overwritten by " + verb + ":");
+            for (str path in untracked) {
+                io.eprint("\t" + path);
+            }
+            if (verb == "checkout") {
+                io.eprint("Please move or remove them before you switch branches.");
+            } else {
+                io.eprint("Please move or remove them before you " + verb + ".");
+            }
+        }
+        io.eprint("Aborting");
+    }
+    return plan;
+}
+
+/// Do the plan: removals first, then writes, then the index.
+pub bool apply(GIT_gitcommon.Ctx ctx, GIT_gitwrite.Idx idx, Plan plan) {
+    for (Action action in plan.actions) {
+        if (!action.is_remove) {
+            continue;
+        }
+        int kind = GIT_gitwrite.kind_of(fs.join(ctx.root, action.path));
+        if (kind == 1 || kind == 2) {
+            GIT_gitwrite.remove_file(ctx.root, action.path);
+        }
+        idx.remove(action.path);
+    }
+    for (Action action in plan.actions) {
+        if (action.is_remove) {
+            continue;
+        }
+        if (!GIT_gitwrite.write_blob_to(ctx.gitdir, ctx.root, action.path, action.flat.mode, action.flat.id)) {
+            io.eprint("error: unable to write '" + action.path + "'");
+            return false;
+        }
+        if (action.flat.mode >> 12 == 0o16) {
+            idx.put(GIT_gitwrite.entry_from_flat(action.path, action.flat));
+        } else {
+            idx.put(GIT_gitwrite.fresh_entry(ctx.root, action.path, action.flat.mode, action.flat.id));
+        }
+    }
+    return GIT_gitwrite.write_idx(ctx.gitdir, idx);
+}

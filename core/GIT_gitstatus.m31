@@ -53,6 +53,9 @@ type Opts {
     int ignored = 0;
     bool is_renames = true;
     bool is_ahead_behind = true;
+    // what `commit` shows: "Initial commit", and "No changes" when amending
+    bool is_commit_header = false;
+    bool is_amend_footer = false;
     // "" unset, else always / never / auto
     str color = "";
     bool is_stash = false;
@@ -975,6 +978,20 @@ void detached_from(str gitdir, str head_id, Snapshot snap) {
     }
 }
 
+/// The words after `HEAD detached` that `status` and `branch` print:
+/// `at <name>` or `from <name>`.
+pub str detached_words(str gitdir, str head_id) {
+    Snapshot snap = Snapshot();
+    detached_from(gitdir, head_id, snap);
+    if (snap.is_detached_at) {
+        return "at " + snap.detached_name;
+    }
+    if (snap.detached_name == "") {
+        return "at " + abbrev(head_id);
+    }
+    return "from " + snap.detached_name;
+}
+
 // Untracked and ignored paths as git lists them: whole directories that hold
 // nothing tracked collapse to `dir/` (not with -uall), nested repositories
 // are always one `dir/`.
@@ -1651,7 +1668,11 @@ str Printer.long_text() {
     }
     out = out + state_text() + rebase_text();
     if (snap.is_initial) {
-        out = out + "\nNo commits yet\n\n";
+        if (opts.is_commit_header) {
+            out = out + "\nInitial commit\n\n";
+        } else {
+            out = out + "\nNo commits yet\n\n";
+        }
     }
     bool is_commit = !is_in_progress();
     // staged
@@ -1752,7 +1773,9 @@ str Printer.long_text() {
     bool is_committable = snap.has_staged || (fs.is_file(fs.join(gitdir, "MERGE_HEAD")) && !snap.has_unmerged);
     if (!is_committable) {
         bool is_dirty = snap.has_unstaged || snap.has_unmerged;
-        if (is_dirty) {
+        if (opts.is_amend_footer) {
+            out = out + "No changes\n";
+        } else if (is_dirty) {
             out = out + "no changes added to commit (use \"git add\" and/or \"git commit -a\")\n";
         } else if (snap.untracked.size() > 0) {
             out = out + "nothing added to commit but untracked files present (use \"git add\" to track)\n";
@@ -2174,6 +2197,10 @@ int parse_args(Opts opts, List<str> argv) {
                 opts.is_ahead_behind = true;
             } else if (name == "--no-ahead-behind") {
                 opts.is_ahead_behind = false;
+            } else if (name == "--commit-header") {
+                opts.is_commit_header = true;
+            } else if (name == "--amend-footer") {
+                opts.is_amend_footer = true;
             } else if (name == "--show-stash") {
                 opts.is_stash = true;
                 opts.is_stash_set = true;
@@ -2284,6 +2311,13 @@ pub str find_root(str start) {
 /// absolute and normalised), `overrides` the `-c name=value` pairs, `argv`
 /// what followed the word `status`. Returns the process exit status.
 pub int run(str start, List<str> overrides, List<str> argv) {
+    return run_into(start, overrides, argv, false, []);
+}
+
+/// `run`, or with `is_capture` the text goes to `sink` instead of standard
+/// output (what `commit` shows when there is nothing to commit and puts in
+/// its editor template).
+pub int run_into(str start, List<str> overrides, List<str> argv, bool is_capture, List<str> sink) {
     Opts opts = Opts();
     opts.overrides = overrides;
     int parsed = parse_args(opts, argv);
@@ -2396,14 +2430,20 @@ pub int run(str start, List<str> overrides, List<str> argv) {
                 palette = build_palette(opts, config);
             }
             Printer printer = Printer(opts, palette, snap, prefix, config, gitdir);
+            str text = "";
             if (format == 0) {
-                put(printer.long_text());
+                text = printer.long_text();
             } else if (format == 1) {
-                put(printer.short_text(false));
+                text = printer.short_text(false);
             } else if (format == 2) {
-                put(printer.short_text(true));
+                text = printer.short_text(true);
             } else {
-                put(printer.v2_text());
+                text = printer.v2_text();
+            }
+            if (is_capture) {
+                sink.push(text);
+            } else {
+                put(text);
             }
             return 0;
         }
