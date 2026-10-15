@@ -829,7 +829,15 @@ fi
 
 # --- patch ----------------------------------------------------------------------------------
 
-if wanted patch; then
+# the prompts and the hunk navigation of git 2.55 (j/k roll over, p/P): older
+# gits ask differently, so this group is only compared against 2.55 or later
+git_at_least() { [ "$(printf '%s\n%s\n' "$1" "$(git version | awk '{print $3}')" | sort -V | head -n 1)" = "$1" ]; }
+
+if wanted patch && ! git_at_least 2.55; then
+    echo "compare_write: patch group skipped: git $(git version | awk '{print $3}') is older than 2.55"
+fi
+
+if wanted patch && git_at_least 2.55; then
     case_ "patch: add -p all yes" fx_hunks ':' 'printf "y\ny\ny\ny\ny\ny\ny\ny\ny\ny\ny\ny\ny\n" | G add -p'
     case_ "patch: add -p all no" fx_hunks ':' 'printf "n\nn\nn\nn\nn\nn\nn\nn\nn\nn\nn\nn\nn\n" | G add -p'
     case_ "patch: add -p a" fx_hunks ':' 'printf "a\na\na\na\na\na\n" | G add -p'

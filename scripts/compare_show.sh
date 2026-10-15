@@ -135,7 +135,9 @@ mm="$WORK/fx/combined"
 c=$(git -C "$mm" rev-list --merges HEAD | tail -n 1)
 compare combined-paths "$mm" show "$c" -- both.txt
 compare combined-paths "$mm" show -c "$c" -- both.txt conflict.txt
-compare combined-paths "$mm" show --cc "$c" -- nothing
+if git_at_least 2.55; then
+    compare combined-paths "$mm" show --cc "$c" -- nothing
+fi
 compare combined-paths "$mm" show --raw "$c" -- code.c
 compare combined-paths "$mm" show -m --raw "$c" -- code.c
 compare combined-paths "$mm" show --name-status "$c" -- '*.txt'
