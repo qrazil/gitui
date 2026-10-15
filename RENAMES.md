@@ -1,3 +1,21 @@
+# gitui 0.17.0: `1git` clone, fetch, pull, push, remote, ls-remote, init over HTTPS and ssh
+
+Version 0.17.0, from master 61188a5 (0.16.0). No module was renamed or
+removed. Added to `net/`: `GIT_transport.m31` (one session over smart HTTP,
+protocol v2 first with v0 fallback, or ssh; credentials), `GIT_creds.m31`
+(URL, netrc, `credential.helper`, askpass, terminal), `GIT_packstore.m31`
+(unpack small packs, keep large ones with a v2 `.idx`), `GIT_refspec.m31`,
+and the commands `GIT_gitfetch.m31`, `GIT_gitclone.m31` (`clone`, `init`),
+`GIT_gitpush.m31`, `GIT_gitpull.m31`, `GIT_gitremote.m31` (`remote`,
+`ls-remote`). `scripts/compare_net.sh` runs ~100 cases beside real git 2.55
+against `git http-backend` on localhost (`tests/net_serve.py`) and
+`scripts/compare_net_ssh.sh` against a disposable sshd. Library changes, none
+breaking: `GIT_object.read` treats a commit listed in `<common>/shallow` as
+parentless; `GIT_pack.Unpacked` has `start` and `end`; `GIT_reflog.action`
+reads `GIT_REFLOG_ACTION`, which `merge` and `rebase` now use in their reflog
+lines as git does (`pull: Fast-forward`, `pull --rebase (start): ...`);
+`merge --ff-only` prints git's `advice.diverging` hint. Nothing to migrate.
+
 # gitui 0.16.0: `1git` stash, cherry-pick, revert, merge, rebase, clean, worktree
 
 Version 0.16.0, from master 40bd10a (0.15.0). No module was renamed or

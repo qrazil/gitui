@@ -1,0 +1,1134 @@
+// `1git fetch`, and the engine `clone` and `pull` use: resolve the remote,
+// list its refs, work out what to fetch, receive the pack, update the
+// local refs with git's reflog messages, write FETCH_HEAD, prune, and print
+// the summary on standard error in git's columns.
+
+import io;
+import os;
+import fs;
+import text;
+import core.GIT_config;
+import core.GIT_object;
+import core.GIT_hash;
+import core.GIT_reflog;
+import core.GIT_refs;
+import core.GIT_branches;
+import core.GIT_repository;
+import core.GIT_gitcommon;
+import core.GIT_gitstore;
+import core.GIT_gitwrite;
+import net.GIT_remote;
+import net.GIT_refspec;
+import net.GIT_transport;
+import net.GIT_packstore;
+import net.GIT_http_push;
+
+/// A remote as the repository's configuration (or the command line) names it.
+pub type Remote {
+    pub str name;
+    pub str url;
+    pub List<str> specs;
+    pub str tagopt;
+    pub bool is_named;
+}
+
+pub type Opts {
+    pub bool prune = false;
+    /// "auto", "all" or "none"
+    pub str tags = "auto";
+    pub int depth = 0;
+    pub bool unshallow = false;
+    pub bool force = false;
+    pub bool quiet = false;
+    pub bool dry_run = false;
+    pub bool update_head_ok = false;
+    pub bool write_head = true;
+    pub bool verbose = false;
+    pub str filter = "";
+    /// the reflog message's start: `fetch origin`
+    pub str action = "";
+    /// `clone`: record the updates instead of making them, print nothing,
+    /// write no FETCH_HEAD
+    pub bool collect = false;
+}
+
+/// A ref a collecting fetch would have written.
+pub type Update {
+    pub str name;
+    pub str id;
+    pub str peeled;
+    /// an auto-followed tag (a clone writes these as loose refs)
+    pub bool is_followed = false;
+}
+
+/// One line of FETCH_HEAD.
+pub type Head {
+    pub str id;
+    pub str name;
+    pub bool is_for_merge;
+    pub str description;
+}
+
+pub type Outcome {
+    pub int status = 0;
+    pub List<Head> heads = [];
+    pub bool is_empty = false;
+    pub GIT_transport.Listing listing = GIT_transport.Listing();
+    pub List<Update> updates = [];
+}
+
+// One planned update of a local ref.
+type Plan {
+    str src;
+    str id;
+    str dst;
+    bool force;
+    bool is_followed;
+    bool is_for_merge;
+    str peeled;
+}
+
+int fail(str message) {
+    io.eprint("fatal: " + message);
+    return 128;
+}
+
+// --- remotes -------------------------------------------------------------------------
+
+pub List<str> remote_names(GIT_gitcommon.Ctx ctx) {
+    List<str> out = [];
+    for (str section in ctx.config.sections()) {
+        if (section.starts_with("remote.")) {
+            str name = section.substr(7, section.size());
+            if (!out.contains(name)) {
+                out.push(name);
+            }
+        }
+    }
+    out.sort();
+    return out;
+}
+
+pub bool has_remote(GIT_gitcommon.Ctx ctx, str name) {
+    return ctx.config.has_key("remote", name, "url") || ctx.config.has_key("remote", name, "fetch") || ctx.config.has_key("remote", name, "pushurl");
+}
+
+/// `name` as a configured remote, or `arg` as a URL; "" resolves through
+/// the current branch's remote, then `origin`.
+pub Result<Remote, str> resolve(GIT_gitcommon.Ctx ctx, str arg, bool is_push) {
+    str name = arg;
+    if (name == "") {
+        GIT_gitwrite.HeadInfo head = GIT_gitwrite.read_head(ctx.gitdir);
+        if (head.ref.starts_with("refs/heads/")) {
+            name = ctx.config.get("branch", head.ref.substr(11, head.ref.size()), "remote").or("");
+        }
+        if (name == "" && is_push) {
+            name = ctx.config.get("remote", "", "pushdefault").or("");
+        }
+        if (name == "" || name == ".") {
+            name = "origin";
+        }
+        if (!has_remote(ctx, name)) {
+            return Result<Remote, str>.Err("No remote repository specified.  Please, specify either a URL or a\nremote name from which new revisions should be fetched.");
+        }
+    }
+    if (has_remote(ctx, name)) {
+        str url = "";
+        if (is_push) {
+            List<str> push_urls = ctx.config.get_all("remote", name, "pushurl");
+            if (push_urls.size() > 0) {
+                url = push_urls[0];
+            }
+        }
+        if (url == "") {
+            List<str> urls = ctx.config.get_all("remote", name, "url");
+            if (urls.size() > 0) {
+                url = urls[0];
+            }
+        }
+        if (url == "") {
+            return Result<Remote, str>.Err("'" + name + "' does not appear to be a git repository");
+        }
+        url = GIT_remote.rewrite_gitdir(ctx.gitdir, url, is_push);
+        return Result<Remote, str>.Ok(Remote(name, url, ctx.config.get_all("remote", name, "fetch"), ctx.config.get("remote", name, "tagopt").or(""), true));
+    }
+    if (name.contains("://") || name.contains("/") || name.contains(":") || name.starts_with(".")) {
+        return Result<Remote, str>.Ok(Remote("", GIT_remote.rewrite_gitdir(ctx.gitdir, name, is_push), [], "", false));
+    }
+    return Result<Remote, str>.Err("'" + name + "' does not appear to be a git repository\nfatal: Could not read from remote repository.\n\nPlease make sure you have the correct access rights\nand the repository exists.");
+}
+
+/// The URL as a `To` line shows it: no credentials.
+pub str shown_url_push(str url) {
+    return GIT_transport.anonymize(url);
+}
+
+/// The URL as `From` and `To` lines show it: no credentials, no `.git`, no
+/// trailing slash.
+pub str shown_url(str url) {
+    str out = GIT_transport.anonymize(url);
+    while (out.ends_with("/")) {
+        out = out.substr(0, out.size() - 1);
+    }
+    if (out.ends_with(".git")) {
+        out = out.substr(0, out.size() - 4);
+    }
+    return out;
+}
+
+// --- local state -----------------------------------------------------------------------
+
+pub bool has_object_public(str gitdir, str id) {
+    return has_object(gitdir, id);
+}
+
+bool has_object(str gitdir, str id) {
+    match (GIT_object.read(gitdir, id)) {
+        case Ok(_): {
+            return true;
+        }
+        case Err(_): {
+            return false;
+        }
+    }
+}
+
+/// The ids to offer as `have`: every ref's tip, then their ancestors,
+/// breadth first, at most `limit`.
+pub List<str> local_haves(str gitdir, int limit) {
+    List<str> out = [];
+    Map<str, bool> seen = {};
+    List<str> queue = [];
+    match (GIT_refs.all(gitdir)) {
+        case Ok(List<GIT_refs.Ref> all): {
+            for (GIT_refs.Ref one in all) {
+                if (!seen.contains(one.id)) {
+                    seen.set(one.id, true);
+                    queue.push(one.id);
+                }
+            }
+        }
+        case Err(_): {
+        }
+    }
+    match (GIT_refs.head(gitdir)) {
+        case Ok(GIT_refs.Head head): {
+            match (head) {
+                case Detached(str id): {
+                    if (!seen.contains(id)) {
+                        seen.set(id, true);
+                        queue.push(id);
+                    }
+                }
+                case Born(_, _): {
+                }
+                case Unborn(_): {
+                }
+            }
+        }
+        case Err(_): {
+        }
+    }
+    int at = 0;
+    while (at < queue.size() && out.size() < limit) {
+        str id = queue[at];
+        at = at + 1;
+        match (GIT_object.read(gitdir, id)) {
+            case Ok(GIT_object.Object object): {
+                match (object.body) {
+                    case Commit(GIT_object.Commit commit): {
+                        out.push(id);
+                        for (str parent in commit.parents) {
+                            if (!seen.contains(parent)) {
+                                seen.set(parent, true);
+                                queue.push(parent);
+                            }
+                        }
+                    }
+                    case Tag(GIT_object.Tag tag): {
+                        if (!seen.contains(tag.object)) {
+                            seen.set(tag.object, true);
+                            queue.push(tag.object);
+                        }
+                    }
+                    case Blob: {
+                    }
+                    case Tree(_): {
+                    }
+                }
+            }
+            case Err(_): {
+            }
+        }
+    }
+    return out;
+}
+
+List<str> read_shallow(str gitdir) {
+    List<str> out = [];
+    str path = fs.join(GIT_repository.common(gitdir), "shallow");
+    if (!fs.is_file(path)) {
+        return out;
+    }
+    match (io.read(path)) {
+        case Ok(str body): {
+            for (str line in body.split("\n")) {
+                if (line.trim() != "") {
+                    out.push(line.trim());
+                }
+            }
+        }
+        case Err(_): {
+        }
+    }
+    return out;
+}
+
+/// Add `added` to and take `removed` out of `<common>/shallow`.
+pub void update_shallow(str gitdir, List<str> added, List<str> removed) {
+    Map<str, bool> set = {};
+    for (str id in read_shallow(gitdir)) {
+        set.set(id, true);
+    }
+    for (str id in added) {
+        set.set(id, true);
+    }
+    for (str id in removed) {
+        set.remove(id);
+    }
+    List<str> ids = set.keys();
+    ids.sort();
+    str path = fs.join(GIT_repository.common(gitdir), "shallow");
+    if (ids.size() == 0) {
+        if (fs.is_file(path)) {
+            match (fs.remove(path)) {
+                case Ok(_): {
+                }
+                case Err(_): {
+                }
+            }
+        }
+        return;
+    }
+    match (io.write(path, ids.join("\n") + "\n")) {
+        case Ok(_): {
+        }
+        case Err(_): {
+        }
+    }
+}
+
+// --- the planning -------------------------------------------------------------------------
+
+Option<GIT_transport.RefInfo> find_ref(GIT_transport.Listing listing, str name) {
+    for (GIT_transport.RefInfo one in listing.refs) {
+        if (one.name == name) {
+            return Option<GIT_transport.RefInfo>.Some(one);
+        }
+    }
+    if (name == "HEAD" && listing.head_id != "") {
+        return Option<GIT_transport.RefInfo>.Some(GIT_transport.RefInfo("HEAD", listing.head_id, "", listing.head_target));
+    }
+    return Option<GIT_transport.RefInfo>.None;
+}
+
+Option<GIT_transport.RefInfo> find_candidate(GIT_transport.Listing listing, str name) {
+    for (str candidate in GIT_refspec.candidates(name)) {
+        match (find_ref(listing, candidate)) {
+            case Some(GIT_transport.RefInfo found): {
+                return Option<GIT_transport.RefInfo>.Some(found);
+            }
+            case None: {
+            }
+        }
+    }
+    return Option<GIT_transport.RefInfo>.None;
+}
+
+str flag_summary(str kind) {
+    return kind;
+}
+
+// --- running -----------------------------------------------------------------------------------
+
+/// Fetch from `remote`. `cli_specs` are the refspecs typed after the remote.
+pub Outcome fetch(GIT_gitcommon.Ctx ctx, Remote remote, List<str> cli_specs, Opts opts) {
+    Outcome out = Outcome();
+    GIT_gitwrite.HeadInfo head = GIT_gitwrite.read_head(ctx.gitdir);
+    // 1. the specs
+    List<GIT_refspec.Spec> specs = [];
+    bool is_explicit = cli_specs.size() > 0;
+    if (is_explicit) {
+        int i = 0;
+        while (i < cli_specs.size()) {
+            str word = cli_specs[i];
+            if (word == "tag" && i + 1 < cli_specs.size()) {
+                specs.push(GIT_refspec.parse("refs/tags/" + cli_specs[i + 1] + ":refs/tags/" + cli_specs[i + 1]));
+                i = i + 2;
+                continue;
+            }
+            specs.push(GIT_refspec.parse(word));
+            i = i + 1;
+        }
+    } else {
+        for (str one in remote.specs) {
+            specs.push(GIT_refspec.parse(one));
+        }
+        if (specs.size() == 0 && !remote.is_named) {
+            specs.push(GIT_refspec.parse("HEAD"));
+        }
+    }
+    str tag_mode = opts.tags;
+    if (remote.tagopt == "--no-tags" && tag_mode == "auto") {
+        tag_mode = "none";
+    } else if (remote.tagopt == "--tags" && tag_mode == "auto") {
+        tag_mode = "all";
+    }
+    if (tag_mode == "all") {
+        specs.push(GIT_refspec.parse("refs/tags/*:refs/tags/*"));
+    }
+    bool is_autotags = false;
+    if (is_explicit) {
+        for (GIT_refspec.Spec spec in specs) {
+            if (spec.dst != "") {
+                is_autotags = true;
+            }
+        }
+    } else {
+        is_autotags = remote.specs.size() > 0;
+    }
+    // 2. connect and list
+    List<str> prefixes = [];
+    for (GIT_refspec.Spec spec in specs) {
+        if (spec.is_glob) {
+            prefixes.push(GIT_refspec.prefix_of(spec.src));
+        } else {
+            for (str candidate in GIT_refspec.candidates(spec.src)) {
+                prefixes.push(candidate);
+            }
+        }
+    }
+    if (tag_mode == "auto" && is_autotags) {
+        prefixes.push("refs/tags/");
+    }
+    if (remote.is_named && !is_explicit && prefixes.size() > 0) {
+        prefixes.push("HEAD");
+    }
+    bool has_unborn_head = false;
+    GIT_transport.Session session = GIT_transport.empty(ctx);
+    match (GIT_transport.connect(ctx, remote.url, "git-upload-pack")) {
+        case Ok(GIT_transport.Session connected): {
+            session = connected;
+        }
+        case Err(str why): {
+            out.status = fail(why);
+            return out;
+        }
+    }
+    GIT_transport.Listing listing = GIT_transport.Listing();
+    match (session.list(prefixes)) {
+        case Ok(GIT_transport.Listing got): {
+            listing = got;
+        }
+        case Err(str why): {
+            session.close();
+            out.status = fail(why);
+            return out;
+        }
+    }
+    out.listing = listing;
+    // the remote's object format must be ours
+    int local_raw = GIT_hash.raw_length(ctx.gitdir);
+    if (listing.object_format != GIT_hash.name(local_raw)) {
+        session.close();
+        out.status = fail("the remote's object format (" + listing.object_format + ") does not match this repository's (" + GIT_hash.name(local_raw) + ")");
+        return out;
+    }
+    // 3. the plan
+    List<Plan> plans = [];
+    Map<str, bool> planned = {};
+    for (GIT_refspec.Spec spec in specs) {
+        if (spec.is_glob) {
+            for (GIT_transport.RefInfo one in listing.refs) {
+                match (GIT_refspec.glob_capture(spec.src, one.name)) {
+                    case Some(str middle): {
+                        str dst = "";
+                        if (spec.dst != "") {
+                            dst = GIT_refspec.glob_fill(spec.dst, middle);
+                        }
+                        str key = one.name + "\n" + dst;
+                        if (!planned.contains(key)) {
+                            planned.set(key, true);
+                            plans.push(Plan(one.name, one.id, dst, spec.force, false, false, one.peeled));
+                        }
+                    }
+                    case None: {
+                    }
+                }
+            }
+        } else {
+            match (find_candidate(listing, spec.src)) {
+                case Some(GIT_transport.RefInfo found): {
+                    str dst = spec.dst;
+                    if (dst != "" && !dst.starts_with("refs/")) {
+                        // a short destination: the namespace of the source
+                        if (found.name.starts_with("refs/tags/")) {
+                            dst = "refs/tags/" + dst;
+                        } else {
+                            dst = "refs/heads/" + dst;
+                        }
+                    }
+                    str key = found.name + "\n" + dst;
+                    if (!planned.contains(key)) {
+                        planned.set(key, true);
+                        plans.push(Plan(found.name, found.id, dst, spec.force, false, is_explicit, found.peeled));
+                    }
+                }
+                case None: {
+                    if (is_explicit) {
+                        session.close();
+                        out.status = fail("couldn't find remote ref " + spec.src);
+                        return out;
+                    }
+                    if (spec.src == "HEAD" && listing.head_id == "") {
+                        has_unborn_head = true;
+                    }
+                }
+            }
+        }
+    }
+    // which of them FETCH_HEAD marks for merging when nothing was typed
+    if (!is_explicit) {
+        if (!remote.is_named) {
+            for (int i in 0 .. plans.size()) {
+                if (plans[i].src == "HEAD") {
+                    plans[i].is_for_merge = true;
+                }
+            }
+        } else if (head.ref.starts_with("refs/heads/")) {
+            str branch = head.ref.substr(11, head.ref.size());
+            Option<str> branch_remote = ctx.config.get("branch", branch, "remote");
+            Option<str> merge = ctx.config.get("branch", branch, "merge");
+            if (branch_remote.is_some() && merge.is_some() && branch_remote.or("") == remote.name) {
+                for (int i in 0 .. plans.size()) {
+                    if (plans[i].src == merge.or("")) {
+                        plans[i].is_for_merge = true;
+                    }
+                }
+            }
+        }
+    }
+    // 4. what is missing
+    Map<str, bool> was_local = {};
+    for (GIT_transport.RefInfo one in listing.refs) {
+        if (one.name.starts_with("refs/tags/")) {
+            str target = one.id;
+            if (one.peeled != "") {
+                target = one.peeled;
+            }
+            if (has_object(ctx.gitdir, target)) {
+                was_local.set(target, true);
+            }
+        }
+    }
+    if (!opts.update_head_ok && !ctx.is_bare && head.ref != "") {
+        for (Plan one in plans) {
+            if (one.dst == head.ref) {
+                session.close();
+                out.status = fail("refusing to fetch into branch '" + head.ref + "' checked out at '" + ctx.root + "'");
+                return out;
+            }
+        }
+    }
+    List<str> wants = [];
+    Map<str, bool> wanted = {};
+    for (Plan one in plans) {
+        if (!wanted.contains(one.id) && !has_object(ctx.gitdir, one.id)) {
+            wanted.set(one.id, true);
+            wants.push(one.id);
+        }
+    }
+    List<str> shallows = read_shallow(ctx.gitdir);
+    bool is_deepening = opts.depth > 0 || opts.unshallow;
+    if (is_deepening && wants.size() == 0) {
+        for (Plan one in plans) {
+            if (!wanted.contains(one.id)) {
+                wanted.set(one.id, true);
+                wants.push(one.id);
+            }
+        }
+    }
+    int depth = opts.depth;
+    if (opts.unshallow) {
+        depth = 2147483647;
+    }
+    GIT_transport.Fetched fetched = GIT_transport.Fetched();
+    if (wants.size() > 0 || (tag_mode == "auto" && false)) {
+        GIT_transport.FetchArgs args = GIT_transport.FetchArgs();
+        args.wants = wants;
+        args.haves = local_haves(ctx.gitdir, 256);
+        args.depth = depth;
+        args.shallows = shallows;
+        args.include_tag = tag_mode == "auto" && is_autotags;
+        args.filter = opts.filter;
+        match (session.fetch(args)) {
+            case Ok(GIT_transport.Fetched got): {
+                fetched = got;
+            }
+            case Err(str why): {
+                session.close();
+                out.status = fail(why);
+                return out;
+            }
+        }
+        if (fetched.has_pack && !opts.dry_run) {
+            int limit = GIT_gitcommon.cfg_int(ctx, "fetch", "", "unpackLimit", GIT_gitcommon.cfg_int(ctx, "transfer", "", "unpackLimit", GIT_packstore.DEFAULT_UNPACK_LIMIT));
+            match (GIT_packstore.store(ctx.gitdir, fetched.pack, limit)) {
+                case Ok(_): {
+                }
+                case Err(str why): {
+                    session.close();
+                    io.eprint(why);
+                    out.status = 128;
+                    return out;
+                }
+            }
+        }
+        if (!opts.dry_run && (fetched.shallow.size() > 0 || fetched.unshallow.size() > 0)) {
+            update_shallow(ctx.gitdir, fetched.shallow, fetched.unshallow);
+        }
+    }
+    session.close();
+    // 5. the batches: what was asked for, the tracking refs a named
+    // remote keeps opportunistically, and the tags that point at what we have
+    str action = opts.action;
+    if (action == "") {
+        action = "fetch";
+        if (remote.name != "") {
+            action = action + " " + remote.name;
+        } else {
+            action = action + " " + remote.url;
+        }
+    }
+    GIT_gitstore.Store store = GIT_gitstore.open(ctx.gitdir);
+    int abbrev = GIT_gitcommon.default_abbrev(ctx);
+    int refcol = 10;
+    List<List<str>> all_rows = [];
+    List<Head> heads = [];
+    int status = 0;
+    List<Plan> opportunistic = [];
+    if (is_explicit && remote.is_named) {
+        for (Plan one in plans) {
+            str mapped = GIT_branches.map_through_fetch(remote.specs, one.src);
+            if (mapped != "" && mapped != one.dst && !planned.contains(one.src + "\n" + mapped)) {
+                opportunistic.push(Plan(one.src, one.id, mapped, false, false, false, one.peeled));
+                planned.set(one.src + "\n" + mapped, true);
+            }
+        }
+    }
+    List<Plan> followed = [];
+    if (is_autotags && tag_mode == "auto") {
+        Map<str, bool> primary_ids = {};
+        for (Plan one in plans) {
+            primary_ids.set(one.id, true);
+        }
+        List<Plan> early = [];
+        for (str name in tag_order(listing)) {
+            if (GIT_refs.has_ref(ctx.gitdir, name) || planned.contains(name + "\n" + name)) {
+                continue;
+            }
+            GIT_transport.RefInfo one = find_ref(listing, name).or(GIT_transport.RefInfo("", "", "", ""));
+            if (!has_object(ctx.gitdir, one.id)) {
+                continue;
+            }
+            if (one.peeled != "" && !has_object(ctx.gitdir, one.peeled)) {
+                continue;
+            }
+            str target = one.id;
+            if (one.peeled != "") {
+                target = one.peeled;
+            }
+            Plan follow = Plan(one.name, one.id, one.name, false, true, false, one.peeled);
+            if (primary_ids.contains(target) || was_local.contains(target)) {
+                early.push(follow);
+            } else {
+                followed.push(follow);
+            }
+        }
+        for (Plan one in early) {
+            plans.push(one);
+        }
+    }
+    List<List<Plan>> batches = [plans, opportunistic, followed];
+    int batch_index = 0;
+    for (List<Plan> batch in batches) {
+        batch_index = batch_index + 1;
+        // the column widths of this batch (git counts what will be shown)
+        for (Plan one in batch) {
+            if (one.dst == "") {
+                continue;
+            }
+            str local_id = "";
+            match (GIT_refs.resolve(ctx.gitdir, one.dst)) {
+                case Ok(str current): {
+                    local_id = current;
+                }
+                case Err(_): {
+                }
+            }
+            if (local_id == one.id && !opts.verbose) {
+                continue;
+            }
+            int remote_width = GIT_refspec.pretty(one.src).size();
+            int local_width = GIT_refspec.pretty(one.dst).size();
+            if (80 < 21 + remote_width + 4 + local_width) {
+                continue;
+            }
+            if (remote_width > refcol) {
+                refcol = remote_width;
+            }
+        }
+        for (Plan one in batch) {
+            str kind = "";
+            str what = one.src;
+            if (one.src == "HEAD") {
+                what = "";
+            } else if (one.src.starts_with("refs/heads/")) {
+                kind = "branch";
+                what = one.src.substr(11, one.src.size());
+            } else if (one.src.starts_with("refs/tags/")) {
+                kind = "tag";
+                what = one.src.substr(10, one.src.size());
+            } else if (one.src.starts_with("refs/remotes/")) {
+                kind = "remote-tracking branch";
+                what = one.src.substr(13, one.src.size());
+            }
+            if (batch_index != 2) {
+                str description = head_url(remote.url);
+                if (kind != "" || what != "") {
+                    if (kind != "") {
+                        description = kind + " '" + what + "' of " + head_url(remote.url);
+                    } else {
+                        description = "'" + what + "' of " + head_url(remote.url);
+                    }
+                }
+                heads.push(Head(one.id, one.src, one.is_for_merge, description));
+            }
+            if (one.dst == "") {
+                str shown_kind = kind;
+                if (shown_kind == "") {
+                    shown_kind = "branch";
+                }
+                str shown_what = what;
+                if (shown_what == "") {
+                    shown_what = "HEAD";
+                }
+                all_rows.push(["*", shown_kind, shown_what, "FETCH_HEAD", "", "0"]);
+                continue;
+            }
+            str old = "";
+            match (GIT_refs.resolve(ctx.gitdir, one.dst)) {
+                case Ok(str current): {
+                    old = current;
+                }
+                case Err(_): {
+                }
+            }
+            if (old == one.id) {
+                if (opts.verbose) {
+                    all_rows.push([" ", "= [up to date]", GIT_refspec.pretty(one.src), GIT_refspec.pretty(one.dst), "", "1"]);
+                }
+                continue;
+            }
+            str reflog = "";
+            List<str> row = [];
+            bool is_have = has_object(ctx.gitdir, one.id);
+            if (old == "") {
+                str summary = "[new ref]";
+                reflog = "storing ref";
+                if (kind == "branch") {
+                    summary = "[new branch]";
+                    reflog = "storing head";
+                } else if (kind == "tag") {
+                    summary = "[new tag]";
+                    reflog = "storing tag";
+                }
+                row = ["*", summary, GIT_refspec.pretty(one.src), GIT_refspec.pretty(one.dst), "", "1"];
+            } else {
+                bool is_force = one.force || opts.force;
+                if (one.dst.starts_with("refs/tags/")) {
+                    if (!is_force) {
+                        all_rows.push(["!", "[rejected]", GIT_refspec.pretty(one.src), GIT_refspec.pretty(one.dst), "would clobber existing tag", "1"]);
+                        status = 1;
+                        continue;
+                    }
+                    reflog = "updating tag";
+                    row = ["t", "[tag update]", GIT_refspec.pretty(one.src), GIT_refspec.pretty(one.dst), "", "1"];
+                } else {
+                    bool is_ff = is_have && GIT_http_push.is_ancestor(ctx.gitdir, old, one.id);
+                    str short_old = store.unique_abbrev(old, abbrev);
+                    str short_new = one.id.substr(0, abbrev);
+                    if (is_have) {
+                        short_new = store.unique_abbrev(one.id, abbrev);
+                    }
+                    if (is_ff) {
+                        reflog = "fast-forward";
+                        row = [" ", short_old + ".." + short_new, GIT_refspec.pretty(one.src), GIT_refspec.pretty(one.dst), "", "1"];
+                    } else if (is_force) {
+                        reflog = "forced-update";
+                        row = ["+", short_old + "..." + short_new, GIT_refspec.pretty(one.src), GIT_refspec.pretty(one.dst), "forced update", "1"];
+                    } else {
+                        all_rows.push(["!", "[rejected]", GIT_refspec.pretty(one.src), GIT_refspec.pretty(one.dst), "non-fast-forward", "1"]);
+                        status = 1;
+                        continue;
+                    }
+                }
+            }
+            if (opts.collect) {
+                if (is_have) {
+                    Update update = Update(one.dst, one.id, one.peeled);
+                    update.is_followed = one.is_followed;
+                    out.updates.push(update);
+                }
+                continue;
+            }
+            if (!opts.dry_run) {
+                if (!is_have) {
+                    io.eprint("error: " + remote.url + " did not send all necessary objects");
+                    status = 1;
+                    continue;
+                }
+                match (GIT_refs.update(ctx.gitdir, one.dst, one.id, Option<str>.None, reflog_message: action + ": " + reflog)) {
+                    case Ok(_): {
+                    }
+                    case Err(_): {
+                        row = ["!", "[rejected]", GIT_refspec.pretty(one.src), GIT_refspec.pretty(one.dst), "unable to update local ref", "1"];
+                        status = 1;
+                    }
+                }
+            }
+            all_rows.push(row);
+        }
+    }
+    // 6. prune
+    if (opts.prune) {
+        List<List<str>> pruned = prune_rows(ctx, specs, listing, remote, opts.dry_run);
+        for (List<str> row in pruned) {
+            all_rows.push(row);
+        }
+    }
+    for (List<str> row in all_rows) {
+        if (row[5] == "1" && row[2].size() > refcol && 80 >= 21 + row[2].size() + 4 + row[3].size()) {
+            refcol = row[2].size();
+        }
+    }
+    // 7. the remote's HEAD as a local symbolic ref (remote.<name>.followRemoteHEAD)
+    if (remote.is_named && !is_explicit && listing.head_target.starts_with("refs/heads/") && !opts.dry_run && !opts.collect) {
+        str follow = ctx.config.get("remote", remote.name, "followremotehead").or("create");
+        str head_ref = "refs/remotes/" + remote.name + "/HEAD";
+        str target = "refs/remotes/" + remote.name + "/" + listing.head_target.substr(11, listing.head_target.size());
+        bool is_present = GIT_refs.has_ref(ctx.gitdir, head_ref) || fs.is_file(fs.join(ctx.gitdir, head_ref));
+        if ((follow == "create" || follow == "warn" || follow == "always") && (!is_present || follow == "always") && GIT_refs.has_ref(ctx.gitdir, target)) {
+            match (GIT_refs.update_symbolic(ctx.gitdir, head_ref, target)) {
+                case Ok(_): {
+                }
+                case Err(_): {
+                }
+            }
+            match (GIT_refs.resolve(ctx.gitdir, target)) {
+                case Ok(str tip): {
+                    match (GIT_reflog.log_update(ctx.gitdir, head_ref, GIT_reflog.zero(ctx.gitdir), tip, "fetch")) {
+                        case Ok(_): {
+                        }
+                        case Err(_): {
+                        }
+                    }
+                }
+                case Err(_): {
+                }
+            }
+        }
+    }
+    // 8. FETCH_HEAD
+    if (opts.write_head && !opts.dry_run && !opts.collect) {
+        str body = "";
+        for (int pass in 0 .. 2) {
+            for (Head one in heads) {
+                if (one.is_for_merge == (pass == 0)) {
+                    str flag = "not-for-merge";
+                    if (one.is_for_merge) {
+                        flag = "";
+                    }
+                    body = body + one.id + "\t" + flag + "\t" + one.description + "\n";
+                }
+            }
+        }
+        match (io.write(fs.join(GIT_repository.common(ctx.gitdir), "FETCH_HEAD"), body)) {
+            case Ok(_): {
+            }
+            case Err(_): {
+            }
+        }
+    }
+    // 9. the report
+    if (!opts.quiet && !opts.collect && all_rows.size() > 0) {
+        int summary_width = 2 * abbrev + 3;
+        for (List<str> row in all_rows) {
+            if (row[1].size() > summary_width && row[1].contains("..") && !row[1].starts_with("[")) {
+                summary_width = row[1].size();
+            }
+        }
+        io.eprint("From " + shown_url(remote.url));
+        for (List<str> row in all_rows) {
+            str line = " " + row[0] + " " + pad(row[1], summary_width) + " " + pad(row[2], refcol) + " -> " + row[3];
+            if (row[4] != "") {
+                line = line + "  (" + row[4] + ")";
+            }
+            io.eprint(line);
+        }
+    }
+    out.heads = heads;
+    out.status = status;
+    out.is_empty = listing.refs.size() == 0 && listing.head_id == "";
+    return out;
+}
+
+// The order git's `find_non_local_tags` visits the remote's tags in: a
+// hashmap of names (FNV-1 of the name, 64 buckets growing fourfold past 80%
+// load, new entries at the head of a bucket's chain), walked bucket by bucket.
+List<str> tag_order(GIT_transport.Listing listing) {
+    List<str> names = [];
+    for (GIT_transport.RefInfo one in listing.refs) {
+        if (one.name.starts_with("refs/tags/")) {
+            names.push(one.name);
+        }
+    }
+    int size = 64;
+    List<List<str>> table = [];
+    for (int i in 0 .. size) {
+        table.push([]);
+    }
+    int count = 0;
+    for (str name in names) {
+        int slot = fnv1(name) & (size - 1);
+        List<str> chain = [name];
+        for (str existing in table[slot]) {
+            chain.push(existing);
+        }
+        table[slot] = chain;
+        count = count + 1;
+        if (count > size * 80 / 100) {
+            int bigger = size * 4;
+            List<List<str>> next = [];
+            for (int i in 0 .. bigger) {
+                next.push([]);
+            }
+            for (List<str> old_chain in table) {
+                for (str moved in old_chain) {
+                    int new_slot = fnv1(moved) & (bigger - 1);
+                    List<str> grown = [moved];
+                    for (str there in next[new_slot]) {
+                        grown.push(there);
+                    }
+                    next[new_slot] = grown;
+                }
+            }
+            table = next;
+            size = bigger;
+        }
+    }
+    List<str> out = [];
+    for (List<str> chain in table) {
+        for (str name in chain) {
+            out.push(name);
+        }
+    }
+    return out;
+}
+
+int fnv1(str name) {
+    int hash = 0x811c9dc5;
+    for (int c in name.to_bytes()) {
+        hash = ((hash * 0x01000193) & 0xFFFFFFFF) ^ c;
+    }
+    return hash;
+}
+
+str slurp(str path) {
+    match (io.read(path)) {
+        case Ok(str contents): {
+            return contents;
+        }
+        case Err(_): {
+            return "";
+        }
+    }
+}
+
+str head_url(str url) {
+    return shown_url(url);
+}
+
+str shown_url_for_head(str url) {
+    return head_url(url);
+}
+
+str pad(str text_value, int width) {
+    str out = text_value;
+    while (out.size() < width) {
+        out = out + " ";
+    }
+    return out;
+}
+
+// Delete the local refs a glob destination covers that the remote lost.
+List<List<str>> prune_rows(GIT_gitcommon.Ctx ctx, List<GIT_refspec.Spec> specs, GIT_transport.Listing listing, Remote remote, bool is_dry) {
+    List<List<str>> rows = [];
+    List<GIT_refs.Ref> locals = [];
+    match (GIT_refs.all(ctx.gitdir)) {
+        case Ok(List<GIT_refs.Ref> all): {
+            locals = all;
+        }
+        case Err(_): {
+            return rows;
+        }
+    }
+    Map<str, bool> remote_names_seen = {};
+    for (GIT_transport.RefInfo one in listing.refs) {
+        remote_names_seen.set(one.name, true);
+    }
+    for (GIT_refspec.Spec spec in specs) {
+        if (spec.dst == "" || !spec.is_glob || spec.dst.starts_with("refs/tags/")) {
+            continue;
+        }
+        for (GIT_refs.Ref local in locals) {
+            // a symbolic ref (`origin/HEAD`) is not the remote's to take away
+            str loose = slurp(fs.join(GIT_repository.common(ctx.gitdir), local.name));
+            if (loose.starts_with("ref:")) {
+                continue;
+            }
+            match (GIT_refspec.glob_capture(spec.dst, local.name)) {
+                case Some(str middle): {
+                    str src = GIT_refspec.glob_fill(spec.src, middle);
+                    if (!remote_names_seen.contains(src)) {
+                        rows.push(["-", "[deleted]", "(none)", GIT_refspec.pretty(local.name), "", "0"]);
+                        if (!is_dry) {
+                            match (GIT_branches.delete_ref(ctx.gitdir, local.name)) {
+                                case Ok(_): {
+                                }
+                                case Err(_): {
+                                }
+                            }
+                            match (GIT_reflog.delete_log(ctx.gitdir, local.name)) {
+                                case Ok(_): {
+                                }
+                                case Err(_): {
+                                }
+                            }
+                        }
+                    }
+                }
+                case None: {
+                }
+            }
+        }
+    }
+    return rows;
+}
+
+// --- the command ----------------------------------------------------------------------------------
+
+const str FETCH_USAGE = "usage: git fetch [<options>] [<repository> [<refspec>...]]\n   or: git fetch [<options>] <group>\n   or: git fetch --multiple [<options>] [(<repository> | <group>)...]\n   or: git fetch --all [<options>]";
+
+pub int run_fetch(str start, List<str> overrides, List<str> argv) {
+    GIT_gitwrite.Opts parsed = GIT_gitwrite.parse_opts(argv, ["-q --quiet", "-v --verbose", "--all", "-p --prune", "-t --tags", "-n", "--depth=", "--unshallow", "-f --force", "-u --update-head-ok", "--dry-run", "--write-fetch-head", "--filter=", "-j --jobs=", "--set-upstream", "-a --append", "--progress", "--no-progress", "--recurse-submodules=?", "--multiple", "--prefetch", "-4", "-6", "-k --keep", "--auto-gc", "--auto-maintenance", "-o --server-option="]);
+    int checked = GIT_gitwrite.check_opts(parsed, FETCH_USAGE);
+    if (checked >= 0) {
+        return checked;
+    }
+    GIT_gitcommon.Opened opened = GIT_gitcommon.open(start, overrides);
+    if (!opened.ok) {
+        return 128;
+    }
+    GIT_gitcommon.Ctx ctx = opened.ctx;
+    Opts opts = Opts();
+    if (argv.size() > 0) {
+        opts.action = "fetch " + argv.join(" ");
+    } else {
+        opts.action = "fetch";
+    }
+    opts.quiet = parsed.flag("quiet");
+    opts.verbose = parsed.flag("verbose");
+    opts.prune = parsed.flag("prune") || ctx.config.get_bool("fetch", "", "prune").or(false);
+    opts.force = parsed.flag("force");
+    opts.dry_run = parsed.flag("dry-run");
+    opts.update_head_ok = parsed.flag("update-head-ok");
+    opts.filter = parsed.value("filter", "");
+    if (parsed.has("tags")) {
+        if (parsed.flag("tags")) {
+            opts.tags = "all";
+        } else {
+            opts.tags = "none";
+        }
+    }
+    if (parsed.flag("n")) {
+        opts.tags = "none";
+    }
+    if (parsed.has("depth")) {
+        match (parsed.value("depth", "").parse_int()) {
+            case Some(int depth): {
+                if (depth <= 0) {
+                    return fail("depth " + parsed.value("depth", "") + " is not a positive number");
+                }
+                opts.depth = depth;
+            }
+            case None: {
+                return fail("depth " + parsed.value("depth", "") + " is not a positive number");
+            }
+        }
+    }
+    opts.unshallow = parsed.flag("unshallow");
+    if (opts.unshallow && read_shallow(ctx.gitdir).size() == 0) {
+        return fail("--unshallow on a complete repository does not make sense");
+    }
+    List<str> words = parsed.paths();
+    if (parsed.flag("all")) {
+        int status = 0;
+        for (str name in remote_names(ctx)) {
+            match (resolve(ctx, name, false)) {
+                case Ok(Remote remote): {
+                    if (!opts.quiet && remote_names(ctx).size() > 1) {
+                        print("Fetching " + name);
+                    }
+                    Outcome got = fetch(ctx, remote, [], opts);
+                    if (got.status != 0) {
+                        status = got.status;
+                    }
+                }
+                case Err(str why): {
+                    return fail(why);
+                }
+            }
+        }
+        return status;
+    }
+    str remote_arg = "";
+    List<str> specs = [];
+    if (words.size() > 0) {
+        remote_arg = words[0];
+        for (int i in 1 .. words.size()) {
+            specs.push(words[i]);
+        }
+    }
+    Remote remote = Remote("", "", [], "", false);
+    match (resolve(ctx, remote_arg, false)) {
+        case Ok(Remote found): {
+            remote = found;
+        }
+        case Err(str why): {
+            return fail(why);
+        }
+    }
+    Outcome got = fetch(ctx, remote, specs, opts);
+    return got.status;
+}

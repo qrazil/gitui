@@ -764,7 +764,7 @@ Result<bool, GIT_sequencer.Error> begin(str gitdir, str worktree, Plan plan, Lis
     if (shown == "") {
         shown = onto;
     }
-    move_head(gitdir, plan.orig_head, new_head, "rebase (start): checkout " + shown)?;
+    move_head(gitdir, plan.orig_head, new_head, GIT_reflog.action("rebase") + " (start): checkout " + shown)?;
     return Result<bool, GIT_sequencer.Error>.Ok(true);
 }
 
@@ -927,7 +927,7 @@ Result<bool, GIT_sequencer.Error> pick_message_check(GIT_object.Commit commit) {
 }
 
 str pick_word(GIT_rebase_todo.Verb verb) {
-    return "rebase (" + verb.word() + ")";
+    return GIT_reflog.action("rebase") + " (" + verb.word() + ")";
 }
 
 str merge_message(str gitdir, GIT_object.Commit commit) {
@@ -1028,7 +1028,7 @@ Result<Option<Report>, GIT_sequencer.Error> after_pick(str gitdir, str worktree,
                     return Result<Option<Report>, GIT_sequencer.Error>.Err(GIT_sequencer.Error.EmptyMessage);
                 }
                 str tree = tree_of(gitdir, head.id)?;
-                amend_head(gitdir, tree, text.to_bytes(), "rebase (reword): " + first_line(text))?;
+                amend_head(gitdir, tree, text.to_bytes(), GIT_reflog.action("rebase") + " (reword): " + first_line(text))?;
                 // the commit git's own `commit` made says so on standard output
                 Where reworded = where_head(gitdir)?;
                 notes.push("@@commit " + reworded.id);
@@ -1224,10 +1224,10 @@ Result<Report, GIT_sequencer.Error> finish(str gitdir, str worktree, List<str> n
             }
         }
         if (current != head.id) {
-            GIT_sequencer.move_ref(gitdir, head_name, head.id, Option<str>.Some(current), "rebase (finish): " + head_name + " onto " + onto)?;
+            GIT_sequencer.move_ref(gitdir, head_name, head.id, Option<str>.Some(current), GIT_reflog.action("rebase") + " (finish): " + head_name + " onto " + onto)?;
         }
         GIT_sequencer.lift_bool(link_head(gitdir, head_name))?;
-        log_head(gitdir, head.id, head.id, "rebase (finish): returning to " + head_name);
+        log_head(gitdir, head.id, head.id, GIT_reflog.action("rebase") + " (finish): returning to " + head_name);
     }
     drop_state(gitdir);
     if (autostash != "") {
@@ -1308,8 +1308,6 @@ Option<GIT_rebase_todo.Command> last_done(str gitdir) {
     return Option<GIT_rebase_todo.Command>.None;
 }
 
-const str CONTINUE_WORD = "rebase (continue)";
-
 /// Commit what the person staged for the stopped step, as git's
 /// `commit_staged_changes`. `Some(report)` when a message is still needed.
 Result<Option<Report>, GIT_sequencer.Error> commit_staged(str gitdir, str worktree, Option<str> message, Editor editor, List<str> notes) {
@@ -1348,7 +1346,7 @@ Result<Option<Report>, GIT_sequencer.Error> commit_staged(str gitdir, str worktr
             return Result<Option<Report>, GIT_sequencer.Error>.Err(GIT_sequencer.Error.EmptyMessage);
         }
         str tree = tree_of(gitdir, head.id)?;
-        amend_head(gitdir, tree, text.to_bytes(), "rebase (reword): " + first_line(text))?;
+        amend_head(gitdir, tree, text.to_bytes(), GIT_reflog.action("rebase") + " (reword): " + first_line(text))?;
         return after_commit(gitdir, false);
     }
     if (!is_staged && !is_final) {
@@ -1390,7 +1388,7 @@ Result<Option<Report>, GIT_sequencer.Error> commit_staged(str gitdir, str worktr
         if (text.trim() == "") {
             return Result<Option<Report>, GIT_sequencer.Error>.Err(GIT_sequencer.Error.EmptyMessage);
         }
-        amend_head(gitdir, tree, text.to_bytes(), CONTINUE_WORD + ": " + first_line(text))?;
+        amend_head(gitdir, tree, text.to_bytes(), GIT_reflog.action("rebase") + " (continue): " + first_line(text))?;
         return after_commit(gitdir, is_final);
     }
     GIT_object.Ident author = GIT_merge.ident(gitdir, "AUTHOR");
@@ -1413,7 +1411,7 @@ Result<Option<Report>, GIT_sequencer.Error> commit_staged(str gitdir, str worktr
     if (text.trim() == "") {
         return Result<Option<Report>, GIT_sequencer.Error>.Err(GIT_sequencer.Error.EmptyMessage);
     }
-    commit_head(gitdir, tree, [head.id], author, text.to_bytes(), head.id, CONTINUE_WORD + ": " + first_line(text))?;
+    commit_head(gitdir, tree, [head.id], author, text.to_bytes(), head.id, GIT_reflog.action("rebase") + " (continue): " + first_line(text))?;
     return after_commit(gitdir, false);
 }
 
@@ -1481,9 +1479,9 @@ pub Result<List<str>, GIT_sequencer.Error> abort(str gitdir, str worktree) {
     rm_git(gitdir, "CHERRY_PICK_HEAD");
     if (head_name.starts_with("refs/")) {
         GIT_sequencer.lift_bool(link_head(gitdir, head_name))?;
-        log_head(gitdir, head.id, orig, "rebase (abort): returning to " + head_name);
+        log_head(gitdir, head.id, orig, GIT_reflog.action("rebase") + " (abort): returning to " + head_name);
     } else {
-        move_head(gitdir, head.id, orig, "rebase (abort): returning to detached HEAD")?;
+        move_head(gitdir, head.id, orig, GIT_reflog.action("rebase") + " (abort): returning to detached HEAD")?;
     }
     drop_state(gitdir);
     List<str> notes = [];

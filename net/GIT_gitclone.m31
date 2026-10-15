@@ -1,0 +1,558 @@
+// `1git clone` and `1git init`: make a repository, fetch into it with the
+// engine of `GIT_gitfetch`, write what a clone writes (packed remote-tracking
+// refs and tags, the local branch, `origin/HEAD`, the upstream configuration,
+// reflogs reading `clone: from <url>`) and check the branch out.
+//
+// Not here: `--filter` (needs lazy fetching of missing objects),
+// `--recurse-submodules`, `--reference`, `--mirror`, `--separate-git-dir`,
+// local-path sources.
+
+import io;
+import os;
+import fs;
+import core.GIT_config;
+import core.GIT_object;
+import core.GIT_refs;
+import core.GIT_reflog;
+import core.GIT_gitcommon;
+import core.GIT_gitstatus;
+import core.GIT_gitstore;
+import core.GIT_gitwrite;
+import net.GIT_gitfetch;
+import net.GIT_transport;
+
+const str CLONE_USAGE = "usage: git clone [<options>] [--] <repo> [<dir>]";
+const str INIT_USAGE = "usage: git init [-q | --quiet] [--bare] [--template=<template-directory>]\n                [--separate-git-dir <git-dir>] [--object-format=<format>]\n                [-b <branch-name> | --initial-branch=<branch-name>]\n                [--shared[=<permissions>]] [<directory>]";
+
+/// Make the skeleton of a repository at `gitdir`.
+pub bool make_repo(str gitdir, bool is_bare, str branch, str format) {
+    List<str> dirs = [gitdir, fs.join(gitdir, "objects"), fs.join(fs.join(gitdir, "objects"), "info"), fs.join(fs.join(gitdir, "objects"), "pack"), fs.join(gitdir, "refs"), fs.join(fs.join(gitdir, "refs"), "heads"), fs.join(fs.join(gitdir, "refs"), "tags"), fs.join(gitdir, "hooks"), fs.join(gitdir, "info")];
+    for (str dir in dirs) {
+        match (fs.makedirs(dir)) {
+            case Ok(_): {
+            }
+            case Err(_): {
+                return false;
+            }
+        }
+    }
+    str config = "[core]\n";
+    if (format == "sha256") {
+        config = config + "\trepositoryformatversion = 1\n";
+    } else {
+        config = config + "\trepositoryformatversion = 0\n";
+    }
+    config = config + "\tfilemode = true\n";
+    if (is_bare) {
+        config = config + "\tbare = true\n";
+    } else {
+        config = config + "\tbare = false\n\tlogallrefupdates = true\n";
+    }
+    if (format == "sha256") {
+        config = config + "[extensions]\n\tobjectformat = sha256\n";
+    }
+    match (io.write(fs.join(gitdir, "config"), config)) {
+        case Ok(_): {
+        }
+        case Err(_): {
+            return false;
+        }
+    }
+    match (io.write(fs.join(gitdir, "HEAD"), "ref: refs/heads/" + branch + "\n")) {
+        case Ok(_): {
+            return true;
+        }
+        case Err(_): {
+            return false;
+        }
+    }
+}
+
+str default_branch(List<str> overrides) {
+    str branch = "";
+    for (str entry in overrides) {
+        int equals = entry.index_of("=").or(-1);
+        if (equals > 0 && entry.substr(0, equals).to_lower() == "init.defaultbranch") {
+            branch = entry.substr(equals + 1, entry.size());
+        }
+    }
+    if (branch != "") {
+        return branch;
+    }
+    return GIT_config.init_default_branch("");
+}
+
+pub int run_init(str start, List<str> overrides, List<str> argv) {
+    GIT_gitwrite.Opts parsed = GIT_gitwrite.parse_opts(argv, ["-q --quiet", "--bare", "-b --initial-branch=", "--template=", "--object-format=", "--shared=?", "--separate-git-dir="]);
+    int checked = GIT_gitwrite.check_opts(parsed, INIT_USAGE);
+    if (checked >= 0) {
+        return checked;
+    }
+    List<str> words = parsed.paths();
+    str target = start;
+    if (words.size() > 0) {
+        target = GIT_gitstatus.resolve_dir(start, words[0]);
+    }
+    bool is_bare = parsed.flag("bare");
+    str gitdir = target;
+    if (!is_bare) {
+        gitdir = fs.join(target, ".git");
+    }
+    str branch = parsed.value("initial-branch", "");
+    if (branch == "") {
+        branch = default_branch(overrides);
+    }
+    str format = parsed.value("object-format", "sha1");
+    if (fs.is_file(fs.join(gitdir, "HEAD"))) {
+        if (!parsed.flag("quiet")) {
+            print("Reinitialized existing Git repository in " + gitdir + "/");
+        }
+        return 0;
+    }
+    if (!make_repo(gitdir, is_bare, branch, format)) {
+        io.eprint("fatal: cannot mkdir " + gitdir);
+        return 128;
+    }
+    if (!parsed.flag("quiet")) {
+        print("Initialized empty Git repository in " + gitdir + "/");
+    }
+    return 0;
+}
+
+// `https://host/a/b.git` -> `b`, `host:a/b/` -> `b`.
+str default_dir(str url, bool is_bare) {
+    str name = url;
+    while (name.ends_with("/")) {
+        name = name.substr(0, name.size() - 1);
+    }
+    if (name.ends_with(".git")) {
+        name = name.substr(0, name.size() - 4);
+    }
+    int cut = -1;
+    for (int i in 0 .. name.size()) {
+        int c = name.byte_at(i);
+        if (c == '/' || c == ':') {
+            cut = i;
+        }
+    }
+    name = name.substr(cut + 1, name.size());
+    if (is_bare) {
+        return name + ".git";
+    }
+    return name;
+}
+
+int fatal(str message) {
+    io.eprint("fatal: " + message);
+    return 128;
+}
+
+void remove_tree(str path) {
+    match (os.run(["rm", "-rf", path])) {
+        case Ok(_): {
+        }
+        case Err(_): {
+        }
+    }
+}
+
+bool is_empty_dir(str path) {
+    match (fs.listdir(path)) {
+        case Ok(List<str> names): {
+            return names.size() == 0;
+        }
+        case Err(_): {
+            return false;
+        }
+    }
+}
+
+pub int run_clone(str start, List<str> overrides, List<str> argv) {
+    GIT_gitwrite.Opts parsed = GIT_gitwrite.parse_opts(argv, ["-q --quiet", "-v --verbose", "--bare", "-b --branch=", "--depth=", "--single-branch", "-o --origin=", "-n --no-checkout", "--tags", "-c --config=", "--filter=", "--progress", "--recurse-submodules=?", "--shallow-submodules", "-j --jobs=", "--template=", "-l --local", "-s --shared", "--no-hardlinks", "--mirror", "--reference=", "--separate-git-dir=", "--sparse", "--also-filter-submodules", "-4", "-6", "--revision="]);
+    int checked = GIT_gitwrite.check_opts(parsed, CLONE_USAGE);
+    if (checked >= 0) {
+        return checked;
+    }
+    List<str> words = parsed.paths();
+    if (words.size() == 0) {
+        io.eprint("fatal: You must specify a repository to clone.\n");
+        io.eprint(CLONE_USAGE);
+        return 129;
+    }
+    if (words.size() > 2) {
+        io.eprint("fatal: too many arguments");
+        io.eprint(CLONE_USAGE);
+        return 129;
+    }
+    if (parsed.flag("filter") || parsed.has("filter")) {
+        return fatal("--filter is not supported by this client (partial clone needs lazy object fetching)");
+    }
+    if (parsed.flag("mirror")) {
+        return fatal("--mirror is not supported by this client");
+    }
+    str url = words[0];
+    bool is_bare = parsed.flag("bare");
+    str directory = default_dir(url, is_bare);
+    if (words.size() == 2) {
+        directory = words[1];
+    }
+    str origin = parsed.value("origin", "origin");
+    str wanted_branch = parsed.value("branch", "");
+    bool is_quiet = parsed.flag("quiet");
+    int depth = 0;
+    if (parsed.has("depth")) {
+        match (parsed.value("depth", "").parse_int()) {
+            case Some(int got): {
+                if (got <= 0) {
+                    return fatal("depth " + parsed.value("depth", "") + " is not a positive number");
+                }
+                depth = got;
+            }
+            case None: {
+                return fatal("depth " + parsed.value("depth", "") + " is not a positive number");
+            }
+        }
+    }
+    bool is_single = depth > 0 || (parsed.flag("single-branch") && parsed.has("single-branch"));
+    if (parsed.has("single-branch") && !parsed.flag("single-branch")) {
+        is_single = false;
+    }
+    str target = GIT_gitstatus.resolve_dir(start, directory);
+    str gitdir = target;
+    if (!is_bare) {
+        gitdir = fs.join(target, ".git");
+    }
+    if (fs.is_present(target) && !is_empty_dir(target)) {
+        return fatal("destination path '" + directory + "' already exists and is not an empty directory.");
+    }
+    bool did_create_dir = !fs.is_present(target);
+    if (!is_quiet) {
+        if (is_bare) {
+            io.eprint("Cloning into bare repository '" + directory + "'...");
+        } else {
+            io.eprint("Cloning into '" + directory + "'...");
+        }
+    }
+    // the connection comes before the repository: its object format decides what to make
+    str shown_url = GIT_transport.anonymize(url);
+    GIT_gitcommon.Ctx probe_ctx = probe_context(start, overrides);
+    GIT_transport.Session session = GIT_transport.empty(probe_ctx);
+    match (GIT_transport.connect(probe_ctx, url, "git-upload-pack")) {
+        case Ok(GIT_transport.Session got): {
+            session = got;
+        }
+        case Err(str why): {
+            return fatal(why);
+        }
+    }
+    GIT_transport.Listing listing = GIT_transport.Listing();
+    match (session.list(["HEAD", "refs/heads/", "refs/tags/"])) {
+        case Ok(GIT_transport.Listing got): {
+            listing = got;
+        }
+        case Err(str why): {
+            session.close();
+            return fatal(why);
+        }
+    }
+    session.close();
+    // which branch HEAD will be
+    str head_branch = "";
+    str detached_id = "";
+    if (wanted_branch != "") {
+        bool is_found = false;
+        for (GIT_transport.RefInfo one in listing.refs) {
+            if (one.name == "refs/heads/" + wanted_branch) {
+                head_branch = wanted_branch;
+                is_found = true;
+            }
+        }
+        if (!is_found) {
+            for (GIT_transport.RefInfo one in listing.refs) {
+                if (one.name == "refs/tags/" + wanted_branch) {
+                    detached_id = one.id;
+                    if (one.peeled != "") {
+                        detached_id = one.peeled;
+                    }
+                    is_found = true;
+                }
+            }
+        }
+        if (!is_found) {
+            return fatal("Remote branch " + wanted_branch + " not found in upstream " + origin);
+        }
+    } else if (listing.head_target.starts_with("refs/heads/")) {
+        head_branch = listing.head_target.substr(11, listing.head_target.size());
+    } else if (listing.head_id != "") {
+        detached_id = listing.head_id;
+    }
+    bool is_empty = listing.refs.size() == 0 && listing.head_id == "";
+    str unborn_branch = head_branch;
+    if (unborn_branch == "") {
+        unborn_branch = default_branch(overrides);
+    }
+    if (is_empty && listing.head_target.starts_with("refs/heads/")) {
+        unborn_branch = listing.head_target.substr(11, listing.head_target.size());
+    }
+    // the repository
+    if (!make_repo(gitdir, is_bare, unborn_branch, listing.object_format)) {
+        return fatal("could not create work tree dir '" + directory + "'");
+    }
+    // configuration, in git's order: -c keys, the remote, then the branch
+    for (str entry in parsed.all("config")) {
+        int equals = entry.index_of("=").or(-1);
+        str key = entry;
+        str value = "true";
+        if (equals > 0) {
+            key = entry.substr(0, equals);
+            value = entry.substr(equals + 1, entry.size());
+        }
+        match (GIT_config.split_name(key)) {
+            case Ok(GIT_config.Name name): {
+                match (GIT_config.add(gitdir, name.section, name.subsection, name.key, value)) {
+                    case Ok(_): {
+                    }
+                    case Err(_): {
+                    }
+                }
+            }
+            case Err(_): {
+                return fatal("key does not contain a section: " + key);
+            }
+        }
+    }
+    str prefix = "refs/remotes/" + origin + "/";
+    if (is_bare) {
+        prefix = "refs/heads/";
+    }
+    str spec = "+refs/heads/*:" + prefix + "*";
+    if (is_single) {
+        str only = head_branch;
+        if (only == "" && detached_id == "" && listing.head_target.starts_with("refs/heads/")) {
+            only = listing.head_target.substr(11, listing.head_target.size());
+        }
+        if (only != "") {
+            spec = "+refs/heads/" + only + ":" + prefix + only;
+        }
+    }
+    bool is_no_tags = parsed.has("tags") && !parsed.flag("tags");
+    config_set(gitdir, "remote", origin, "url", shown_url_or(url));
+    if (is_no_tags) {
+        config_set(gitdir, "remote", origin, "tagOpt", "--no-tags");
+    }
+    if (!is_bare) {
+        config_set(gitdir, "remote", origin, "fetch", spec);
+    }
+    // the fetch
+    GIT_gitcommon.Ctx ctx = GIT_gitcommon.Ctx(gitdir, target, "", overrides, GIT_config.effective(gitdir));
+    ctx.is_bare = is_bare;
+    GIT_gitfetch.Opts opts = GIT_gitfetch.Opts();
+    opts.collect = true;
+    opts.quiet = true;
+    opts.write_head = false;
+    opts.update_head_ok = true;
+    opts.depth = depth;
+    if (is_no_tags) {
+        opts.tags = "none";
+    } else if (is_single) {
+        opts.tags = "auto";
+    } else {
+        opts.tags = "all";
+    }
+    GIT_gitfetch.Remote remote = GIT_gitfetch.Remote(origin, url, [spec], "", true);
+    if (is_empty) {
+        remote.specs = [];
+    }
+    GIT_gitfetch.Outcome got = GIT_gitfetch.Outcome();
+    if (!is_empty) {
+        got = GIT_gitfetch.fetch(ctx, remote, [], opts);
+        if (got.status != 0) {
+            cleanup(target, gitdir, did_create_dir);
+            return got.status;
+        }
+    }
+    // packed refs: what a clone leaves besides the local branch
+    Map<str, GIT_gitfetch.Update> by_name = {};
+    List<str> names = [];
+    for (GIT_gitfetch.Update one in got.updates) {
+        by_name.set(one.name, one);
+        names.push(one.name);
+    }
+    names.sort();
+    for (str name in names) {
+        GIT_gitfetch.Update one = by_name.get(name).or(GIT_gitfetch.Update("", "", ""));
+        if (one.is_followed) {
+            match (GIT_refs.update(gitdir, one.name, one.id, Option<str>.None)) {
+                case Ok(_): {
+                }
+                case Err(_): {
+                }
+            }
+        }
+    }
+    if (names.size() > 0) {
+        str packed = "# pack-refs with: peeled fully-peeled sorted \n";
+        for (str name in names) {
+            GIT_gitfetch.Update one = by_name.get(name).or(GIT_gitfetch.Update("", "", ""));
+            if (one.is_followed) {
+                continue;
+            }
+            packed = packed + one.id + " " + name + "\n";
+            if (one.peeled != "") {
+                packed = packed + "^" + one.peeled + "\n";
+            }
+        }
+        match (io.write(fs.join(gitdir, "packed-refs"), packed)) {
+            case Ok(_): {
+            }
+            case Err(_): {
+                cleanup(target, gitdir, did_create_dir);
+                return fatal("unable to write packed-refs");
+            }
+        }
+    }
+    str message = "clone: from " + shown_url;
+    str zero = GIT_reflog.zero(gitdir);
+    str checked_out = "";
+    if (is_empty) {
+        io.eprint("warning: You appear to have cloned an empty repository.");
+    } else if (head_branch != "" && !is_bare) {
+        str tracking = prefix + head_branch;
+        str id = "";
+        match (by_name.get(tracking)) {
+            case Some(GIT_gitfetch.Update found): {
+                id = found.id;
+            }
+            case None: {
+            }
+        }
+        if (id == "") {
+            // a branch that was asked for but not among what was fetched (cannot happen with -b)
+            cleanup(target, gitdir, did_create_dir);
+            return fatal("Remote branch " + head_branch + " not found in upstream " + origin);
+        }
+        match (GIT_refs.update(gitdir, "refs/heads/" + head_branch, id, Option<str>.None, reflog_message: message)) {
+            case Ok(_): {
+            }
+            case Err(_): {
+                cleanup(target, gitdir, did_create_dir);
+                return fatal("unable to create the local branch");
+            }
+        }
+        config_set(gitdir, "branch", head_branch, "remote", origin);
+        config_set(gitdir, "branch", head_branch, "merge", "refs/heads/" + head_branch);
+        checked_out = id;
+    } else if (head_branch != "" && is_bare) {
+        // HEAD already names the branch
+    } else if (detached_id != "" && !is_bare) {
+        match (io.write(fs.join(gitdir, "HEAD"), detached_id + "\n")) {
+            case Ok(_): {
+            }
+            case Err(_): {
+            }
+        }
+        match (GIT_reflog.log_update(gitdir, "HEAD", zero, detached_id, message)) {
+            case Ok(_): {
+            }
+            case Err(_): {
+            }
+        }
+        checked_out = detached_id;
+        if (GIT_gitcommon.cfg_bool(ctx, "advice", "", "detachedHead", true) && !is_quiet) {
+            io.eprint("Note: switching to '" + detached_id + "'.\n\nYou are in 'detached HEAD' state. You can look around, make experimental\nchanges and commit them, and you can discard any commits you make in this\nstate without impacting any branches by switching back to a branch.\n\nIf you want to create a new branch to retain commits you create, you may\ndo so (now or later) by using -c with the switch command. Example:\n\n  git switch -c <new-branch-name>\n\nOr undo this operation with:\n\n  git switch -\n\nTurn off this advice by setting config variable advice.detachedHead to false\n");
+        }
+    }
+    if (is_empty && !is_bare) {
+        config_set(gitdir, "branch", unborn_branch, "remote", origin);
+        config_set(gitdir, "branch", unborn_branch, "merge", "refs/heads/" + unborn_branch);
+    }
+    // origin/HEAD, when the remote's HEAD branch was fetched
+    if (!is_bare && listing.head_target.starts_with("refs/heads/")) {
+        str remote_branch = listing.head_target.substr(11, listing.head_target.size());
+        match (by_name.get(prefix + remote_branch)) {
+            case Some(GIT_gitfetch.Update found): {
+                str head_ref = prefix + "HEAD";
+                match (GIT_refs.update_symbolic(gitdir, head_ref, prefix + remote_branch)) {
+                    case Ok(_): {
+                    }
+                    case Err(_): {
+                    }
+                }
+                match (GIT_reflog.log_update(gitdir, head_ref, zero, found.id, message)) {
+                    case Ok(_): {
+                    }
+                    case Err(_): {
+                    }
+                }
+            }
+            case None: {
+            }
+        }
+    }
+    if (checked_out != "" && !parsed.flag("no-checkout")) {
+        if (!checkout_commit(ctx, checked_out)) {
+            return 128;
+        }
+    }
+    return 0;
+}
+
+void config_set(str gitdir, str section, str subsection, str key, str value) {
+    match (GIT_config.set(gitdir, section, subsection, key, value)) {
+        case Ok(_): {
+        }
+        case Err(_): {
+        }
+    }
+}
+
+str shown_url_or(str url) {
+    return url;
+}
+
+void cleanup(str target, str gitdir, bool did_create_dir) {
+    if (did_create_dir) {
+        remove_tree(target);
+    } else {
+        remove_tree(gitdir);
+    }
+}
+
+// Write the tree of `commit` into the work tree and the index.
+bool checkout_commit(GIT_gitcommon.Ctx ctx, str commit) {
+    GIT_gitstore.Store store = GIT_gitstore.open(ctx.gitdir);
+    str tree = GIT_gitwrite.tree_of_commit(store, commit);
+    if (tree == "") {
+        io.eprint("fatal: unable to checkout working tree");
+        return false;
+    }
+    Map<str, GIT_gitwrite.Flat> flat = {};
+    if (!GIT_gitwrite.flatten(store, tree, "", flat)) {
+        io.eprint("fatal: unable to checkout working tree");
+        return false;
+    }
+    List<str> paths = flat.keys();
+    paths.sort();
+    GIT_gitwrite.Idx idx = GIT_gitwrite.Idx();
+    for (str path in paths) {
+        GIT_gitwrite.Flat entry = flat.get(path).or(GIT_gitwrite.Flat(0, ""));
+        if (!GIT_gitwrite.write_blob_to(ctx.gitdir, ctx.root, path, entry.mode, entry.id)) {
+            io.eprint("error: unable to write '" + path + "'");
+            return false;
+        }
+        if (entry.mode >> 12 == 0o16) {
+            idx.put(GIT_gitwrite.entry_from_flat(path, entry));
+        } else {
+            idx.put(GIT_gitwrite.fresh_entry(ctx.root, path, entry.mode, entry.id));
+        }
+    }
+    if (!GIT_gitwrite.write_idx(ctx.gitdir, idx)) {
+        io.eprint("fatal: unable to write the index");
+        return false;
+    }
+    return true;
+}
+
+GIT_gitcommon.Ctx probe_context(str start, List<str> overrides) {
+    return GIT_gitcommon.Ctx("", start, "", overrides, GIT_config.effective(""));
+}

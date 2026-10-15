@@ -1,0 +1,100 @@
+// Refspecs: `[+]<src>[:<dst>]`, with one `*` on each side at most, and the
+// short names a command line takes (`main`, `tag v1`, `HEAD`).
+
+/// A parsed refspec. `src` is "" for a delete (`:ref`), `dst` is "" when the
+/// spec only names what to fetch.
+pub type Spec {
+    pub bool force;
+    pub str src;
+    pub str dst;
+    pub bool is_glob;
+    pub bool has_colon;
+}
+
+pub str Spec.to_str() {
+    str out = src;
+    if (has_colon) {
+        out = out + ":" + dst;
+    }
+    if (force) {
+        out = "+" + out;
+    }
+    return out;
+}
+
+pub Spec parse(str text) {
+    str rest = text;
+    bool force = false;
+    if (rest.starts_with("+")) {
+        force = true;
+        rest = rest.substr(1, rest.size());
+    }
+    str src = rest;
+    str dst = "";
+    bool has_colon = false;
+    int colon = rest.index_of(":").or(-1);
+    if (colon >= 0) {
+        src = rest.substr(0, colon);
+        dst = rest.substr(colon + 1, rest.size());
+        has_colon = true;
+    }
+    return Spec(force, src, dst, src.contains("*"), has_colon);
+}
+
+/// Does `name` match the glob `pattern` (one `*`)? The captured part in `out`.
+pub Option<str> glob_capture(str pattern, str name) {
+    int star = pattern.index_of("*").or(-1);
+    if (star < 0) {
+        if (pattern == name) {
+            return Option<str>.Some("");
+        }
+        return Option<str>.None;
+    }
+    str head = pattern.substr(0, star);
+    str tail = pattern.substr(star + 1, pattern.size());
+    if (name.size() >= head.size() + tail.size() && name.starts_with(head) && name.ends_with(tail)) {
+        return Option<str>.Some(name.substr(head.size(), name.size() - tail.size()));
+    }
+    return Option<str>.None;
+}
+
+/// `pattern` with its `*` replaced by `middle`.
+pub str glob_fill(str pattern, str middle) {
+    int star = pattern.index_of("*").or(-1);
+    if (star < 0) {
+        return pattern;
+    }
+    return pattern.substr(0, star) + middle + pattern.substr(star + 1, pattern.size());
+}
+
+/// The names a short `name` may stand for, in git's order.
+pub List<str> candidates(str name) {
+    if (name.starts_with("refs/")) {
+        return [name];
+    }
+    return [name, "refs/" + name, "refs/tags/" + name, "refs/heads/" + name, "refs/remotes/" + name, "refs/remotes/" + name + "/HEAD"];
+}
+
+/// `refs/heads/main` -> `main`, `refs/tags/v1` -> `v1`, `refs/remotes/o/x` -> `o/x`
+/// (git's `prettify_refname`).
+pub str pretty(str name) {
+    if (name.starts_with("refs/heads/")) {
+        return name.substr(11, name.size());
+    }
+    if (name.starts_with("refs/tags/")) {
+        return name.substr(10, name.size());
+    }
+    if (name.starts_with("refs/remotes/")) {
+        return name.substr(13, name.size());
+    }
+    return name;
+}
+
+/// The directory prefix a spec's source needs listed (for `ref-prefix`).
+pub str prefix_of(str src) {
+    int star = src.index_of("*").or(-1);
+    if (star >= 0) {
+        return src.substr(0, star);
+    }
+    return src;
+}

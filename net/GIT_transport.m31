@@ -1,0 +1,1286 @@
+// One connection to a remote repository, over smart HTTP(S) or ssh, behind
+// the operations `clone`, `fetch`, `pull`, `push` and `ls-remote` need:
+// list refs, fetch a pack, send a pack and ref updates.
+//
+//   GIT_transport.connect(ctx, url, service)  -> Result<Session, str>
+//   session.list(prefixes)                     -> Result<Listing, str>
+//   session.fetch(FetchArgs)                   -> Result<Fetched, str>
+//   session.push(commands, pack, ...)          -> Result<PushOutcome, str>
+//   session.close()
+//
+// Every error is the sentence git would put after `fatal: `.
+//
+// --- protocol -------------------------------------------------------------
+//
+// HTTP asks for protocol v2 (`Git-Protocol: version=2`, unless
+// `protocol.version` says 0 or 1) for `git-upload-pack`: `ls-refs` and
+// `fetch` are two commands on `POST /git-upload-pack`. A server that answers
+// the advertisement in v0 (receive-pack always does) is spoken to in v0:
+// the advertisement is the ref listing, the fetch is one stateless request
+// of wants, shallow/deepen lines, haves and `done`. ssh is v0 only (the
+// exec channel does not set `GIT_PROTOCOL`). In every case this client sends
+// its haves in one round and `done`: it never negotiates in rounds, which
+// can make a pack larger than git's, never wrong.
+//
+// --- credentials ----------------------------------------------------------
+//
+// The first request goes out without any. A 401 asks `GIT_creds` (the URL,
+// netrc, helpers, askpass, terminal) and the request is repeated with HTTP
+// Basic; the credential then rides on every later request of the session.
+// A credential that worked is `approve`d to the helpers, one that did not is
+// `reject`ed and `Authentication failed for '<url>'` is the answer. No
+// message here ever contains a password.
+
+import io;
+import os;
+import fs;
+import text;
+import tls;
+import encoding.base64;
+import net;
+import net.http;
+import net.https;
+import net.GIT_wire;
+import net.GIT_http_fetch;
+import net.GIT_creds;
+import net.GIT_remote;
+import net.GIT_ssh_transport;
+import core.GIT_hash;
+import core.GIT_object;
+import core.GIT_config;
+import core.GIT_gitcommon;
+
+pub const str AGENT = "1git/0.17.0";
+
+/// One ref as listed: `peeled` is the commit a tag points at ("" when the
+/// ref is not an annotated tag), `symref` the target of a symbolic ref.
+pub type RefInfo {
+    pub str name;
+    pub str id;
+    pub str peeled;
+    pub str symref;
+}
+
+pub type Listing {
+    pub List<RefInfo> refs = [];
+    /// what HEAD points at on the remote ("" when it is detached or unknown)
+    pub str head_target = "";
+    /// the id HEAD names ("" for an empty repository)
+    pub str head_id = "";
+    pub str object_format = "sha1";
+}
+
+pub type FetchArgs {
+    pub List<str> wants = [];
+    pub List<str> haves = [];
+    /// `--depth`; 0 for none
+    pub int depth = 0;
+    /// the repository's current shallow boundary
+    pub List<str> shallows = [];
+    pub bool include_tag = false;
+    pub str filter = "";
+}
+
+pub type Fetched {
+    pub bytes pack = [];
+    pub List<str> shallow = [];
+    pub List<str> unshallow = [];
+    pub bool has_pack = false;
+}
+
+pub type PushCmd {
+    pub str old;
+    pub str new;
+    pub str ref;
+}
+
+pub type PushStatus {
+    pub str ref;
+    pub bool is_ok;
+    pub str reason;
+}
+
+pub type PushOutcome {
+    pub bool is_unpacked = false;
+    pub str unpack_reason = "";
+    pub List<PushStatus> statuses = [];
+}
+
+/// One connection. `service` is `git-upload-pack` or `git-receive-pack`.
+pub type Session {
+    /// the URL as given, without credentials
+    pub str url;
+    pub str service;
+    GIT_gitcommon.Ctx ctx;
+    pub bool is_ssh = false;
+    pub bool is_v2 = false;
+    pub List<str> caps = [];
+    pub GIT_wire.Advertisement ad = GIT_wire.Advertisement("", [], [], "sha1");
+    pub str object_format = "sha1";
+    // http
+    str base = "";
+    str user = "";
+    str password = "";
+    bool has_auth = false;
+    bool is_stored = false;
+    bool has_user_in_url = false;
+    tls.Trust trust = tls.Trust.SystemRoots;
+    GIT_creds.Want cred_want = GIT_creds.Want("", "", "", "");
+    // ssh
+    Option<GIT_ssh_transport.Upload> upload = Option<GIT_ssh_transport.Upload>.None;
+    Option<GIT_ssh_transport.Receive> receive = Option<GIT_ssh_transport.Receive>.None;
+}
+
+pub void Session.close() {
+    match (upload) {
+        case Some(GIT_ssh_transport.Upload up): {
+            up.finish();
+            upload = Option<GIT_ssh_transport.Upload>.None;
+        }
+        case None: {
+        }
+    }
+    match (receive) {
+        case Some(GIT_ssh_transport.Receive rec): {
+            match (GIT_wire.say_goodbye(rec.connection)) {
+                case Ok(_): {
+                }
+                case Err(_): {
+                }
+            }
+            rec.connection.finish(true);
+            receive = Option<GIT_ssh_transport.Receive>.None;
+        }
+        case None: {
+        }
+    }
+}
+
+str Session.basic() {
+    return "Basic " + base64.encode((user + ":" + password).to_bytes());
+}
+
+// The URL as git's messages quote it: with the trailing slash curl adds.
+pub str Session.shown() {
+    str out = url;
+    if (!out.ends_with("/")) {
+        out = out + "/";
+    }
+    return out;
+}
+
+str Session.access_failure(http.Error error) {
+    return "unable to access '" + shown() + "': " + error.to_str();
+}
+
+Result<http.Request, str> Session.build(str method, str target, str content_type, bytes body, bool wants_v2, str accept) {
+    match (http.request(method, target)) {
+        case Ok(http.Request request): {
+            request.set("user-agent", AGENT);
+            request.set("accept", accept);
+            request.set("pragma", "no-cache");
+            if (wants_v2) {
+                request.set("git-protocol", "version=2");
+            }
+            if (content_type != "") {
+                request.set("content-type", content_type);
+            }
+            if (method == "POST") {
+                request.set_body(body);
+            }
+            if (has_auth) {
+                request.set("authorization", basic());
+            }
+            return Result<http.Request, str>.Ok(request);
+        }
+        case Err(http.Error bad): {
+            return Result<http.Request, str>.Err(access_failure(bad));
+        }
+    }
+}
+
+/// Send one request; on a 401 find credentials and send it again.
+pub Result<http.Response, str> Session.exchange(str method, str target, str content_type, bytes body, bool wants_v2, str accept) {
+    int rounds = 0;
+    while (true) {
+        rounds = rounds + 1;
+        http.Request request = build(method, target, content_type, body, wants_v2, accept)?;
+        match (https.fetch(request, trust: trust)) {
+            case Ok(http.Response response): {
+                if (response.status() == 401) {
+                    if (has_auth) {
+                        GIT_creds.reject(ctx.config, ctx.overrides, cred_want, user, password);
+                        return Result<http.Response, str>.Err("Authentication failed for '" + shown() + "'");
+                    }
+                    if (rounds > 2) {
+                        return Result<http.Response, str>.Err("Authentication failed for '" + shown() + "'");
+                    }
+                    if (has_user_in_url && password != "") {
+                        has_auth = true;
+                    } else {
+                        GIT_creds.Want asked = GIT_creds.Want(cred_want.protocol, cred_want.host, cred_want.path, user);
+                        str shown = cred_want.protocol + "://" + cred_want.host;
+                        GIT_creds.Filled filled = GIT_creds.fill(ctx.config, ctx.overrides, asked, shown);
+                        if (!filled.ok) {
+                            return Result<http.Response, str>.Err(filled.error);
+                        }
+                        user = filled.user;
+                        password = filled.password;
+                        has_auth = true;
+                    }
+                    continue;
+                }
+                if (has_auth && response.status() < 400 && !is_stored) {
+                    is_stored = true;
+                    GIT_creds.approve(ctx.config, ctx.overrides, cred_want, user, password);
+                }
+                return Result<http.Response, str>.Ok(response);
+            }
+            case Err(http.Error failure): {
+                return Result<http.Response, str>.Err(access_failure(failure));
+            }
+        }
+    }
+}
+
+// One request over a fresh connection, the head read and the body left.
+Result<http.BodyStream, str> Session.connect_stream(http.Request request) {
+    match (http.open(request, 600000)) {
+        case Ok(net.Conn connection): {
+            if (request.url().scheme() == "https") {
+                match (tls.connect_over(connection, request.url().host(), trust)) {
+                    case Ok(tls.Conn secure): {
+                        match (http.write_request(secure, request)) {
+                            case Ok: {
+                            }
+                            case Err(http.Error bad): {
+                                return Result<http.BodyStream, str>.Err(access_failure(bad));
+                            }
+                        }
+                        match (http.read_response_stream(secure, request.method())) {
+                            case Ok(http.BodyStream answer): {
+                                return Result<http.BodyStream, str>.Ok(answer);
+                            }
+                            case Err(http.Error bad): {
+                                return Result<http.BodyStream, str>.Err(access_failure(bad));
+                            }
+                        }
+                    }
+                    case Err(tls.Error bad): {
+                        return Result<http.BodyStream, str>.Err("unable to access '" + shown() + "': SSL connection failed: " + bad.to_str());
+                    }
+                }
+            }
+            match (http.write_request(connection, request)) {
+                case Ok: {
+                }
+                case Err(http.Error bad): {
+                    return Result<http.BodyStream, str>.Err(access_failure(bad));
+                }
+            }
+            match (http.read_response_stream(connection, request.method())) {
+                case Ok(http.BodyStream answer): {
+                    return Result<http.BodyStream, str>.Ok(answer);
+                }
+                case Err(http.Error bad): {
+                    return Result<http.BodyStream, str>.Err(access_failure(bad));
+                }
+            }
+        }
+        case Err(http.Error bad): {
+            return Result<http.BodyStream, str>.Err(access_failure(bad));
+        }
+    }
+}
+
+// The request with a streamed answer, and the 401 dance. `None` when the
+// answer is a redirect (the buffered `exchange` follows those).
+Result<Option<BodyReader>, str> Session.open_stream(str method, str target, str content_type, bytes body, bool wants_v2, str accept) {
+    int rounds = 0;
+    while (true) {
+        rounds = rounds + 1;
+        http.Request request = build(method, target, content_type, body, wants_v2, accept)?;
+        http.BodyStream answer = connect_stream(request)?;
+        int code = answer.status();
+        if (code == 401) {
+            if (has_auth) {
+                GIT_creds.reject(ctx.config, ctx.overrides, cred_want, user, password);
+                return Result<Option<BodyReader>, str>.Err("Authentication failed for '" + shown() + "'");
+            }
+            if (rounds > 2) {
+                return Result<Option<BodyReader>, str>.Err("Authentication failed for '" + shown() + "'");
+            }
+            if (has_user_in_url && password != "") {
+                has_auth = true;
+            } else {
+                GIT_creds.Want asked = GIT_creds.Want(cred_want.protocol, cred_want.host, cred_want.path, user);
+                str shown_host = cred_want.protocol + "://" + cred_want.host;
+                GIT_creds.Filled filled = GIT_creds.fill(ctx.config, ctx.overrides, asked, shown_host);
+                if (!filled.ok) {
+                    return Result<Option<BodyReader>, str>.Err(filled.error);
+                }
+                user = filled.user;
+                password = filled.password;
+                has_auth = true;
+            }
+            continue;
+        }
+        if (code >= 300 && code < 400) {
+            return Result<Option<BodyReader>, str>.Ok(Option<BodyReader>.None);
+        }
+        if (has_auth && code < 400 && !is_stored) {
+            is_stored = true;
+            GIT_creds.approve(ctx.config, ctx.overrides, cred_want, user, password);
+        }
+        return Result<Option<BodyReader>, str>.Ok(Option<BodyReader>.Some(BodyReader(answer)));
+    }
+}
+
+/// Does the v2 capability `group` (`fetch`, `ls-refs`) offer `feature`?
+pub bool Session.has_feature(str group, str feature) {
+    for (str cap in caps) {
+        if (cap == group) {
+            return feature == "";
+        }
+        if (cap.starts_with(group + "=")) {
+            for (str word in cap.substr(group.size() + 1, cap.size()).split(" ")) {
+                if (word == feature) {
+                    return true;
+                }
+            }
+        }
+    }
+    return false;
+}
+
+pub Result<Listing, str> Session.list(List<str> prefixes) {
+    if (is_v2) {
+        return list_v2(prefixes);
+    }
+    Listing out = Listing();
+    out.object_format = object_format;
+    str head_symref = "";
+    for (str cap in ad.capabilities) {
+        if (cap.starts_with("symref=HEAD:")) {
+            head_symref = cap.substr(12, cap.size());
+        }
+    }
+    out.head_target = head_symref;
+    for (GIT_wire.RemoteRef one in ad.refs) {
+        if (one.name.ends_with("^{}")) {
+            if (out.refs.size() > 0) {
+                RefInfo last = out.refs[out.refs.size() - 1];
+                if (last.name == one.name.substr(0, one.name.size() - 3)) {
+                    last.peeled = one.id;
+                }
+            }
+            continue;
+        }
+        if (one.name == "HEAD") {
+            out.head_id = one.id;
+        }
+        if (has_prefix(prefixes, one.name)) {
+            out.refs.push(RefInfo(one.name, one.id, "", ""));
+        }
+    }
+    return Result<Listing, str>.Ok(out);
+}
+
+Result<Listing, str> Session.list_v2(List<str> prefixes) {
+    bytes body = [];
+    body.extend(pkt("command=ls-refs\n"));
+    body.extend(pkt("agent=" + AGENT + "\n"));
+    if (has_feature("object-format", "") || GIT_wire.has_cap(caps, "object-format")) {
+        body.extend(pkt("object-format=" + object_format + "\n"));
+    }
+    body.extend(DELIM.to_bytes());
+    body.extend(pkt("peel\n"));
+    body.extend(pkt("symrefs\n"));
+    if (has_feature("ls-refs", "unborn")) {
+        body.extend(pkt("unborn\n"));
+    }
+    for (str prefix in prefixes) {
+        body.extend(pkt("ref-prefix " + prefix + "\n"));
+    }
+    body.extend(FLUSH.to_bytes());
+    http.Response response = exchange("POST", base + "/" + service, "application/x-" + service + "-request", body, true, "application/x-" + service + "-result")?;
+    if (response.status() != 200) {
+        return Result<Listing, str>.Err("unable to access '" + shown() + "': The requested URL returned error: " + response.status().to_str());
+    }
+    Listing out = Listing();
+    out.object_format = object_format;
+    io.Buffer stream = io.buffer_of(response.body());
+    while (true) {
+        Pkt packet = read_pkt(stream)?;
+        if (packet.kind != 0) {
+            break;
+        }
+        str line = line_of(packet.data);
+        List<str> words = line.split(" ");
+        if (words.size() >= 3 && words[0] == "unborn") {
+            for (int i in 2 .. words.size()) {
+                if (words[i].starts_with("symref-target:") && words[1] == "HEAD") {
+                    out.head_target = words[i].substr(14, words[i].size());
+                }
+            }
+            continue;
+        }
+        if (words.size() < 2) {
+            continue;
+        }
+        RefInfo info = RefInfo(words[1], words[0], "", "");
+        for (int i in 2 .. words.size()) {
+            if (words[i].starts_with("symref-target:")) {
+                info.symref = words[i].substr(14, words[i].size());
+            } else if (words[i].starts_with("peeled:")) {
+                info.peeled = words[i].substr(7, words[i].size());
+            }
+        }
+        if (info.name == "HEAD") {
+            out.head_id = info.id;
+            out.head_target = info.symref;
+        }
+        out.refs.push(info);
+    }
+    return Result<Listing, str>.Ok(out);
+}
+
+pub Result<Fetched, str> Session.fetch(FetchArgs args) {
+    if (args.depth > 0) {
+        bool has_shallow = false;
+        if (is_v2) {
+            has_shallow = has_feature("fetch", "shallow");
+        } else {
+            has_shallow = GIT_wire.has_cap(caps, "shallow");
+        }
+        if (!has_shallow) {
+            return Result<Fetched, str>.Err("Server does not support shallow clients");
+        }
+    }
+    bool is_filter = false;
+    if (args.filter != "") {
+        if (is_v2) {
+            is_filter = has_feature("fetch", "filter");
+        } else {
+            is_filter = GIT_wire.has_cap(caps, "filter");
+        }
+        if (!is_filter) {
+            return Result<Fetched, str>.Err("filtering not recognized by server, ignoring");
+        }
+    }
+    bytes body = [];
+    if (is_v2) {
+        body.extend(pkt("command=fetch\n"));
+        body.extend(pkt("agent=" + AGENT + "\n"));
+        if (GIT_wire.has_cap(caps, "object-format")) {
+            body.extend(pkt("object-format=" + object_format + "\n"));
+        }
+        body.extend(DELIM.to_bytes());
+        body.extend(pkt("no-progress\n"));
+        body.extend(pkt("ofs-delta\n"));
+        if (args.include_tag) {
+            body.extend(pkt("include-tag\n"));
+        }
+        for (str shallow in args.shallows) {
+            body.extend(pkt("shallow " + shallow + "\n"));
+        }
+        if (args.depth > 0) {
+            body.extend(pkt("deepen " + args.depth.to_str() + "\n"));
+        }
+        if (is_filter) {
+            body.extend(pkt("filter " + args.filter + "\n"));
+        }
+        for (str want in args.wants) {
+            body.extend(pkt("want " + want + "\n"));
+        }
+        for (str have in args.haves) {
+            body.extend(pkt("have " + have + "\n"));
+        }
+        body.extend(pkt("done\n"));
+        body.extend(FLUSH.to_bytes());
+    } else {
+        if (!GIT_wire.has_cap(caps, "side-band-64k")) {
+            return Result<Fetched, str>.Err("the server does not support side-band-64k");
+        }
+        str capabilities = "side-band-64k ofs-delta no-progress";
+        if (args.include_tag && GIT_wire.has_cap(caps, "include-tag")) {
+            capabilities = capabilities + " include-tag";
+        }
+        if (is_filter) {
+            capabilities = capabilities + " filter";
+        }
+        if (GIT_wire.has_cap(caps, "object-format")) {
+            capabilities = capabilities + " object-format=" + object_format;
+        }
+        capabilities = capabilities + " agent=" + AGENT;
+        bool is_first = true;
+        for (str want in args.wants) {
+            if (is_first) {
+                body.extend(pkt("want " + want + " " + capabilities + "\n"));
+                is_first = false;
+            } else {
+                body.extend(pkt("want " + want + "\n"));
+            }
+        }
+        for (str shallow in args.shallows) {
+            body.extend(pkt("shallow " + shallow + "\n"));
+        }
+        if (args.depth > 0) {
+            body.extend(pkt("deepen " + args.depth.to_str() + "\n"));
+        }
+        if (is_filter) {
+            body.extend(pkt("filter " + args.filter + "\n"));
+        }
+        body.extend(FLUSH.to_bytes());
+        for (str have in args.haves) {
+            body.extend(pkt("have " + have + "\n"));
+        }
+        body.extend(pkt("done\n"));
+    }
+    bytes answer = [];
+    if (is_ssh) {
+        match (upload) {
+            case Some(GIT_ssh_transport.Upload up): {
+                match (up.connection.write(body)) {
+                    case Ok(_): {
+                    }
+                    case Err(_): {
+                        return Result<Fetched, str>.Err("the connection failed while sending the request");
+                    }
+                }
+                while (true) {
+                    match (up.connection.read(65536)) {
+                        case Ok(bytes got): {
+                            if (got.size() == 0) {
+                                break;
+                            }
+                            answer.extend(got);
+                        }
+                        case Err(_): {
+                            break;
+                        }
+                    }
+                }
+                str said = up.connection.remote_messages();
+                up.connection.finish(true);
+                upload = Option<GIT_ssh_transport.Upload>.None;
+                if (answer.size() == 0 && said != "") {
+                    return Result<Fetched, str>.Err(said);
+                }
+            }
+            case None: {
+                return Result<Fetched, str>.Err("the connection is closed");
+            }
+        }
+    } else {
+        // the pack comes down a stream: no ceiling on its size
+        Option<BodyReader> reader = open_stream("POST", base + "/git-upload-pack", "application/x-git-upload-pack-request", body, is_v2, "application/x-git-upload-pack-result")?;
+        match (reader) {
+            case Some(BodyReader source): {
+                if (source.body.status() != 200) {
+                    return Result<Fetched, str>.Err("unable to access '" + shown() + "': The requested URL returned error: " + source.body.status().to_str());
+                }
+                return parse_fetch(source, is_v2);
+            }
+            case None: {
+            }
+        }
+        http.Response response = exchange("POST", base + "/git-upload-pack", "application/x-git-upload-pack-request", body, is_v2, "application/x-git-upload-pack-result")?;
+        if (response.status() != 200) {
+            return Result<Fetched, str>.Err("unable to access '" + shown() + "': The requested URL returned error: " + response.status().to_str());
+        }
+        answer = response.body();
+    }
+    return parse_fetch(io.buffer_of(answer), is_v2);
+}
+
+/// Send `commands` and `pack` (empty when only deleting) to a
+/// `git-receive-pack`; `options` are push options.
+pub Result<PushOutcome, str> Session.push(List<PushCmd> commands, bytes pack, bool is_atomic, List<str> options) {
+    if (options.size() > 0 && !GIT_wire.has_cap(caps, "push-options")) {
+        return Result<PushOutcome, str>.Err("the receiving end does not support push options");
+    }
+    if (is_atomic && !GIT_wire.has_cap(caps, "atomic")) {
+        return Result<PushOutcome, str>.Err("the receiving end does not support --atomic push");
+    }
+    bool is_sideband = GIT_wire.has_cap(caps, "side-band-64k");
+    bool has_status = GIT_wire.has_cap(caps, "report-status");
+    str capabilities = "";
+    if (has_status) {
+        capabilities = "report-status";
+    }
+    if (is_sideband) {
+        capabilities = capabilities + " side-band-64k";
+    }
+    if (is_atomic) {
+        capabilities = capabilities + " atomic";
+    }
+    if (options.size() > 0) {
+        capabilities = capabilities + " push-options";
+    }
+    if (GIT_wire.has_cap(caps, "object-format")) {
+        capabilities = capabilities + " object-format=" + object_format;
+    }
+    capabilities = capabilities + " agent=" + AGENT;
+    bytes body = [];
+    bool is_first = true;
+    bool is_all_delete = true;
+    str zero = GIT_hash.zero(GIT_hash.raw_of_name(object_format));
+    for (PushCmd command in commands) {
+        str line = command.old + " " + command.new + " " + command.ref;
+        if (is_first) {
+            bytes first_line = line.to_bytes();
+            first_line.push(0);
+            first_line.extend((capabilities.trim() + "\n").to_bytes());
+            body.extend(GIT_wire.pkt_line(first_line));
+            is_first = false;
+        } else {
+            body.extend(pkt(line + "\n"));
+        }
+        if (command.new != zero) {
+            is_all_delete = false;
+        }
+    }
+    body.extend(FLUSH.to_bytes());
+    if (options.size() > 0) {
+        for (str option in options) {
+            body.extend(pkt(option));
+        }
+        body.extend(FLUSH.to_bytes());
+    }
+    if (!is_all_delete) {
+        body.extend(pack);
+    }
+    bytes answer = [];
+    if (is_ssh) {
+        match (receive) {
+            case Some(GIT_ssh_transport.Receive rec): {
+                match (rec.connection.write(body)) {
+                    case Ok(_): {
+                    }
+                    case Err(_): {
+                        return Result<PushOutcome, str>.Err("the connection failed while sending the request");
+                    }
+                }
+                while (true) {
+                    match (rec.connection.read(65536)) {
+                        case Ok(bytes got): {
+                            if (got.size() == 0) {
+                                break;
+                            }
+                            answer.extend(got);
+                        }
+                        case Err(_): {
+                            break;
+                        }
+                    }
+                }
+                str said = rec.connection.remote_messages();
+                rec.connection.finish(true);
+                receive = Option<GIT_ssh_transport.Receive>.None;
+                if (answer.size() == 0 && said != "") {
+                    return Result<PushOutcome, str>.Err(said);
+                }
+            }
+            case None: {
+                return Result<PushOutcome, str>.Err("the connection is closed");
+            }
+        }
+    } else {
+        http.Response response = exchange("POST", base + "/git-receive-pack", "application/x-git-receive-pack-request", body, false, "application/x-git-receive-pack-result")?;
+        if (response.status() != 200) {
+            return Result<PushOutcome, str>.Err("unable to access '" + shown() + "': The requested URL returned error: " + response.status().to_str());
+        }
+        answer = response.body();
+    }
+    if (!has_status) {
+        PushOutcome unknown = PushOutcome();
+        unknown.is_unpacked = true;
+        for (PushCmd command in commands) {
+            unknown.statuses.push(PushStatus(command.ref, true, ""));
+        }
+        return Result<PushOutcome, str>.Ok(unknown);
+    }
+    return parse_report(answer, is_sideband);
+}
+
+/// A session with nothing behind it, for a variable that is assigned later.
+pub Session empty(GIT_gitcommon.Ctx ctx) {
+    return Session("", "", ctx);
+}
+
+// --- the URL --------------------------------------------------------------------
+
+/// `https://user:secret@host/p` -> `https://host/p`.
+pub str anonymize(str url) {
+    int scheme = url.index_of("://").or(-1);
+    if (scheme < 0) {
+        return url;
+    }
+    str head = url.substr(0, scheme + 3);
+    str rest = url.substr(scheme + 3, url.size());
+    int slash = rest.index_of("/").or(rest.size());
+    str authority = rest.substr(0, slash);
+    int at = -1;
+    for (int i in 0 .. authority.size()) {
+        if (authority.byte_at(i) == '@') {
+            at = i;
+        }
+    }
+    if (at < 0) {
+        return url;
+    }
+    return head + authority.substr(at + 1, authority.size()) + rest.substr(slash, rest.size());
+}
+
+// --- config helpers ---------------------------------------------------------------
+
+str cfg_text(GIT_gitcommon.Ctx ctx, str section, str subsection, str key, str fallback) {
+    return GIT_gitcommon.cfg(ctx, section, subsection, key).or(fallback);
+}
+
+tls.Trust trust_of(GIT_gitcommon.Ctx ctx) {
+    str path = os.env("GIT_SSL_CAINFO").or("");
+    if (path == "") {
+        path = cfg_text(ctx, "http", "", "sslCAInfo", "");
+    }
+    if (path == "") {
+        path = os.env("GITUI_HTTP_CA_FILE").or("");
+    }
+    if (path != "") {
+        return tls.Trust.CaFile(path);
+    }
+    return tls.Trust.SystemRoots;
+}
+
+// --- connecting ---------------------------------------------------------------------
+
+/// Open `url` for `service`. Local paths and other schemes are refused with
+/// the sentence git uses for a transport it has no helper for.
+pub Result<Session, str> connect(GIT_gitcommon.Ctx ctx, str url, str service) {
+    if (url.starts_with("http://") || url.starts_with("https://")) {
+        return connect_http(ctx, url, service);
+    }
+    match (GIT_remote.parse(url)) {
+        case Ok(GIT_remote.Remote remote): {
+            if (remote.transport.eq(GIT_remote.Transport.Ssh)) {
+                return connect_ssh(ctx, url, remote, service);
+            }
+            return Result<Session, str>.Err("local-path remotes are not supported (use an https:// or ssh URL): '" + url + "'");
+        }
+        case Err(_): {
+            return Result<Session, str>.Err("Unable to find remote helper for '" + url + "'");
+        }
+    }
+}
+
+Result<Session, str> connect_http(GIT_gitcommon.Ctx ctx, str url, str service) {
+    Session session = Session(anonymize(url), service, ctx);
+    session.trust = trust_of(ctx);
+    int scheme_end = url.index_of("://").or(0);
+    str protocol = url.substr(0, scheme_end);
+    str rest = url.substr(scheme_end + 3, url.size());
+    int slash = rest.index_of("/").or(rest.size());
+    str authority = rest.substr(0, slash);
+    str tail = rest.substr(slash, rest.size());
+    int at = -1;
+    for (int i in 0 .. authority.size()) {
+        if (authority.byte_at(i) == '@') {
+            at = i;
+        }
+    }
+    str host = authority;
+    if (at >= 0) {
+        host = authority.substr(at + 1, authority.size());
+        str userinfo = authority.substr(0, at);
+        int colon = userinfo.index_of(":").or(-1);
+        str user_text = userinfo;
+        if (colon >= 0) {
+            user_text = userinfo.substr(0, colon);
+            match (http.unquote(userinfo.substr(colon + 1, userinfo.size()))) {
+                case Ok(str decoded): {
+                    session.password = decoded;
+                }
+                case Err(_): {
+                }
+            }
+        }
+        match (http.unquote(user_text)) {
+            case Ok(str decoded): {
+                session.user = decoded;
+            }
+            case Err(_): {
+            }
+        }
+        session.has_user_in_url = true;
+    }
+    if (host == "") {
+        return Result<Session, str>.Err("unable to access '" + session.shown() + "': URL using bad/illegal format or missing URL");
+    }
+    str path = tail;
+    int query = path.index_of("?").or(-1);
+    if (query >= 0) {
+        path = path.substr(0, query);
+    }
+    session.base = protocol + "://" + host + tail;
+    while (session.base.ends_with("/")) {
+        session.base = session.base.substr(0, session.base.size() - 1);
+    }
+    str wanted_path = path;
+    if (wanted_path.starts_with("/")) {
+        wanted_path = wanted_path.substr(1, wanted_path.size());
+    }
+    session.cred_want = GIT_creds.Want(protocol, host, wanted_path, session.user);
+    if (!GIT_gitcommon.cfg_bool(ctx, "credential", "", "useHttpPath", false)) {
+        session.cred_want.path = "";
+    }
+    // the advertisement
+    bool is_v2_wanted = service == "git-upload-pack" && cfg_text(ctx, "protocol", "", "version", "2") == "2";
+    str target = session.base + "/info/refs?service=" + service;
+    http.Response response = session.exchange("GET", target, "", [], is_v2_wanted, "application/x-" + service + "-advertisement")?;
+    if (response.status() == 404) {
+        return Result<Session, str>.Err("repository '" + session.shown() + "' not found");
+    }
+    if (response.status() != 200) {
+        return Result<Session, str>.Err("unable to access '" + session.shown() + "': The requested URL returned error: " + response.status().to_str());
+    }
+    str content_type = response.header("content-type").or("");
+    if (!content_type.starts_with("application/x-" + service + "-advertisement")) {
+        return Result<Session, str>.Err("unable to access '" + session.shown() + "': not a smart HTTP git server (dumb HTTP is not supported)");
+    }
+    bytes body = response.body();
+    io.Buffer stream = io.buffer_of(body);
+    Pkt first = read_pkt(stream)?;
+    Pkt next = first;
+    if (first.kind == 0 && first.data.starts_with("# service=".to_bytes())) {
+        Pkt flush = read_pkt(stream)?;
+        next = read_pkt(stream)?;
+    }
+    if (next.kind == 0 && line_of(next.data) == "version 2") {
+        session.is_v2 = true;
+        while (true) {
+            Pkt cap = read_pkt(stream)?;
+            if (cap.kind != 0) {
+                break;
+            }
+            session.caps.push(line_of(cap.data));
+        }
+        for (str cap in session.caps) {
+            if (cap.starts_with("object-format=")) {
+                session.object_format = cap.substr(14, cap.size());
+            }
+        }
+        return Result<Session, str>.Ok(session);
+    }
+    // v0 (or v1): the whole advertisement, from the start of the refs
+    match (GIT_http_fetch.parse_advertisement(body)) {
+        case Ok(GIT_http_fetch.Advertisement got): {
+            List<GIT_wire.RemoteRef> refs = [];
+            for (GIT_http_fetch.RemoteRef one in got.refs) {
+                refs.push(GIT_wire.RemoteRef(one.name, one.id));
+            }
+            session.ad = GIT_wire.Advertisement(got.service, got.capabilities, refs, got.object_format);
+            session.caps = got.capabilities;
+            session.object_format = got.object_format;
+            return Result<Session, str>.Ok(session);
+        }
+        case Err(_): {
+            return Result<Session, str>.Err("unable to access '" + session.shown() + "': the server's advertisement is not well-formed");
+        }
+    }
+}
+
+Result<Session, str> connect_ssh(GIT_gitcommon.Ctx ctx, str url, GIT_remote.Remote remote, str service) {
+    Session session = Session(url, service, ctx);
+    session.is_ssh = true;
+    GIT_ssh_transport.Target target = GIT_ssh_transport.Target("", 0, "", "", [], "", false);
+    match (GIT_ssh_transport.target_for(remote)) {
+        case Ok(GIT_ssh_transport.Target found): {
+            target = found;
+        }
+        case Err(GIT_ssh_transport.Error why): {
+            return Result<Session, str>.Err(why.to_str());
+        }
+    }
+    int attempts = 0;
+    while (attempts < 2) {
+        attempts = attempts + 1;
+        Option<GIT_ssh_transport.Error> failure = Option<GIT_ssh_transport.Error>.None;
+        if (service == "git-upload-pack") {
+            match (GIT_ssh_transport.connect_upload(target)) {
+                case Ok(GIT_ssh_transport.Upload upload): {
+                    session.upload = Option<GIT_ssh_transport.Upload>.Some(upload);
+                    session.ad = upload.advertisement;
+                    session.caps = upload.advertisement.capabilities;
+                    session.object_format = upload.advertisement.object_format;
+                    return Result<Session, str>.Ok(session);
+                }
+                case Err(GIT_ssh_transport.Error why): {
+                    failure = Option<GIT_ssh_transport.Error>.Some(why);
+                }
+            }
+        } else {
+            match (GIT_ssh_transport.connect_receive(target)) {
+                case Ok(GIT_ssh_transport.Receive receive): {
+                    session.receive = Option<GIT_ssh_transport.Receive>.Some(receive);
+                    session.ad = receive.advertisement;
+                    session.caps = receive.advertisement.capabilities;
+                    session.object_format = receive.advertisement.object_format;
+                    return Result<Session, str>.Ok(session);
+                }
+                case Err(GIT_ssh_transport.Error why): {
+                    failure = Option<GIT_ssh_transport.Error>.Some(why);
+                }
+            }
+        }
+        match (failure) {
+            case Some(GIT_ssh_transport.Error why): {
+                match (why.pending_host()) {
+                    case Some(GIT_ssh_transport.PendingHost pending): {
+                        // ssh's own StrictHostKeyChecking=ask: only a person at a terminal may say yes
+                        str question = "The authenticity of host '" + pending.host + "' can't be established.\n" + pending.prompt() + "\nAre you sure you want to continue connecting (yes/no)? ";
+                        Option<str> answer = GIT_creds.ask("", question, false);
+                        bool is_yes = false;
+                        match (answer) {
+                            case Some(str said): {
+                                is_yes = said.trim() == "yes";
+                            }
+                            case None: {
+                            }
+                        }
+                        if (!is_yes) {
+                            return Result<Session, str>.Err("Host key verification failed.\nPlease make sure you have the correct access rights\nand the repository exists.");
+                        }
+                        match (GIT_ssh_transport.trust_host(pending)) {
+                            case Ok(_): {
+                            }
+                            case Err(GIT_ssh_transport.Error trust_failure): {
+                                return Result<Session, str>.Err(trust_failure.to_str());
+                            }
+                        }
+                        continue;
+                    }
+                    case None: {
+                        return Result<Session, str>.Err(why.to_str() + "\nPlease make sure you have the correct access rights\nand the repository exists.");
+                    }
+                }
+            }
+            case None: {
+            }
+        }
+    }
+    return Result<Session, str>.Err("Host key verification failed.");
+}
+
+// --- one HTTP exchange, with the 401 dance ---------------------------------------------
+
+/// A response body read piece by piece, as the `GIT_wire.Stream` the
+/// parsers take.
+pub type BodyReader {
+    pub http.BodyStream body;
+}
+
+pub Result<bytes, io.Error> BodyReader.read(int count) {
+    match (body.read(count)) {
+        case Ok(bytes got): {
+            return Result<bytes, io.Error>.Ok(got);
+        }
+        case Err(_): {
+            return Result<bytes, io.Error>.Err(io.Error.Other(5));
+        }
+    }
+}
+
+pub Result<int, io.Error> BodyReader.write(bytes data) {
+    return Result<int, io.Error>.Err(io.Error.Other(32));
+}
+
+pub Result<bool, io.Error> BodyReader.close() {
+    return Result<bool, io.Error>.Ok(true);
+}
+
+// --- pkt-lines, with the v2 delimiter ---------------------------------------------------
+
+/// One packet: `kind` 0 data, 1 flush (`0000`), 2 delimiter (`0001`), 3
+/// response end (`0002`), 4 the stream ended between packets.
+pub type Pkt {
+    pub int kind;
+    pub bytes data;
+}
+
+str read_error_text(GIT_wire.Error error) {
+    return error.to_str();
+}
+
+Result<bytes, str> read_exact(GIT_wire.Stream stream, int count) {
+    bytes out = [];
+    while (out.size() < count) {
+        match (stream.read(count - out.size())) {
+            case Ok(bytes got): {
+                if (got.size() == 0) {
+                    return Result<bytes, str>.Err("the remote end hung up unexpectedly");
+                }
+                out.extend(got);
+            }
+            case Err(_): {
+                return Result<bytes, str>.Err("the connection failed while reading");
+            }
+        }
+    }
+    return Result<bytes, str>.Ok(out);
+}
+
+int hex_digit(int c) {
+    if (c >= '0' && c <= '9') {
+        return c - 48;
+    }
+    if (c >= 'a' && c <= 'f') {
+        return c - 87;
+    }
+    if (c >= 'A' && c <= 'F') {
+        return c - 55;
+    }
+    return -1;
+}
+
+pub Result<Pkt, str> read_pkt(GIT_wire.Stream stream) {
+    bytes head = [];
+    match (stream.read(4)) {
+        case Ok(bytes got): {
+            if (got.size() == 0) {
+                // the stream ended between packets
+                return Result<Pkt, str>.Ok(Pkt(4, []));
+            }
+            head.extend(got);
+        }
+        case Err(_): {
+            return Result<Pkt, str>.Err("the connection failed while reading");
+        }
+    }
+    if (head.size() < 4) {
+        bytes more = read_exact(stream, 4 - head.size())?;
+        head.extend(more);
+    }
+    int length = 0;
+    for (int i in 0 .. 4) {
+        int digit = hex_digit(head[i]);
+        if (digit < 0) {
+            return Result<Pkt, str>.Err("protocol error: bad pkt-line length");
+        }
+        length = length * 16 + digit;
+    }
+    if (length == 0) {
+        return Result<Pkt, str>.Ok(Pkt(1, []));
+    }
+    if (length == 1) {
+        return Result<Pkt, str>.Ok(Pkt(2, []));
+    }
+    if (length == 2) {
+        return Result<Pkt, str>.Ok(Pkt(3, []));
+    }
+    if (length < 4) {
+        return Result<Pkt, str>.Err("protocol error: bad pkt-line length");
+    }
+    bytes payload = read_exact(stream, length - 4)?;
+    if (payload.starts_with("ERR ".to_bytes())) {
+        return Result<Pkt, str>.Err("remote error: " + payload.substr(4, payload.size()).utf8().or("").trim());
+    }
+    return Result<Pkt, str>.Ok(Pkt(0, payload));
+}
+
+/// A data packet's text without its trailing newline.
+pub str line_of(bytes data) {
+    str line = data.utf8().or("");
+    if (line.ends_with("\n")) {
+        line = line.substr(0, line.size() - 1);
+    }
+    return line;
+}
+
+bytes pkt(str line) {
+    return GIT_wire.pkt_line(line.to_bytes());
+}
+
+const str FLUSH = "0000";
+const str DELIM = "0001";
+
+// --- listing -------------------------------------------------------------------------------
+
+bool has_prefix(List<str> prefixes, str name) {
+    if (prefixes.size() == 0) {
+        return true;
+    }
+    for (str prefix in prefixes) {
+        if (name.starts_with(prefix)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+// --- fetching ----------------------------------------------------------------------------------
+
+// What the server said on the side-band, as git shows it: `remote: ` before
+// each line and, on a stream that is not a terminal, eight spaces after.
+void emit_remote(str message) {
+    str rest = message;
+    while (rest.size() > 0) {
+        int stop = rest.size();
+        int newline = rest.index_of("\n").or(-1);
+        int carriage = rest.index_of("\r").or(-1);
+        bool has_end = false;
+        if (newline >= 0) {
+            stop = newline;
+            has_end = true;
+        }
+        if (carriage >= 0 && carriage < stop) {
+            stop = carriage;
+            has_end = true;
+        }
+        str line = rest.substr(0, stop);
+        if (has_end) {
+            io.eprint("remote: " + line + "        ");
+            rest = rest.substr(stop + 1, rest.size());
+        } else {
+            io.eprint("remote: " + line);
+            rest = "";
+        }
+    }
+}
+
+/// The response to a fetch, v0 (ACK/NAK, shallow lines and side-band) or v2
+/// (sections).
+Result<Fetched, str> parse_fetch(GIT_wire.Stream stream, bool is_v2) {
+    Fetched out = Fetched();
+    str section = "";
+    bool is_in_pack = false;
+    while (true) {
+        Pkt packet = read_pkt(stream)?;
+        if (packet.kind == 4) {
+            break;
+        }
+        if (packet.kind == 1) {
+            if (is_v2 || is_in_pack) {
+                break;
+            }
+            continue;
+        }
+        if (packet.kind == 2) {
+            section = "";
+            continue;
+        }
+        if (packet.kind == 3) {
+            break;
+        }
+        if (is_v2 && section == "") {
+            section = line_of(packet.data);
+            if (section == "packfile") {
+                is_in_pack = true;
+            }
+            continue;
+        }
+        if (is_v2 && section != "packfile") {
+            str line = line_of(packet.data);
+            if (section == "shallow-info") {
+                if (line.starts_with("shallow ")) {
+                    out.shallow.push(line.substr(8, line.size()));
+                } else if (line.starts_with("unshallow ")) {
+                    out.unshallow.push(line.substr(10, line.size()));
+                }
+            }
+            continue;
+        }
+        bytes data = packet.data;
+        if (data.size() == 0) {
+            continue;
+        }
+        int band = data[0];
+        if (!is_v2 && band != 1 && band != 2 && band != 3) {
+            str line = line_of(data);
+            if (line.starts_with("shallow ")) {
+                out.shallow.push(line.substr(8, line.size()));
+            } else if (line.starts_with("unshallow ")) {
+                out.unshallow.push(line.substr(10, line.size()));
+            }
+            continue;
+        }
+        if (band == 1) {
+            is_in_pack = true;
+            out.pack.extend(data.substr(1, data.size()));
+            out.has_pack = true;
+        } else if (band == 2) {
+            emit_remote(data.substr(1, data.size()).utf8().or(""));
+        } else if (band == 3) {
+            return Result<Fetched, str>.Err("remote error: " + data.substr(1, data.size()).utf8().or("").trim());
+        } else {
+            return Result<Fetched, str>.Err("protocol error: bad band #" + band.to_str());
+        }
+    }
+    return Result<Fetched, str>.Ok(out);
+}
+
+// --- pushing ----------------------------------------------------------------------------------
+
+Result<PushOutcome, str> parse_report(bytes body, bool is_sideband) {
+    bytes inner = [];
+    io.Buffer stream = io.buffer_of(body);
+    if (is_sideband) {
+        while (stream.size() > 0) {
+            Pkt packet = read_pkt(stream)?;
+            if (packet.kind != 0) {
+                if (packet.kind == 1) {
+                    break;
+                }
+                continue;
+            }
+            if (packet.data.size() == 0) {
+                continue;
+            }
+            int band = packet.data[0];
+            if (band == 1) {
+                inner.extend(packet.data.substr(1, packet.data.size()));
+            } else if (band == 2) {
+                emit_remote(packet.data.substr(1, packet.data.size()).utf8().or(""));
+            } else if (band == 3) {
+                return Result<PushOutcome, str>.Err("remote error: " + packet.data.substr(1, packet.data.size()).utf8().or("").trim());
+            }
+        }
+    } else {
+        inner = body;
+    }
+    PushOutcome out = PushOutcome();
+    io.Buffer lines = io.buffer_of(inner);
+    bool has_unpack = false;
+    while (lines.size() > 0) {
+        Pkt packet = read_pkt(lines)?;
+        if (packet.kind == 1) {
+            break;
+        }
+        if (packet.kind != 0) {
+            continue;
+        }
+        str line = line_of(packet.data);
+        if (line.starts_with("unpack ")) {
+            has_unpack = true;
+            str verdict = line.substr(7, line.size());
+            out.is_unpacked = verdict == "ok";
+            if (!out.is_unpacked) {
+                out.unpack_reason = verdict;
+            }
+        } else if (line.starts_with("ok ")) {
+            out.statuses.push(PushStatus(line.substr(3, line.size()), true, ""));
+        } else if (line.starts_with("ng ")) {
+            str rest = line.substr(3, line.size());
+            int space = rest.index_of(" ").or(-1);
+            if (space < 0) {
+                out.statuses.push(PushStatus(rest, false, ""));
+            } else {
+                out.statuses.push(PushStatus(rest.substr(0, space), false, rest.substr(space + 1, rest.size())));
+            }
+        }
+    }
+    if (!has_unpack) {
+        return Result<PushOutcome, str>.Err("the remote end did not report a status");
+    }
+    return Result<PushOutcome, str>.Ok(out);
+}

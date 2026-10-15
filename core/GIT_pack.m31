@@ -285,6 +285,9 @@ pub type Unpacked {
     pub str id;
     pub str kind;
     pub bytes content;
+    /// where the entry begins and ends in the pack (`read_pack` only)
+    pub int start = 0;
+    pub int end = 0;
 }
 
 // One entry as the front-to-back walk finds it, before any delta is applied.
@@ -293,6 +296,8 @@ type Raw {
     int base_offset;
     bytes base_id;
     bytes data;
+    int start = 0;
+    int end = 0;
 }
 
 /// Every object in `pack` (a whole packfile's bytes), deltas resolved, in
@@ -347,7 +352,10 @@ pub Result<List<Unpacked>, Error> read_pack(str gitdir, bytes pack) {
         }
         GIT_zlib.Decoded decoded = inflate_pack_zlib(pack, position)?;
         index_at.set(current, raws.size());
-        raws.push(Raw(header.kind, base_off, base_id, decoded.data));
+        Raw one_raw = Raw(header.kind, base_off, base_id, decoded.data);
+        one_raw.start = current;
+        one_raw.end = position + decoded.used;
+        raws.push(one_raw);
         current = position + decoded.used;
     }
     List<Option<Unpacked>> done = [];
@@ -386,6 +394,8 @@ pub Result<List<Unpacked>, Error> read_pack(str gitdir, bytes pack) {
                 content = apply_delta(resolved_base.content, raw.data)?;
             }
             Unpacked unpacked = Unpacked(object_name(raw_width, kind, content), kind, content);
+            unpacked.start = raw.start;
+            unpacked.end = raw.end;
             by_id.set(unpacked.id, unpacked);
             done[i] = Option<Unpacked>.Some(unpacked);
             left = left - 1;

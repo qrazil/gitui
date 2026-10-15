@@ -332,6 +332,45 @@ pub Result<Object, Error> read(str gitdir, str id) {
 /// `read` through a `GIT_pack.Cache`, which keeps the packs' bytes between
 /// reads: what a command that reads thousands of objects holds on to.
 pub Result<Object, Error> read_with(GIT_pack.Cache pack_cache, str gitdir, str id) {
+    Object object = read_stored(pack_cache, gitdir, id)?;
+    match (object.body) {
+        case Commit(Commit commit): {
+            // a shallow boundary (`.git/shallow`) is a commit with no parents
+            if (commit.parents.size() > 0 && is_shallow(gitdir, object.id)) {
+                commit.parents = [];
+            }
+        }
+        case Blob: {
+        }
+        case Tree(_): {
+        }
+        case Tag(_): {
+        }
+    }
+    return Result<Object, Error>.Ok(object);
+}
+
+/// Is `id` a commit whose parents are cut off, per `<common dir>/shallow`?
+pub bool is_shallow(str gitdir, str id) {
+    str path = fs.join(GIT_repository.common(gitdir), "shallow");
+    if (!fs.is_file(path)) {
+        return false;
+    }
+    match (io.read(path)) {
+        case Ok(str body): {
+            for (str line in body.split("\n")) {
+                if (line.trim() == id) {
+                    return true;
+                }
+            }
+        }
+        case Err(_): {
+        }
+    }
+    return false;
+}
+
+Result<Object, Error> read_stored(GIT_pack.Cache pack_cache, str gitdir, str id) {
     if (!is_name(id) || !is_full_width(id)) {
         return Result<Object, Error>.Err(Error.BadName);
     }

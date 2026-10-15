@@ -174,22 +174,22 @@ Result<Stacks, Error> scan(str gitdir) {
             }
             continue;
         }
-        if (message.starts_with("rebase (start)")) {
+        if (is_rebase_step(message, "start")) {
             is_in_rebase = true;
             rebase_from = entry.old;
             continue;
         }
-        if (is_in_rebase && message.starts_with("rebase (abort)")) {
+        if (is_in_rebase && is_rebase_step(message, "abort")) {
             is_in_rebase = false;
             continue;
         }
-        if (is_in_rebase && message.starts_with("rebase (finish)")) {
+        if (is_in_rebase && is_rebase_step(message, "finish")) {
             is_in_rebase = false;
             stacks.redo.clear();
             stacks.done.push(Unit(rebase_from, entry.new, message, false, "", "", !GIT_reflog.is_zero(rebase_from) && rebase_from != ""));
             continue;
         }
-        if (is_in_rebase && message.starts_with("rebase")) {
+        if (is_in_rebase && (message.starts_with("rebase") || message.starts_with("pull"))) {
             continue;
         }
         List<str> labels = moving_labels(message);
@@ -482,4 +482,18 @@ Result<GIT_index.Index, Error> load_index(str gitdir) {
             return Result<GIT_index.Index, Error>.Err(Error.Index(error));
         }
     }
+}
+
+// `rebase (start)`, or `pull --rebase (start)` / `pull (start)` when a pull
+// ran the rebase (GIT_REFLOG_ACTION).
+bool is_rebase_step(str message, str word) {
+    if (message.starts_with("rebase (" + word + ")")) {
+        return true;
+    }
+    if (message.starts_with("pull")) {
+        int paren = message.index_of(" (" + word + ")").or(-1);
+        int colon = message.index_of(":").or(-1);
+        return paren >= 0 && (colon < 0 || paren < colon);
+    }
+    return false;
 }

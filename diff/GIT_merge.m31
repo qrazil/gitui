@@ -2114,7 +2114,7 @@ pub Result<Report, Error> start_commit(str gitdir, str worktree, str theirs, str
             squashed.is_squashed = true;
             return Result<Report, Error>.Ok(squashed);
         }
-        ref_update(gitdir, ref_name, theirs, Option<str>.Some(ours), "merge " + spec + ": Fast-forward")?;
+        ref_update(gitdir, ref_name, theirs, Option<str>.Some(ours), GIT_reflog.action("merge " + spec) + ": Fast-forward")?;
         return Result<Report, Error>.Ok(Report(Ending.FastForwarded, theirs, theirs_tree, none, ["Fast-forward"]));
     }
     // git writes ORIG_HEAD before it can refuse
@@ -2140,7 +2140,7 @@ pub Result<Report, Error> start_commit(str gitdir, str worktree, str theirs, str
             bool is_index_dirty = error.is_index_dirty();
             if (is_index_dirty || error.is_local_changes()) {
                 if (is_index_dirty && GIT_reflog.should_log(gitdir, "HEAD")) {
-                    match (GIT_reflog.append(gitdir, "HEAD", ours, ours, GIT_reflog.default_ident(gitdir), "merge " + spec + ": updating HEAD")) {
+                    match (GIT_reflog.append(gitdir, "HEAD", ours, ours, GIT_reflog.default_ident(gitdir), GIT_reflog.action("merge " + spec) + ": updating HEAD")) {
                         case Ok: {
                         }
                         case Err(_): {
@@ -2175,7 +2175,7 @@ pub Result<Report, Error> start_commit(str gitdir, str worktree, str theirs, str
     if (applied.conflicts.size() == 0 && opts.should_commit) {
         GIT_object.Commit commit = GIT_object.Commit(applied.tree, [ours, theirs], ident(gitdir, "AUTHOR"), ident(gitdir, "COMMITTER"), [], text.to_bytes());
         str id = write_commit(gitdir, commit)?;
-        ref_update(gitdir, ref_name, id, Option<str>.Some(ours), "merge " + spec + ": Merge made by the 'ort' strategy.")?;
+        ref_update(gitdir, ref_name, id, Option<str>.Some(ours), GIT_reflog.action("merge " + spec) + ": Merge made by the 'ort' strategy.")?;
         return Result<Report, Error>.Ok(Report(Ending.Merged, id, applied.tree, none, applied.messages));
     }
     write_state(gitdir, "MERGE_HEAD", theirs + "\n")?;
@@ -2245,7 +2245,7 @@ pub Result<Report, Error> merge_ours(str gitdir, str worktree, str theirs, str s
     if (opts.should_commit) {
         GIT_object.Commit commit = GIT_object.Commit(ours_tree, [ours, theirs], ident(gitdir, "AUTHOR"), ident(gitdir, "COMMITTER"), [], text.to_bytes());
         str id = write_commit(gitdir, commit)?;
-        ref_update(gitdir, ref_name, id, Option<str>.Some(ours), "merge " + spec + ": Merge made by the 'ours' strategy.")?;
+        ref_update(gitdir, ref_name, id, Option<str>.Some(ours), GIT_reflog.action("merge " + spec) + ": Merge made by the 'ours' strategy.")?;
         return Result<Report, Error>.Ok(Report(Ending.Merged, id, ours_tree, none, []));
     }
     write_state(gitdir, "MERGE_HEAD", theirs + "\n")?;

@@ -85,7 +85,8 @@ deliberately differ.
 Done: `status` (0.11.0), `log`, `show` and `diff` (0.12.0), `add`, `rm`, `mv`,
 `restore`, `reset`, `commit`, `switch`, `checkout`, `branch` and `tag` (0.13.0),
 `stash`, `cherry-pick`, `revert`, `merge`, `rebase`, `clean` and `worktree`
-(0.16.0).
+(0.16.0), `clone`, `fetch`, `pull`, `push`, `remote`, `ls-remote` and `init`
+over HTTPS, HTTP and ssh (0.17.0, below).
 
 `1git status` is git's grammar and git's bytes: long form (branch, upstream
 ahead/behind/diverged/gone, detached at/from, merge / cherry-pick / revert /
@@ -442,6 +443,102 @@ matches; these do not):
 - `NO_COLOR` switches colour off under `auto`, as `status` does; git itself
   ignores it.
 
+### Network commands (0.17.0)
+
+`clone`, `fetch`, `pull`, `push`, `remote`, `ls-remote` and a minimal `init`,
+in git's grammar. Transport: smart HTTP(S) with protocol v2 first
+(`Git-Protocol: version=2`; `ls-refs` and `fetch` commands) and v0 when the
+server answers v0 or `protocol.version=0|1` is set; `receive-pack` is v0 as
+in git. ssh (`ssh://`, `git@host:path`, `~/.ssh/config` Host/HostName/User/
+Port/IdentityFile) is v0 over m31's own ssh client: ed25519 OpenSSH keys, no
+agent, no passphrases; `known_hosts` is strict (an unknown host is asked about
+on the terminal only, a changed key is refused).
+`scripts/compare_net.sh` (HTTP, 100 cases) and `scripts/compare_net_ssh.sh`
+run every form below beside real git 2.55 and compare stdout, stderr, exit
+status, refs, reflogs, config, `packed-refs`, `shallow`, `FETCH_HEAD`, the
+object set, the index and the work tree, and the server's refs and `fsck`.
+
+What matches git byte for byte (stdout, stderr, state):
+
+- `fetch`: remotes by name or URL, refspecs (`+src:dst`, globs, short names,
+  `tag <name>`), the opportunistic update of remote-tracking refs, auto-follow
+  of tags in git's visiting order (`git`'s name hashmap), `--tags`,
+  `--no-tags`, `remote.<n>.tagOpt`, `--prune`, `--depth`, `--unshallow`,
+  `--all`, `-f`, `-q`, `-v`, `--dry-run`, `FETCH_HEAD` (for-merge flags),
+  `refs/remotes/<n>/HEAD` (`followRemoteHEAD`), the `From` summary in git's
+  columns, reflog messages (`fetch origin: storing head`, `fast-forward`,
+  `forced-update`), `refusing to fetch into branch`, `fetch.unpackLimit`.
+- `clone`: `-b` (branch or tag, with git's detached-HEAD advice), `--bare`,
+  `--single-branch`, `--depth`, `-o`, `--no-tags`, `-n`, `-q`, `-c`, empty
+  remotes, the destination checks, clean-up on failure; the config, the
+  packed refs, `origin/HEAD` and the `clone: from <url>` reflogs as git
+  writes them.
+- `push`: `<remote> <refspec>...`, `src:dst`, `HEAD`, `+`, `:dst`/`--delete`,
+  `--tags`, `--all`, `-u`/`push.autoSetupRemote`, `-o` push options,
+  `--atomic`, `-n`, `-q`, `-v`, `push.default` (simple, current, upstream,
+  matching), `remote.<n>.push`/`pushurl`, `pre-push` hook, `--force-with-lease`
+  (`=ref`, `=ref:expect`), `Everything up-to-date`, `[new branch]`/`..`/`...`
+  rows, rejection reasons (`non-fast-forward`, `fetch first`, `already exists`,
+  `stale info`, `remote rejected`) and git's `hint:` blocks, `remote:` lines
+  from the server's side-band (with git's trailing padding), tracking-ref
+  update (`update by push`), Gerrit `refs/for/<branch>%topic=...,r=...`.
+- `pull`: fetch, then `merge`/`rebase` (this program run again with
+  `GIT_REFLOG_ACTION=pull ...`): fast-forward, up to date, `--ff-only`,
+  `--rebase[=...]`, `--no-rebase`, `pull.rebase`, `pull.ff`,
+  `branch.<n>.rebase`, `Merge branch 'x' of <url> [into <branch>]`, git's
+  divergent-branches refusal and no-tracking-information messages.
+- `remote`: list, `-v`, `add` (`-t`, `-m`, `-f`, `--tags`, `--no-tags`),
+  `remove`/`rm`, `rename` (config, refs, reflogs, branch config), `set-url`
+  (`--push`, `--add`, `--delete`), `get-url`, `show` (and `-n`), `prune`
+  (`-n`), `set-head` (`-a`, `-d`).
+- `ls-remote`: `--heads`/`--branches`, `--tags`, `--refs`, `--symref`,
+  `--exit-code`, `--get-url`, `-q`, patterns, a named, implied or URL remote.
+- Credentials, in git's order: userinfo of the URL, `~/.netrc`,
+  `credential.helper` (`store` natively; `!cmd`, absolute paths and
+  `git-credential-<name>` run with `get`/`store`/`erase`), `GIT_ASKPASS` /
+  `core.askPass` / `SSH_ASKPASS`, the terminal (`/dev/tty`, echo off);
+  `GIT_TERMINAL_PROMPT=0`; `approve` after success, `reject` after a refusal.
+  The first request goes out without credentials and waits for the 401, as
+  curl does. A secret is never printed.
+- Pack handling: a pack is checksum-verified, then unpacked (< 100 objects)
+  or kept with a version 2 `.idx`; thin packs (never requested) and deltas
+  against local objects resolve; SHA-256 repositories exchange with SHA-256
+  servers; `.git/shallow` makes the commit it names parentless for every
+  command.
+
+Deliberate departures, and gaps:
+
+- `push --force`/`-f` and a leading `+` are a lease on the remote-tracking ref
+  (`stale info` when the remote moved since the last fetch; a missing
+  tracking ref means "must not exist"); `--force=unsafe` is git's plain force
+  (this is the departure listed above, and the one place output differs).
+- No progress meters: `no-progress` is always requested, `Rebasing (1/1)` is
+  not printed by `rebase` (stderr only; `pull --rebase` therefore differs in
+  that one stderr line), and the transfer is not interleaved with `remote:`
+  lines (they are printed once the response is read).
+- Negotiation is one round: all haves (at most 256 commits from the local
+  refs, breadth first) and `done`. A pack can be larger than git's; never
+  wrong. Thin packs are not requested.
+- Not done: `--filter`/partial clone (needs lazy object fetch), submodules,
+  `--mirror`, `--reference`, local-path and `git://` remotes, `file://`,
+  `http.proxy`, `http.sslVerify=false` (certificates are always checked; roots
+  from the system, `GIT_SSL_CAINFO`, `http.sslCAInfo`, `GITUI_HTTP_CA_FILE`),
+  client certificates, `credential.helper=cache`'s daemon (the helper program
+  is run if present), `fetch.negotiationAlgorithm`, `push --follow-tags`,
+  `--signed`, `push --mirror`/`--prune`, `remote update`/`set-branches`,
+  `pull` of several heads (octopus), `--recurse-submodules`, `gc --auto`,
+  bundle URIs, sideband progress on a terminal, ssh protocol v2 and ssh
+  agent/passphrase keys, `ssh -o` options (only `~/.ssh/config`'s Host
+  blocks; `GIT_SSH_COMMAND` is not used).
+- A server that answers a pack with `Content-Length` over 32 MiB is refused by
+  m31's `lib/net/http.m31` (`MAX_BODY`, applied to framing even for a
+  streamed body); chunked answers, which git servers send, stream without a
+  ceiling and are held in memory whole once received (a 40 MB clone takes
+  ~40 s at `-O0`, a 21 MB repository 7 s at `-O2`). This is an m31 library
+  limit, not worked around.
+- `init` writes no templates (no sample hooks, `info/exclude`, `description`).
+- The advertised user agent is `1git/0.17.0`.
+
 ## Order
 
 1. Read side, git spelling: ~~`log`~~ ~~`show`~~ ~~`diff`~~ ~~`status`~~ (done) `blame` `cat-file`
@@ -450,8 +547,8 @@ matches; these do not):
 2. Write side: ~~`add`~~ ~~`rm`~~ ~~`mv`~~ ~~`restore`~~ ~~`reset`~~ ~~`commit`~~
    ~~`checkout`~~ ~~`switch`~~ ~~`branch`~~ ~~`tag`~~ (done, 0.13.0) ~~`stash`~~
    ~~`cherry-pick`~~ ~~`revert`~~ ~~`merge`~~ ~~`rebase`~~ ~~`clean`~~ ~~`worktree`~~ (done, 0.16.0).
-3. Network: `clone` `fetch` `pull` `push` `remote` (HTTP(S) smart protocol
-   exists; ssh when m31 grows a client).
+3. Network: ~~`clone`~~ ~~`fetch`~~ ~~`pull`~~ ~~`push`~~ ~~`remote`~~ ~~`ls-remote`~~
+   (done, 0.17.0: HTTP(S) smart protocol v2 with a v0 fallback, ssh v0).
 4. The long tail: hooks, `.gitattributes`, filters, worktrees, submodules,
    `gc`/`repack`, `bisect`, `format-patch`/`am`.
 

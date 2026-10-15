@@ -64,6 +64,13 @@ import core.GIT_gitadd;
 import core.GIT_gitcommit;
 import core.GIT_gitbranch;
 import core.GIT_githistory;
+import net.GIT_transport;
+import net.GIT_packstore;
+import net.GIT_gitfetch;
+import net.GIT_gitclone;
+import net.GIT_gitpush;
+import net.GIT_gitpull;
+import net.GIT_gitremote;
 
 args.Parser parser = args.Parser("1git", summary: "read-only git plumbing over loose objects");
 parser.value("git-dir", help: "the repository's git directory", placeholder: "DIR");
@@ -183,6 +190,27 @@ int git_spelling(List<str> argv) {
     }
     if (argv[index] == "restore") {
         return GIT_gitadd.run_restore(cwd, overrides, argv.slice(index + 1, argv.size()));
+    }
+    if (argv[index] == "clone") {
+        return GIT_gitclone.run_clone(cwd, overrides, argv.slice(index + 1, argv.size()));
+    }
+    if (argv[index] == "init") {
+        return GIT_gitclone.run_init(cwd, overrides, argv.slice(index + 1, argv.size()));
+    }
+    if (argv[index] == "remote") {
+        return GIT_gitremote.run_remote(cwd, overrides, argv.slice(index + 1, argv.size()));
+    }
+    if (argv[index] == "ls-remote") {
+        return GIT_gitremote.run_ls_remote(cwd, overrides, argv.slice(index + 1, argv.size()));
+    }
+    if (argv[index] == "pull") {
+        return GIT_gitpull.run_pull(cwd, overrides, argv.slice(index + 1, argv.size()));
+    }
+    if (argv[index] == "push") {
+        return GIT_gitpush.run_push(cwd, overrides, argv.slice(index + 1, argv.size()));
+    }
+    if (argv[index] == "fetch") {
+        return GIT_gitfetch.run_fetch(cwd, overrides, argv.slice(index + 1, argv.size()));
     }
     if (argv[index] == "diff") {
         return GIT_gitdiffcmd.run(cwd, overrides, argv.slice(index + 1, argv.size()));

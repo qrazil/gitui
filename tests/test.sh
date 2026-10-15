@@ -338,6 +338,28 @@ if build git; then
     fi
 fi
 
+# --- `1git clone`, `fetch`, `pull`, `push`, `remote`, `ls-remote` against real git --
+# a real `git http-backend` on localhost (and a disposable sshd): see the
+# header of scripts/compare_net.sh. Skipped when git's backend or python3 is
+# missing.
+
+if build git; then
+    if [ -x /usr/libexec/git-core/git-http-backend ] || [ -x "$(git --exec-path)/git-http-backend" ] && command -v python3 > /dev/null; then
+        if out=$(NET_BACKEND=$( [ -x /usr/libexec/git-core/git-http-backend ] && echo /usr/libexec/git-core/git-http-backend || echo "$(git --exec-path)/git-http-backend") bash scripts/compare_net.sh "$WORK/git" "$WORK/net-fixtures" 2>&1); then
+            note "git network commands: ${out## }"
+        else
+            bad "git network commands" "$out"
+        fi
+        if out=$(bash scripts/compare_net_ssh.sh "$WORK/git" "$WORK/net-ssh-fixtures" 2>&1); then
+            note "git network commands over ssh: ${out## }"
+        else
+            bad "git network commands over ssh" "$out"
+        fi
+    else
+        note "SKIP network commands: git http-backend or python3 missing"
+    fi
+fi
+
 # --- the write path: .git/index, loose objects, refs, status -------------------
 #
 # `test_write.sh` shares this script's shell, `$WORK`, `$LANGC`, `build`,

@@ -56,6 +56,22 @@ import io;
 import os;
 import random;
 
+/// What a reflog message starts with: `$GIT_REFLOG_ACTION` (git's own
+/// variable, which `pull` sets for the merge or rebase it runs), else
+/// `fallback`.
+pub str action(str fallback) {
+    match (os.env("GIT_REFLOG_ACTION")) {
+        case Some(str value): {
+            if (value != "") {
+                return value;
+            }
+        }
+        case None: {
+        }
+    }
+    return fallback;
+}
+
 /// The id that stands for "no such ref" on either side of a line: as many
 /// zeros as an object name has in this repository.
 pub str zero(str gitdir) {

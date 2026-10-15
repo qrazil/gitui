@@ -268,8 +268,8 @@ case_() {
     dump_state "$a" > "$WORK/dump-a" 2>&1
     dump_state "$b" > "$WORK/dump-b" 2>&1
     # absolute paths (worktree commands print and store them) differ by side
-    sed -i.bak "s|$a|REPO|g" "$WORK/log-a" "$WORK/dump-a"; rm -f "$WORK/log-a.bak" "$WORK/dump-a.bak"
-    sed -i.bak "s|$b|REPO|g" "$WORK/log-b" "$WORK/dump-b"; rm -f "$WORK/log-b.bak" "$WORK/dump-b.bak"
+    sed -i "s|$a|REPO|g" "$WORK/log-a" "$WORK/dump-a"
+    sed -i "s|$b|REPO|g" "$WORK/log-b" "$WORK/dump-b"
     local failed=0
     if [ -n "${SHOW:-}" ]; then
         echo "=== $label"; echo "--- git"; cat "$WORK/log-a"; echo "--- ours"; cat "$WORK/log-b"; echo "--- stderr"; cat "$WORK/log-b.err"

@@ -1,0 +1,843 @@
+// `1git push`: resolve the remote and the refspecs, connect to
+// `git-receive-pack`, decide each ref's fate the way git's client does
+// (new, fast-forward, forced, rejected, deleted, up to date), send one pack
+// with every accepted command, and report in git's columns.
+//
+// `--force` and a leading `+` are `--force-with-lease` against the
+// remote-tracking ref here (docs/GIT-COMPAT.md: a deliberate departure);
+// `--force=unsafe` is git's plain force.
+
+import io;
+import os;
+import fs;
+import core.GIT_config;
+import core.GIT_object;
+import core.GIT_refs;
+import core.GIT_reflog;
+import core.GIT_revparse;
+import core.GIT_branches;
+import core.GIT_hash;
+import core.GIT_pack_write;
+import core.GIT_repository;
+import core.GIT_gitcommon;
+import core.GIT_gitstore;
+import core.GIT_gitwrite;
+import net.GIT_gitfetch;
+import net.GIT_refspec;
+import net.GIT_transport;
+import net.GIT_http_push;
+
+const str PUSH_USAGE = "usage: git push [<options>] [<repository> [<refspec>...]]";
+
+// One ref to push.
+type Item {
+    str src_name;
+    str src_id;
+    str dst;
+    bool is_force;
+    bool is_delete;
+    // "" (no lease), "any" (lease on the tracking ref) or an explicit expected id
+    str lease;
+    bool has_lease;
+    // the source was typed `HEAD`
+    bool is_head = false;
+}
+
+type Row {
+    str flag;
+    str summary;
+    str from;
+    str to;
+    str reason;
+    bool is_failure;
+    // "" or the hint class: "ff", "other", "tag", "fetch"
+    str hint;
+}
+
+int fail(str message) {
+    io.eprint("fatal: " + message);
+    return 128;
+}
+
+bool has_object(str gitdir, str id) {
+    match (GIT_object.read(gitdir, id)) {
+        case Ok(_): {
+            return true;
+        }
+        case Err(_): {
+            return false;
+        }
+    }
+}
+
+// The full name of a local ref `name` stands for, "" if none.
+str local_ref_name(str gitdir, str name) {
+    for (str candidate in GIT_refspec.candidates(name)) {
+        if (GIT_refs.has_ref(gitdir, candidate)) {
+            return candidate;
+        }
+    }
+    return "";
+}
+
+pub int run_push(str start, List<str> overrides, List<str> argv) {
+    GIT_gitwrite.Opts parsed = GIT_gitwrite.parse_opts(argv, ["-q --quiet", "-v --verbose", "-u --set-upstream", "-f --force=?", "--force-with-lease=?", "--force-if-includes", "-d --delete", "--tags", "--all --branches", "--mirror", "-o --push-option=", "--atomic", "-n --dry-run", "--follow-tags", "--verify", "--porcelain", "--progress", "--signed=?", "--prune", "--receive-pack= --exec=", "--thin", "--recurse-submodules=", "--repo=", "-4", "-6"]);
+    int checked = GIT_gitwrite.check_opts(parsed, PUSH_USAGE);
+    if (checked >= 0) {
+        return checked;
+    }
+    GIT_gitcommon.Opened opened = GIT_gitcommon.open(start, overrides);
+    if (!opened.ok) {
+        return 128;
+    }
+    GIT_gitcommon.Ctx ctx = opened.ctx;
+    bool is_quiet = parsed.flag("quiet");
+    bool is_verbose = parsed.flag("verbose");
+    List<str> words = parsed.paths();
+    str remote_arg = "";
+    List<str> specs = [];
+    if (words.size() > 0) {
+        remote_arg = words[0];
+        for (int i in 1 .. words.size()) {
+            specs.push(words[i]);
+        }
+    }
+    if (parsed.has("repo")) {
+        remote_arg = parsed.value("repo", "");
+    }
+    GIT_gitfetch.Remote remote = GIT_gitfetch.Remote("", "", [], "", false);
+    match (GIT_gitfetch.resolve(ctx, remote_arg, true)) {
+        case Ok(GIT_gitfetch.Remote found): {
+            remote = found;
+        }
+        case Err(str why): {
+            if (remote_arg == "") {
+                return fail("No configured push destination.\nEither specify the URL from the command-line or configure a remote repository using\n\n    git remote add <name> <url>\n\nand then push using the remote name\n\n    git push <name>\n");
+            }
+            return fail(why);
+        }
+    }
+    GIT_gitwrite.HeadInfo head = GIT_gitwrite.read_head(ctx.gitdir);
+    GIT_object.Ident ident = GIT_gitwrite.no_ident();
+    // the refspecs
+    bool is_delete_flag = parsed.flag("delete");
+    bool is_force_all = false;
+    bool is_unsafe = false;
+    if (parsed.has("force") && parsed.flag("force")) {
+        is_force_all = true;
+        if (parsed.value("force", "") == "unsafe") {
+            is_unsafe = true;
+        }
+    }
+    bool has_lease_flag = parsed.has("force-with-lease") && parsed.flag("force-with-lease");
+    // `--force-with-lease=<ref>[:<expect>]`
+    Map<str, str> leases = {};
+    bool is_lease_all = false;
+    for (str one in parsed.all("force-with-lease")) {
+        if (one == "") {
+            is_lease_all = true;
+        } else {
+            int colon = one.index_of(":").or(-1);
+            if (colon >= 0) {
+                leases.set(one.substr(0, colon), one.substr(colon + 1, one.size()));
+            } else {
+                leases.set(one, "");
+            }
+        }
+    }
+    if (has_lease_flag && parsed.all("force-with-lease").size() == 0) {
+        is_lease_all = true;
+    }
+    List<GIT_refspec.Spec> parsed_specs = [];
+    for (str one in specs) {
+        if (one == "tag") {
+            continue;
+        }
+        parsed_specs.push(GIT_refspec.parse(one));
+    }
+    // `tag <name>` is `refs/tags/<name>`
+    for (int i in 0 .. specs.size()) {
+        if (specs[i] == "tag" && i + 1 < specs.size()) {
+            parsed_specs = [];
+            List<str> rebuilt = [];
+            int j = 0;
+            while (j < specs.size()) {
+                if (specs[j] == "tag" && j + 1 < specs.size()) {
+                    rebuilt.push("refs/tags/" + specs[j + 1]);
+                    j = j + 2;
+                } else {
+                    rebuilt.push(specs[j]);
+                    j = j + 1;
+                }
+            }
+            for (str one in rebuilt) {
+                parsed_specs.push(GIT_refspec.parse(one));
+            }
+            break;
+        }
+    }
+    List<Item> items = [];
+    bool is_default = false;
+    if (parsed.flag("tags")) {
+        parsed_specs.push(GIT_refspec.parse("refs/tags/*:refs/tags/*"));
+    }
+    if (parsed.flag("all")) {
+        parsed_specs.push(GIT_refspec.parse("refs/heads/*:refs/heads/*"));
+    }
+    str set_upstream_candidate = "";
+    if (parsed_specs.size() == 0) {
+        // the configured push refspecs, then push.default
+        List<str> configured = [];
+        if (remote.is_named) {
+            configured = ctx.config.get_all("remote", remote.name, "push");
+        }
+        if (configured.size() > 0) {
+            for (str one in configured) {
+                parsed_specs.push(GIT_refspec.parse(one));
+            }
+        } else {
+            is_default = true;
+            if (head.is_detached || head.ref == "") {
+                return fail("You are not currently on a branch.\nTo push the history leading to the current (detached HEAD)\nstate now, use\n\n    git push " + remote_name_for_hint(remote) + " HEAD:<name-of-remote-branch>\n");
+            }
+            str branch = head.ref.substr(11, head.ref.size());
+            str mode = GIT_gitcommon.cfg(ctx, "push", "", "default").or("simple");
+            str upstream_remote = ctx.config.get("branch", branch, "remote").or("");
+            str upstream_merge = ctx.config.get("branch", branch, "merge").or("");
+            if (mode == "nothing") {
+                return fail("You didn't specify any refspecs to push, and push.default is \"nothing\".");
+            }
+            if (mode == "matching") {
+                parsed_specs.push(GIT_refspec.parse("refs/heads/*:refs/heads/*"));
+                is_default = false;
+            } else if (mode == "current") {
+                parsed_specs.push(GIT_refspec.parse(head.ref + ":" + head.ref));
+            } else if (mode == "upstream" || mode == "tracking") {
+                if (upstream_merge == "" || upstream_remote == "") {
+                    return fail(no_upstream_message(branch, remote_name_for_hint(remote)));
+                }
+                parsed_specs.push(GIT_refspec.parse(head.ref + ":" + upstream_merge));
+            } else {
+                // simple
+                bool is_same = upstream_remote != "" && upstream_remote == remote.name;
+                if (is_same && upstream_merge != "") {
+                    if (upstream_merge != head.ref) {
+                        return fail("The upstream branch of your current branch does not match\nthe name of your current branch.  To push to the upstream branch\non the remote, use\n\n    git push " + remote_name_for_hint(remote) + " HEAD:" + upstream_merge + "\n\nTo push to the branch of the same name on the remote, use\n\n    git push " + remote_name_for_hint(remote) + " HEAD\n\nTo choose either option permanently, see push.default in 'git help config'.\n");
+                    }
+                    parsed_specs.push(GIT_refspec.parse(head.ref + ":" + head.ref));
+                } else if (!is_same && upstream_remote != "" && upstream_remote != remote.name) {
+                    parsed_specs.push(GIT_refspec.parse(head.ref + ":" + head.ref));
+                } else if (GIT_gitcommon.cfg_bool(ctx, "push", "", "autoSetupRemote", false)) {
+                    parsed_specs.push(GIT_refspec.parse(head.ref + ":" + head.ref));
+                    set_upstream_candidate = head.ref;
+                } else {
+                    return fail(no_upstream_message(branch, remote_name_for_hint(remote)));
+                }
+            }
+        }
+    }
+    // each spec becomes items
+    for (GIT_refspec.Spec spec in parsed_specs) {
+        bool force = spec.force || is_force_all;
+        if (is_delete_flag || (spec.has_colon && spec.src == "")) {
+            str name = spec.src;
+            if (spec.has_colon && spec.src == "") {
+                name = spec.dst;
+            }
+            items.push(Item("", "", qualify_remote(name, ""), false, true, "", false));
+            continue;
+        }
+        if (spec.is_glob) {
+            List<GIT_refs.Ref> locals = [];
+            match (GIT_refs.all(ctx.gitdir)) {
+                case Ok(List<GIT_refs.Ref> all): {
+                    locals = all;
+                }
+                case Err(_): {
+                }
+            }
+            for (GIT_refs.Ref local in locals) {
+                match (GIT_refspec.glob_capture(spec.src, local.name)) {
+                    case Some(str middle): {
+                        str dst = local.name;
+                        if (spec.dst != "") {
+                            dst = GIT_refspec.glob_fill(spec.dst, middle);
+                        }
+                        items.push(Item(local.name, local.id, dst, force, false, "", false));
+                    }
+                    case None: {
+                    }
+                }
+            }
+            continue;
+        }
+        // a plain source
+        str src_name = "";
+        str src_id = "";
+        if (spec.src == "HEAD") {
+            if (head.ref != "") {
+                src_name = head.ref;
+                src_id = head.id;
+            } else {
+                src_name = "HEAD";
+                src_id = head.id;
+            }
+        } else {
+            src_name = local_ref_name(ctx.gitdir, spec.src);
+        }
+        if (src_id == "") {
+            match (GIT_revparse.object_id(ctx.gitdir, spec.src)) {
+                case Ok(str id): {
+                    src_id = id;
+                }
+                case Err(_): {
+                    io.eprint("error: src refspec " + spec.src + " does not match any");
+                    io.eprint("error: failed to push some refs to '" + GIT_gitfetch.shown_url_push(remote.url) + "'");
+                    return 1;
+                }
+            }
+        }
+        if (src_name != "" && src_name != "HEAD" && spec.src != "HEAD") {
+            // a ref name: the object it names (a tag object stays the tag object)
+            match (GIT_refs.resolve(ctx.gitdir, src_name)) {
+                case Ok(str id): {
+                    src_id = id;
+                }
+                case Err(_): {
+                }
+            }
+        }
+        str dst = spec.dst;
+        if (!spec.has_colon || dst == "") {
+            if (src_name == "" || src_name == "HEAD") {
+                io.eprint("error: The destination you provided is not a full refname (i.e.,\nstarting with \"refs/\"). We tried to guess what you meant by:\n\n- Looking for a ref that matches '" + spec.src + "' on the remote side.\n- Checking if the <src> being pushed ('" + spec.src + "')\n  is a ref in \"refs/{heads,tags}/\". If so we add a corresponding\n  refs/{heads,tags}/ prefix on the remote side.\n\nNeither worked, so we gave up. You must fully qualify the ref.");
+                io.eprint("error: failed to push some refs to '" + GIT_gitfetch.shown_url_push(remote.url) + "'");
+                return 1;
+            }
+            dst = src_name;
+        } else {
+            dst = qualify_remote(dst, src_name);
+        }
+        Item item = Item(src_name, src_id, dst, force, false, "", false);
+        item.is_head = spec.src == "HEAD";
+        items.push(item);
+    }
+    // leases
+    for (int i in 0 .. items.size()) {
+        if (items[i].is_delete) {
+            continue;
+        }
+        if (leases.contains(items[i].dst) || leases.contains(GIT_refspec.pretty(items[i].dst))) {
+            items[i].has_lease = true;
+            items[i].lease = leases.get(items[i].dst).or(leases.get(GIT_refspec.pretty(items[i].dst)).or(""));
+            items[i].is_force = true;
+        } else if (is_lease_all) {
+            items[i].has_lease = true;
+            items[i].is_force = true;
+        } else if (items[i].is_force && !is_unsafe) {
+            // `--force` and `+`: a lease on the remote-tracking ref
+            items[i].has_lease = true;
+        }
+    }
+    // hook: pre-push
+    // connect
+    GIT_transport.Session session = GIT_transport.empty(ctx);
+    match (GIT_transport.connect(ctx, remote.url, "git-receive-pack")) {
+        case Ok(GIT_transport.Session got): {
+            session = got;
+        }
+        case Err(str why): {
+            return fail(why);
+        }
+    }
+    GIT_transport.Listing listing = GIT_transport.Listing();
+    match (session.list([])) {
+        case Ok(GIT_transport.Listing got): {
+            listing = got;
+        }
+        case Err(str why): {
+            session.close();
+            return fail(why);
+        }
+    }
+    if (listing.object_format != GIT_hash.name(GIT_hash.raw_length(ctx.gitdir))) {
+        session.close();
+        return fail("the remote's object format (" + listing.object_format + ") does not match this repository's (" + GIT_hash.name(GIT_hash.raw_length(ctx.gitdir)) + ")");
+    }
+    Map<str, str> remote_ids = {};
+    for (GIT_transport.RefInfo one in listing.refs) {
+        remote_ids.set(one.name, one.id);
+    }
+    str zero = GIT_hash.zero(GIT_hash.raw_length(ctx.gitdir));
+    GIT_gitstore.Store store = GIT_gitstore.open(ctx.gitdir);
+    int abbrev = GIT_gitcommon.default_abbrev(ctx);
+    List<Row> rows = [];
+    List<GIT_transport.PushCmd> commands = [];
+    List<Item> command_items = [];
+    List<str> tips = [];
+    List<str> known = [];
+    for (GIT_transport.RefInfo one in listing.refs) {
+        known.push(one.id);
+    }
+    int status = 0;
+    bool has_error_only = false;
+    for (Item item in items) {
+        str old = remote_ids.get(item.dst).or("");
+        str to = GIT_refspec.pretty(item.dst);
+        if (item.is_delete) {
+            if (old == "") {
+                io.eprint("error: unable to delete '" + GIT_refspec.pretty(item.dst) + "': remote ref does not exist");
+                status = 1;
+                has_error_only = true;
+                continue;
+            }
+            commands.push(GIT_transport.PushCmd(old, zero, item.dst));
+            command_items.push(item);
+            rows.push(Row("-", "[deleted]", "", to, "", false, ""));
+            continue;
+        }
+        str from = GIT_refspec.pretty(item.src_name);
+        if (item.is_head) {
+            from = "HEAD";
+        }
+        if (item.src_name == "" || item.src_name == "HEAD") {
+            from = item.src_id.substr(0, abbrev);
+            if (item.src_name == "HEAD") {
+                from = "HEAD";
+            }
+        }
+        if (old == item.src_id) {
+            if (is_verbose) {
+                rows.push(Row("=", "[up to date]", from, to, "", false, ""));
+            }
+            continue;
+        }
+        // the lease
+        if (item.has_lease) {
+            str expected = item.lease;
+            if (expected == "") {
+                str tracking = "";
+                if (remote.is_named) {
+                    List<str> lease_specs = remote.specs;
+                    if (lease_specs.size() == 0) {
+                        lease_specs = ["+refs/heads/*:refs/remotes/" + remote.name + "/*"];
+                    }
+                    tracking = GIT_branches.map_through_fetch(lease_specs, item.dst);
+                }
+                if (tracking != "") {
+                    match (GIT_refs.resolve(ctx.gitdir, tracking)) {
+                        case Ok(str id): {
+                            expected = id;
+                        }
+                        case Err(_): {
+                        }
+                    }
+                }
+            } else {
+                match (GIT_revparse.object_id(ctx.gitdir, expected)) {
+                    case Ok(str id): {
+                        expected = id;
+                    }
+                    case Err(_): {
+                    }
+                }
+            }
+            if (expected != old) {
+                rows.push(Row("!", "[rejected]", from, to, "stale info", true, ""));
+                status = 1;
+                continue;
+            }
+        }
+        str kind = "[new reference]";
+        if (item.dst.starts_with("refs/tags/")) {
+            kind = "[new tag]";
+        } else if (item.dst.starts_with("refs/heads/")) {
+            kind = "[new branch]";
+        }
+        if (old == "" || old == zero) {
+            rows.push(Row("*", kind, from, to, "", false, ""));
+        } else {
+            bool is_old_local = has_object(ctx.gitdir, old);
+            bool is_ff = is_old_local && GIT_http_push.is_ancestor(ctx.gitdir, old, item.src_id);
+            bool is_tag = item.dst.starts_with("refs/tags/");
+            if (is_tag && !item.is_force) {
+                rows.push(Row("!", "[rejected]", from, to, "already exists", true, "tag"));
+                status = 1;
+                continue;
+            }
+            str short_old = old.substr(0, abbrev);
+            if (is_old_local) {
+                short_old = store.unique_abbrev(old, abbrev);
+            }
+            str short_new = store.unique_abbrev(item.src_id, abbrev);
+            if (is_ff && !is_tag) {
+                rows.push(Row(" ", short_old + ".." + short_new, from, to, "", false, ""));
+            } else if (item.is_force) {
+                rows.push(Row("+", short_old + "..." + short_new, from, to, "forced update", false, ""));
+            } else if (!is_old_local) {
+                rows.push(Row("!", "[rejected]", from, to, "fetch first", true, "fetch"));
+                status = 1;
+                continue;
+            } else {
+                str hint = "other";
+                if (item.src_name == head.ref && head.ref != "") {
+                    hint = "ff";
+                }
+                rows.push(Row("!", "[rejected]", from, to, "non-fast-forward", true, hint));
+                status = 1;
+                continue;
+            }
+        }
+        str command_old = old;
+        if (command_old == "") {
+            command_old = zero;
+        }
+        commands.push(GIT_transport.PushCmd(command_old, item.src_id, item.dst));
+        command_items.push(item);
+        tips.push(item.src_id);
+    }
+    str url_shown = GIT_gitfetch.shown_url_push(remote.url);
+    if (commands.size() == 0) {
+        session.close();
+        if (rows.size() == 0 && has_error_only) {
+            io.eprint("error: failed to push some refs to '" + url_shown + "'");
+            return 1;
+        }
+        if (rows.size() == 0) {
+            if (!is_quiet) {
+                io.eprint("Everything up-to-date");
+            }
+            finish_upstream(ctx, parsed, remote, items, set_upstream_candidate, head);
+            return 0;
+        }
+        print_rows(rows, url_shown, abbrev, is_quiet);
+        report_failure(rows, url_shown, ctx);
+        return 1;
+    }
+    // the pre-push hook sees what is about to be sent
+    if (!parsed.has("verify") || parsed.flag("verify")) {
+        str lines = "";
+        for (int i in 0 .. commands.size()) {
+            str local_name = command_items[i].src_name;
+            if (local_name == "") {
+                local_name = "(delete)";
+            }
+            str local_id = commands[i].new;
+            lines = lines + local_name + " " + local_id + " " + commands[i].ref + " " + commands[i].old + "\n";
+        }
+        int hook = run_pre_push(ctx, remote, lines);
+        if (hook > 0) {
+            session.close();
+            io.eprint("error: failed to push some refs to '" + url_shown + "'");
+            return 1;
+        }
+    }
+    if (parsed.flag("dry-run")) {
+        session.close();
+        print_rows(rows, url_shown, abbrev, is_quiet);
+        return status;
+    }
+    // the pack
+    bytes pack = [];
+    if (tips.size() > 0) {
+        List<str> ids = [];
+        match (GIT_pack_write.objects_to_send(ctx.gitdir, tips, known)) {
+            case Ok(List<str> listed): {
+                ids = listed;
+            }
+            case Err(_): {
+                session.close();
+                return fail("unable to collect the objects to send");
+            }
+        }
+        match (GIT_pack_write.build(ctx.gitdir, ids)) {
+            case Ok(bytes packed): {
+                pack = packed;
+            }
+            case Err(_): {
+                session.close();
+                return fail("unable to build the pack");
+            }
+        }
+    }
+    GIT_transport.PushOutcome outcome = GIT_transport.PushOutcome();
+    match (session.push(commands, pack, parsed.flag("atomic"), parsed.all("push-option"))) {
+        case Ok(GIT_transport.PushOutcome got): {
+            outcome = got;
+        }
+        case Err(str why): {
+            session.close();
+            if (why.starts_with("the receiving end does not support")) {
+                return fail(why);
+            }
+            io.eprint("error: " + why);
+            io.eprint("error: failed to push some refs to '" + url_shown + "'");
+            return 1;
+        }
+    }
+    session.close();
+    // the verdicts
+    Map<str, GIT_transport.PushStatus> verdicts = {};
+    for (GIT_transport.PushStatus one in outcome.statuses) {
+        verdicts.set(one.ref, one);
+    }
+    List<Row> final_rows = [];
+    int sent = 0;
+    // rows for commands appear in `rows` in order; match them by `to`
+    for (Row row in rows) {
+        final_rows.push(row);
+    }
+    for (int i in 0 .. commands.size()) {
+        GIT_transport.PushCmd command = commands[i];
+        str name = GIT_refspec.pretty(command.ref);
+        bool is_ok = true;
+        str reason = "";
+        str summary = "";
+        if (!outcome.is_unpacked) {
+            is_ok = false;
+            summary = "[remote failure]";
+            reason = outcome.unpack_reason;
+            if (reason == "") {
+                reason = "unpacker error";
+            }
+        } else {
+            match (verdicts.get(command.ref)) {
+                case Some(GIT_transport.PushStatus verdict): {
+                    if (!verdict.is_ok) {
+                        is_ok = false;
+                        summary = "[remote rejected]";
+                        reason = verdict.reason;
+                    }
+                }
+                case None: {
+                    // Gerrit and friends report a changed name; one command, one verdict
+                    if (outcome.statuses.size() == commands.size()) {
+                        GIT_transport.PushStatus verdict = outcome.statuses[i];
+                        if (!verdict.is_ok) {
+                            is_ok = false;
+                            summary = "[remote rejected]";
+                            reason = verdict.reason;
+                        }
+                    } else {
+                        is_ok = false;
+                        summary = "[remote failure]";
+                        reason = "remote failed to report status";
+                    }
+                }
+            }
+        }
+        if (!is_ok) {
+            status = 1;
+            for (int r in 0 .. final_rows.size()) {
+                if (final_rows[r].to == name && !final_rows[r].is_failure) {
+                    final_rows[r] = Row("!", summary, final_rows[r].from, name, reason, true, "");
+                    break;
+                }
+            }
+        } else {
+            sent = sent + 1;
+            if (remote.is_named) {
+                update_tracking(ctx, remote, command, command_items[i]);
+            }
+        }
+    }
+    print_rows(final_rows, url_shown, abbrev, is_quiet);
+    if (status != 0) {
+        report_failure(final_rows, url_shown, ctx);
+        return 1;
+    }
+    finish_upstream(ctx, parsed, remote, items, set_upstream_candidate, head);
+    return 0;
+}
+
+str remote_name_for_hint(GIT_gitfetch.Remote remote) {
+    if (remote.name != "") {
+        return remote.name;
+    }
+    return remote.url;
+}
+
+str no_upstream_message(str branch, str remote) {
+    return "The current branch " + branch + " has no upstream branch.\nTo push the current branch and set the remote as upstream, use\n\n    git push --set-upstream " + remote + " " + branch + "\n\nTo have this happen automatically for branches without a tracking\nupstream, see 'push.autoSetupRemote' in 'git help config'.\n";
+}
+
+// `main` on the remote side: a short name is a branch, or the namespace of the source.
+str qualify_remote(str name, str src_name) {
+    if (name.starts_with("refs/")) {
+        return name;
+    }
+    if (name == "HEAD") {
+        return name;
+    }
+    if (src_name.starts_with("refs/tags/")) {
+        return "refs/tags/" + name;
+    }
+    return "refs/heads/" + name;
+}
+
+void print_rows(List<Row> rows, str url_shown, int abbrev, bool is_quiet) {
+    if (rows.size() == 0 || is_quiet) {
+        return;
+    }
+    io.eprint("To " + url_shown);
+    int width = 2 * abbrev + 3;
+    for (Row row in rows) {
+        if (row.summary.size() > width && row.summary.contains("..")) {
+            width = row.summary.size();
+        }
+    }
+    for (Row row in rows) {
+        str summary = row.summary;
+        while (summary.size() < width) {
+            summary = summary + " ";
+        }
+        str line = " " + row.flag + " " + summary + " ";
+        if (row.from != "") {
+            line = line + row.from + " -> " + row.to;
+        } else {
+            line = line + row.to;
+        }
+        if (row.reason != "") {
+            line = line + " (" + row.reason + ")";
+        }
+        io.eprint(line);
+    }
+}
+
+void report_failure(List<Row> rows, str url_shown, GIT_gitcommon.Ctx ctx) {
+    io.eprint("error: failed to push some refs to '" + url_shown + "'");
+    bool is_ff = false;
+    bool is_other = false;
+    bool is_tag = false;
+    bool is_fetch = false;
+    for (Row row in rows) {
+        if (row.hint == "ff") {
+            is_ff = true;
+        } else if (row.hint == "other") {
+            is_other = true;
+        } else if (row.hint == "tag") {
+            is_tag = true;
+        } else if (row.hint == "fetch") {
+            is_fetch = true;
+        }
+    }
+    if (!GIT_gitcommon.cfg_bool(ctx, "advice", "", "pushUpdateRejected", true)) {
+        return;
+    }
+    if (is_ff && GIT_gitcommon.cfg_bool(ctx, "advice", "", "pushNonFFCurrent", true)) {
+        io.eprint("hint: Updates were rejected because the tip of your current branch is behind\nhint: its remote counterpart. If you want to integrate the remote changes,\nhint: use 'git pull' before pushing again.\nhint: See the 'Note about fast-forwards' in 'git push --help' for details.");
+    } else if (is_fetch && GIT_gitcommon.cfg_bool(ctx, "advice", "", "pushFetchFirst", true)) {
+        io.eprint("hint: Updates were rejected because the remote contains work that you do not\nhint: have locally. This is usually caused by another repository pushing to\nhint: the same ref. If you want to integrate the remote changes, use\nhint: 'git pull' before pushing again.\nhint: See the 'Note about fast-forwards' in 'git push --help' for details.");
+    } else if (is_other && GIT_gitcommon.cfg_bool(ctx, "advice", "", "pushNonFFMatching", true)) {
+        io.eprint("hint: Updates were rejected because a pushed branch tip is behind its remote\nhint: counterpart. If you want to integrate the remote changes, use 'git pull'\nhint: before pushing again.\nhint: See the 'Note about fast-forwards' in 'git push --help' for details.");
+    } else if (is_tag && GIT_gitcommon.cfg_bool(ctx, "advice", "", "pushAlreadyExists", true)) {
+        io.eprint("hint: Updates were rejected because the tag already exists in the remote.");
+    }
+}
+
+// The remote-tracking ref of a pushed ref moves with the push ("update by push").
+void update_tracking(GIT_gitcommon.Ctx ctx, GIT_gitfetch.Remote remote, GIT_transport.PushCmd command, Item item) {
+    List<str> fetch_specs = remote.specs;
+    if (fetch_specs.size() == 0) {
+        fetch_specs = ["+refs/heads/*:refs/remotes/" + remote.name + "/*"];
+    }
+    str tracking = GIT_branches.map_through_fetch(fetch_specs, command.ref);
+    if (tracking == "") {
+        return;
+    }
+    if (item.is_delete) {
+        if (GIT_refs.has_ref(ctx.gitdir, tracking)) {
+            match (GIT_branches.delete_ref(ctx.gitdir, tracking)) {
+                case Ok(_): {
+                }
+                case Err(_): {
+                }
+            }
+            match (GIT_reflog.delete_log(ctx.gitdir, tracking)) {
+                case Ok(_): {
+                }
+                case Err(_): {
+                }
+            }
+        }
+        return;
+    }
+    match (GIT_refs.update(ctx.gitdir, tracking, command.new, Option<str>.None, reflog_message: "update by push")) {
+        case Ok(_): {
+        }
+        case Err(_): {
+        }
+    }
+}
+
+// `-u`: the branches pushed become the upstream of their sources.
+void finish_upstream(GIT_gitcommon.Ctx ctx, GIT_gitwrite.Opts parsed, GIT_gitfetch.Remote remote, List<Item> items, str candidate, GIT_gitwrite.HeadInfo head) {
+    bool is_set = parsed.flag("set-upstream") || candidate != "";
+    if (!is_set || !remote.is_named) {
+        return;
+    }
+    for (Item item in items) {
+        if (item.is_delete || !item.src_name.starts_with("refs/heads/") || !item.dst.starts_with("refs/heads/")) {
+            continue;
+        }
+        str branch = item.src_name.substr(11, item.src_name.size());
+        match (GIT_branches.set_upstream(ctx.gitdir, branch, remote.name, item.dst)) {
+            case Ok(_): {
+                str shown = remote.name + "/" + item.dst.substr(11, item.dst.size());
+                print("branch '" + branch + "' set up to track '" + shown + "'.");
+            }
+            case Err(_): {
+            }
+        }
+    }
+}
+
+int run_pre_push(GIT_gitcommon.Ctx ctx, GIT_gitfetch.Remote remote, str lines) {
+    str hook = fs.join(GIT_gitwrite.hooks_dir(ctx), "pre-push");
+    match (fs.stat(hook)) {
+        case Ok(fs.Stat stat): {
+            if (!stat.is_file() || (stat.perm() & 0o111) == 0) {
+                return -1;
+            }
+        }
+        case Err(_): {
+            return -1;
+        }
+    }
+    str input = fs.join(GIT_repository.common(ctx.gitdir), "pre-push-input.tmp");
+    match (io.write(input, lines)) {
+        case Ok(_): {
+        }
+        case Err(_): {
+            return -1;
+        }
+    }
+    str name = remote.name;
+    if (name == "") {
+        name = remote.url;
+    }
+    List<str> command = ["sh", "-c", "cd \"$0\" && GIT_DIR=\"$1\" && export GIT_DIR && exec \"$2\" \"$3\" \"$4\" < \"$5\"", ctx.root, ctx.gitdir, hook, name, GIT_transport.anonymize(remote.url), input];
+    int code = 0;
+    match (os.run(command)) {
+        case Ok(os.ExitStatus done): {
+            match (done) {
+                case Exited(int exit_code): {
+                    code = exit_code;
+                }
+                case Signaled(int signal): {
+                    code = 128 + signal;
+                }
+            }
+        }
+        case Err(_): {
+            code = -1;
+        }
+    }
+    match (fs.remove(input)) {
+        case Ok(_): {
+        }
+        case Err(_): {
+        }
+    }
+    return code;
+}

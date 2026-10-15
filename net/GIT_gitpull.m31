@@ -1,0 +1,329 @@
+// `1git pull`: fetch (with `GIT_gitfetch`'s engine, writing FETCH_HEAD), then
+// merge or rebase what was fetched with the existing `merge` and `rebase`
+// commands, run as this same program with `GIT_REFLOG_ACTION=pull` so the
+// reflogs read `pull: Fast-forward` and `pull --rebase (start): ...` as git's.
+//
+// Git refuses to guess how to reconcile divergent branches (since 2.33) and
+// so does this: with neither `--rebase`, `--no-rebase`, `--ff-only` nor
+// `pull.rebase` / `pull.ff` configured, a diverged pull stops with git's
+// hints, having fetched.
+
+import io;
+import os;
+import fs;
+import core.GIT_config;
+import core.GIT_object;
+import core.GIT_refs;
+import core.GIT_gitcommon;
+import core.GIT_gitwrite;
+import net.GIT_gitfetch;
+import net.GIT_http_push;
+
+const str PULL_USAGE = "usage: git pull [<options>] [<repository> [<refspec>...]]";
+
+int fail(str message) {
+    io.eprint("fatal: " + message);
+    return 128;
+}
+
+bool has_object(str gitdir, str id) {
+    match (GIT_object.read(gitdir, id)) {
+        case Ok(_): {
+            return true;
+        }
+        case Err(_): {
+            return false;
+        }
+    }
+}
+
+// Run this program again as `<self> -C <start> <-c ...> <words...>` with
+// GIT_REFLOG_ACTION set; its exit status.
+int rerun(str start, List<str> overrides, str action, List<str> words) {
+    List<str> self_args = os.arguments();
+    str self = "1git";
+    if (self_args.size() > 0) {
+        self = self_args[0];
+    }
+    List<str> command = ["sh", "-c", "GIT_REFLOG_ACTION=\"$1\"; export GIT_REFLOG_ACTION; shift; exec \"$@\"", "sh", action, self, "-C", start];
+    for (str entry in overrides) {
+        if (entry.starts_with("--git-dir=") || entry.starts_with("--work-tree=")) {
+            command.push(entry);
+        } else {
+            command.push("-c");
+            command.push(entry);
+        }
+    }
+    for (str word in words) {
+        command.push(word);
+    }
+    match (os.run(command)) {
+        case Ok(os.ExitStatus done): {
+            match (done) {
+                case Exited(int code): {
+                    return code;
+                }
+                case Signaled(int signal): {
+                    return 128 + signal;
+                }
+            }
+        }
+        case Err(_): {
+            return 128;
+        }
+    }
+}
+
+pub int run_pull(str start, List<str> overrides, List<str> argv) {
+    GIT_gitwrite.Opts parsed = GIT_gitwrite.parse_opts(argv, ["-q --quiet", "-v --verbose", "-r --rebase=?", "--ff", "--ff-only", "--squash", "--commit", "-e --edit", "-s --strategy=", "-X --strategy-option=", "--autostash", "--verify-signatures", "-p --prune", "-t --tags", "-n", "--depth=", "--unshallow", "-f --force", "-u --update-head-ok", "--dry-run", "--all", "--progress", "--set-upstream", "--allow-unrelated-histories", "--stat", "--log=?", "--signoff", "--no-verify", "--cleanup=", "-S --gpg-sign=?", "--recurse-submodules=?", "-j --jobs=", "-4", "-6", "--verify", "--summary", "--compact-summary"]);
+    int checked = GIT_gitwrite.check_opts(parsed, PULL_USAGE);
+    if (checked >= 0) {
+        return checked;
+    }
+    GIT_gitcommon.Opened opened = GIT_gitcommon.open(start, overrides);
+    if (!opened.ok) {
+        return 128;
+    }
+    GIT_gitcommon.Ctx ctx = opened.ctx;
+    if (ctx.is_bare) {
+        return fail("this operation must be run in a work tree");
+    }
+    GIT_gitwrite.HeadInfo head = GIT_gitwrite.read_head(ctx.gitdir);
+    str branch = "";
+    if (head.ref.starts_with("refs/heads/")) {
+        branch = head.ref.substr(11, head.ref.size());
+    }
+    List<str> words = parsed.paths();
+    str remote_arg = "";
+    List<str> specs = [];
+    if (words.size() > 0) {
+        remote_arg = words[0];
+        for (int i in 1 .. words.size()) {
+            specs.push(words[i]);
+        }
+    }
+    // how to integrate
+    str rebase = "";  // "", "true", "false", "merges", "interactive"
+    if (parsed.has("rebase")) {
+        if (!parsed.flag("rebase")) {
+            rebase = "false";
+        } else {
+            rebase = parsed.value("rebase", "true");
+            if (rebase == "") {
+                rebase = "true";
+            }
+        }
+    } else {
+        str configured = "";
+        if (branch != "") {
+            configured = ctx.config.get("branch", branch, "rebase").or("");
+        }
+        if (configured == "") {
+            configured = GIT_gitcommon.cfg(ctx, "pull", "", "rebase").or("");
+        }
+        rebase = configured.to_lower();
+        if (rebase == "yes" || rebase == "on" || rebase == "1") {
+            rebase = "true";
+        }
+        if (rebase == "no" || rebase == "off" || rebase == "0") {
+            rebase = "false";
+        }
+    }
+    str ff = "";  // "", "yes", "no", "only"
+    if (parsed.has("ff")) {
+        if (parsed.flag("ff")) {
+            ff = "yes";
+        } else {
+            ff = "no";
+        }
+    }
+    if (parsed.flag("ff-only")) {
+        ff = "only";
+    }
+    if (ff == "") {
+        str configured_ff = GIT_gitcommon.cfg(ctx, "pull", "", "ff").or("").to_lower();
+        if (configured_ff == "only") {
+            ff = "only";
+        } else if (configured_ff == "false" || configured_ff == "no") {
+            ff = "no";
+        } else if (configured_ff == "true" || configured_ff == "yes") {
+            ff = "yes";
+        }
+    }
+    // the fetch
+    GIT_gitfetch.Remote remote = GIT_gitfetch.Remote("", "", [], "", false);
+    match (GIT_gitfetch.resolve(ctx, remote_arg, false)) {
+        case Ok(GIT_gitfetch.Remote found): {
+            remote = found;
+        }
+        case Err(str why): {
+            if (remote_arg == "" && branch != "") {
+                return fail("No remote repository specified.  Please, specify either a URL or a\nremote name from which new revisions should be fetched.");
+            }
+            return fail(why);
+        }
+    }
+    GIT_gitfetch.Opts opts = GIT_gitfetch.Opts();
+    // git's GIT_REFLOG_ACTION for a pull is `pull` and the arguments as typed
+    str action = "pull";
+    if (argv.size() > 0) {
+        action = "pull " + argv.join(" ");
+    }
+    opts.action = action;
+    opts.quiet = parsed.flag("quiet");
+    opts.verbose = parsed.flag("verbose");
+    opts.prune = parsed.flag("prune") || ctx.config.get_bool("fetch", "", "prune").or(false);
+    opts.force = parsed.flag("force");
+    opts.update_head_ok = true;
+    if (parsed.has("tags")) {
+        if (parsed.flag("tags")) {
+            opts.tags = "all";
+        } else {
+            opts.tags = "none";
+        }
+    }
+    if (parsed.has("depth")) {
+        opts.depth = parsed.value("depth", "0").parse_int().or(0);
+    }
+    opts.unshallow = parsed.flag("unshallow");
+    GIT_gitfetch.Outcome got = GIT_gitfetch.fetch(ctx, remote, specs, opts);
+    if (got.status != 0) {
+        return got.status;
+    }
+    if (parsed.flag("dry-run")) {
+        return 0;
+    }
+    // what to integrate
+    List<GIT_gitfetch.Head> merge_heads = [];
+    for (GIT_gitfetch.Head one in got.heads) {
+        if (one.is_for_merge) {
+            merge_heads.push(one);
+        }
+    }
+    if (merge_heads.size() == 0) {
+        if (got.is_empty && specs.size() == 0) {
+            return 0;
+        }
+        if (specs.size() > 0 || remote_arg != "" && !remote.is_named) {
+            io.eprint("You asked to pull from the remote '" + remote_arg + "', but did not specify\na branch. Because this is not the default configured remote\nfor your current branch, you must specify a branch on the command line.");
+            return 1;
+        }
+        if (branch == "") {
+            io.eprint("You are not currently on a branch.\nPlease specify which branch you want to " + verb_for(rebase) + " with.\nSee git-pull(1) for details.\n\n    git pull <remote> <branch>\n");
+            return 1;
+        }
+        str configured_merge = ctx.config.get("branch", branch, "merge").or("");
+        if (configured_merge == "") {
+            io.eprint("There is no tracking information for the current branch.\nPlease specify which branch you want to " + verb_for(rebase) + " with.\nSee git-pull(1) for details.\n\n    git pull <remote> <branch>\n\nIf you wish to set tracking information for this branch you can do so with:\n\n    git branch --set-upstream-to=" + remote.name + "/<branch> " + branch + "\n");
+            return 1;
+        }
+        io.eprint("Your configuration specifies to merge with the ref '" + configured_merge + "'\nfrom the remote, but no such ref was fetched.");
+        return 1;
+    }
+    if (merge_heads.size() > 1) {
+        io.eprint("error: merging several heads (octopus) is not in 1git (see docs/GIT-COMPAT.md)");
+        return 129;
+    }
+    str target = merge_heads[0].id;
+    if (!head.is_born) {
+        // an unborn branch takes the fetched commit as it is
+        return rerun(start, overrides, action, ["checkout", "-q", "-B", branch, target]);
+    }
+    bool is_up_to_date = target == head.id || GIT_http_push.is_ancestor(ctx.gitdir, target, head.id);
+    bool is_fast_forward = !is_up_to_date && GIT_http_push.is_ancestor(ctx.gitdir, head.id, target);
+    if (rebase != "" && rebase != "false") {
+        List<str> command = ["rebase"];
+        if (opts.quiet) {
+            command.push("-q");
+        }
+        if (rebase == "merges") {
+            command.push("--rebase-merges");
+        } else if (rebase == "interactive") {
+            command.push("-i");
+        }
+        if (parsed.flag("autostash")) {
+            command.push("--autostash");
+        }
+        command.push(target);
+        return rerun(start, overrides, action, command);
+    }
+    if (is_up_to_date) {
+        if (!opts.quiet) {
+            print("Already up to date.");
+        }
+        return 0;
+    }
+    if (!is_fast_forward && ff == "only") {
+        if (GIT_gitcommon.cfg_bool(ctx, "advice", "", "diverging", true)) {
+            io.eprint("hint: Diverging branches can't be fast-forwarded, you need to either:\nhint:\nhint: \tgit merge --no-ff\nhint:\nhint: or:\nhint:\nhint: \tgit rebase\nhint:\nhint: Disable this message with \"git config set advice.diverging false\"");
+        }
+        return fail("Not possible to fast-forward, aborting.");
+    }
+    if (!is_fast_forward && ff == "" && rebase == "") {
+        io.eprint("hint: You have divergent branches and need to specify how to reconcile them.\nhint: You can do so by running one of the following commands sometime before\nhint: your next pull:\nhint:\nhint:   git config pull.rebase false  # merge\nhint:   git config pull.rebase true   # rebase\nhint:   git config pull.ff only       # fast-forward only\nhint:\nhint: You can replace \"git config\" with \"git config --global\" to set a default\nhint: preference for all repositories. You can also pass --rebase, --no-rebase,\nhint: or --ff-only on the command line to override the configured default per\nhint: invocation.");
+        return fail("Need to specify how to reconcile divergent branches.");
+    }
+    List<str> command = ["merge"];
+    if (opts.quiet) {
+        command.push("-q");
+    }
+    if (ff == "only") {
+        command.push("--ff-only");
+    } else if (ff == "no") {
+        command.push("--no-ff");
+    }
+    if (parsed.flag("squash")) {
+        command.push("--squash");
+    }
+    if (parsed.has("commit") && !parsed.flag("commit")) {
+        command.push("--no-commit");
+    }
+    if (parsed.has("edit")) {
+        if (parsed.flag("edit")) {
+            command.push("--edit");
+        } else {
+            command.push("--no-edit");
+        }
+    }
+    for (str strategy in parsed.all("strategy")) {
+        command.push("-s");
+        command.push(strategy);
+    }
+    for (str option in parsed.all("strategy-option")) {
+        command.push("-X");
+        command.push(option);
+    }
+    if (parsed.flag("allow-unrelated-histories")) {
+        command.push("--allow-unrelated-histories");
+    }
+    if (parsed.flag("autostash")) {
+        command.push("--autostash");
+    }
+    command.push("-m");
+    command.push(merge_message(ctx, merge_heads[0], branch));
+    command.push(target);
+    return rerun(start, overrides, action, command);
+}
+
+str verb_for(str rebase) {
+    if (rebase != "" && rebase != "false") {
+        return "rebase";
+    }
+    return "merge";
+}
+
+// fmt-merge-msg for one head: `Merge branch 'x' of <url>`, with ` into <branch>`
+// unless the current branch is main or master (merge.suppressDest).
+str merge_message(GIT_gitcommon.Ctx ctx, GIT_gitfetch.Head head, str branch) {
+    str what = head.description;
+    str out = "Merge " + what;
+    if (what.starts_with("'")) {
+        out = "Merge " + what;
+    } else if (!what.starts_with("branch ") && !what.starts_with("tag ") && !what.starts_with("remote-tracking branch ")) {
+        out = "Merge commit " + what;
+    }
+    if (branch != "" && branch != "main" && branch != "master") {
+        out = out + " into " + branch;
+    }
+    return out;
+}

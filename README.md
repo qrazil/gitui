@@ -70,6 +70,7 @@ bash scripts/build.sh git.m31         # the command line client -> ./1git
 ./1git cherry-pick -x A..B            # also revert, --continue/--skip/--abort, -m 1 for merge commits
 ./1git rebase -i --autosquash main    # also --onto, --root, --autostash, -x cmd, --continue/--abort
 ./1git clean -fdx -n                  # also worktree add/list/remove/prune
+./1git clone --depth 1 https://host/repo.git   # also fetch/pull/push/remote/ls-remote over HTTPS and ssh, git's output
 ./1git -log --max 5                   # the older `-word` grammar, unchanged
 
 bash scripts/build.sh                 # gitui.m31 -> ./mgit   (-o name to rename)

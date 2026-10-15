@@ -1,0 +1,550 @@
+// Credentials for an HTTPS remote, the way git finds them: what the URL
+// carries, `~/.netrc` (curl's own job in git), the `credential.helper`s
+// (`store` natively; anything else by running `git-credential-<name>` /
+// `!command` / an absolute path with `get`, `store` and `erase`),
+// `GIT_ASKPASS` / `core.askPass` / `SSH_ASKPASS`, and finally a prompt on the
+// terminal (`/dev/tty`, with echo off for the password) unless
+// `GIT_TERMINAL_PROMPT=0`.
+//
+// A secret is a `str` that lives in a `Credentials` and nowhere else: no
+// message this module (or the callers, which only ever name the URL) builds
+// has it in it, and a helper is told it on its standard input only.
+
+import io;
+import os;
+import fs;
+import proc;
+import text;
+import core.GIT_config;
+import net.GIT_http_push;
+
+/// Where the credential is wanted: `https`, `host[:port]`, the path.
+pub type Want {
+    pub str protocol;
+    pub str host;
+    pub str path;
+    pub str username;
+}
+
+/// What `credential.helper` lists, in order, for this host: the repository's
+/// and global files (via `config`), then `-c` overrides.
+pub List<str> helpers(GIT_config.Config config, List<str> overrides, Want want) {
+    List<str> out = [];
+    str base = want.protocol + "://" + want.host;
+    for (str entry in config.list()) {
+        str lower = entry.to_lower();
+        int equals = entry.index_of("=").or(-1);
+        if (equals < 0) {
+            continue;
+        }
+        str name = lower.substr(0, equals);
+        str value = entry.substr(equals + 1, entry.size());
+        if (name == "credential.helper") {
+            out = apply_helper(out, value);
+        } else if (name.starts_with("credential.") && name.ends_with(".helper")) {
+            str scope = name.substr(11, name.size() - 7);
+            if (scope == base.to_lower() || scope == (base + "/" + want.path).to_lower() || scope == want.host.to_lower()) {
+                out = apply_helper(out, value);
+            }
+        }
+    }
+    for (str entry in overrides) {
+        int equals = entry.index_of("=").or(-1);
+        if (equals > 0 && entry.substr(0, equals).to_lower() == "credential.helper") {
+            out = apply_helper(out, entry.substr(equals + 1, entry.size()));
+        }
+    }
+    return out;
+}
+
+// An empty value resets the list, as git's does.
+List<str> apply_helper(List<str> so_far, str value) {
+    if (value == "") {
+        return [];
+    }
+    List<str> out = [];
+    for (str one in so_far) {
+        out.push(one);
+    }
+    out.push(value);
+    return out;
+}
+
+pub type Answer {
+    pub str user;
+    pub str password;
+    pub bool has_user;
+    pub bool has_password;
+}
+
+str input_for(Want want, str password) {
+    str out = "protocol=" + want.protocol + "\nhost=" + want.host + "\n";
+    if (want.path != "") {
+        out = out + "path=" + want.path + "\n";
+    }
+    if (want.username != "") {
+        out = out + "username=" + want.username + "\n";
+    }
+    if (password != "") {
+        out = out + "password=" + password + "\n";
+    }
+    return out + "\n";
+}
+
+Answer parse_answer(str body) {
+    Answer out = Answer("", "", false, false);
+    for (str line in text.lines(body)) {
+        int equals = line.index_of("=").or(-1);
+        if (equals <= 0) {
+            continue;
+        }
+        str key = line.substr(0, equals);
+        str value = line.substr(equals + 1, line.size());
+        if (key == "username") {
+            out.user = value;
+            out.has_user = true;
+        } else if (key == "password") {
+            out.password = value;
+            out.has_password = true;
+        }
+    }
+    return out;
+}
+
+// The argv for helper `name` and action `verb`.
+List<str> helper_argv(str name, str verb) {
+    if (name.starts_with("!")) {
+        return ["sh", "-c", name.substr(1, name.size()) + " " + verb];
+    }
+    if (name.starts_with("/")) {
+        return ["sh", "-c", "exec \"$0\" \"$1\"", name, verb];
+    }
+    // `git credential-<name>` first through the git program, the standalone
+    // `git-credential-<name>` otherwise.
+    return ["sh", "-c", "if command -v git-credential-" + name + " >/dev/null 2>&1; then exec git-credential-" + name + " " + verb + "; else exec git credential-" + name + " " + verb + "; fi"];
+}
+
+str slurp(str path) {
+    match (io.read(path)) {
+        case Ok(str contents): {
+            return contents;
+        }
+        case Err(_): {
+            return "";
+        }
+    }
+}
+
+str store_path() {
+    str home = os.env("HOME").or("");
+    str legacy = fs.join(home, ".git-credentials");
+    if (fs.is_file(legacy)) {
+        return legacy;
+    }
+    str xdg = os.env("XDG_CONFIG_HOME").or("");
+    if (xdg == "") {
+        xdg = fs.join(home, ".config");
+    }
+    str modern = fs.join(fs.join(xdg, "git"), "credentials");
+    if (fs.is_file(modern)) {
+        return modern;
+    }
+    return legacy;
+}
+
+// `https://user:pass@host` lines of the `store` helper's file; the first
+// that matches (protocol, host, and a user when one is wanted) answers.
+Answer store_get(Want want) {
+    str body = "";
+    match (io.read(store_path())) {
+        case Ok(str contents): {
+            body = contents;
+        }
+        case Err(_): {
+            return Answer("", "", false, false);
+        }
+    }
+    for (str line in text.lines(body)) {
+        str prefix = want.protocol + "://";
+        if (!line.starts_with(prefix)) {
+            continue;
+        }
+        str rest = line.substr(prefix.size(), line.size());
+        int at = rest.index_of("@").or(-1);
+        if (at < 0) {
+            continue;
+        }
+        str userinfo = rest.substr(0, at);
+        str where = rest.substr(at + 1, rest.size());
+        int slash = where.index_of("/").or(-1);
+        if (slash >= 0) {
+            where = where.substr(0, slash);
+        }
+        if (where != want.host) {
+            continue;
+        }
+        int colon = userinfo.index_of(":").or(-1);
+        if (colon < 0) {
+            continue;
+        }
+        str user = percent_decode(userinfo.substr(0, colon));
+        if (want.username != "" && user != want.username) {
+            continue;
+        }
+        return Answer(user, percent_decode(userinfo.substr(colon + 1, userinfo.size())), true, true);
+    }
+    return Answer("", "", false, false);
+}
+
+str percent_decode(str value) {
+    if (!value.contains("%")) {
+        return value;
+    }
+    bytes out = [];
+    bytes raw = value.to_bytes();
+    int i = 0;
+    while (i < raw.size()) {
+        if (raw[i] == '%' && i + 2 < raw.size()) {
+            int high = hex_of(raw[i + 1]);
+            int low = hex_of(raw[i + 2]);
+            if (high >= 0 && low >= 0) {
+                out.push(high * 16 + low);
+                i = i + 3;
+                continue;
+            }
+        }
+        out.push(raw[i]);
+        i = i + 1;
+    }
+    return out.utf8().or(value);
+}
+
+int hex_of(int c) {
+    if (c >= '0' && c <= '9') {
+        return c - 48;
+    }
+    if (c >= 'a' && c <= 'f') {
+        return c - 87;
+    }
+    if (c >= 'A' && c <= 'F') {
+        return c - 55;
+    }
+    return -1;
+}
+
+str percent_encode(str value) {
+    bytes out = [];
+    for (int c in value.to_bytes()) {
+        bool is_safe = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '-' || c == '.' || c == '_' || c == '~';
+        if (is_safe) {
+            out.push(c);
+        } else {
+            out.push('%');
+            bytes two = [c];
+            out.extend(two.hex().to_upper().to_bytes());
+        }
+    }
+    return out.utf8().or(value);
+}
+
+void store_put(Want want, str user, str password) {
+    str path = store_path();
+    str line = want.protocol + "://" + percent_encode(user) + ":" + percent_encode(password) + "@" + want.host;
+    str body = slurp(path);
+    for (str existing in text.lines(body)) {
+        if (existing == line) {
+            return;
+        }
+    }
+    if (body != "" && !body.ends_with("\n")) {
+        body = body + "\n";
+    }
+    match (io.write(path, body + line + "\n")) {
+        case Ok(_): {
+        }
+        case Err(_): {
+        }
+    }
+    // a credentials file is private
+    match (os.run(["chmod", "600", path])) {
+        case Ok(_): {
+        }
+        case Err(_): {
+        }
+    }
+}
+
+void store_erase(Want want, str user) {
+    str path = store_path();
+    str body = slurp(path);
+    if (body == "") {
+        return;
+    }
+    List<str> kept = [];
+    str prefix = want.protocol + "://" + percent_encode(user) + ":";
+    for (str line in text.lines(body)) {
+        if (line.starts_with(prefix) && line.ends_with("@" + want.host)) {
+            continue;
+        }
+        kept.push(line);
+    }
+    match (io.write(path, kept.join("\n") + "\n")) {
+        case Ok(_): {
+        }
+        case Err(_): {
+        }
+    }
+}
+
+// Run one helper; its answer, or an empty one.
+Answer run_helper(str name, str verb, str input) {
+    match (proc.run(helper_argv(name, verb), input: input.to_bytes(), should_check: false, is_quiet: true)) {
+        case Ok(proc.Completed done): {
+            if (verb == "get" && done.is_success()) {
+                return parse_answer(done.stdout.utf8().or(""));
+            }
+        }
+        case Err(_): {
+        }
+    }
+    return Answer("", "", false, false);
+}
+
+// `~/.netrc`: `machine host login x password y` (also `default`, one line or
+// many).
+Answer netrc_get(Want want) {
+    str home = os.env("HOME").or("");
+    str file = fs.join(home, ".netrc");
+    str body = slurp(file);
+    if (body == "") {
+        return Answer("", "", false, false);
+    }
+    List<str> words = [];
+    for (str line in body.split("\n")) {
+        for (str piece in line.split(" ")) {
+            for (str word in piece.split("\t")) {
+                if (word != "") {
+                    words.push(word);
+                }
+            }
+        }
+    }
+    str host_only = want.host;
+    if (!host_only.starts_with("[")) {
+        int colon = host_only.index_of(":").or(-1);
+        if (colon > 0) {
+            host_only = host_only.substr(0, colon);
+        }
+    }
+    bool is_in = false;
+    Answer found = Answer("", "", false, false);
+    int i = 0;
+    while (i < words.size()) {
+        str word = words[i];
+        if (word == "machine" && i + 1 < words.size()) {
+            if (is_in && found.has_password) {
+                break;
+            }
+            is_in = words[i + 1] == host_only;
+            found = Answer("", "", false, false);
+            i = i + 2;
+        } else if (word == "default") {
+            if (is_in && found.has_password) {
+                break;
+            }
+            is_in = true;
+            found = Answer("", "", false, false);
+            i = i + 1;
+        } else if (word == "login" && i + 1 < words.size()) {
+            if (is_in) {
+                found.user = words[i + 1];
+                found.has_user = true;
+            }
+            i = i + 2;
+        } else if (word == "password" && i + 1 < words.size()) {
+            if (is_in) {
+                found.password = words[i + 1];
+                found.has_password = true;
+            }
+            i = i + 2;
+        } else {
+            i = i + 1;
+        }
+    }
+    if (is_in && found.has_password && (want.username == "" || found.user == want.username || !found.has_user)) {
+        if (want.username != "" && !found.has_user) {
+            found.user = want.username;
+            found.has_user = true;
+        }
+        return found;
+    }
+    return Answer("", "", false, false);
+}
+
+str askpass_program(GIT_config.Config config, List<str> overrides) {
+    str value = os.env("GIT_ASKPASS").or("");
+    if (value != "") {
+        return value;
+    }
+    for (str entry in overrides) {
+        int equals = entry.index_of("=").or(-1);
+        if (equals > 0 && entry.substr(0, equals).to_lower() == "core.askpass") {
+            value = entry.substr(equals + 1, entry.size());
+        }
+    }
+    if (value != "") {
+        return value;
+    }
+    value = config.get("core", "", "askpass").or("");
+    if (value != "") {
+        return value;
+    }
+    return os.env("SSH_ASKPASS").or("");
+}
+
+/// Ask for `prompt`: the askpass program when there is one, else the
+/// terminal. `is_secret` turns echo off. `None` when nobody could be asked.
+pub Option<str> ask(str program, str prompt, bool is_secret) {
+    if (program != "") {
+        match (proc.run(["sh", "-c", "exec " + program + " \"$0\"", prompt], should_check: false, is_quiet: true)) {
+            case Ok(proc.Completed done): {
+                if (done.is_success()) {
+                    str got = done.stdout.utf8().or("");
+                    if (got.ends_with("\n")) {
+                        got = got.substr(0, got.size() - 1);
+                    }
+                    return Option<str>.Some(got);
+                }
+            }
+            case Err(_): {
+            }
+        }
+        return Option<str>.None;
+    }
+    if (os.env("GIT_TERMINAL_PROMPT").or("1") == "0") {
+        return Option<str>.None;
+    }
+    str script = "exec 3<>/dev/tty || exit 1; printf '%s' \"$0\" >&3; ";
+    if (is_secret) {
+        script = script + "stty -echo <&3 2>/dev/null; IFS= read -r v <&3; stty echo <&3 2>/dev/null; echo >&3; ";
+    } else {
+        script = script + "IFS= read -r v <&3; ";
+    }
+    script = script + "printf '%s' \"$v\"";
+    match (proc.run(["sh", "-c", script, prompt], should_check: false, is_quiet: true)) {
+        case Ok(proc.Completed done): {
+            if (done.is_success()) {
+                return Option<str>.Some(done.stdout.utf8().or(""));
+            }
+        }
+        case Err(_): {
+        }
+    }
+    return Option<str>.None;
+}
+
+/// Why `ask` failed, in git's words.
+pub str why_not(str what, str where) {
+    if (os.env("GIT_TERMINAL_PROMPT").or("1") == "0") {
+        return "could not read " + what + " for '" + where + "': terminal prompts disabled";
+    }
+    return "could not read " + what + " for '" + where + "': No such device or address";
+}
+
+/// What a fill found: the credential, or the sentence for the fatal error.
+pub type Filled {
+    pub bool ok;
+    pub str user;
+    pub str password;
+    pub str error;
+    /// came from a helper or the file (to be approved/rejected), not a prompt
+    pub bool is_stored;
+}
+
+/// `git credential fill` for `want`. `shown` is the URL as git quotes it in
+/// prompts (`https://host`, with the user when one is known).
+pub Filled fill(GIT_config.Config config, List<str> overrides, Want want, str shown) {
+    // known user and password from the URL are the caller's business.
+    Answer netrc = netrc_get(want);
+    if (netrc.has_password) {
+        return Filled(true, netrc.user, netrc.password, "", false);
+    }
+    str user = want.username;
+    str password = "";
+    bool has_password = false;
+    bool is_stored = false;
+    for (str name in helpers(config, overrides, want)) {
+        Answer got = Answer("", "", false, false);
+        if (name == "store") {
+            got = store_get(want);
+        } else {
+            got = run_helper(name, "get", input_for(want, ""));
+        }
+        if (got.has_user && user == "") {
+            user = got.user;
+        }
+        if (got.has_password) {
+            password = got.password;
+            has_password = true;
+            is_stored = true;
+            if (got.has_user) {
+                user = got.user;
+            }
+            break;
+        }
+    }
+    if (has_password && user != "") {
+        return Filled(true, user, password, "", is_stored);
+    }
+    str program = askpass_program(config, overrides);
+    if (user == "") {
+        match (ask(program, "Username for '" + shown + "': ", false)) {
+            case Some(str got_user): {
+                user = got_user;
+            }
+            case None: {
+                return Filled(false, "", "", why_not("Username", shown), false);
+            }
+        }
+    }
+    if (!has_password) {
+        str who = shown;
+        int scheme_end = shown.index_of("://").or(-1);
+        if (scheme_end >= 0) {
+            who = shown.substr(0, scheme_end + 3) + user + "@" + shown.substr(scheme_end + 3, shown.size());
+        }
+        match (ask(program, "Password for '" + who + "': ", true)) {
+            case Some(str got_password): {
+                password = got_password;
+            }
+            case None: {
+                return Filled(false, "", "", why_not("Password", who), false);
+            }
+        }
+    }
+    return Filled(true, user, password, "", false);
+}
+
+/// The request worked: tell the helpers to keep it.
+pub void approve(GIT_config.Config config, List<str> overrides, Want want, str user, str password) {
+    Want full = Want(want.protocol, want.host, want.path, user);
+    for (str name in helpers(config, overrides, want)) {
+        if (name == "store") {
+            store_put(want, user, password);
+        } else {
+            Answer ignored = run_helper(name, "store", input_for(full, password));
+        }
+    }
+}
+
+/// The server refused it: tell the helpers to forget it.
+pub void reject(GIT_config.Config config, List<str> overrides, Want want, str user, str password) {
+    Want full = Want(want.protocol, want.host, want.path, user);
+    for (str name in helpers(config, overrides, want)) {
+        if (name == "store") {
+            store_erase(want, user);
+        } else {
+            Answer ignored = run_helper(name, "erase", input_for(full, password));
+        }
+    }
+}

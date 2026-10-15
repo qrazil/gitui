@@ -1,0 +1,1268 @@
+// `1git remote` (add, remove/rm, rename, set-url, get-url, show, prune,
+// set-head, and the list forms) and `1git ls-remote`.
+
+import io;
+import os;
+import fs;
+import core.GIT_config;
+import core.GIT_object;
+import core.GIT_refs;
+import core.GIT_reflog;
+import core.GIT_branches;
+import core.GIT_repository;
+import core.GIT_hash;
+import core.GIT_gitcommon;
+import core.GIT_gitstore;
+import core.GIT_gitwrite;
+import core.GIT_gitstatus;
+import net.GIT_gitfetch;
+import net.GIT_refspec;
+import net.GIT_remote;
+import net.GIT_transport;
+import net.GIT_http_push;
+
+const str REMOTE_USAGE = "usage: git remote [-v | --verbose]\n   or: git remote add [-t <branch>] [-m <master>] [-f] [--tags | --no-tags] [--mirror=<fetch|push>] <name> <url>\n   or: git remote rename [--[no-]progress] <old> <new>\n   or: git remote remove <name>\n   or: git remote set-head <name> (-a | --auto | -d | --delete | <branch>)\n   or: git remote [-v | --verbose] show [-n] <name>\n   or: git remote prune [-n | --dry-run] <name>\n   or: git remote [-v | --verbose] update [-p | --prune] [(<group> | <remote>)...]\n   or: git remote set-branches [--add] <name> <branch>...\n   or: git remote get-url [--push] [--all] <name>\n   or: git remote set-url [--push] <name> <newurl> [<oldurl>]\n   or: git remote set-url --add <name> <newurl>\n   or: git remote set-url --delete <name> <url>";
+const str ADD_USAGE = "usage: git remote add [<options>] <name> <url>\n\n    -f, --[no-]fetch      fetch the remote branches\n    --[no-]tags           import all tags and associated objects when fetching\n                          or do not fetch any tag at all (--no-tags)\n    -t, --[no-]track <branch>\n                          branch(es) to track\n    -m, --[no-]master <branch>\n                          master branch\n    --[no-]mirror[=(push|fetch)]\n                          set up remote as a mirror to push to or fetch from\n";
+const str LS_REMOTE_USAGE = "usage: git ls-remote [--heads] [--tags] [--refs] [--upload-pack=<exec>]\n                     [-q | --quiet] [--exit-code] [--get-url] [--sort=<key>]\n                     [--symref] [<repository> [<patterns>...]]";
+
+int fatal(str message) {
+    io.eprint("fatal: " + message);
+    return 128;
+}
+
+str slurp(str path) {
+    match (io.read(path)) {
+        case Ok(str contents): {
+            return contents;
+        }
+        case Err(_): {
+            return "";
+        }
+    }
+}
+
+// --- config sections ------------------------------------------------------------------------
+
+// Is `line` the header of section `section` with subsection `sub`?
+bool is_header(str line, str section, str sub) {
+    str t = line.trim();
+    if (!t.starts_with("[")) {
+        return false;
+    }
+    int bracket = t.index_of("]").or(-1);
+    if (bracket < 0) {
+        return false;
+    }
+    str inner = t.substr(1, bracket);
+    if (sub == "") {
+        return inner.to_lower() == section.to_lower();
+    }
+    str want = section.to_lower() + " \"" + sub + "\"";
+    if (inner.to_lower().starts_with(section.to_lower() + " ")) {
+        str rest = inner.substr(section.size() + 1, inner.size()).trim();
+        return rest == "\"" + sub + "\"";
+    }
+    return false;
+}
+
+bool is_any_header(str line) {
+    return line.trim().starts_with("[");
+}
+
+/// Remove section `section "sub"` (header and keys). Whether one was there.
+bool remove_section(str gitdir, str section, str sub) {
+    str path = fs.join(GIT_repository.common(gitdir), "config");
+    str body = slurp(path);
+    List<str> kept = [];
+    bool is_inside = false;
+    bool is_found = false;
+    for (str line in body.split("\n")) {
+        if (is_any_header(line)) {
+            is_inside = is_header(line, section, sub);
+            if (is_inside) {
+                is_found = true;
+                continue;
+            }
+        }
+        if (!is_inside) {
+            kept.push(line);
+        }
+    }
+    if (!is_found) {
+        return false;
+    }
+    str out = kept.join("\n");
+    match (io.write(path, out)) {
+        case Ok(_): {
+        }
+        case Err(_): {
+            return false;
+        }
+    }
+    return true;
+}
+
+/// Rename `section "old"` to `section "new"` in place.
+bool rename_section(str gitdir, str section, str old, str new) {
+    str path = fs.join(GIT_repository.common(gitdir), "config");
+    str body = slurp(path);
+    List<str> out = [];
+    bool is_found = false;
+    for (str line in body.split("\n")) {
+        if (is_any_header(line) && is_header(line, section, old)) {
+            out.push("[" + section + " \"" + new + "\"]");
+            is_found = true;
+        } else {
+            out.push(line);
+        }
+    }
+    if (!is_found) {
+        return false;
+    }
+    match (io.write(path, out.join("\n"))) {
+        case Ok(_): {
+        }
+        case Err(_): {
+            return false;
+        }
+    }
+    return true;
+}
+
+void config_set(str gitdir, str section, str sub, str key, str value) {
+    match (GIT_config.set(gitdir, section, sub, key, value)) {
+        case Ok(_): {
+        }
+        case Err(_): {
+        }
+    }
+}
+
+void config_add(str gitdir, str section, str sub, str key, str value) {
+    match (GIT_config.add(gitdir, section, sub, key, value)) {
+        case Ok(_): {
+        }
+        case Err(_): {
+        }
+    }
+}
+
+bool is_valid_remote_name(str name) {
+    if (name == "" || name.starts_with("-") || name.starts_with(".") || name.ends_with("/") || name.ends_with(".lock") || name.contains("..") || name.contains("//") || name.contains("@{")) {
+        return false;
+    }
+    for (int i in 0 .. name.size()) {
+        int c = name.byte_at(i);
+        if (c <= 32 || c == 127 || c == '~' || c == '^' || c == ':' || c == '?' || c == '*' || c == '[' || c == '\\') {
+            return false;
+        }
+    }
+    return true;
+}
+
+// --- the command ---------------------------------------------------------------------------------
+
+pub int run_remote(str start, List<str> overrides, List<str> argv) {
+    // `-v` may come before the subcommand
+    bool is_verbose = false;
+    List<str> rest = [];
+    str sub = "";
+    for (str word in argv) {
+        if (sub == "" && (word == "-v" || word == "--verbose")) {
+            is_verbose = true;
+        } else if (sub == "" && !word.starts_with("-")) {
+            sub = word;
+        } else {
+            rest.push(word);
+        }
+    }
+    GIT_gitcommon.Opened opened = GIT_gitcommon.open(start, overrides);
+    if (!opened.ok) {
+        return 128;
+    }
+    GIT_gitcommon.Ctx ctx = opened.ctx;
+    if (sub == "") {
+        GIT_gitwrite.Opts parsed = GIT_gitwrite.parse_opts(rest, ["-v --verbose"]);
+        int checked = GIT_gitwrite.check_opts(parsed, REMOTE_USAGE);
+        if (checked >= 0) {
+            return checked;
+        }
+        return list_remotes(ctx, is_verbose || parsed.flag("verbose"));
+    }
+    if (sub == "add") {
+        return remote_add(ctx, rest);
+    }
+    if (sub == "remove" || sub == "rm") {
+        return remote_remove(ctx, rest);
+    }
+    if (sub == "rename") {
+        return remote_rename(ctx, rest);
+    }
+    if (sub == "set-url") {
+        return remote_set_url(ctx, rest);
+    }
+    if (sub == "get-url") {
+        return remote_get_url(ctx, rest);
+    }
+    if (sub == "show") {
+        return remote_show(ctx, rest);
+    }
+    if (sub == "prune") {
+        return remote_prune(ctx, rest);
+    }
+    if (sub == "set-head") {
+        return remote_set_head(ctx, rest);
+    }
+    io.eprint("error: Unknown subcommand: " + sub);
+    io.eprint(REMOTE_USAGE);
+    return 129;
+}
+
+List<str> urls_of(GIT_gitcommon.Ctx ctx, str name) {
+    List<str> urls = ctx.config.get_all("remote", name, "url");
+    List<str> out = [];
+    for (str url in urls) {
+        out.push(GIT_remote.rewrite_gitdir(ctx.gitdir, url, false));
+    }
+    return out;
+}
+
+List<str> push_urls_of(GIT_gitcommon.Ctx ctx, str name) {
+    List<str> pushes = ctx.config.get_all("remote", name, "pushurl");
+    if (pushes.size() == 0) {
+        List<str> out = [];
+        for (str url in ctx.config.get_all("remote", name, "url")) {
+            out.push(GIT_remote.rewrite_gitdir(ctx.gitdir, url, true));
+        }
+        return out;
+    }
+    List<str> out = [];
+    for (str url in pushes) {
+        out.push(GIT_remote.rewrite_gitdir(ctx.gitdir, url, true));
+    }
+    return out;
+}
+
+int list_remotes(GIT_gitcommon.Ctx ctx, bool is_verbose) {
+    for (str name in GIT_gitfetch.remote_names(ctx)) {
+        if (!is_verbose) {
+            GIT_gitwrite.say(name);
+            continue;
+        }
+        List<str> fetches = urls_of(ctx, name);
+        if (fetches.size() == 0) {
+            GIT_gitwrite.say(name + "\t (fetch)");
+        }
+        for (str url in fetches) {
+            GIT_gitwrite.say(name + "\t" + url + " (fetch)");
+        }
+        List<str> pushes = push_urls_of(ctx, name);
+        if (pushes.size() == 0) {
+            GIT_gitwrite.say(name + "\t (push)");
+        }
+        for (str url in pushes) {
+            GIT_gitwrite.say(name + "\t" + url + " (push)");
+        }
+    }
+    return 0;
+}
+
+int remote_add(GIT_gitcommon.Ctx ctx, List<str> argv) {
+    GIT_gitwrite.Opts parsed = GIT_gitwrite.parse_opts(argv, ["-f --fetch", "--tags", "-t --track=", "-m --master=", "--mirror=?"]);
+    int checked = GIT_gitwrite.check_opts(parsed, ADD_USAGE);
+    if (checked >= 0) {
+        return checked;
+    }
+    List<str> words = parsed.paths();
+    if (words.size() != 2) {
+        io.eprint(ADD_USAGE);
+        return 129;
+    }
+    str name = words[0];
+    str url = words[1];
+    if (!is_valid_remote_name(name)) {
+        return fatal("'" + name + "' is not a valid remote name");
+    }
+    if (GIT_gitfetch.has_remote(ctx, name)) {
+        io.eprint("error: remote " + name + " already exists.");
+        return 3;
+    }
+    config_set(ctx.gitdir, "remote", name, "url", url);
+    List<str> tracked = parsed.all("track");
+    if (parsed.has("mirror")) {
+        config_set(ctx.gitdir, "remote", name, "mirror", "true");
+        config_set(ctx.gitdir, "remote", name, "fetch", "+refs/*:refs/*");
+    } else if (tracked.size() > 0) {
+        for (str branch in tracked) {
+            config_add(ctx.gitdir, "remote", name, "fetch", "+refs/heads/" + branch + ":refs/remotes/" + name + "/" + branch);
+        }
+    } else {
+        config_set(ctx.gitdir, "remote", name, "fetch", "+refs/heads/*:refs/remotes/" + name + "/*");
+    }
+    if (parsed.has("tags")) {
+        if (parsed.flag("tags")) {
+            config_set(ctx.gitdir, "remote", name, "tagopt", "--tags");
+        } else {
+            config_set(ctx.gitdir, "remote", name, "tagopt", "--no-tags");
+        }
+    }
+    int fetch_status = 0;
+    if (parsed.flag("fetch")) {
+        GIT_gitcommon.Opened again = GIT_gitcommon.open(ctx.root, ctx.overrides);
+        if (again.ok) {
+            GIT_gitfetch.Opts opts = GIT_gitfetch.Opts();
+            opts.action = "fetch " + name;
+            match (GIT_gitfetch.resolve(again.ctx, name, false)) {
+                case Ok(GIT_gitfetch.Remote remote): {
+                    print("Updating " + name);
+                    GIT_gitfetch.Outcome got = GIT_gitfetch.fetch(again.ctx, remote, [], opts);
+                    fetch_status = got.status;
+                }
+                case Err(str why): {
+                    return fatal(why);
+                }
+            }
+        }
+    }
+    if (parsed.has("master")) {
+        str master = parsed.value("master", "");
+        set_symbolic_head(ctx, name, master, "remote add");
+    }
+    return fetch_status;
+}
+
+// `refs/remotes/<name>/HEAD` -> `refs/remotes/<name>/<branch>`, with the log line git writes.
+bool set_symbolic_head(GIT_gitcommon.Ctx ctx, str name, str branch, str message) {
+    str head_ref = "refs/remotes/" + name + "/HEAD";
+    str target = "refs/remotes/" + name + "/" + branch;
+    str old = GIT_reflog.zero(ctx.gitdir);
+    match (GIT_refs.resolve(ctx.gitdir, head_ref)) {
+        case Ok(str found): {
+            old = found;
+        }
+        case Err(_): {
+        }
+    }
+    match (GIT_refs.update_symbolic(ctx.gitdir, head_ref, target)) {
+        case Ok(_): {
+        }
+        case Err(_): {
+            return false;
+        }
+    }
+    match (GIT_refs.resolve(ctx.gitdir, target)) {
+        case Ok(str id): {
+            match (GIT_reflog.log_update(ctx.gitdir, head_ref, old, id, message)) {
+                case Ok(_): {
+                }
+                case Err(_): {
+                }
+            }
+        }
+        case Err(_): {
+        }
+    }
+    return true;
+}
+
+// The remote-tracking refs of `name`, under refs/remotes/<name>/.
+List<str> tracking_refs(str gitdir, str name) {
+    List<str> out = [];
+    str prefix = "refs/remotes/" + name + "/";
+    match (GIT_refs.all(gitdir)) {
+        case Ok(List<GIT_refs.Ref> all): {
+            for (GIT_refs.Ref one in all) {
+                if (one.name.starts_with(prefix)) {
+                    out.push(one.name);
+                }
+            }
+        }
+        case Err(_): {
+        }
+    }
+    // a dangling origin/HEAD is a ref too
+    str head = fs.join(GIT_repository.common(gitdir), prefix + "HEAD");
+    if (fs.is_file(head) && !out.contains(prefix + "HEAD")) {
+        out.push(prefix + "HEAD");
+    }
+    out.sort();
+    return out;
+}
+
+void delete_ref_and_log(str gitdir, str ref) {
+    match (GIT_branches.delete_ref(gitdir, ref)) {
+        case Ok(_): {
+        }
+        case Err(_): {
+        }
+    }
+    match (GIT_reflog.delete_log(gitdir, ref)) {
+        case Ok(_): {
+        }
+        case Err(_): {
+        }
+    }
+}
+
+int remote_remove(GIT_gitcommon.Ctx ctx, List<str> argv) {
+    if (argv.size() != 1) {
+        io.eprint(REMOTE_USAGE);
+        return 129;
+    }
+    str name = argv[0];
+    if (!GIT_gitfetch.has_remote(ctx, name)) {
+        io.eprint("error: No such remote: '" + name + "'");
+        return 2;
+    }
+    // branches that tracked it lose their upstream
+    for (str section in ctx.config.sections()) {
+        if (section.starts_with("branch.")) {
+            str branch = section.substr(7, section.size());
+            if (ctx.config.get("branch", branch, "remote").or("") == name) {
+                match (GIT_config.unset(ctx.gitdir, "branch", branch, "remote")) {
+                    case Ok(_): {
+                    }
+                    case Err(_): {
+                    }
+                }
+                match (GIT_config.unset(ctx.gitdir, "branch", branch, "merge")) {
+                    case Ok(_): {
+                    }
+                    case Err(_): {
+                    }
+                }
+            }
+        }
+    }
+    for (str ref in tracking_refs(ctx.gitdir, name)) {
+        delete_ref_and_log(ctx.gitdir, ref);
+    }
+    if (!remove_section(ctx.gitdir, "remote", name)) {
+        return 1;
+    }
+    return 0;
+}
+
+int remote_rename(GIT_gitcommon.Ctx ctx, List<str> argv) {
+    GIT_gitwrite.Opts parsed = GIT_gitwrite.parse_opts(argv, ["--progress"]);
+    List<str> words = parsed.paths();
+    if (words.size() != 2) {
+        io.eprint(REMOTE_USAGE);
+        return 129;
+    }
+    str old = words[0];
+    str new = words[1];
+    if (!GIT_gitfetch.has_remote(ctx, old)) {
+        io.eprint("error: No such remote: '" + old + "'");
+        return 2;
+    }
+    if (GIT_gitfetch.has_remote(ctx, new)) {
+        io.eprint("error: remote " + new + " already exists.");
+        return 3;
+    }
+    if (!is_valid_remote_name(new)) {
+        return fatal("'" + new + "' is not a valid remote name");
+    }
+    if (!rename_section(ctx.gitdir, "remote", old, new)) {
+        return 1;
+    }
+    // the default fetch refspec follows the name; others are left, with a warning
+    List<str> specs = ctx.config.get_all("remote", old, "fetch");
+    str default_old = "+refs/heads/*:refs/remotes/" + old + "/*";
+    str default_new = "+refs/heads/*:refs/remotes/" + new + "/*";
+    bool is_first = true;
+    for (str spec in specs) {
+        if (spec == default_old) {
+            match (GIT_config.unset_all(ctx.gitdir, "remote", new, "fetch")) {
+                case Ok(_): {
+                }
+                case Err(_): {
+                }
+            }
+            break;
+        }
+    }
+    List<str> rebuilt = [];
+    List<str> kept_warnings = [];
+    for (str spec in specs) {
+        if (spec == default_old) {
+            rebuilt.push(default_new);
+        } else {
+            rebuilt.push(spec);
+            kept_warnings.push(spec);
+        }
+    }
+    if (specs.size() > 0 && rebuilt.size() == specs.size()) {
+        match (GIT_config.unset_all(ctx.gitdir, "remote", new, "fetch")) {
+            case Ok(_): {
+            }
+            case Err(_): {
+            }
+        }
+        for (str spec in rebuilt) {
+            config_add(ctx.gitdir, "remote", new, "fetch", spec);
+        }
+    }
+    if (kept_warnings.size() > 0) {
+        io.eprint("warning: Not updating non-default fetch refspec");
+        for (str spec in kept_warnings) {
+            io.eprint("\t" + spec);
+        }
+        io.eprint("\tPlease update the configuration manually if necessary.");
+    }
+    // branches follow
+    for (str section in ctx.config.sections()) {
+        if (section.starts_with("branch.")) {
+            str branch = section.substr(7, section.size());
+            if (ctx.config.get("branch", branch, "remote").or("") == old) {
+                config_set(ctx.gitdir, "branch", branch, "remote", new);
+            }
+        }
+    }
+    // the remote-tracking refs move, with their logs and one more line
+    for (str ref in tracking_refs(ctx.gitdir, old)) {
+        str target = "refs/remotes/" + new + "/" + ref.substr(("refs/remotes/" + old + "/").size(), ref.size());
+        str raw = slurp(fs.join(GIT_repository.common(ctx.gitdir), ref));
+        str log_old = GIT_reflog.log_path(ctx.gitdir, ref);
+        str log_new = GIT_reflog.log_path(ctx.gitdir, target);
+        bool has_log = fs.is_file(log_old);
+        str log_text = "";
+        if (has_log) {
+            log_text = slurp(log_old);
+        }
+        str id = GIT_reflog.zero(ctx.gitdir);
+        if (raw.starts_with("ref:")) {
+            str symbolic = raw.substr(4, raw.size()).trim();
+            str prefix_old = "refs/remotes/" + old + "/";
+            if (symbolic.starts_with(prefix_old)) {
+                symbolic = "refs/remotes/" + new + "/" + symbolic.substr(prefix_old.size(), symbolic.size());
+            }
+            match (GIT_refs.update_symbolic(ctx.gitdir, target, symbolic)) {
+                case Ok(_): {
+                }
+                case Err(_): {
+                }
+            }
+        } else {
+            match (GIT_refs.resolve(ctx.gitdir, ref)) {
+                case Ok(str found): {
+                    id = found;
+                    str write_log = "";
+                    // written below, with the log; the update itself must not log
+                    match (GIT_refs.update(ctx.gitdir, target, id, Option<str>.None, reflog_message: "remote: renamed " + ref + " to " + target)) {
+                        case Ok(_): {
+                        }
+                        case Err(_): {
+                        }
+                    }
+                }
+                case Err(_): {
+                    continue;
+                }
+            }
+        }
+        delete_ref_and_log(ctx.gitdir, ref);
+        if (has_log) {
+            match (fs.makedirs(GIT_gitwrite.dirname(log_new))) {
+                case Ok(_): {
+                }
+                case Err(_): {
+                }
+            }
+            match (io.write(log_new, log_text)) {
+                case Ok(_): {
+                }
+                case Err(_): {
+                }
+            }
+            match (GIT_reflog.append(ctx.gitdir, target, id, id, GIT_reflog.default_ident(ctx.gitdir), "remote: renamed " + ref + " to " + target)) {
+                case Ok(_): {
+                }
+                case Err(_): {
+                }
+            }
+        } else {
+            // a log made by the update above is not git's: ref without a log stays without
+            match (GIT_reflog.delete_log(ctx.gitdir, target)) {
+                case Ok(_): {
+                }
+                case Err(_): {
+                }
+            }
+        }
+    }
+    return 0;
+}
+
+int remote_set_url(GIT_gitcommon.Ctx ctx, List<str> argv) {
+    GIT_gitwrite.Opts parsed = GIT_gitwrite.parse_opts(argv, ["--push", "--add", "--delete"]);
+    int checked = GIT_gitwrite.check_opts(parsed, REMOTE_USAGE);
+    if (checked >= 0) {
+        return checked;
+    }
+    List<str> words = parsed.paths();
+    bool is_add = parsed.flag("add");
+    bool is_delete = parsed.flag("delete");
+    if (words.size() < 2 || words.size() > 3 || (is_add && is_delete) || ((is_add || is_delete) && words.size() != 2)) {
+        io.eprint(REMOTE_USAGE);
+        return 129;
+    }
+    str name = words[0];
+    if (!GIT_gitfetch.has_remote(ctx, name)) {
+        io.eprint("error: No such remote '" + name + "'");
+        return 2;
+    }
+    str key = "url";
+    if (parsed.flag("push")) {
+        key = "pushurl";
+    }
+    if (is_add) {
+        config_add(ctx.gitdir, "remote", name, key, words[1]);
+        return 0;
+    }
+    List<str> current = ctx.config.get_all("remote", name, key);
+    if (is_delete) {
+        str victim = words[1];
+        bool is_found = false;
+        List<str> remaining = [];
+        for (str url in current) {
+            if (url == victim) {
+                is_found = true;
+            } else {
+                remaining.push(url);
+            }
+        }
+        if (!is_found) {
+            io.eprint("fatal: could not unset 'remote." + name + "." + key + "'");
+            return 128;
+        }
+        if (remaining.size() == 0 && key == "url") {
+            io.eprint("fatal: Will not delete all non-push URLs");
+            return 128;
+        }
+        match (GIT_config.unset_all(ctx.gitdir, "remote", name, key)) {
+            case Ok(_): {
+            }
+            case Err(_): {
+            }
+        }
+        for (str url in remaining) {
+            config_add(ctx.gitdir, "remote", name, key, url);
+        }
+        return 0;
+    }
+    if (words.size() == 3) {
+        str old = words[2];
+        bool is_found = false;
+        List<str> replaced = [];
+        for (str url in current) {
+            if (url == old && !is_found) {
+                replaced.push(words[1]);
+                is_found = true;
+            } else {
+                replaced.push(url);
+            }
+        }
+        if (!is_found) {
+            io.eprint("fatal: No such URL found: " + old);
+            return 128;
+        }
+        match (GIT_config.unset_all(ctx.gitdir, "remote", name, key)) {
+            case Ok(_): {
+            }
+            case Err(_): {
+            }
+        }
+        for (str url in replaced) {
+            config_add(ctx.gitdir, "remote", name, key, url);
+        }
+        return 0;
+    }
+    if (current.size() > 1) {
+        match (GIT_config.unset_all(ctx.gitdir, "remote", name, key)) {
+            case Ok(_): {
+            }
+            case Err(_): {
+            }
+        }
+    }
+    config_set(ctx.gitdir, "remote", name, key, words[1]);
+    return 0;
+}
+
+int remote_get_url(GIT_gitcommon.Ctx ctx, List<str> argv) {
+    GIT_gitwrite.Opts parsed = GIT_gitwrite.parse_opts(argv, ["--push", "--all"]);
+    List<str> words = parsed.paths();
+    if (words.size() != 1) {
+        io.eprint(REMOTE_USAGE);
+        return 129;
+    }
+    str name = words[0];
+    if (!GIT_gitfetch.has_remote(ctx, name)) {
+        io.eprint("error: No such remote '" + name + "'");
+        return 2;
+    }
+    List<str> urls = urls_of(ctx, name);
+    if (parsed.flag("push")) {
+        urls = push_urls_of(ctx, name);
+    }
+    if (urls.size() == 0) {
+        urls = [name];
+    }
+    if (parsed.flag("all")) {
+        for (str url in urls) {
+            GIT_gitwrite.say(url);
+        }
+    } else {
+        GIT_gitwrite.say(urls[0]);
+    }
+    return 0;
+}
+
+// What the remote has, under `refs/heads/`, and its HEAD's branch.
+GIT_transport.Listing remote_listing(GIT_gitcommon.Ctx ctx, str url, List<str> prefixes) {
+    GIT_transport.Listing none = GIT_transport.Listing();
+    match (GIT_transport.connect(ctx, url, "git-upload-pack")) {
+        case Ok(GIT_transport.Session session): {
+            match (session.list(prefixes)) {
+                case Ok(GIT_transport.Listing got): {
+                    session.close();
+                    return got;
+                }
+                case Err(str why): {
+                    session.close();
+                    io.eprint("fatal: " + why);
+                    return none;
+                }
+            }
+        }
+        case Err(str why): {
+            io.eprint("fatal: " + why);
+            return none;
+        }
+    }
+}
+
+int remote_show(GIT_gitcommon.Ctx ctx, List<str> argv) {
+    GIT_gitwrite.Opts parsed = GIT_gitwrite.parse_opts(argv, ["-n"]);
+    List<str> names = parsed.paths();
+    if (names.size() == 0) {
+        io.eprint("fatal: remote show needs a name");
+        return 129;
+    }
+    bool is_no_query = parsed.flag("n");
+    int status = 0;
+    for (str name in names) {
+        if (!GIT_gitfetch.has_remote(ctx, name)) {
+            io.eprint("fatal: '" + name + "' does not appear to be a git repository");
+            io.eprint("fatal: Could not read from remote repository.\n\nPlease make sure you have the correct access rights\nand the repository exists.");
+            return 128;
+        }
+        List<str> fetch_urls = urls_of(ctx, name);
+        List<str> push_urls = push_urls_of(ctx, name);
+        GIT_gitwrite.say("* remote " + name);
+        if (fetch_urls.size() == 0) {
+            GIT_gitwrite.say("  Fetch URL: " + name);
+        } else {
+            GIT_gitwrite.say("  Fetch URL: " + fetch_urls[0]);
+        }
+        if (push_urls.size() == 0) {
+            GIT_gitwrite.say("  Push  URL: " + name);
+        } else {
+            for (str url in push_urls) {
+                GIT_gitwrite.say("  Push  URL: " + url);
+            }
+        }
+        List<str> specs = ctx.config.get_all("remote", name, "fetch");
+        if (specs.size() == 0) {
+            specs = ["+refs/heads/*:refs/remotes/" + name + "/*"];
+        }
+        // the remote's heads
+        GIT_transport.Listing listing = GIT_transport.Listing();
+        bool is_queried = false;
+        if (!is_no_query && fetch_urls.size() > 0) {
+            listing = remote_listing(ctx, fetch_urls[0], ["HEAD", "refs/heads/"]);
+            is_queried = true;
+        }
+        str head_branch = "(not queried)";
+        if (is_queried) {
+            head_branch = "(unknown)";
+            if (listing.head_target.starts_with("refs/heads/")) {
+                head_branch = listing.head_target.substr(11, listing.head_target.size());
+            } else if (listing.head_id != "") {
+                // a detached remote HEAD: the branch that points at the same commit, when only one does
+                List<str> same = [];
+                for (GIT_transport.RefInfo one in listing.refs) {
+                    if (one.name.starts_with("refs/heads/") && one.id == listing.head_id) {
+                        same.push(one.name.substr(11, one.name.size()));
+                    }
+                }
+                if (same.size() == 1) {
+                    head_branch = same[0];
+                }
+            }
+        }
+        GIT_gitwrite.say("  HEAD branch: " + head_branch);
+        // remote branches: what it has, what we track, what is stale
+        List<str> shown_names = [];
+        List<str> shown_states = [];
+        Map<str, bool> remote_set = {};
+        if (is_queried) {
+            for (GIT_transport.RefInfo one in listing.refs) {
+                if (one.name.starts_with("refs/heads/")) {
+                    remote_set.set(one.name.substr(11, one.name.size()), true);
+                }
+            }
+        }
+        str prefix = "refs/remotes/" + name + "/";
+        Map<str, bool> tracked_set = {};
+        List<str> stale_refs = [];
+        for (str ref in tracking_refs(ctx.gitdir, name)) {
+            str short = ref.substr(prefix.size(), ref.size());
+            if (short == "HEAD") {
+                continue;
+            }
+            tracked_set.set(short, true);
+            if (is_queried && !remote_set.contains(short)) {
+                stale_refs.push(ref);
+            }
+        }
+        List<str> remote_names_sorted = remote_set.keys();
+        remote_names_sorted.sort();
+        // the pairs, sorted by the name shown
+        List<str> keys = [];
+        Map<str, str> state_of = {};
+        if (is_queried) {
+            for (str branch in remote_names_sorted) {
+                keys.push(branch);
+                if (tracked_set.contains(branch)) {
+                    state_of.set(branch, "tracked");
+                } else {
+                    state_of.set(branch, "new (next fetch will store in remotes/" + name + ")");
+                }
+            }
+            for (str ref in stale_refs) {
+                keys.push(ref);
+                state_of.set(ref, "stale (use 'git remote prune' to remove)");
+            }
+        } else {
+            for (str branch in tracked_set.keys()) {
+                keys.push(branch);
+                state_of.set(branch, "");
+            }
+        }
+        keys.sort();
+        if (keys.size() > 0) {
+            int width = 0;
+            for (str key in keys) {
+                if (key.size() > width) {
+                    width = key.size();
+                }
+            }
+            str tail = "";
+            if (!is_queried) {
+                tail = " (status not queried)";
+            }
+            if (keys.size() == 1) {
+                GIT_gitwrite.say("  Remote branch:" + tail);
+            } else {
+                GIT_gitwrite.say("  Remote branches:" + tail);
+            }
+            for (str key in keys) {
+                str state = state_of.get(key).or("");
+                if (state == "") {
+                    GIT_gitwrite.say("    " + key);
+                } else {
+                    GIT_gitwrite.say("    " + pad(key, width) + " " + state);
+                }
+            }
+        }
+        // local branches configured for pull
+        List<str> pulls = [];
+        List<str> merges = [];
+        List<str> rebases = [];
+        for (str section in ctx.config.sections()) {
+            if (section.starts_with("branch.")) {
+                str branch = section.substr(7, section.size());
+                if (ctx.config.get("branch", branch, "remote").or("") == name) {
+                    str merge = ctx.config.get("branch", branch, "merge").or("");
+                    if (merge != "") {
+                        pulls.push(branch);
+                        str short = merge;
+                        if (short.starts_with("refs/heads/")) {
+                            short = short.substr(11, short.size());
+                        }
+                        merges.push(short);
+                        rebases.push(ctx.config.get("branch", branch, "rebase").or(""));
+                    }
+                }
+            }
+        }
+        if (pulls.size() > 0) {
+            int width = 0;
+            for (str branch in pulls) {
+                if (branch.size() > width) {
+                    width = branch.size();
+                }
+            }
+            if (pulls.size() == 1) {
+                GIT_gitwrite.say("  Local branch configured for 'git pull':");
+            } else {
+                GIT_gitwrite.say("  Local branches configured for 'git pull':");
+            }
+            for (int i in 0 .. pulls.size()) {
+                str verb = "merges with remote";
+                if (rebases[i] == "true") {
+                    verb = "rebases onto remote";
+                } else if (rebases[i] == "interactive") {
+                    verb = "rebases interactively onto remote";
+                } else if (rebases[i] == "merges") {
+                    verb = "rebases interactively (with merges) onto remote";
+                }
+                GIT_gitwrite.say("    " + pad(pulls[i], width) + " " + verb + " " + merges[i]);
+            }
+        }
+        // refs configured for push
+        List<str> push_specs = ctx.config.get_all("remote", name, "push");
+        List<str> src_names = [];
+        List<str> dst_names = [];
+        List<str> states = [];
+        if (push_specs.size() == 0) {
+            if (!is_queried) {
+                GIT_gitwrite.say("  Local ref configured for 'git push' (status not queried):");
+                GIT_gitwrite.say("    (matching) pushes to (matching)");
+            } else {
+                List<str> locals = [];
+                match (GIT_refs.all(ctx.gitdir)) {
+                    case Ok(List<GIT_refs.Ref> all): {
+                        for (GIT_refs.Ref one in all) {
+                            if (one.name.starts_with("refs/heads/")) {
+                                str branch = one.name.substr(11, one.name.size());
+                                if (remote_set.contains(branch)) {
+                                    src_names.push(branch);
+                                    dst_names.push(branch);
+                                    str remote_id = "";
+                                    for (GIT_transport.RefInfo ref_info in listing.refs) {
+                                        if (ref_info.name == one.name) {
+                                            remote_id = ref_info.id;
+                                        }
+                                    }
+                                    if (remote_id == one.id) {
+                                        states.push("up to date");
+                                    } else if (GIT_gitfetch.has_object_public(ctx.gitdir, remote_id) && GIT_http_push.is_ancestor(ctx.gitdir, remote_id, one.id)) {
+                                        states.push("fast-forwardable");
+                                    } else {
+                                        states.push("local out of date");
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    case Err(_): {
+                    }
+                }
+            }
+        } else {
+            for (str one in push_specs) {
+                GIT_refspec.Spec spec = GIT_refspec.parse(one);
+                src_names.push(GIT_refspec.pretty(spec.src));
+                str dst = spec.dst;
+                if (dst == "") {
+                    dst = spec.src;
+                }
+                dst_names.push(GIT_refspec.pretty(dst));
+                if (!is_queried) {
+                    states.push("");
+                } else {
+                    str remote_id = "";
+                    for (GIT_transport.RefInfo ref_info in listing.refs) {
+                        if (ref_info.name == dst || ref_info.name == "refs/heads/" + dst) {
+                            remote_id = ref_info.id;
+                        }
+                    }
+                    str local_id = "";
+                    match (GIT_refs.resolve(ctx.gitdir, spec.src)) {
+                        case Ok(str found): {
+                            local_id = found;
+                        }
+                        case Err(_): {
+                        }
+                    }
+                    if (remote_id == "") {
+                        states.push("create");
+                    } else if (remote_id == local_id) {
+                        states.push("up to date");
+                    } else if (GIT_gitfetch.has_object_public(ctx.gitdir, remote_id) && GIT_http_push.is_ancestor(ctx.gitdir, remote_id, local_id)) {
+                        states.push("fast-forwardable");
+                    } else {
+                        states.push("local out of date");
+                    }
+                }
+            }
+        }
+        if (src_names.size() > 0) {
+            int src_width = 0;
+            int dst_width = 0;
+            for (str one in src_names) {
+                if (one.size() > src_width) {
+                    src_width = one.size();
+                }
+            }
+            for (str one in dst_names) {
+                if (one.size() > dst_width) {
+                    dst_width = one.size();
+                }
+            }
+            str tail = "";
+            if (!is_queried) {
+                tail = " (status not queried)";
+            }
+            if (src_names.size() == 1) {
+                GIT_gitwrite.say("  Local ref configured for 'git push'" + tail + ":");
+            } else {
+                GIT_gitwrite.say("  Local refs configured for 'git push'" + tail + ":");
+            }
+            for (int i in 0 .. src_names.size()) {
+                if (states[i] == "") {
+                    GIT_gitwrite.say("    " + pad(src_names[i], src_width) + " pushes to " + dst_names[i]);
+                } else {
+                    GIT_gitwrite.say("    " + pad(src_names[i], src_width) + " pushes to " + pad(dst_names[i], dst_width) + " (" + states[i] + ")");
+                }
+            }
+        }
+    }
+    return status;
+}
+
+str pad(str text_value, int width) {
+    str out = text_value;
+    while (out.size() < width) {
+        out = out + " ";
+    }
+    return out;
+}
+
+int remote_prune(GIT_gitcommon.Ctx ctx, List<str> argv) {
+    GIT_gitwrite.Opts parsed = GIT_gitwrite.parse_opts(argv, ["-n --dry-run"]);
+    List<str> names = parsed.paths();
+    if (names.size() == 0) {
+        io.eprint(REMOTE_USAGE);
+        return 129;
+    }
+    for (str name in names) {
+        if (!GIT_gitfetch.has_remote(ctx, name)) {
+            io.eprint("error: No such remote: '" + name + "'");
+            return 2;
+        }
+        List<str> urls = urls_of(ctx, name);
+        if (urls.size() == 0) {
+            continue;
+        }
+        GIT_transport.Listing listing = remote_listing(ctx, urls[0], ["refs/heads/"]);
+        Map<str, bool> remote_set = {};
+        for (GIT_transport.RefInfo one in listing.refs) {
+            remote_set.set(one.name, true);
+        }
+        str prefix = "refs/remotes/" + name + "/";
+        List<str> stale = [];
+        for (str ref in tracking_refs(ctx.gitdir, name)) {
+            str short = ref.substr(prefix.size(), ref.size());
+            if (short == "HEAD") {
+                continue;
+            }
+            if (!remote_set.contains("refs/heads/" + short)) {
+                stale.push(ref);
+            }
+        }
+        if (stale.size() == 0) {
+            continue;
+        }
+        GIT_gitwrite.say("Pruning " + name);
+        GIT_gitwrite.say("URL: " + urls[0]);
+        for (str ref in stale) {
+            str verb = "pruned";
+            if (parsed.flag("dry-run")) {
+                verb = "would prune";
+            }
+            GIT_gitwrite.say(" * [" + verb + "] " + GIT_refspec.pretty(ref));
+            if (!parsed.flag("dry-run")) {
+                delete_ref_and_log(ctx.gitdir, ref);
+            }
+        }
+    }
+    return 0;
+}
+
+int remote_set_head(GIT_gitcommon.Ctx ctx, List<str> argv) {
+    GIT_gitwrite.Opts parsed = GIT_gitwrite.parse_opts(argv, ["-a --auto", "-d --delete"]);
+    List<str> words = parsed.paths();
+    if (words.size() == 0) {
+        io.eprint(REMOTE_USAGE);
+        return 129;
+    }
+    str name = words[0];
+    if (!GIT_gitfetch.has_remote(ctx, name)) {
+        io.eprint("error: No such remote: '" + name + "'");
+        return 2;
+    }
+    str head_ref = "refs/remotes/" + name + "/HEAD";
+    if (parsed.flag("delete")) {
+        delete_ref_and_log(ctx.gitdir, head_ref);
+        return 0;
+    }
+    str branch = "";
+    if (parsed.flag("auto")) {
+        List<str> urls = urls_of(ctx, name);
+        if (urls.size() == 0) {
+            return 1;
+        }
+        GIT_transport.Listing listing = remote_listing(ctx, urls[0], ["HEAD", "refs/heads/"]);
+        if (!listing.head_target.starts_with("refs/heads/")) {
+            io.eprint("error: Cannot determine remote HEAD");
+            return 1;
+        }
+        branch = listing.head_target.substr(11, listing.head_target.size());
+    } else if (words.size() >= 2) {
+        branch = words[1];
+    } else {
+        io.eprint(REMOTE_USAGE);
+        return 129;
+    }
+    str target = "refs/remotes/" + name + "/" + branch;
+    if (!GIT_refs.has_ref(ctx.gitdir, target)) {
+        io.eprint("error: Not a valid ref: " + target);
+        return 1;
+    }
+    if (!set_symbolic_head(ctx, name, branch, "remote set-head")) {
+        return 1;
+    }
+    if (parsed.flag("auto")) {
+        GIT_gitwrite.say("'" + name + "/HEAD' is now created and points to '" + branch + "'");
+    }
+    return 0;
+}
+
+// --- ls-remote -------------------------------------------------------------------------------------
+
+pub int run_ls_remote(str start, List<str> overrides, List<str> argv) {
+    GIT_gitwrite.Opts parsed = GIT_gitwrite.parse_opts(argv, ["-h --heads --branches", "-t --tags", "--refs", "-q --quiet", "--exit-code", "--get-url", "--symref", "--sort=", "--upload-pack=", "-o --server-option=", "--no-heads"]);
+    int checked = GIT_gitwrite.check_opts(parsed, LS_REMOTE_USAGE);
+    if (checked >= 0) {
+        return checked;
+    }
+    GIT_gitcommon.Ctx ctx = GIT_gitcommon.Ctx("", start, "", overrides, GIT_config.effective(""));
+    bool is_in_repo = GIT_gitstatus.find_root(start) != "" || fs.is_file(fs.join(GIT_repository.find(start), "HEAD"));
+    if (is_in_repo) {
+        GIT_gitcommon.Opened opened = GIT_gitcommon.open(start, overrides);
+        if (opened.ok) {
+            ctx = opened.ctx;
+        }
+    }
+    List<str> words = parsed.paths();
+    str remote_arg = "";
+    List<str> patterns = [];
+    if (words.size() > 0) {
+        remote_arg = words[0];
+        for (int i in 1 .. words.size()) {
+            patterns.push(words[i]);
+        }
+    }
+    GIT_gitfetch.Remote remote = GIT_gitfetch.Remote("", "", [], "", false);
+    match (GIT_gitfetch.resolve(ctx, remote_arg, false)) {
+        case Ok(GIT_gitfetch.Remote found): {
+            remote = found;
+        }
+        case Err(str why): {
+            return fatal(why);
+        }
+    }
+    if (parsed.flag("get-url")) {
+        GIT_gitwrite.say(remote.url);
+        return 0;
+    }
+    bool is_heads = parsed.flag("heads");
+    bool is_tags = parsed.flag("tags");
+    List<str> prefixes = [];
+    if (is_heads || is_tags) {
+        if (is_heads) {
+            prefixes.push("refs/heads/");
+        }
+        if (is_tags) {
+            prefixes.push("refs/tags/");
+        }
+    }
+    GIT_transport.Session session = GIT_transport.empty(ctx);
+    match (GIT_transport.connect(ctx, remote.url, "git-upload-pack")) {
+        case Ok(GIT_transport.Session got): {
+            session = got;
+        }
+        case Err(str why): {
+            return fatal(why);
+        }
+    }
+    GIT_transport.Listing listing = GIT_transport.Listing();
+    match (session.list(prefixes)) {
+        case Ok(GIT_transport.Listing got): {
+            listing = got;
+        }
+        case Err(str why): {
+            session.close();
+            return fatal(why);
+        }
+    }
+    session.close();
+    if (remote.is_named && remote_arg == "" && !parsed.flag("quiet")) {
+        io.eprint("From " + remote.url);
+    }
+    int shown = 0;
+    // HEAD (v0 lists it among the refs; v2 returns it for an empty prefix list)
+    List<GIT_transport.RefInfo> rows = [];
+    bool has_head = false;
+    for (GIT_transport.RefInfo one in listing.refs) {
+        if (one.name == "HEAD") {
+            has_head = true;
+        }
+    }
+    if (!has_head && listing.head_id != "" && prefixes.size() == 0) {
+        rows.push(GIT_transport.RefInfo("HEAD", listing.head_id, "", listing.head_target));
+    }
+    for (GIT_transport.RefInfo one in listing.refs) {
+        rows.push(one);
+    }
+    for (GIT_transport.RefInfo one in rows) {
+        if (parsed.flag("refs") && (one.name == "HEAD" || one.name.ends_with("^{}"))) {
+            continue;
+        }
+        if (prefixes.size() > 0 && !(one.name.starts_with("refs/heads/") && is_heads) && !(one.name.starts_with("refs/tags/") && is_tags)) {
+            continue;
+        }
+        if (patterns.size() > 0 && !matches_any(patterns, one.name)) {
+            continue;
+        }
+        if (parsed.flag("symref") && one.symref != "") {
+            GIT_gitwrite.say("ref: " + one.symref + "\t" + one.name);
+        } else if (parsed.flag("symref") && one.name == "HEAD" && listing.head_target != "") {
+            GIT_gitwrite.say("ref: " + listing.head_target + "\tHEAD");
+        }
+        GIT_gitwrite.say(one.id + "\t" + one.name);
+        shown = shown + 1;
+        if (one.peeled != "" && !parsed.flag("refs")) {
+            GIT_gitwrite.say(one.peeled + "\t" + one.name + "^{}");
+        }
+    }
+    if (parsed.flag("exit-code") && shown == 0) {
+        return 2;
+    }
+    return 0;
+}
+
+// git's `tail_match`: a pattern matches the trailing path components of a
+// ref name (`main` matches `refs/heads/main`), with `*` globs.
+bool matches_any(List<str> patterns, str name) {
+    for (str pattern in patterns) {
+        if (GIT_gitcommon.fnmatch("*/" + pattern, name) || GIT_gitcommon.fnmatch(pattern, name)) {
+            return true;
+        }
+    }
+    return false;
+}

@@ -23,8 +23,6 @@
 # a real difference: the object ids must be IDENTICAL. stderr is not compared
 # (hints are shorter on purpose); its presence is shown on a failure.
 set -uo pipefail
-# sed -i that BSD sed (macOS) also takes (it wants a suffix; GNU takes none)
-sedi() { local f="${@: -1}"; sed "${@:1:$#-1}" "$f" > "$f.sedi" && mv "$f.sedi" "$f"; }
 
 OURS=$(cd "$(dirname "$1")" && pwd)/$(basename "$1")
 HERE=$(cd "$(dirname "$0")" && pwd)
@@ -186,8 +184,8 @@ fx_hunks() {
     printf 'line 1\n' > f.txt
     g commit -qam "other"
     g switch -q main
-    sedi 's/^  line 3$/  line 3 X/; s/^  line 8$/  line 8 X/; s/^  line 9$/  line 9 X/; s/^  line 33$/  line 33 X/; s/^  line 38$/  line 38 X/' s.c
-    sedi 's/^line 3$/line 3 X/; s/^line 4$/line 4 X/; s/^line 15$/line 15 X/; s/^line 28$/line 28 X/' f.txt
+    sed -i 's/^  line 3$/  line 3 X/; s/^  line 8$/  line 8 X/; s/^  line 9$/  line 9 X/; s/^  line 33$/  line 33 X/; s/^  line 38$/  line 38 X/' s.c
+    sed -i 's/^line 3$/line 3 X/; s/^line 4$/line 4 X/; s/^line 15$/line 15 X/; s/^line 28$/line 28 X/' f.txt
     printf 'one\nTWO\nthree\n' > g.txt
     printf 'alpha\nBETA' > noeol.txt
     chmod +x run.sh
