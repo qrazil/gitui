@@ -1,0 +1,836 @@
+#!/usr/bin/env bash
+# The change commands of `1git` beside the real `git`, on pairs of identical
+# disposable repositories.
+#
+#   bash scripts/compare_write.sh <1git-binary> [workdir] [group...]
+#
+# groups: add rm mv restore reset commit switch checkout branch tag gerrit misc
+#         (default: all)
+#
+# A case is a fixture (built twice from the same script with fixed identities
+# and dates, so every object id is the same in both), some setup lines run
+# with real git on both, and the commands under test, written as `G <args>`:
+# `G` is real `git` in the first repository and `1git` in the second. After
+# the commands both repositories are dumped and compared:
+#
+#   - stdout and exit status of every `G` call;
+#   - `ls-files -s`, `for-each-ref`, HEAD, `status --porcelain=v2 -b`, the
+#     reflogs (bytes: identity and dates are fixed), the work tree (names,
+#     modes, content hashes), and the state files (MERGE_HEAD, ...);
+#   - `git fsck --strict` clean on ours.
+#
+# Because dates and identities are fixed, a commit or tree id that differs is
+# a real difference: the object ids must be IDENTICAL. stderr is not compared
+# (hints are shorter on purpose); its presence is shown on a failure.
+set -uo pipefail
+
+OURS=$(cd "$(dirname "$1")" && pwd)/$(basename "$1")
+HERE=$(cd "$(dirname "$0")" && pwd)
+WORK=${2:-$(mktemp -d)}
+mkdir -p "$WORK"
+WORK=$(cd "$WORK" && pwd)
+shift
+shift || true
+GROUPS_WANTED=${*:-add rm mv restore reset commit switch checkout branch tag gerrit misc}
+
+# shellcheck source=fixtures_look.sh
+. "$HERE/fixtures_look.sh"
+export GIT_AUTHOR_DATE="1800000000 +0000" GIT_COMMITTER_DATE="1800000000 +0000"
+umask 022
+
+bad=0
+n=0
+
+# --- fixtures -------------------------------------------------------------------------
+
+fx_base() {
+    new_repo "$1"
+    printf 'alpha\nbeta\ngamma\n' > a.txt
+    printf 'one\n' > b.txt
+    mkdir -p dir/sub
+    printf 'cee\n' > dir/c.txt
+    printf 'dee\n' > dir/sub/d.txt
+    printf 'with space\n' > 'sp ace.txt'
+    printf 'uni\n' > 'ünï.txt'
+    printf '#!/bin/sh\necho hi\n' > exec.sh
+    chmod +x exec.sh
+    g add -A
+    commit_at "first"
+    printf 'alpha\nbeta\ngamma\ndelta\n' > a.txt
+    printf 'one\ntwo\n' > b.txt
+    g add -A
+    commit_at "second"
+    g branch side HEAD~1
+}
+
+fx_empty() {
+    new_repo "$1"
+    printf 'x\n' > x.txt
+}
+
+fx_linear() {
+    new_repo "$1"
+    printf 'l1\n' > f.txt
+    g add f.txt
+    commit_at "c1"
+    printf 'l1\nl2\n' > f.txt
+    g commit -qam "c2"
+    printf 'l1\nl2\nl3\n' > f.txt
+    tick
+    g commit -qam "c3"
+    g branch topic
+    g tag v1 HEAD~1
+}
+
+# a merge with a conflict left in the index
+fx_conflict() {
+    new_repo "$1"
+    printf 'base\nline\n' > f.txt
+    printf 'keep\n' > k.txt
+    g add -A
+    commit_at "base"
+    g checkout -q -b other
+    printf 'base\nother\n' > f.txt
+    g commit -qam "other side"
+    g checkout -q main
+    printf 'base\nmain\n' > f.txt
+    g commit -qam "main side"
+    g merge other > /dev/null 2>&1
+    true
+}
+
+fx_merge() {
+    new_repo "$1"
+    printf 'a\n' > a.txt
+    g add -A
+    commit_at "root"
+    g checkout -q -b feat
+    printf 'f\n' > f.txt
+    g add -A
+    commit_at "feat work"
+    g checkout -q main
+    printf 'm\n' > m.txt
+    g add -A
+    commit_at "main work"
+    tick
+    g merge --no-ff -m "merge feat" feat > /dev/null
+}
+
+fx_crlf() {
+    new_repo "$1"
+    printf 'one\r\ntwo\r\n' > win.txt
+    printf 'mixed\r\nline\n' > mix.txt
+    g add -A
+    commit_at "crlf"
+}
+
+fx_unicode() {
+    new_repo "$1"
+    mkdir -p 'dír ectory'
+    printf 'x\n' > 'dír ectory/fïle one.txt'
+    printf 'y\n' > 'tab	name.txt' 2>/dev/null || printf 'y\n' > 'tab_name.txt'
+    printf 'z\n' > '日本語.txt'
+    g add -A
+    commit_at "unicode"
+}
+
+fx_ignore() {
+    new_repo "$1"
+    printf '*.log\nbuild/\n' > .gitignore
+    printf 'k\n' > keep.txt
+    g add -A
+    commit_at "ignore"
+    printf 'l\n' > debug.log
+    mkdir -p build
+    printf 'o\n' > build/out.o
+    printf 'n\n' > new.txt
+}
+
+# symlinks: one tracked, and a branch that points it elsewhere
+fx_links() {
+    new_repo "$1"
+    printf 'target\n' > real.txt
+    ln -s real.txt link
+    ln -s missing dangling
+    mkdir sub
+    ln -s ../real.txt sub/up
+    g add -A
+    commit_at "links"
+    g switch -q -c other
+    rm link
+    ln -s sub/up link
+    g add -A
+    commit_at "retarget"
+    g switch -q main
+}
+
+# a cherry-pick stopped on a conflict
+fx_pick() {
+    new_repo "$1"
+    printf 'base\nline\n' > f.txt
+    g add -A
+    commit_at "base"
+    g checkout -q -b other
+    printf 'base\nother\n' > f.txt
+    printf 'new\n' > o.txt
+    g add -A
+    GIT_AUTHOR_NAME="Pick Author" GIT_AUTHOR_EMAIL="pick@example.com" GIT_AUTHOR_DATE="1600000000 +0300" g commit -qm "other side"
+    g checkout -q main
+    printf 'base\nmain\n' > f.txt
+    g commit -qam "main side"
+    g cherry-pick other > /dev/null 2>&1
+    true
+}
+
+# --- harness ---
+# --- the harness ----------------------------------------------------------------------
+
+dump_state() {
+    local repo=$1
+    (
+        cd "$repo" || exit 1
+        echo "## ls-files -s"
+        git ls-files -s
+        echo "## refs"
+        git for-each-ref
+        echo "## HEAD"
+        git symbolic-ref -q HEAD || true
+        git rev-parse -q --verify HEAD || true
+        echo "## config"
+        git config --local --list | grep -vi '^gerrit\.' | LC_ALL=C sort
+        echo "## status"
+        git status --porcelain=v2 -b 2>&1
+        echo "## logs"
+        if [ -d .git/logs ]; then
+            (cd .git/logs && find . -type f | LC_ALL=C sort | while read -r f; do echo "-- $f"; cat "$f"; done)
+        fi
+        echo "## state"
+        for f in MERGE_HEAD MERGE_MSG ORIG_HEAD CHERRY_PICK_HEAD REVERT_HEAD SQUASH_MSG; do
+            if [ -e ".git/$f" ]; then echo "$f: $(cat ".git/$f" | head -c 200 | tr '\n' '|')"; fi
+        done
+        echo "## tree"
+        find . -path ./.git -prune -o \( -type f -o -type l \) -print | LC_ALL=C sort | while read -r f; do
+            if [ -L "$f" ]; then echo "L $f"; else printf '%s %s %s\n' "$(stat -c %a "$f")" "$f" "$(sha1sum < "$f" | cut -c1-12)"; fi
+        done
+        echo "## dirs"
+        find . -path ./.git -prune -o -type d -print | LC_ALL=C sort
+    )
+}
+
+run_side() {
+    local bin=$1 repo=$2 fixture=$3 setup=$4 script=$5 log=$6
+    : > "$log"
+    : > "$log.err"
+    (
+        cd "$WORK" || exit 1
+        "$fixture" "$repo" > /dev/null 2>&1
+        cd "$repo" || exit 1
+        export GIT_AUTHOR_DATE="1800000000 +0000" GIT_COMMITTER_DATE="1800000000 +0000"
+        # which program the case runs: some cases differ per side (the Gerrit
+        # hook is installed for git, `gerrit.createChangeId` set for 1git)
+        if [ "$bin" = git ]; then SIDE=git; else SIDE=ours; fi
+        export SIDE
+        eval "$setup" > /dev/null 2>&1
+        T=$(mktemp -d)
+        G() {
+            "$bin" "$@" > "$T/o" 2> "$T/e"
+            local rc=$?
+            { local shown="$*"; printf '$ %s\n' "${shown//--change-id /}"; cat "$T/o"; printf 'rc=%s\n' "$rc"; } >> "$log"
+            { printf '$ %s\n' "$*"; cat "$T/e"; } >> "$log.err"
+            return $rc
+        }
+        eval "$script"
+        rm -rf "$T"
+    ) > /dev/null 2>&1
+}
+
+# case_ <label> <fixture> <setup> <script>
+case_() {
+    local label=$1 fixture=$2 setup=$3 script=$4
+    n=$((n + 1))
+    local a=$WORK/case-a b=$WORK/case-b
+    rm -rf "$a" "$b"
+    run_side git "$a" "$fixture" "$setup" "$script" "$WORK/log-a"
+    run_side "$OURS" "$b" "$fixture" "$setup" "$script" "$WORK/log-b"
+    dump_state "$a" > "$WORK/dump-a" 2>&1
+    dump_state "$b" > "$WORK/dump-b" 2>&1
+    local failed=0
+    if ! cmp -s "$WORK/log-a" "$WORK/log-b"; then
+        failed=1
+        printf '\033[31mdiffer\033[0m %s: output\n' "$label"
+        diff "$WORK/log-a" "$WORK/log-b" | head -14 | sed 's/^/       /'
+        head -6 "$WORK/log-b.err" | sed 's/^/       stderr: /'
+    fi
+    if ! cmp -s "$WORK/dump-a" "$WORK/dump-b"; then
+        failed=1
+        printf '\033[31mdiffer\033[0m %s: state\n' "$label"
+        diff "$WORK/dump-a" "$WORK/dump-b" | head -14 | sed 's/^/       /'
+    fi
+    local fsck
+    fsck=$(cd "$b" && git fsck --strict --no-dangling 2>&1)
+    if [ -n "$fsck" ] && echo "$fsck" | grep -qiE 'error|missing|broken|invalid|corrupt'; then
+        failed=1
+        printf '\033[31mfsck\033[0m %s: %s\n' "$label" "$(echo "$fsck" | head -3)"
+    fi
+    [ $failed -eq 0 ] || bad=$((bad + 1))
+}
+
+wanted() {
+    case " $GROUPS_WANTED " in *" $1 "*) return 0 ;; esac
+    return 1
+}
+
+# --- add ----------------------------------------------------------------------------------
+
+if wanted add; then
+    case_ "add: one file" fx_base 'echo more >> a.txt' 'G add a.txt'
+    case_ "add: two files and a new one" fx_base 'echo more >> a.txt; echo n > new.txt; echo m >> b.txt' 'G add a.txt new.txt'
+    case_ "add: dot" fx_base 'echo more >> a.txt; echo n > new.txt; rm b.txt; echo x >> dir/c.txt' 'G add .'
+    case_ "add: -A" fx_base 'echo more >> a.txt; echo n > new.txt; rm b.txt; mkdir newdir; echo z > newdir/z' 'G add -A'
+    case_ "add: --all" fx_base 'rm b.txt; echo n > new.txt' 'G add --all'
+    case_ "add: -u skips untracked" fx_base 'echo more >> a.txt; echo n > new.txt; rm b.txt' 'G add -u'
+    case_ "add: --update with path" fx_base 'echo more >> a.txt; echo x >> dir/c.txt' 'G add --update dir'
+    case_ "add: deletion by name" fx_base 'rm b.txt' 'G add b.txt'
+    case_ "add: directory" fx_base 'echo n > dir/new.txt; echo m >> dir/sub/d.txt; mkdir dir/deep; echo q > dir/deep/q' 'G add dir'
+    case_ "add: from a subdirectory" fx_base 'echo n > dir/new.txt; echo m >> a.txt' 'cd dir; G add .; G add ../a.txt'
+    case_ "add: -A from a subdirectory covers everything" fx_base 'echo n > dir/new.txt; echo m >> a.txt' 'cd dir; G add -A'
+    case_ "add: -u from a subdirectory covers everything" fx_base 'echo m >> a.txt; echo m >> dir/c.txt' 'cd dir; G add -u'
+    case_ "add: no match" fx_base 'echo n > new.txt' 'G add nope; G add new.txt nope'
+    case_ "add: nothing specified" fx_base 'echo n > new.txt' 'G add'
+    case_ "add: dry run" fx_base 'echo n > new.txt; echo m >> a.txt; rm b.txt' 'G add -n .; G add --dry-run -A'
+    case_ "add: verbose" fx_base 'echo n > new.txt; echo m >> a.txt; rm b.txt' 'G add -v .'
+    case_ "add: verbose from a subdirectory" fx_base 'echo n > dir/new.txt' 'cd dir; G add -v .'
+    case_ "add: unchanged is silent" fx_base ':' 'G add a.txt; G add -v a.txt'
+    case_ "add: executable bit" fx_base 'chmod +x a.txt; chmod -x exec.sh' 'G add a.txt exec.sh'
+    case_ "add: new executable" fx_base 'printf "#!/bin/sh\n" > run.sh; chmod +x run.sh' 'G add run.sh'
+    case_ "add: mode only change by -u" fx_base 'chmod +x b.txt' 'G add -u'
+    case_ "add: filemode off keeps modes" fx_base 'git config core.filemode false; chmod +x a.txt; echo m >> exec.sh; printf "#!/bin/sh\n" > run.sh; chmod +x run.sh' 'G add -A'
+    case_ "add: --chmod=+x" fx_base 'echo n > new.txt' 'G add --chmod=+x new.txt; G add --chmod=-x exec.sh'
+    case_ "add: spaces and unicode" fx_base 'echo m >> "sp ace.txt"; echo m >> "ünï.txt"; echo n > "new ü.txt"' 'G add "sp ace.txt" "ünï.txt" "new ü.txt"'
+    case_ "add: unicode directory tree" fx_unicode 'echo m >> "dír ectory/fïle one.txt"; echo n > "日本語2.txt"' 'G add -A'
+    case_ "add: ignored file is refused" fx_ignore ':' 'G add debug.log'
+    case_ "add: ignored file among others" fx_ignore ':' 'G add debug.log new.txt'
+    case_ "add: ignored by -f" fx_ignore ':' 'G add -f debug.log'
+    case_ "add: dot skips ignored" fx_ignore ':' 'G add .'
+    case_ "add: -f dot takes ignored" fx_ignore ':' 'G add -f .'
+    case_ "add: ignored directory named" fx_ignore ':' 'G add build'
+    case_ "add: glob" fx_base 'echo n > one.c; echo m > two.c; echo o > three.h' 'G add "*.c"'
+    case_ "add: glob matching nothing" fx_base 'echo n > one.c' 'G add "*.zzz"'
+    case_ "add: resolves a conflict" fx_conflict 'printf "resolved\n" > f.txt' 'G add f.txt'
+    case_ "add: resolves a deletion in a conflict" fx_conflict 'rm f.txt' 'G add f.txt'
+    case_ "add: -A with a conflict" fx_conflict 'printf "resolved\n" > f.txt; echo n > new.txt' 'G add -A'
+    case_ "add: -u with a conflict" fx_conflict 'printf "resolved\n" > f.txt' 'G add -u'
+    case_ "add: empty repository" fx_empty ':' 'G add x.txt'
+    case_ "add: empty repository dot" fx_empty 'mkdir d; echo y > d/y' 'G add .'
+    case_ "add: file replaces directory" fx_base 'rm -r dir; echo f > dir' 'G add -A'
+    case_ "add: directory replaces file" fx_base 'rm b.txt; mkdir b.txt; echo f > b.txt/inner' 'G add -A'
+    case_ "add: CRLF kept" fx_crlf 'printf "one\r\ntwo\r\nthree\r\n" > win.txt; printf "new\r\n" > fresh.txt' 'G add -A'
+    case_ "add: empty file" fx_base ': > empty.txt' 'G add empty.txt'
+    case_ "add: binary file" fx_base 'printf "\0\1\2\377" > bin.dat' 'G add bin.dat'
+    case_ "add: --ignore-removal" fx_base 'rm b.txt; echo n > new.txt' 'G add --ignore-removal .'
+    case_ "add: unknown option" fx_base ':' 'G add --frobnicate a.txt'
+    case_ "add: -- separator" fx_base 'echo n > ./-dash' 'G add -- -dash'
+    case_ "add: all with pathspec" fx_base 'echo n > dir/n; echo m >> a.txt' 'G add -A dir'
+    case_ "add: path outside the tree" fx_base ':' 'G add ../x'
+fi
+
+# --- rm -----------------------------------------------------------------------------------
+
+if wanted rm; then
+    case_ "rm: a file" fx_base ':' 'G rm b.txt'
+    case_ "rm: several" fx_base ':' 'G rm b.txt a.txt'
+    case_ "rm: directory needs -r" fx_base ':' 'G rm dir'
+    case_ "rm: -r directory" fx_base ':' 'G rm -r dir'
+    case_ "rm: -r removes empty parents" fx_base ':' 'G rm -r dir/sub'
+    case_ "rm: --cached keeps the file" fx_base ':' 'G rm --cached b.txt'
+    case_ "rm: --cached -r" fx_base ':' 'G rm --cached -r dir'
+    case_ "rm: local modifications refused" fx_base 'echo m >> a.txt' 'G rm a.txt'
+    case_ "rm: local modifications with -f" fx_base 'echo m >> a.txt' 'G rm -f a.txt'
+    case_ "rm: staged changes refused" fx_base 'echo m >> a.txt; git add a.txt' 'G rm a.txt'
+    case_ "rm: staged and local refused" fx_base 'echo m >> a.txt; git add a.txt; echo n >> a.txt' 'G rm a.txt'
+    case_ "rm: staged and local with --cached refused" fx_base 'echo m >> a.txt; git add a.txt; echo n >> a.txt' 'G rm --cached a.txt'
+    case_ "rm: staged changes with --cached" fx_base 'echo m >> a.txt; git add a.txt' 'G rm --cached a.txt'
+    case_ "rm: local modifications with --cached" fx_base 'echo m >> a.txt' 'G rm --cached a.txt'
+    case_ "rm: newly added file refused" fx_base 'echo n > new.txt; git add new.txt' 'G rm new.txt'
+    case_ "rm: newly added file with --cached" fx_base 'echo n > new.txt; git add new.txt' 'G rm --cached new.txt'
+    case_ "rm: newly added with -f" fx_base 'echo n > new.txt; git add new.txt' 'G rm -f new.txt'
+    case_ "rm: no match" fx_base ':' 'G rm nope'
+    case_ "rm: ignore-unmatch" fx_base ':' 'G rm --ignore-unmatch nope'
+    case_ "rm: ignore-unmatch with a match" fx_base ':' 'G rm --ignore-unmatch nope b.txt'
+    case_ "rm: untracked file is no match" fx_base 'echo n > new.txt' 'G rm new.txt'
+    case_ "rm: dry run" fx_base ':' 'G rm -n b.txt; G rm --dry-run -r dir'
+    case_ "rm: quiet" fx_base ':' 'G rm -q b.txt'
+    case_ "rm: already deleted from the work tree" fx_base 'rm b.txt' 'G rm b.txt'
+    case_ "rm: from a subdirectory" fx_base ':' 'cd dir; G rm c.txt ../b.txt'
+    case_ "rm: glob" fx_base ':' 'G rm "dir/*.txt"'
+    case_ "rm: glob crosses directories" fx_base ':' 'G rm "*.txt"'
+    case_ "rm: spaces and unicode" fx_base ':' 'G rm "sp ace.txt" "ünï.txt"'
+    case_ "rm: executable file" fx_base ':' 'G rm exec.sh'
+    case_ "rm: unmerged path" fx_conflict ':' 'G rm f.txt'
+    case_ "rm: unmerged path --cached" fx_conflict ':' 'G rm --cached f.txt'
+    case_ "rm: in an empty repository" fx_empty 'git add x.txt' 'G rm x.txt; G rm --cached x.txt'
+    case_ "rm: no arguments" fx_base ':' 'G rm'
+    case_ "rm: dot needs -r" fx_base ':' 'G rm .'
+    case_ "rm: dot -r" fx_base ':' 'G rm -r .'
+fi
+
+# --- mv -----------------------------------------------------------------------------------
+
+if wanted mv; then
+    case_ "mv: rename" fx_base ':' 'G mv b.txt c2.txt'
+    case_ "mv: verbose" fx_base ':' 'G mv -v b.txt c2.txt'
+    case_ "mv: into a directory" fx_base ':' 'G mv b.txt dir'
+    case_ "mv: several into a directory" fx_base ':' 'G mv a.txt b.txt dir/sub'
+    case_ "mv: several into a non directory" fx_base ':' 'G mv a.txt b.txt nothere'
+    case_ "mv: a directory" fx_base ':' 'G mv dir moved'
+    case_ "mv: a directory into a directory" fx_base ':' 'G mv dir/sub .'
+    case_ "mv: directory into itself" fx_base ':' 'G mv dir dir/sub'
+    case_ "mv: destination exists" fx_base ':' 'G mv a.txt b.txt'
+    case_ "mv: destination exists with -f" fx_base ':' 'G mv -f a.txt b.txt'
+    case_ "mv: bad source" fx_base ':' 'G mv nope x'
+    case_ "mv: untracked source" fx_base 'echo n > new.txt' 'G mv new.txt other.txt'
+    case_ "mv: skip errors with -k" fx_base 'echo n > new.txt' 'G mv -k new.txt nope b.txt c.txt2'
+    case_ "mv: dry run" fx_base ':' 'G mv -n b.txt c2.txt'
+    case_ "mv: destination directory missing" fx_base ':' 'G mv b.txt nodir/b.txt'
+    case_ "mv: from a subdirectory" fx_base ':' 'cd dir; G mv c.txt ../c-moved.txt'
+    case_ "mv: keeps staged and local changes" fx_base 'echo m >> a.txt; git add a.txt; echo n >> a.txt' 'G mv a.txt z.txt'
+    case_ "mv: spaces and unicode" fx_base ':' 'G mv "sp ace.txt" "new ü.txt"'
+    case_ "mv: executable keeps its mode" fx_base ':' 'G mv exec.sh run.sh'
+    case_ "mv: unmerged source" fx_conflict ':' 'G mv f.txt g.txt'
+    case_ "mv: to the same name" fx_base ':' 'G mv a.txt a.txt'
+    case_ "mv: no arguments" fx_base ':' 'G mv a.txt'
+fi
+
+# --- restore ----------------------------------------------------------------------------
+
+if wanted restore; then
+    case_ "restore: worktree from the index" fx_base 'echo m >> a.txt' 'G restore a.txt'
+    case_ "restore: deleted file" fx_base 'rm b.txt' 'G restore b.txt'
+    case_ "restore: directory" fx_base 'echo m >> dir/c.txt; rm dir/sub/d.txt; echo u > dir/untracked' 'G restore dir'
+    case_ "restore: dot" fx_base 'echo m >> a.txt; rm b.txt; echo u > untracked' 'G restore .'
+    case_ "restore: --worktree explicit" fx_base 'echo m >> a.txt' 'G restore --worktree a.txt'
+    case_ "restore: -W" fx_base 'echo m >> a.txt' 'G restore -W a.txt'
+    case_ "restore: --staged" fx_base 'echo m >> a.txt; git add a.txt' 'G restore --staged a.txt'
+    case_ "restore: -S keeps the work tree" fx_base 'echo m >> a.txt; git add a.txt' 'G restore -S a.txt'
+    case_ "restore: --staged a new file" fx_base 'echo n > new.txt; git add new.txt' 'G restore --staged new.txt'
+    case_ "restore: --staged a deletion" fx_base 'git rm -q b.txt' 'G restore --staged b.txt'
+    case_ "restore: --staged dot" fx_base 'echo m >> a.txt; echo n > new.txt; git add -A; git rm -q --cached b.txt' 'G restore --staged .'
+    case_ "restore: --staged --worktree" fx_base 'echo m >> a.txt; git add a.txt; echo n >> a.txt' 'G restore --staged --worktree a.txt'
+    case_ "restore: --source=HEAD~1" fx_base ':' 'G restore --source=HEAD~1 a.txt'
+    case_ "restore: --source=side with paths" fx_base ':' 'G restore --source=side b.txt a.txt'
+    case_ "restore: -s HEAD~1 --staged" fx_base ':' 'G restore -s HEAD~1 --staged a.txt'
+    case_ "restore: --source removes files the source lacks" fx_base 'echo n > new.txt; git add new.txt' 'G restore --source=HEAD~1 --worktree .'
+    case_ "restore: --source=side dot" fx_base ':' 'G restore --source=side .'
+    case_ "restore: --source=side --staged --worktree dot" fx_base ':' 'G restore --source=side -S -W .'
+    case_ "restore: no match" fx_base ':' 'G restore nope'
+    case_ "restore: untracked file is no match" fx_base 'echo n > new.txt' 'G restore new.txt'
+    case_ "restore: no paths" fx_base ':' 'G restore'
+    case_ "restore: unmerged path" fx_conflict ':' 'G restore f.txt'
+    case_ "restore: unmerged path --ours" fx_conflict ':' 'G restore --ours f.txt'
+    case_ "restore: unmerged path --theirs" fx_conflict ':' 'G restore --theirs f.txt'
+    case_ "restore: unmerged path --staged" fx_conflict ':' 'G restore --staged f.txt'
+    case_ "restore: unmerged path from a source" fx_conflict ':' 'G restore --source=HEAD f.txt'
+    case_ "restore: executable bit comes back" fx_base 'chmod -x exec.sh' 'G restore exec.sh'
+    case_ "restore: from a subdirectory" fx_base 'echo m >> dir/c.txt; echo m >> a.txt' 'cd dir; G restore c.txt ../a.txt'
+    case_ "restore: dot in a subdirectory" fx_base 'echo m >> dir/c.txt; echo m >> a.txt' 'cd dir; G restore .'
+    case_ "restore: spaces and unicode" fx_base 'echo m >> "sp ace.txt"; rm "ünï.txt"' 'G restore "sp ace.txt" "ünï.txt"'
+    case_ "restore: CRLF" fx_crlf 'printf "x\n" > win.txt' 'G restore win.txt'
+    case_ "restore: glob" fx_base 'echo m >> a.txt; echo m >> b.txt' 'G restore "*.txt"'
+    case_ "restore: in an empty repository" fx_empty 'git add x.txt' 'G restore --staged x.txt'
+    case_ "restore: quiet" fx_base 'echo m >> a.txt' 'G restore -q a.txt'
+fi
+
+# --- reset --------------------------------------------------------------------------------
+
+if wanted reset; then
+    case_ "reset: mixed to HEAD~1" fx_base ':' 'G reset HEAD~1'
+    case_ "reset: default is mixed" fx_base 'echo m >> a.txt' 'G reset'
+    case_ "reset: --mixed with local changes lists them" fx_base 'echo m >> a.txt; rm b.txt' 'G reset --mixed HEAD'
+    case_ "reset: soft" fx_base ':' 'G reset --soft HEAD~1'
+    case_ "reset: soft keeps staged changes" fx_base 'echo m >> a.txt; git add a.txt' 'G reset --soft HEAD~1'
+    case_ "reset: hard" fx_base 'echo m >> a.txt; echo n > untracked.txt' 'G reset --hard HEAD~1'
+    case_ "reset: hard with no argument" fx_base 'echo m >> a.txt; git add a.txt; rm b.txt' 'G reset --hard'
+    case_ "reset: hard removes added files" fx_base 'echo n > new.txt; git add new.txt' 'G reset --hard HEAD'
+    case_ "reset: hard to another branch" fx_base ':' 'G reset --hard side'
+    case_ "reset: hard restores a deleted directory" fx_base 'rm -r dir' 'G reset --hard'
+    case_ "reset: hard over an untracked file in the way" fx_base 'git rm -q --cached b.txt; echo mine > b.txt' 'G reset --hard HEAD~1'
+    case_ "reset: hard restores the executable bit" fx_base 'chmod -x exec.sh' 'G reset --hard'
+    case_ "reset: quiet" fx_base 'echo m >> a.txt' 'G reset -q --hard HEAD~1'
+    case_ "reset: -q mixed" fx_base 'echo m >> a.txt' 'G reset -q HEAD~1'
+    case_ "reset: path from HEAD" fx_base 'echo m >> a.txt; git add a.txt' 'G reset a.txt'
+    case_ "reset: path with --" fx_base 'echo m >> a.txt; git add a.txt' 'G reset -- a.txt'
+    case_ "reset: tree-ish and path" fx_base ':' 'G reset HEAD~1 a.txt'
+    case_ "reset: tree-ish and path with --" fx_base ':' 'G reset HEAD~1 -- a.txt b.txt'
+    case_ "reset: a new file is unstaged" fx_base 'echo n > new.txt; git add new.txt' 'G reset new.txt'
+    case_ "reset: a directory" fx_base 'echo m >> dir/c.txt; echo m >> dir/sub/d.txt; git add -A' 'G reset dir'
+    case_ "reset: from a subdirectory" fx_base 'echo m >> dir/c.txt; git add -A' 'cd dir; G reset c.txt'
+    case_ "reset: soft with paths" fx_base ':' 'G reset --soft HEAD~1 a.txt'
+    case_ "reset: hard with paths" fx_base ':' 'G reset --hard HEAD~1 a.txt'
+    case_ "reset: unknown revision" fx_base ':' 'G reset nope'
+    case_ "reset: unknown revision hard" fx_base ':' 'G reset --hard nope'
+    case_ "reset: ambiguous revision and file" fx_base 'echo x > side' 'G reset side'
+    case_ "reset: ORIG_HEAD is written" fx_base ':' 'G reset --hard HEAD~1; G reset --hard ORIG_HEAD'
+    case_ "reset: detached HEAD" fx_base 'git checkout -q --detach HEAD' 'G reset --hard HEAD~1'
+    case_ "reset: branch tip by name" fx_base ':' 'G reset --soft side'
+    case_ "reset: from a tag" fx_linear ':' 'G reset --hard v1'
+    case_ "reset: unborn HEAD" fx_empty 'git add x.txt' 'G reset'
+    case_ "reset: unborn HEAD hard" fx_empty 'git add x.txt' 'G reset --hard'
+    case_ "reset: clears a merge" fx_conflict ':' 'G reset --hard'
+    case_ "reset: mixed in a conflict" fx_conflict ':' 'G reset'
+    case_ "reset: soft in a merge refused" fx_conflict ':' 'G reset --soft HEAD'
+    case_ "reset: --keep with a clean tree" fx_base ':' 'G reset --keep HEAD~1'
+    case_ "reset: --keep keeps unrelated local changes" fx_base 'echo m >> dir/c.txt' 'G reset --keep HEAD~1'
+    case_ "reset: --keep refuses a clash" fx_base 'echo m >> a.txt' 'G reset --keep HEAD~1'
+    case_ "reset: spaces and unicode" fx_base 'echo m >> "sp ace.txt"; echo m >> "ünï.txt"; git add -A' 'G reset "sp ace.txt" "ünï.txt"'
+    case_ "reset: CRLF" fx_crlf 'printf "x\n" > win.txt; git add win.txt' 'G reset win.txt'
+fi
+
+# --- commit -------------------------------------------------------------------------------
+
+if wanted commit; then
+    case_ "commit: -m" fx_base 'echo m >> a.txt; git add a.txt' 'G commit -m "change a"'
+    case_ "commit: root commit" fx_empty 'git add x.txt' 'G commit -m "root"'
+    case_ "commit: two -m make paragraphs" fx_base 'echo m >> a.txt; git add a.txt' 'G commit -m "subject" -m "body text"'
+    case_ "commit: -F file" fx_base 'echo m >> a.txt; git add a.txt; printf "from file\n\nbody\n" > /tmp/msg.$$' 'G commit -F /tmp/msg.$$; rm -f /tmp/msg.$$'
+    case_ "commit: -F stdin" fx_base 'echo m >> a.txt; git add a.txt' 'echo "from stdin" | G commit -F -'
+    case_ "commit: -a" fx_base 'echo m >> a.txt; rm b.txt; echo n > new.txt' 'G commit -a -m "all"'
+    case_ "commit: -am" fx_base 'echo m >> a.txt' 'G commit -am "all in one"'
+    case_ "commit: nothing to commit" fx_base ':' 'G commit -m x'
+    case_ "commit: nothing but untracked" fx_base 'echo n > new.txt' 'G commit -m x'
+    case_ "commit: unstaged changes only" fx_base 'echo m >> a.txt' 'G commit -m x'
+    case_ "commit: empty repository" fx_empty ':' 'G commit -m x'
+    case_ "commit: --allow-empty" fx_base ':' 'G commit --allow-empty -m "empty"'
+    case_ "commit: --amend -m" fx_base ':' 'G commit --amend -m "reworded"'
+    case_ "commit: --amend --no-edit with staged" fx_base 'echo m >> a.txt; git add a.txt' 'G commit --amend --no-edit'
+    case_ "commit: --amend keeps the author" fx_base 'export GIT_AUTHOR_NAME="Other"; git commit -q --allow-empty -m "by other"' 'G commit --amend --no-edit'
+    case_ "commit: --amend --reset-author" fx_base 'export GIT_AUTHOR_NAME="Other"; git commit -q --allow-empty -m "by other"; unset GIT_AUTHOR_NAME; export GIT_AUTHOR_NAME="Ada Author"' 'G commit --amend --no-edit --reset-author'
+    case_ "commit: --amend of a root commit" fx_empty 'git add x.txt; git commit -qm root' 'G commit --amend -m "new root"'
+    case_ "commit: --amend of a merge commit" fx_merge ':' 'G commit --amend -m "merge reworded"'
+    case_ "commit: --amend that would be empty" fx_base 'git reset -q --soft HEAD~1; git commit -qm one --allow-empty' 'G commit --amend --no-edit'
+    case_ "commit: --amend in an empty repository" fx_empty ':' 'G commit --amend -m x'
+    case_ "commit: --author" fx_base 'echo m >> a.txt; git add a.txt' 'G commit -m x --author="Zed Writer <zed@example.com>"'
+    case_ "commit: --author invalid" fx_base 'echo m >> a.txt; git add a.txt' 'G commit -m x --author="nobody"'
+    case_ "commit: --date" fx_base 'echo m >> a.txt; git add a.txt' 'G commit -m x --date="2020-02-03T04:05:06 +0200"'
+    case_ "commit: --date raw" fx_base 'echo m >> a.txt; git add a.txt' 'G commit -m x --date="1500000000 -0700"'
+    case_ "commit: --date rfc2822" fx_base 'echo m >> a.txt; git add a.txt' 'G commit -m x --date="Thu, 07 Apr 2005 22:13:13 +0200"'
+    case_ "commit: -s" fx_base 'echo m >> a.txt; git add a.txt' 'G commit -s -m "signed"'
+    case_ "commit: -s with a body" fx_base 'echo m >> a.txt; git add a.txt' 'G commit -s -m "signed" -m "the body"'
+    case_ "commit: -s twice does not repeat" fx_base ':' 'G commit --allow-empty -s -m "signed"; G commit --amend -s --no-edit'
+    case_ "commit: -s after other trailers" fx_base 'echo m >> a.txt; git add a.txt' 'G commit -s -m "subject" -m "Bug: 12"'
+    case_ "commit: --fixup" fx_base 'echo m >> a.txt; git add a.txt' 'G commit --fixup=HEAD~1'
+    case_ "commit: --fixup of a fixup" fx_base 'echo m >> a.txt; git add a.txt; git commit -q --fixup=HEAD~1; echo n >> a.txt' 'G commit -a --fixup=HEAD'
+    case_ "commit: --squash -m" fx_base 'echo m >> a.txt; git add a.txt' 'G commit --squash=HEAD~1 -m "note"'
+    case_ "commit: -C reuses message and author" fx_base 'echo m >> a.txt; git add a.txt' 'G commit -C HEAD~1'
+    case_ "commit: -m empty is refused" fx_base 'echo m >> a.txt; git add a.txt' 'G commit -m ""'
+    case_ "commit: --allow-empty-message" fx_base 'echo m >> a.txt; git add a.txt' 'G commit --allow-empty-message -m ""'
+    case_ "commit: message whitespace is cleaned" fx_base 'echo m >> a.txt; git add a.txt' 'G commit -m "  subject with trailing   " -m "" -m "body   "'
+    case_ "commit: a # line is kept with -m" fx_base 'echo m >> a.txt; git add a.txt' 'G commit -m "subject" -m "# not a comment"'
+    case_ "commit: --cleanup=verbatim" fx_base 'echo m >> a.txt; git add a.txt' 'G commit --cleanup=verbatim -m "subject   " -m "x"'
+    case_ "commit: with paths" fx_base 'echo m >> a.txt; echo n >> b.txt; git add a.txt' 'G commit -m "only b" b.txt'
+    case_ "commit: with a directory" fx_base 'echo m >> dir/c.txt; echo n >> dir/sub/d.txt; echo o >> a.txt' 'G commit -m "dir" dir'
+    case_ "commit: with a deleted path" fx_base 'rm b.txt; echo o >> a.txt' 'G commit -m "gone" b.txt'
+    case_ "commit: with an unknown path" fx_base 'echo m >> a.txt' 'G commit -m x nope'
+    case_ "commit: with an untracked path" fx_base 'echo n > new.txt' 'G commit -m x new.txt'
+    case_ "commit: --include with paths" fx_base 'echo m >> a.txt; echo n >> b.txt; git add a.txt' 'G commit -i -m "both" b.txt'
+    case_ "commit: -a with paths is refused" fx_base 'echo m >> a.txt' 'G commit -a -m x a.txt'
+    case_ "commit: executable file" fx_base 'printf "#!/bin/sh\n" > run.sh; chmod +x run.sh; git add run.sh' 'G commit -m "run"'
+    case_ "commit: rename shows in the summary" fx_base 'git mv b.txt b-renamed.txt' 'G commit -m "rename"'
+    case_ "commit: delete and mode in the summary" fx_base 'git rm -q a.txt; chmod -x exec.sh; git add exec.sh' 'G commit -m "mixed"'
+    case_ "commit: many files" fx_base 'for i in 1 2 3 4 5 6 7 8; do echo $i > f$i.txt; done; git add -A' 'G commit -m "many"'
+    case_ "commit: from a subdirectory" fx_base 'echo m >> a.txt; git add a.txt' 'cd dir; G commit -m "from dir"'
+    case_ "commit: unmerged paths refuse" fx_conflict ':' 'G commit -m x'
+    case_ "commit: concluding a merge" fx_conflict 'printf "resolved\n" > f.txt; git add f.txt' 'G commit -m "merged"'
+    case_ "commit: concluding a merge from MERGE_MSG" fx_conflict 'printf "resolved\n" > f.txt; git add f.txt' 'GIT_EDITOR=true G commit'
+    case_ "commit: partial commit during a merge" fx_conflict 'printf "resolved\n" > f.txt; git add f.txt' 'G commit -m x f.txt'
+    case_ "commit: detached HEAD" fx_base 'git checkout -q --detach HEAD; echo m >> a.txt; git add a.txt' 'G commit -m "detached"'
+    case_ "commit: spaces and unicode paths" fx_unicode 'echo m >> "dír ectory/fïle one.txt"; echo n > "新しい.txt"; git add -A' 'G commit -m "unicode"'
+    case_ "commit: CRLF content" fx_crlf 'printf "three\r\n" >> win.txt; git add win.txt' 'G commit -m "crlf"'
+    case_ "commit: empty file and binary" fx_base ': > empty.txt; printf "\0\1" > bin.dat; git add -A' 'G commit -m "files"'
+    case_ "commit: editor supplies the message" fx_base 'echo m >> a.txt; git add a.txt' 'GIT_EDITOR="sh -c '"'"'echo from editor > \"\$1\"'"'"' sh" G commit'
+    case_ "commit: editor leaves nothing" fx_base 'echo m >> a.txt; git add a.txt' 'GIT_EDITOR=true G commit'
+    case_ "commit: editor failing" fx_base 'echo m >> a.txt; git add a.txt' 'GIT_EDITOR=false G commit'
+    case_ "commit: editor with -m and -e" fx_base 'echo m >> a.txt; git add a.txt' 'GIT_EDITOR="sh -c '"'"'printf \"edited: \" | cat - \"\$1\" > \"\$1.n\"; mv \"\$1.n\" \"\$1\"'"'"' sh" G commit -e -m "base"'
+    case_ "commit: core.editor" fx_base 'echo m >> a.txt; git add a.txt; git config core.editor "sh -c '"'"'echo via core.editor > \"\$1\"'"'"' sh"' 'G commit'
+    case_ "commit: amend through the editor" fx_base ':' 'GIT_EDITOR="sh -c '"'"'echo amended in editor > \"\$1\"'"'"' sh" G commit --amend'
+    case_ "commit: commit.template" fx_base 'echo m >> a.txt; git add a.txt; printf "templated subject\n\nfrom the template\n" > /tmp/tpl.$$; git config commit.template /tmp/tpl.$$' 'GIT_EDITOR=true G commit; rm -f /tmp/tpl.$$'
+    case_ "commit: template unused with -m" fx_base 'echo m >> a.txt; git add a.txt; printf "templated\n" > /tmp/tpl2.$$; git config commit.template /tmp/tpl2.$$' 'G commit -m "explicit"; rm -f /tmp/tpl2.$$'
+    case_ "commit: --no-verify skips hooks" fx_base 'echo m >> a.txt; git add a.txt; printf "#!/bin/sh\nexit 1\n" > .git/hooks/pre-commit; chmod +x .git/hooks/pre-commit' 'G commit -n -m "skipped"'
+    case_ "commit: pre-commit hook rejects" fx_base 'echo m >> a.txt; git add a.txt; printf "#!/bin/sh\nexit 1\n" > .git/hooks/pre-commit; chmod +x .git/hooks/pre-commit' 'G commit -m "rejected"'
+    case_ "commit: commit-msg hook rewrites" fx_base 'echo m >> a.txt; git add a.txt; printf "#!/bin/sh\necho \"hooked\" >> \"\$1\"\n" > .git/hooks/commit-msg; chmod +x .git/hooks/commit-msg' 'G commit -m "msg"'
+    case_ "commit: commit-msg hook rejects" fx_base 'echo m >> a.txt; git add a.txt; printf "#!/bin/sh\nexit 3\n" > .git/hooks/commit-msg; chmod +x .git/hooks/commit-msg' 'G commit -m "msg"'
+    case_ "commit: post-commit hook runs" fx_base 'echo m >> a.txt; git add a.txt; printf "#!/bin/sh\ngit rev-parse HEAD > .git/post-commit-ran\n" > .git/hooks/post-commit; chmod +x .git/hooks/post-commit' 'G commit -m "msg"; cat .git/post-commit-ran'
+    case_ "commit: committer different from author shows Author" fx_base 'echo m >> a.txt; git add a.txt; export GIT_COMMITTER_NAME="Someone Else"' 'G commit -m x'
+    case_ "commit: reflog of an amend" fx_base ':' 'G commit --amend --no-edit; G commit --amend -m "second"'
+    case_ "commit: quiet" fx_base 'echo m >> a.txt; git add a.txt' 'G commit -q -m x'
+    case_ "commit: unknown option" fx_base ':' 'G commit --frobnicate'
+fi
+
+# --- gerrit ---------------------------------------------------------------------------------
+
+GERRIT_SETUP='if [ "$SIDE" = git ]; then cp "'"$HERE"'/gerrit-commit-msg.sh" .git/hooks/commit-msg; chmod +x .git/hooks/commit-msg; else git config gerrit.createChangeId true; fi'
+
+if wanted gerrit; then
+    case_ "gerrit: Change-Id on a plain message" fx_base "$GERRIT_SETUP"'; echo m >> a.txt; git add a.txt' 'G commit -m "Fix the a file"'
+    case_ "gerrit: Change-Id with a body" fx_base "$GERRIT_SETUP"'; echo m >> a.txt; git add a.txt' 'G commit -m "Fix the a file" -m "A longer explanation
+that runs over two lines."'
+    case_ "gerrit: Change-Id goes before Signed-off-by" fx_base "$GERRIT_SETUP"'; echo m >> a.txt; git add a.txt' 'G commit -s -m "Fix the a file"'
+    case_ "gerrit: Change-Id after Bug footer" fx_base "$GERRIT_SETUP"'; echo m >> a.txt; git add a.txt' 'G commit -m "Fix" -m "Body." -m "Bug: 1234"'
+    case_ "gerrit: Change-Id before another footer" fx_base "$GERRIT_SETUP"'; echo m >> a.txt; git add a.txt' 'G commit -m "Fix" -m "Body." -m "Reviewed-by: Someone <s@example.com>"'
+    case_ "gerrit: Change-Id among Bug and Signed-off-by" fx_base "$GERRIT_SETUP"'; echo m >> a.txt; git add a.txt' 'G commit -s -m "Fix" -m "Body." -m "Bug: 1
+Test: ran it"'
+    case_ "gerrit: existing Change-Id is kept" fx_base "$GERRIT_SETUP"'; echo m >> a.txt; git add a.txt' 'G commit -m "Fix" -m "Change-Id: I0123456789012345678901234567890123456789"'
+    case_ "gerrit: fixup is left alone" fx_base "$GERRIT_SETUP"'; echo m >> a.txt; git add a.txt' 'G commit --fixup=HEAD'
+    case_ "gerrit: squash is left alone" fx_base "$GERRIT_SETUP"'; echo m >> a.txt; git add a.txt' 'G commit --squash=HEAD -m "n"'
+    case_ "gerrit: root commit has no parent" fx_empty "$GERRIT_SETUP"'; git add x.txt' 'G commit -m "Initial"'
+    case_ "gerrit: -a" fx_base "$GERRIT_SETUP"'; echo m >> a.txt; echo n >> b.txt' 'G commit -a -m "Both files"'
+    case_ "gerrit: author and date given" fx_base "$GERRIT_SETUP"'; echo m >> a.txt; git add a.txt' 'G commit -m "By another" --author="Zed <z@example.com>" --date="1600000000 +0100"'
+    case_ "gerrit: amend of a commit without one" fx_base "$GERRIT_SETUP"'' 'G commit --amend -m "Reworded"'
+    case_ "gerrit: amend keeps the Change-Id" fx_base "$GERRIT_SETUP"'' 'G commit --allow-empty -m "First"; G commit --amend -m "Second subject"'
+    case_ "gerrit: amend --no-edit" fx_base "$GERRIT_SETUP"'' 'G commit --allow-empty -m "One"; G commit --amend --no-edit'
+    case_ "gerrit: two commits get different ids" fx_base "$GERRIT_SETUP"'' 'G commit --allow-empty -m "One"; G commit --allow-empty -m "One"'
+    case_ "gerrit: editor message with comments" fx_base "$GERRIT_SETUP"'; echo m >> a.txt; git add a.txt' 'GIT_EDITOR="sh -c '"'"'printf \"Edited subject\n\n# a comment\nbody\n\" > \"\$1\"'"'"' sh" G commit'
+    case_ "gerrit: message with trailing blank lines" fx_base "$GERRIT_SETUP"'; echo m >> a.txt; git add a.txt; printf "Subject\n\n\n\nBody\n\n\n" > /tmp/gm.$$' 'G commit -F /tmp/gm.$$; rm -f /tmp/gm.$$'
+    case_ "gerrit: unicode subject" fx_base "$GERRIT_SETUP"'; echo m >> a.txt; git add a.txt' 'G commit -m "Korrigiere Größe der Überschrift 日本語"'
+    case_ "gerrit: URL-like first line is not a footer" fx_base "$GERRIT_SETUP"'; echo m >> a.txt; git add a.txt' 'G commit -m "Subject" -m "https://example.com/page"'
+    case_ "gerrit: disabled" fx_base 'git config gerrit.createChangeId false; echo m >> a.txt; git add a.txt' 'G commit -m "no id"'
+    case_ "gerrit: --change-id without config" fx_base 'echo m >> a.txt; git add a.txt; if [ "$SIDE" = git ]; then cp "'"$HERE"'/gerrit-commit-msg.sh" .git/hooks/commit-msg; chmod +x .git/hooks/commit-msg; fi' 'if [ "$SIDE" = ours ]; then G commit --change-id -m "Flagged"; else G commit -m "Flagged"; fi'
+fi
+
+# --- switch -------------------------------------------------------------------------------
+
+if wanted switch; then
+    case_ "switch: to a branch" fx_base ':' 'G switch side'
+    case_ "switch: back with -" fx_base ':' 'G switch side; G switch -'
+    case_ "switch: -c" fx_base ':' 'G switch -c feature'
+    case_ "switch: -c from a start point" fx_base ':' 'G switch -c feature side'
+    case_ "switch: -c from a tag" fx_linear ':' 'G switch -c from-tag v1'
+    case_ "switch: -c existing" fx_base ':' 'G switch -c side'
+    case_ "switch: -C resets" fx_base ':' 'G switch -C side main'
+    case_ "switch: -C creates" fx_base ':' 'G switch -C brandnew HEAD~1'
+    case_ "switch: -C the current branch" fx_base ':' 'G switch -C main HEAD~1'
+    case_ "switch: --detach" fx_base ':' 'G switch --detach HEAD~1'
+    case_ "switch: --detach a tag" fx_linear ':' 'G switch --detach v1'
+    case_ "switch: -d no argument" fx_base ':' 'G switch -d'
+    case_ "switch: unknown branch" fx_base ':' 'G switch nope'
+    case_ "switch: a tag needs --detach" fx_linear ':' 'G switch v1'
+    case_ "switch: a commit needs --detach" fx_base ':' 'G switch HEAD~1'
+    case_ "switch: already on it" fx_base ':' 'G switch main'
+    case_ "switch: dirty tree carries over when files agree" fx_base 'echo m >> dir/c.txt' 'G switch side'
+    case_ "switch: dirty tree refused" fx_base 'echo m >> a.txt' 'G switch side'
+    case_ "switch: staged change refused" fx_base 'echo m >> a.txt; git add a.txt' 'G switch side'
+    case_ "switch: staged change that matches the target is kept" fx_base 'git show side:a.txt > a.txt; git add a.txt' 'G switch side'
+    case_ "switch: -f discards changes" fx_base 'echo m >> a.txt; echo n > new.txt; git add new.txt' 'G switch -f side'
+    case_ "switch: --discard-changes" fx_base 'echo m >> a.txt' 'G switch --discard-changes side'
+    case_ "switch: untracked file in the way" fx_base 'git switch -q side; git rm -q b.txt; git commit -qm rmb; git switch -q main; echo mine > b.txt; rm b.txt' 'G switch side; echo mine > b.txt; G switch main'
+    case_ "switch: an untracked file would be overwritten" fx_base 'git switch -q side; echo newfile > only-side.txt; git add only-side.txt; git commit -qm add; git switch -q main; echo mine > only-side.txt' 'G switch side'
+    case_ "switch: file removed by the target" fx_base 'git switch -q side; git rm -q a.txt; git commit -qm rma; git switch -q main' 'G switch side'
+    case_ "switch: directory removed by the target" fx_base 'git switch -q side; git rm -rq dir; git commit -qm rmdir; git switch -q main' 'G switch side; G switch main'
+    case_ "switch: mode change comes along" fx_base 'git switch -q side; chmod +x a.txt; git add a.txt; git commit -qm mode; git switch -q main' 'G switch side'
+    case_ "switch: file becomes directory" fx_base 'git switch -q side; git rm -q b.txt; mkdir b.txt; echo x > b.txt/x; git add b.txt; git commit -qm fd; git switch -q main' 'G switch side; G switch main'
+    case_ "switch: unmerged paths refuse" fx_conflict 'git branch other2 other' 'G switch other2'
+    case_ "switch: in a subdirectory" fx_base ':' 'cd dir; G switch side; G switch -'
+    case_ "switch: from a detached HEAD" fx_base 'git checkout -q --detach HEAD~1' 'G switch main'
+    case_ "switch: detached to detached" fx_base 'git checkout -q --detach HEAD~1' 'G switch --detach main'
+    case_ "switch: unborn branch -c" fx_empty ':' 'G switch -c other'
+    case_ "switch: remote branch is guessed" fx_base 'git update-ref refs/remotes/origin/feature HEAD~1; git remote add origin /nowhere' 'G switch feature'
+    case_ "switch: remote branch with -c --track" fx_base 'git update-ref refs/remotes/origin/feature HEAD~1; git remote add origin /nowhere' 'G switch -c mine --track origin/feature'
+    case_ "switch: -c from a remote branch tracks it" fx_base 'git update-ref refs/remotes/origin/feature HEAD~1; git remote add origin /nowhere' 'G switch -c mine origin/feature'
+    case_ "switch: report of the upstream" fx_base 'git update-ref refs/remotes/origin/main HEAD~1; git remote add origin /nowhere; git branch -u origin/main main' 'G switch side; G switch main'
+    case_ "switch: spaces and unicode" fx_base 'git switch -q side; echo m > "ünï.txt"; git add -A; git commit -qm uni; git switch -q main' 'G switch side'
+    case_ "switch: invalid new name" fx_base ':' 'G switch -c "bad..name"'
+    case_ "switch: quiet" fx_base ':' 'G switch -q side'
+    case_ "switch: reflog of switch -" fx_base ':' 'G switch side; G switch main; G switch -; G switch -'
+    case_ "switch: CRLF files survive" fx_crlf 'git switch -q -c other; printf "z\r\n" > win.txt; git commit -qam crlf2; git switch -q main' 'G switch other; G switch main'
+    case_ "switch: no argument" fx_base ':' 'G switch'
+fi
+
+# --- checkout -----------------------------------------------------------------------------
+
+if wanted checkout; then
+    case_ "checkout: a branch" fx_base ':' 'G checkout side'
+    case_ "checkout: back with -" fx_base ':' 'G checkout side; G checkout -'
+    case_ "checkout: -b" fx_base ':' 'G checkout -b feature'
+    case_ "checkout: -b from a start point" fx_base ':' 'G checkout -b feature side'
+    case_ "checkout: -b existing" fx_base ':' 'G checkout -b side'
+    case_ "checkout: -B resets" fx_base ':' 'G checkout -B side main'
+    case_ "checkout: -B the current branch" fx_base ':' 'G checkout -B main HEAD~1'
+    case_ "checkout: a tag detaches" fx_linear ':' 'G checkout v1'
+    case_ "checkout: a commit detaches" fx_base ':' 'G checkout HEAD~1'
+    case_ "checkout: --detach" fx_base ':' 'G checkout --detach'
+    case_ "checkout: --detach a branch" fx_base ':' 'G checkout --detach side'
+    case_ "checkout: from detached to a branch" fx_base 'git checkout -q --detach HEAD~1' 'G checkout main'
+    case_ "checkout: unknown name" fx_base ':' 'G checkout nope'
+    case_ "checkout: dirty refused" fx_base 'echo m >> a.txt' 'G checkout side'
+    case_ "checkout: dirty unrelated file is carried" fx_base 'echo m >> dir/c.txt' 'G checkout side'
+    case_ "checkout: -f" fx_base 'echo m >> a.txt' 'G checkout -f side'
+    case_ "checkout: file from the index" fx_base 'echo m >> a.txt' 'G checkout a.txt'
+    case_ "checkout: file with --" fx_base 'echo m >> a.txt' 'G checkout -- a.txt'
+    case_ "checkout: file from a branch" fx_base ':' 'G checkout side -- a.txt'
+    case_ "checkout: file from a commit without --" fx_base ':' 'G checkout HEAD~1 a.txt'
+    case_ "checkout: file from a commit updates the index" fx_base ':' 'G checkout HEAD~1 -- a.txt b.txt'
+    case_ "checkout: directory from a branch" fx_base 'echo m >> dir/c.txt' 'G checkout side -- dir'
+    case_ "checkout: dot" fx_base 'echo m >> a.txt; rm b.txt' 'G checkout .'
+    case_ "checkout: dot from a branch" fx_base ':' 'G checkout side .'
+    case_ "checkout: deleted file" fx_base 'rm b.txt' 'G checkout -- b.txt'
+    case_ "checkout: a path that does not exist" fx_base ':' 'G checkout -- nope'
+    case_ "checkout: a path from a rev that does not have it" fx_base ':' 'G checkout side -- nope'
+    case_ "checkout: ambiguous name" fx_base 'echo x > side' 'G checkout side'
+    case_ "checkout: disambiguated with --" fx_base 'echo x > side; echo y >> side' 'G checkout -- side; G checkout side --'
+    case_ "checkout: --ours" fx_conflict ':' 'G checkout --ours f.txt'
+    case_ "checkout: --theirs" fx_conflict ':' 'G checkout --theirs f.txt'
+    case_ "checkout: unmerged path" fx_conflict ':' 'G checkout -- f.txt'
+    case_ "checkout: unmerged tree refuses a switch" fx_conflict 'git branch other2 other' 'G checkout other2'
+    case_ "checkout: remote branch is guessed" fx_base 'git update-ref refs/remotes/origin/feature HEAD~1; git remote add origin /nowhere' 'G checkout feature'
+    case_ "checkout: -b from a remote branch tracks it" fx_base 'git update-ref refs/remotes/origin/feature HEAD~1; git remote add origin /nowhere' 'G checkout -b mine origin/feature'
+    case_ "checkout: --track" fx_base 'git update-ref refs/remotes/origin/feature HEAD~1; git remote add origin /nowhere' 'G checkout --track origin/feature'
+    case_ "checkout: executable bit from a branch" fx_base 'git switch -q side; chmod -x exec.sh; git add exec.sh; git commit -qm x; git switch -q main' 'G checkout side -- exec.sh'
+    case_ "checkout: from a subdirectory" fx_base 'echo m >> dir/c.txt; echo m >> a.txt' 'cd dir; G checkout c.txt ../a.txt'
+    case_ "checkout: spaces and unicode" fx_base 'echo m >> "sp ace.txt"; rm "ünï.txt"' 'G checkout -- "sp ace.txt" "ünï.txt"'
+    case_ "checkout: empty repository -b" fx_empty ':' 'G checkout -b other'
+    case_ "checkout: quiet" fx_base ':' 'G checkout -q side'
+    case_ "checkout: HEAD" fx_base 'echo m >> a.txt' 'G checkout HEAD'
+    case_ "checkout: HEAD with a path" fx_base 'echo m >> a.txt; git add a.txt' 'G checkout HEAD a.txt'
+    case_ "checkout: -b on a dirty tree keeps changes" fx_base 'echo m >> a.txt' 'G checkout -b other'
+fi
+
+# --- branch -------------------------------------------------------------------------------
+
+if wanted branch; then
+    case_ "branch: list" fx_base 'git branch zeta; git branch alpha' 'G branch'
+    case_ "branch: list with -v" fx_base 'git branch zeta' 'G branch -v'
+    case_ "branch: list with -vv and upstreams" fx_base 'git update-ref refs/remotes/origin/main HEAD~1; git remote add origin /nowhere; git branch -u origin/main main; git branch side2 side' 'G branch -vv'
+    case_ "branch: -vv gone upstream" fx_base 'git config branch.side.remote origin; git config branch.side.merge refs/heads/gone; git remote add origin /nowhere' 'G branch -vv'
+    case_ "branch: -a" fx_base 'git update-ref refs/remotes/origin/main HEAD; git update-ref refs/remotes/origin/feature side; git symbolic-ref refs/remotes/origin/HEAD refs/remotes/origin/main' 'G branch -a; G branch -r'
+    case_ "branch: -avv" fx_base 'git update-ref refs/remotes/origin/main HEAD; git update-ref refs/remotes/origin/feature side; git symbolic-ref refs/remotes/origin/HEAD refs/remotes/origin/main' 'G branch -avv'
+    case_ "branch: --list pattern" fx_base 'git branch topic-1; git branch topic-2' 'G branch --list "topic-*"; G branch -l "s*"'
+    case_ "branch: --show-current" fx_base ':' 'G branch --show-current'
+    case_ "branch: --show-current detached" fx_base 'git checkout -q --detach' 'G branch --show-current'
+    case_ "branch: list while detached" fx_base 'git checkout -q --detach HEAD~1' 'G branch; G branch -v'
+    case_ "branch: list while detached on a tag" fx_linear 'git checkout -q v1' 'G branch'
+    case_ "branch: unborn" fx_empty ':' 'G branch; G branch -v'
+    case_ "branch: create" fx_base ':' 'G branch feature'
+    case_ "branch: create at a commit" fx_base ':' 'G branch feature HEAD~1'
+    case_ "branch: create at a tag" fx_linear ':' 'G branch feature v1'
+    case_ "branch: create existing" fx_base ':' 'G branch side'
+    case_ "branch: create with -f" fx_base ':' 'G branch -f side main'
+    case_ "branch: create with -f on the current" fx_base ':' 'G branch -f main HEAD~1'
+    case_ "branch: bad start point" fx_base ':' 'G branch feature nope'
+    case_ "branch: bad name" fx_base ':' 'G branch "bad..name"; G branch -x; G branch "has space"'
+    case_ "branch: from a remote tracks it" fx_base 'git update-ref refs/remotes/origin/feature HEAD~1; git remote add origin /nowhere' 'G branch mine origin/feature'
+    case_ "branch: --track from a local branch" fx_base ':' 'G branch --track mine side'
+    case_ "branch: --no-track from a remote" fx_base 'git update-ref refs/remotes/origin/feature HEAD~1; git remote add origin /nowhere' 'G branch --no-track mine origin/feature'
+    case_ "branch: unborn create" fx_empty ':' 'G branch feature'
+    case_ "branch: delete" fx_base 'git branch topic HEAD' 'G branch -d topic'
+    case_ "branch: delete not merged" fx_base 'git switch -q -c work; echo w > w.txt; git add w.txt; git commit -qm w; git switch -q main' 'G branch -d work'
+    case_ "branch: -D not merged" fx_base 'git switch -q -c work; echo w > w.txt; git add w.txt; git commit -qm w; git switch -q main' 'G branch -D work'
+    case_ "branch: delete several" fx_base 'git branch a1; git branch a2' 'G branch -d a1 a2 nope'
+    case_ "branch: delete the current" fx_base ':' 'G branch -d main; G branch -D main'
+    case_ "branch: delete unknown" fx_base ':' 'G branch -d nope'
+    case_ "branch: delete drops the tracking config" fx_base 'git update-ref refs/remotes/origin/main HEAD; git remote add origin /nowhere; git branch -t topic origin/main' 'G branch -D topic'
+    case_ "branch: delete a remote-tracking branch" fx_base 'git update-ref refs/remotes/origin/old HEAD' 'G branch -d -r origin/old'
+    case_ "branch: delete a nested branch removes the directory" fx_base 'git branch feature/x/y' 'G branch -d feature/x/y'
+    case_ "branch: list nested branches" fx_base 'git branch feature/x/y; git branch feature/z' 'G branch'
+    case_ "branch: rename the current" fx_base ':' 'G branch -m trunk'
+    case_ "branch: rename another" fx_base ':' 'G branch -m side other'
+    case_ "branch: rename to existing" fx_base ':' 'G branch -m side main'
+    case_ "branch: -M to existing" fx_base 'git branch other' 'G branch -M side other'
+    case_ "branch: rename unknown" fx_base ':' 'G branch -m nope x'
+    case_ "branch: rename keeps upstream config" fx_base 'git update-ref refs/remotes/origin/main HEAD; git remote add origin /nowhere; git branch -u origin/main side' 'G branch -m side moved'
+    case_ "branch: rename the current keeps its log" fx_base 'git commit -q --allow-empty -m e1; git commit -q --allow-empty -m e2' 'G branch -m renamed'
+    case_ "branch: rename unborn" fx_empty ':' 'G branch -m trunk'
+    case_ "branch: copy" fx_base ':' 'G branch -c side copy'
+    case_ "branch: copy the current" fx_base ':' 'G branch -c copy'
+    case_ "branch: -u" fx_base 'git update-ref refs/remotes/origin/main HEAD; git remote add origin /nowhere' 'G branch -u origin/main'
+    case_ "branch: --set-upstream-to a branch" fx_base 'git update-ref refs/remotes/origin/main HEAD; git remote add origin /nowhere' 'G branch --set-upstream-to=origin/main side'
+    case_ "branch: -u a local branch" fx_base ':' 'G branch -u main side'
+    case_ "branch: -u unknown upstream" fx_base ':' 'G branch -u nope'
+    case_ "branch: --unset-upstream" fx_base 'git update-ref refs/remotes/origin/main HEAD; git remote add origin /nowhere; git branch -u origin/main main' 'G branch --unset-upstream'
+    case_ "branch: --unset-upstream without one" fx_base ':' 'G branch --unset-upstream'
+    case_ "branch: --contains" fx_base 'git branch late; git checkout -q late; git commit -q --allow-empty -m late; git checkout -q main' 'G branch --contains HEAD~1; G branch --contains late'
+    case_ "branch: --merged" fx_base 'git branch late; git checkout -q late; git commit -q --allow-empty -m late; git checkout -q main' 'G branch --merged; G branch --no-merged; G branch --merged late'
+    case_ "branch: --sort=-refname" fx_base 'git branch zeta; git branch alpha' 'G branch --sort=-refname'
+    case_ "branch: --format" fx_base 'git branch zeta' 'G branch --format="%(refname:short) %(objectname:short)"'
+    case_ "branch: --points-at" fx_base ':' 'G branch --points-at HEAD~1'
+    case_ "branch: -q create" fx_base ':' 'G branch -q feature'
+    case_ "branch: long names align in -v" fx_base 'git branch a-rather-long-branch-name-for-alignment' 'G branch -v'
+    case_ "branch: multi-line subject in -v" fx_base 'git commit -q --allow-empty -m "first line" -m "second paragraph"' 'G branch -v'
+fi
+
+# --- tag ----------------------------------------------------------------------------------
+
+if wanted tag; then
+    case_ "tag: lightweight" fx_base ':' 'G tag v1'
+    case_ "tag: at a commit" fx_base ':' 'G tag v0 HEAD~1'
+    case_ "tag: annotated with -a -m" fx_base ':' 'G tag -a -m "release one" v1'
+    case_ "tag: -m implies -a" fx_base ':' 'G tag -m "release one" v1'
+    case_ "tag: annotated at a commit" fx_base ':' 'G tag -a -m "old" v0 HEAD~1'
+    case_ "tag: multi-paragraph message" fx_base ':' 'G tag -a -m "subject" -m "body" v1'
+    case_ "tag: message from a file" fx_base 'printf "from a file\n\nmore\n" > /tmp/tm.$$' 'G tag -a -F /tmp/tm.$$ v1; rm -f /tmp/tm.$$'
+    case_ "tag: message whitespace" fx_base ':' 'G tag -a -m "  spaced   " v1'
+    case_ "tag: empty message" fx_base ':' 'G tag -a -m "" v1'
+    case_ "tag: annotated through the editor" fx_base ':' 'GIT_EDITOR="sh -c '"'"'echo from editor > \"\$1\"'"'"' sh" G tag -a v1'
+    case_ "tag: editor leaves nothing" fx_base ':' 'GIT_EDITOR=true G tag -a v1'
+    case_ "tag: existing" fx_base 'git tag v1' 'G tag v1'
+    case_ "tag: -f moves" fx_base 'git tag v1 HEAD~1' 'G tag -f v1'
+    case_ "tag: -f to the same place" fx_base 'git tag v1' 'G tag -f v1'
+    case_ "tag: -f annotated over lightweight" fx_base 'git tag v1' 'G tag -f -a -m "now annotated" v1'
+    case_ "tag: bad name" fx_base ':' 'G tag "bad..name"; G tag "-x"; G tag "has space"'
+    case_ "tag: bad object" fx_base ':' 'G tag v1 nope'
+    case_ "tag: delete" fx_base 'git tag v1; git tag -a -m x v2' 'G tag -d v1 v2'
+    case_ "tag: delete missing" fx_base 'git tag v1' 'G tag -d nope v1'
+    case_ "tag: list" fx_base 'git tag v1; git tag v10; git tag v2; git tag -a -m x rel' 'G tag; G tag -l'
+    case_ "tag: list with a pattern" fx_base 'git tag v1; git tag v10; git tag w1' 'G tag -l "v*"; G tag --list "w?"'
+    case_ "tag: list with -n" fx_base 'git tag v1; git tag -a -m "annotated tag" v2; git tag -a -m "first line" -m "second" v3' 'G tag -n; G tag -n1 -l; G tag -n3 -l v3'
+    case_ "tag: --sort=-refname" fx_base 'git tag v1; git tag v10; git tag v2' 'G tag --sort=-refname'
+    case_ "tag: --sort=version:refname" fx_base 'git tag v1; git tag v10; git tag v2; git tag v9' 'G tag --sort=version:refname; G tag --sort=-version:refname'
+    case_ "tag: --contains" fx_base 'git tag old HEAD~1; git tag new HEAD' 'G tag --contains HEAD; G tag --contains HEAD~1'
+    case_ "tag: --no-contains" fx_base 'git tag old HEAD~1; git tag new HEAD' 'G tag --no-contains HEAD'
+    case_ "tag: --points-at" fx_base 'git tag old HEAD~1; git tag new HEAD; git tag -a -m x ann HEAD' 'G tag --points-at HEAD'
+    case_ "tag: --merged" fx_base 'git tag old HEAD~1; git tag new HEAD' 'G tag --merged HEAD~1'
+    case_ "tag: --format" fx_base 'git tag v1; git tag -a -m x v2' 'G tag --format="%(refname:short) %(objecttype)"'
+    case_ "tag: tag of a tag" fx_base 'git tag -a -m inner inner' 'G tag -a -m outer outer inner'
+    case_ "tag: of a tree" fx_base ':' 'G tag treetag HEAD^{tree}; G tag -a -m x treeann HEAD^{tree}'
+    case_ "tag: list in an empty repository" fx_empty ':' 'G tag'
+    case_ "tag: create in an empty repository" fx_empty ':' 'G tag v1'
+    case_ "tag: nested name" fx_base ':' 'G tag rel/1.0; G tag rel/2.0; G tag -l "rel/*"; G tag -d rel/1.0'
+    case_ "tag: list is sorted bytewise" fx_base 'git tag B; git tag a; git tag _x; git tag Z' 'G tag'
+    case_ "tag: no -a message with -s refused" fx_base ':' 'G tag -s v1'
+fi
+
+# --- misc ---------------------------------------------------------------------------------
+
+if wanted misc; then
+    case_ "links: switch rewrites a link" fx_links ':' 'G switch other; G switch main'
+    case_ "links: status after switching" fx_links ':' 'G switch other'
+    case_ "links: rm a link" fx_links ':' 'G rm link dangling'
+    case_ "links: rm --cached a link" fx_links ':' 'G rm --cached link'
+    case_ "links: mv a link" fx_links ':' 'G mv link renamed-link'
+    case_ "links: mv a dangling link" fx_links ':' 'G mv dangling moved'
+    case_ "links: restore a deleted link" fx_links 'rm link' 'G restore link'
+    case_ "links: checkout a link from another branch" fx_links ':' 'G checkout other -- link'
+    case_ "links: reset --hard rewrites links" fx_links 'rm link; ln -s elsewhere link' 'G reset --hard'
+    case_ "links: add of an unchanged link is a no-op" fx_links ':' 'G add link; G add -A; G add -u'
+    case_ "links: commit -a with a deleted link" fx_links 'rm link' 'G commit -a -m "no link"'
+    case_ "links: add of a deleted link" fx_links 'rm dangling' 'G add dangling'
+    case_ "links: delete the work tree link and add -A" fx_links 'rm sub/up' 'G add -A'
+    case_ "pick: commit uses the picked author" fx_pick 'printf "resolved\n" > f.txt; git add f.txt' 'G commit -m "picked"'
+    case_ "pick: commit message from MERGE_MSG" fx_pick 'printf "resolved\n" > f.txt; git add f.txt' 'GIT_EDITOR=true G commit'
+    case_ "pick: partial commit refused" fx_pick 'printf "resolved\n" > f.txt; git add f.txt' 'G commit -m x f.txt'
+    case_ "pick: switch refused" fx_pick 'printf "resolved\n" > f.txt; git add f.txt' 'G switch other'
+    case_ "pick: reset --hard clears the state" fx_pick ':' 'G reset --hard'
+    case_ "pick: commit during an unresolved pick" fx_pick ':' 'G commit -m x'
+    case_ "state: rebase directory refuses a switch" fx_base 'mkdir -p .git/rebase-merge' 'G switch side'
+    case_ "umask 077 files are written private" fx_base 'echo m >> a.txt' 'umask 077; G switch -f side; G reset --hard main'
+    case_ "worktree-only files are not touched by switch" fx_base 'echo u > untracked.txt; echo i > ignored.log; echo "*.log" > .git/info/exclude' 'G switch side; G switch main'
+    case_ "ignored file in the way is replaced" fx_base 'git switch -q side; echo n > ign.dat; git add -f ign.dat; git commit -qm ign; git switch -q main; echo "*.dat" > .git/info/exclude; echo mine > ign.dat' 'G switch side'
+    case_ "empty directory in the way is replaced" fx_base 'git switch -q side; echo n > newdir; git add newdir; git commit -qm nd; git switch -q main; mkdir newdir' 'G switch side'
+    case_ "commit -a keeps untracked out" fx_base 'echo n > untracked.txt; echo m >> a.txt' 'G commit -am "tracked only"'
+    case_ "branch -d after a merge commit" fx_merge ':' 'G branch -d feat'
+    case_ "commit with a long subject" fx_base 'echo m >> a.txt; git add a.txt' 'G commit -m "a very long subject line that goes on and on and on and on and on and on and on and on and on and on"'
+    case_ "commit message with CR LF" fx_base 'echo m >> a.txt; git add a.txt' 'G commit -m "$(printf "crlf subject\r\n\r\nbody\r\n")"'
+fi
+
+[ -f "$HERE/compare_write_more.sh" ] && . "$HERE/compare_write_more.sh"
+
+echo "compare_write: $n cases, $bad differing"
+[ $bad -eq 0 ]

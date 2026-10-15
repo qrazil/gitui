@@ -60,6 +60,7 @@ import core.GIT_log;
 import core.GIT_gitstatus;
 import core.GIT_gitdiffcmd;
 import core.GIT_gitlog;
+import core.GIT_gitadd;
 
 args.Parser parser = args.Parser("1git", summary: "read-only git plumbing over loose objects");
 parser.value("git-dir", help: "the repository's git directory", placeholder: "DIR");
@@ -149,6 +150,18 @@ int git_spelling(List<str> argv) {
     }
     if (argv[index] == "log" || argv[index] == "show") {
         return GIT_gitlog.run(cwd, overrides, argv.slice(index + 1, argv.size()), argv[index] == "show");
+    }
+    if (argv[index] == "add") {
+        return GIT_gitadd.run_add(cwd, overrides, argv.slice(index + 1, argv.size()));
+    }
+    if (argv[index] == "rm") {
+        return GIT_gitadd.run_rm(cwd, overrides, argv.slice(index + 1, argv.size()));
+    }
+    if (argv[index] == "mv") {
+        return GIT_gitadd.run_mv(cwd, overrides, argv.slice(index + 1, argv.size()));
+    }
+    if (argv[index] == "restore") {
+        return GIT_gitadd.run_restore(cwd, overrides, argv.slice(index + 1, argv.size()));
     }
     if (argv[index] == "diff") {
         return GIT_gitdiffcmd.run(cwd, overrides, argv.slice(index + 1, argv.size()));

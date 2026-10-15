@@ -631,7 +631,7 @@ Result<bool, Error> walk(str gitdir, str id, str prefix, Map<str, TreeEntry> out
 // 0o777/0o666 are). Any file already there is removed first -- `io.open`'s
 // permission only applies to a file it creates, so an executable bit that
 // changed would otherwise be kept as it was.
-Result<bool, Error> write_path(str full, bytes content, int mode) {
+pub Result<bool, Error> write_path(str full, bytes content, int mode) {
     str parent = parent_directory(full);
     if (parent != "") {
         match (fs.makedirs(parent)) {
@@ -701,7 +701,7 @@ Result<bool, Error> write_path(str full, bytes content, int mode) {
 // Remove the file at `full`, then every directory above it that is left
 // empty, up to (never including) the working tree's root -- what `git
 // checkout` does when a switch deletes the last file in a directory.
-Result<bool, Error> remove_path(str worktree, str full) {
+pub Result<bool, Error> remove_path(str worktree, str full) {
     if (fs.is_present(full) || fs.is_link(full)) {
         match (fs.remove(full)) {
             case Ok: {

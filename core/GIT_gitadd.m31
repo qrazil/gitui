@@ -1,0 +1,1115 @@
+// `1git add`, `rm`, `mv` and `restore`: git's grammar and git's decisions over
+// the index and the work tree (`GIT_gitwrite` has the pieces). See
+// docs/GIT-COMPAT.md for what differs.
+
+import io;
+import os;
+import fs;
+import core.GIT_object;
+import core.GIT_refs;
+import core.GIT_index;
+import core.GIT_status;
+import core.GIT_revparse;
+import core.GIT_gitcommon;
+import core.GIT_gitstore;
+import core.GIT_gitwrite;
+
+// --- shared -----------------------------------------------------------------------------
+
+pub bool is_filemode(GIT_gitcommon.Ctx ctx) {
+    return GIT_gitcommon.cfg_bool(ctx, "core", "", "filemode", true);
+}
+
+// Does any of `paths` match the spec?
+bool spec_hits_any(GIT_gitcommon.Spec spec, List<str> paths) {
+    for (str path in paths) {
+        if (GIT_gitcommon.spec_match([spec], path)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+// The files below `dir` (repository-relative, "" for the root) in the work
+// tree, `.git` excluded, nested repositories skipped, in path order.
+pub List<str> walk_files(str root, str dir) {
+    List<str> out = [];
+    str full = root;
+    if (dir != "") {
+        full = fs.join(root, dir);
+    }
+    match (fs.listdir(full)) {
+        case Ok(List<str> names): {
+            names.sort();
+            for (str name in names) {
+                if (name == ".git") {
+                    continue;
+                }
+                str rel = name;
+                if (dir != "") {
+                    rel = dir + "/" + name;
+                }
+                int kind = GIT_gitwrite.kind_of(fs.join(root, rel));
+                if (kind == 3) {
+                    if (fs.is_present(fs.join(fs.join(root, rel), ".git"))) {
+                        continue;
+                    }
+                    for (str inner in walk_files(root, rel)) {
+                        out.push(inner);
+                    }
+                } else {
+                    out.push(rel);
+                }
+            }
+        }
+        case Err(_): {
+        }
+    }
+    return out;
+}
+
+// Make the entry for the file at `path`; "" on success, else why not.
+pub str stage_file(GIT_gitcommon.Ctx ctx, GIT_gitwrite.Idx idx, str path, bool filemode, int chmod) {
+    str full = fs.join(ctx.root, path);
+    int kind = GIT_gitwrite.kind_of(full);
+    if (kind == 2) {
+        match (idx.entries.get(path)) {
+            case Some(GIT_index.Entry known): {
+                if (known.is_link()) {
+                    return "";
+                }
+            }
+            case None: {
+            }
+        }
+        return "unable to index file '" + path + "': a symbolic link's target cannot be read here (m31 fs has no readlink)";
+    }
+    if (kind != 1) {
+        return "unable to index file '" + path + "'";
+    }
+    bytes content = [];
+    match (io.read_bytes(full)) {
+        case Ok(bytes found): {
+            content = found;
+        }
+        case Err(_): {
+            return "open(\"" + path + "\"): Permission denied\nerror: unable to index file '" + path + "'";
+        }
+    }
+    fs.Stat stat = fs.Stat(0, 0, 0);
+    match (fs.stat(full)) {
+        case Ok(fs.Stat found): {
+            stat = found;
+        }
+        case Err(_): {
+            return "unable to stat '" + path + "'";
+        }
+    }
+    int mode = 0o100644;
+    if (filemode) {
+        if (stat.perm() & 0o100 != 0) {
+            mode = 0o100755;
+        }
+    } else {
+        match (idx.entries.get(path)) {
+            case Some(GIT_index.Entry known): {
+                if (!known.is_link() && !known.is_gitlink()) {
+                    mode = known.mode;
+                }
+            }
+            case None: {
+            }
+        }
+    }
+    if (chmod == 1) {
+        mode = 0o100755;
+    } else if (chmod == 2) {
+        mode = 0o100644;
+    }
+    str id = "";
+    match (GIT_object.write_blob(ctx.gitdir, content)) {
+        case Ok(str written): {
+            id = written;
+        }
+        case Err(_): {
+            return "unable to write object for '" + path + "'";
+        }
+    }
+    GIT_index.Entry entry = GIT_index.from_stat(path.to_bytes(), stat, false, id);
+    entry.mode = mode;
+    idx.put(entry);
+    return "";
+}
+
+// The status of the work tree, or exit 128 after printing why.
+pub GIT_status.Status status_or_die(GIT_gitcommon.Ctx ctx, List<bool> failed) {
+    match (GIT_status.status(ctx.gitdir, ctx.root)) {
+        case Ok(GIT_status.Status found): {
+            return found;
+        }
+        case Err(GIT_status.Error error): {
+            io.eprint("fatal: " + error.to_str());
+            failed.push(true);
+            return GIT_status.Status([], [], []);
+        }
+    }
+}
+
+pub List<str> untracked_names(GIT_status.Status lib) {
+    List<str> out = [];
+    for (bytes raw in lib.untracked) {
+        match (raw.utf8()) {
+            case Some(str name): {
+                out.push(name);
+            }
+            case None: {
+            }
+        }
+    }
+    out.sort();
+    return out;
+}
+
+// --- add --------------------------------------------------------------------------------
+
+str usage_add() {
+    return "usage: git add [<options>] [--] <pathspec>...";
+}
+
+pub int run_add(str start, List<str> overrides, List<str> argv) {
+    GIT_gitcommon.Opened opened = GIT_gitcommon.open(start, overrides);
+    if (!opened.ok) {
+        return 128;
+    }
+    GIT_gitcommon.Ctx ctx = opened.ctx;
+    GIT_gitwrite.Opts opts = GIT_gitwrite.parse_opts(argv, ["-A --all", "-u --update", "-n --dry-run", "-v --verbose", "-f --force", "-N --intent-to-add", "-p --patch", "-e --edit", "--ignore-removal", "--chmod=", "--refresh", "--ignore-errors", "--renormalize", "--sparse", "--no-warn-embedded-repo", "--pathspec-from-file=", "--pathspec-file-nul", "-i --interactive"]);
+    int bad = GIT_gitwrite.check_opts(opts, usage_add());
+    if (bad >= 0) {
+        return bad;
+    }
+    if (ctx.is_bare) {
+        return GIT_gitcommon.fatal("this operation must be run in a work tree");
+    }
+    if (opts.flag("intent-to-add") || opts.flag("edit") || opts.flag("interactive") || opts.has("pathspec-from-file")) {
+        io.eprint("error: this option of add is not in 1git (see docs/GIT-COMPAT.md)");
+        return 129;
+    }
+    bool is_update = opts.flag("update");
+    bool is_all = opts.flag("all");
+    bool is_dry = opts.flag("dry-run");
+    bool is_verbose = opts.flag("verbose");
+    bool is_force = opts.flag("force");
+    bool is_keep_removed = opts.flag("ignore-removal") || (opts.has("all") && !opts.flag("all"));
+    bool is_ignore_errors = opts.flag("ignore-errors");
+    int chmod = 0;
+    if (opts.has("chmod")) {
+        str want = opts.value("chmod", "");
+        if (want == "+x") {
+            chmod = 1;
+        } else if (want == "-x") {
+            chmod = 2;
+        } else {
+            io.eprint("fatal: --chmod param '" + want + "' must be either -x or +x");
+            return 128;
+        }
+    }
+    List<str> given = opts.paths();
+    if (opts.flag("patch")) {
+        return add_patch(ctx, given);
+    }
+    if (given.size() == 0 && !is_all && !is_update) {
+        io.eprint("Nothing specified, nothing added.");
+        io.eprint("hint: Maybe you wanted to say 'git add .'?");
+        io.eprint("hint: Turn this message off by running");
+        io.eprint("hint: \"git config advice.addEmptyPathspec false\"");
+        return 0;
+    }
+    List<GIT_gitcommon.Spec> specs = [];
+    if (given.size() > 0) {
+        specs = GIT_gitcommon.parse_specs(given, ctx.prefix);
+    }
+    GIT_gitwrite.IdxLoaded loaded = GIT_gitwrite.read_idx(ctx.gitdir);
+    if (!loaded.ok) {
+        return 128;
+    }
+    GIT_gitwrite.Idx idx = loaded.idx;
+    List<bool> failed = [];
+    GIT_status.Status lib = status_or_die(ctx, failed);
+    if (failed.size() > 0) {
+        return 128;
+    }
+    bool is_filemode_on = is_filemode(ctx);
+    List<str> untracked = untracked_names(lib);
+    List<str> conflicted = idx.conflicted_paths();
+    Map<str, bool> is_conflicted = {};
+    for (str path in conflicted) {
+        is_conflicted.set(path, true);
+    }
+    List<str> known = idx.sorted_paths();
+    for (str path in conflicted) {
+        known.push(path);
+    }
+    Map<str, int> modified = {};
+    for (GIT_status.Delta delta in lib.unstaged) {
+        match (delta.path.utf8()) {
+            case Some(str path): {
+                modified.set(path, 1);
+            }
+            case None: {
+            }
+        }
+    }
+    // every pathspec has to name something
+    List<str> ignored_named = [];
+    for (int i in 0 .. specs.size()) {
+        GIT_gitcommon.Spec spec = specs[i];
+        if (spec.is_exclude || spec.pattern == "") {
+            continue;
+        }
+        bool is_hit = spec_hits_any(spec, known) || spec_hits_any(spec, untracked);
+        int kind = 0;
+        if (!spec.is_glob) {
+            kind = GIT_gitwrite.kind_of(fs.join(ctx.root, spec.pattern));
+        }
+        if (is_hit) {
+            continue;
+        }
+        if (kind == 0 && spec.is_glob) {
+            // a glob that matches only ignored files
+            for (str path in walk_files(ctx.root, "")) {
+                if (GIT_gitcommon.spec_match([spec], path)) {
+                    is_hit = true;
+                    break;
+                }
+            }
+            if (is_hit && !is_force) {
+                ignored_named.push(given[i]);
+                continue;
+            }
+        }
+        if (!is_hit && kind == 0) {
+            return GIT_gitcommon.fatal("pathspec '" + given[i] + "' did not match any files");
+        }
+        if (kind == 1 || kind == 2) {
+            // an existing file nothing lists: ignored
+            if (!is_force) {
+                ignored_named.push(spec.pattern);
+            }
+        } else if (kind == 3) {
+            List<str> inside = walk_files(ctx.root, spec.pattern);
+            if (inside.size() > 0 && !is_force) {
+                ignored_named.push(spec.pattern);
+            }
+        }
+    }
+    // tracked paths: what changed
+    int rc = 0;
+    bool is_dirty = false;
+    List<str> done = [];
+    for (str path in known) {
+        if (!GIT_gitcommon.spec_match(specs, path)) {
+            continue;
+        }
+        str full = fs.join(ctx.root, path);
+        int kind = GIT_gitwrite.kind_of(full);
+        bool is_conf = is_conflicted.contains(path);
+        GIT_index.Entry entry = GIT_gitwrite.blank_entry();
+        match (idx.entries.get(path)) {
+            case Some(GIT_index.Entry found): {
+                entry = found;
+            }
+            case None: {
+            }
+        }
+        if (kind == 0 || kind == 3 || kind == 4) {
+            if (is_keep_removed && !is_conf) {
+                continue;
+            }
+            if (is_keep_removed) {
+                continue;
+            }
+            if (is_verbose || is_dry) {
+                GIT_gitwrite.say("remove '" + path + "'");
+            }
+            if (!is_dry) {
+                idx.remove(path);
+                is_dirty = true;
+            }
+            continue;
+        }
+        bool is_changed = is_conf || modified.contains(path);
+        if (!is_changed) {
+            if (kind == 1 && (entry.is_link() || entry.is_gitlink())) {
+                is_changed = true;
+            } else if (kind == 2 && !entry.is_link()) {
+                is_changed = true;
+            } else if (kind == 1 && is_filemode_on) {
+                match (fs.stat(full)) {
+                    case Ok(fs.Stat stat): {
+                        bool is_exec = stat.perm() & 0o100 != 0;
+                        if (is_exec != (entry.mode & 0o100 != 0)) {
+                            is_changed = true;
+                        }
+                    }
+                    case Err(_): {
+                    }
+                }
+            }
+        }
+        if (chmod != 0 && kind == 1 && !is_conf) {
+            int want_mode = 0o100755;
+            if (chmod == 2) {
+                want_mode = 0o100644;
+            }
+            if (entry.mode != want_mode) {
+                is_changed = true;
+            }
+        }
+        if (!is_changed) {
+            continue;
+        }
+        if (is_verbose || is_dry) {
+            GIT_gitwrite.say("add '" + path + "'");
+        }
+        if (is_dry) {
+            continue;
+        }
+        str why = stage_file(ctx, idx, path, is_filemode_on, chmod);
+        if (why != "") {
+            io.eprint("error: " + why);
+            if (!is_ignore_errors) {
+                io.eprint("fatal: adding files failed");
+                return 128;
+            }
+            rc = 1;
+        } else {
+            is_dirty = true;
+        }
+    }
+    // new files
+    if (!is_update) {
+        List<str> fresh = [];
+        if (is_force) {
+            for (str path in walk_files(ctx.root, "")) {
+                if (!idx.entries.contains(path) && !is_conflicted.contains(path) && GIT_gitcommon.spec_match(specs, path)) {
+                    fresh.push(path);
+                }
+            }
+        } else {
+            for (str path in untracked) {
+                if (GIT_gitcommon.spec_match(specs, path)) {
+                    fresh.push(path);
+                }
+            }
+        }
+        for (str path in fresh) {
+            if (is_verbose || is_dry) {
+                GIT_gitwrite.say("add '" + path + "'");
+            }
+            if (is_dry) {
+                continue;
+            }
+            str why = stage_file(ctx, idx, path, is_filemode_on, chmod);
+            if (why != "") {
+                io.eprint("error: " + why);
+                if (!is_ignore_errors) {
+                    io.eprint("fatal: adding files failed");
+                    return 128;
+                }
+                rc = 1;
+            } else {
+                is_dirty = true;
+            }
+        }
+    }
+    if (is_dirty) {
+        if (!GIT_gitwrite.write_idx(ctx.gitdir, idx)) {
+            return 128;
+        }
+    }
+    if (ignored_named.size() > 0) {
+        io.eprint("The following paths are ignored by one of your .gitignore files:");
+        for (str path in ignored_named) {
+            io.eprint(path);
+        }
+        io.eprint("hint: Use -f if you really want to add them.");
+        io.eprint("hint: Turn this message off by running");
+        io.eprint("hint: \"git config advice.addIgnoredFile false\"");
+        rc = 1;
+    }
+    return rc;
+}
+
+// `add -p`: per file with changes, hunk by hunk, y / n / a / d / q / s is
+// not offered (a hunk is a hunk). Reads answers from standard input.
+int add_patch(GIT_gitcommon.Ctx ctx, List<str> given) {
+    io.eprint("error: add -p is not in 1git yet (see docs/GIT-COMPAT.md)");
+    return 129;
+}
+
+// --- rm ---------------------------------------------------------------------------------
+
+pub int run_rm(str start, List<str> overrides, List<str> argv) {
+    GIT_gitcommon.Opened opened = GIT_gitcommon.open(start, overrides);
+    if (!opened.ok) {
+        return 128;
+    }
+    GIT_gitcommon.Ctx ctx = opened.ctx;
+    str usage = "usage: git rm [<options>] [--] <file>...";
+    GIT_gitwrite.Opts opts = GIT_gitwrite.parse_opts(argv, ["-f --force", "-n --dry-run", "-r", "--cached", "--ignore-unmatch", "-q --quiet", "--sparse", "--pathspec-from-file=", "--pathspec-file-nul"]);
+    int bad = GIT_gitwrite.check_opts(opts, usage);
+    if (bad >= 0) {
+        return bad;
+    }
+    if (ctx.is_bare) {
+        return GIT_gitcommon.fatal("this operation must be run in a work tree");
+    }
+    List<str> given = opts.paths();
+    if (given.size() == 0) {
+        return GIT_gitcommon.fatal("No pathspec was given. Which files should I remove?");
+    }
+    bool is_cached = opts.flag("cached");
+    bool is_force = opts.flag("force");
+    bool is_dry = opts.flag("dry-run");
+    bool is_quiet = opts.flag("quiet");
+    bool is_recursive = opts.flag("r");
+    List<GIT_gitcommon.Spec> specs = GIT_gitcommon.parse_specs(given, ctx.prefix);
+    GIT_gitwrite.IdxLoaded loaded = GIT_gitwrite.read_idx(ctx.gitdir);
+    if (!loaded.ok) {
+        return 128;
+    }
+    GIT_gitwrite.Idx idx = loaded.idx;
+    List<str> tracked = idx.sorted_paths();
+    List<str> conflicted = idx.conflicted_paths();
+    Map<str, bool> is_conflicted = {};
+    for (str path in conflicted) {
+        is_conflicted.set(path, true);
+        if (!idx.entries.contains(path)) {
+            tracked.push(path);
+        }
+    }
+    tracked.sort();
+    // 0 nothing, 1 named or globbed, 2 only as a directory
+    List<int> seen = [];
+    for (int i in 0 .. specs.size()) {
+        seen.push(0);
+    }
+    List<str> hits = [];
+    for (str path in tracked) {
+        bool is_hit = false;
+        bool is_excluded = false;
+        for (int i in 0 .. specs.size()) {
+            GIT_gitcommon.Spec spec = specs[i];
+            if (spec.is_exclude) {
+                if (GIT_gitcommon.spec_match([spec], path) == false) {
+                    // exclusion spec does not hit: it removes nothing
+                }
+                continue;
+            }
+            if (spec.pattern == "") {
+                is_hit = true;
+                if (seen[i] == 0) {
+                    seen[i] = 2;
+                }
+            } else if (spec.is_glob && GIT_gitcommon.fnmatch(spec.pattern, path)) {
+                is_hit = true;
+                seen[i] = 1;
+            } else if (path == spec.pattern) {
+                is_hit = true;
+                seen[i] = 1;
+            } else if (path.starts_with(spec.pattern + "/")) {
+                is_hit = true;
+                if (seen[i] == 0) {
+                    seen[i] = 2;
+                }
+            }
+        }
+        for (GIT_gitcommon.Spec spec in specs) {
+            if (spec.is_exclude && GIT_gitcommon.spec_match([spec], path) && spec.pattern != "" && (path == spec.pattern || path.starts_with(spec.pattern + "/"))) {
+                is_excluded = true;
+            }
+        }
+        if (is_hit && !is_excluded) {
+            hits.push(path);
+        }
+    }
+    if (!opts.flag("ignore-unmatch")) {
+        for (int i in 0 .. specs.size()) {
+            if (!specs[i].is_exclude && seen[i] == 0 && specs[i].pattern != "") {
+                return GIT_gitcommon.fatal("pathspec '" + given[i] + "' did not match any files");
+            }
+        }
+    }
+    if (!is_recursive) {
+        for (int i in 0 .. specs.size()) {
+            if (seen[i] == 2) {
+                return GIT_gitcommon.fatal("not removing '" + given[i] + "' recursively without -r");
+            }
+        }
+    }
+    if (hits.size() == 0) {
+        return 0;
+    }
+    if (!is_force) {
+        GIT_gitstore.Store store = GIT_gitstore.open(ctx.gitdir);
+        GIT_gitwrite.HeadInfo head = GIT_gitwrite.read_head(ctx.gitdir);
+        Map<str, GIT_gitwrite.Flat> in_head = {};
+        if (head.is_born) {
+            in_head = GIT_gitwrite.commit_flat(store, head.id);
+        }
+        bool is_filemode_on = is_filemode(ctx);
+        List<str> staged_and_local = [];
+        List<str> only_staged = [];
+        List<str> only_local = [];
+        for (str path in hits) {
+            if (is_conflicted.contains(path) && !idx.entries.contains(path)) {
+                continue;
+            }
+            GIT_index.Entry entry = idx.entries.get(path).or(GIT_gitwrite.blank_entry());
+            str full = fs.join(ctx.root, path);
+            int kind = GIT_gitwrite.kind_of(full);
+            if (kind == 0 || kind == 3) {
+                continue;
+            }
+            bool is_local = !GIT_gitwrite.worktree_matches(full, entry, is_filemode_on);
+            bool is_staged = true;
+            match (in_head.get(path)) {
+                case Some(GIT_gitwrite.Flat flat): {
+                    is_staged = flat.id != entry.id;
+                }
+                case None: {
+                }
+            }
+            if (is_local && is_staged) {
+                if (!is_cached) {
+                    staged_and_local.push(path);
+                } else {
+                    // with --cached only a file that matches neither is refused
+                    bool is_same_as_file = false;
+                    match (io.read_bytes(full)) {
+                        case Ok(bytes content): {
+                            is_same_as_file = GIT_object.blob_id_like(entry.id, content) == entry.id;
+                        }
+                        case Err(_): {
+                        }
+                    }
+                    if (!is_same_as_file) {
+                        staged_and_local.push(path);
+                    }
+                }
+            } else if (!is_cached) {
+                if (is_staged) {
+                    only_staged.push(path);
+                }
+                if (is_local) {
+                    only_local.push(path);
+                }
+            }
+        }
+        bool is_refused = false;
+        if (staged_and_local.size() > 0) {
+            report_rm(staged_and_local, "the following file has staged content different from both the\nfile and the HEAD:", "the following files have staged content different from both the\nfile and the HEAD:", "(use -f to force removal)");
+            is_refused = true;
+        }
+        if (only_staged.size() > 0) {
+            report_rm(only_staged, "the following file has changes staged in the index:", "the following files have changes staged in the index:", "(use --cached to keep the file, or -f to force removal)");
+            is_refused = true;
+        }
+        if (only_local.size() > 0) {
+            report_rm(only_local, "the following file has local modifications:", "the following files have local modifications:", "(use --cached to keep the file, or -f to force removal)");
+            is_refused = true;
+        }
+        if (is_refused) {
+            return 1;
+        }
+    }
+    for (str path in hits) {
+        if (!is_quiet) {
+            GIT_gitwrite.say("rm '" + path + "'");
+        }
+        if (is_dry) {
+            continue;
+        }
+        idx.remove(path);
+        if (!is_cached) {
+            int kind = GIT_gitwrite.kind_of(fs.join(ctx.root, path));
+            if (kind == 1 || kind == 2) {
+                GIT_gitwrite.remove_file(ctx.root, path);
+            }
+        }
+    }
+    if (!is_dry) {
+        if (!GIT_gitwrite.write_idx(ctx.gitdir, idx)) {
+            return 128;
+        }
+    }
+    return 0;
+}
+
+void report_rm(List<str> paths, str one, str many, str hint) {
+    if (paths.size() == 1) {
+        io.eprint("error: " + one);
+    } else {
+        io.eprint("error: " + many);
+    }
+    for (str path in paths) {
+        io.eprint("    " + path);
+    }
+    io.eprint(hint);
+}
+
+// --- mv ---------------------------------------------------------------------------------
+
+type Move {
+    str from;
+    str to;
+}
+
+pub int run_mv(str start, List<str> overrides, List<str> argv) {
+    GIT_gitcommon.Opened opened = GIT_gitcommon.open(start, overrides);
+    if (!opened.ok) {
+        return 128;
+    }
+    GIT_gitcommon.Ctx ctx = opened.ctx;
+    str usage = "usage: git mv [<options>] <source>... <destination>";
+    GIT_gitwrite.Opts opts = GIT_gitwrite.parse_opts(argv, ["-f --force", "-k", "-n --dry-run", "-v --verbose", "--sparse"]);
+    int bad = GIT_gitwrite.check_opts(opts, usage);
+    if (bad >= 0) {
+        return bad;
+    }
+    if (ctx.is_bare) {
+        return GIT_gitcommon.fatal("this operation must be run in a work tree");
+    }
+    List<str> words = opts.paths();
+    if (words.size() < 2) {
+        io.eprint(usage);
+        return 129;
+    }
+    bool is_force = opts.flag("force");
+    bool is_skip = opts.flag("k");
+    bool is_dry = opts.flag("dry-run");
+    bool is_verbose = opts.flag("verbose");
+    GIT_gitwrite.IdxLoaded loaded = GIT_gitwrite.read_idx(ctx.gitdir);
+    if (!loaded.ok) {
+        return 128;
+    }
+    GIT_gitwrite.Idx idx = loaded.idx;
+    str destination = words[words.size() - 1];
+    str dest_rel = GIT_gitwrite.rooted(ctx.prefix, destination);
+    bool is_dest_dir = GIT_gitwrite.kind_of(fs.join(ctx.root, dest_rel)) == 3;
+    int count = words.size() - 1;
+    if (count > 1 && !is_dest_dir) {
+        return GIT_gitcommon.fatal("destination '" + destination + "' is not a directory");
+    }
+    List<Move> moves = [];
+    // the index entries each move takes along (a directory has many)
+    Map<str, bool> claimed = {};
+    for (int i in 0 .. count) {
+        str source_given = words[i];
+        str source = GIT_gitwrite.rooted(ctx.prefix, source_given);
+        if (is_dry) {
+            str shown_target = dest_rel;
+            if (is_dest_dir) {
+                shown_target = dest_rel + "/" + GIT_gitwrite.basename(source);
+                if (dest_rel == "") {
+                    shown_target = GIT_gitwrite.basename(source);
+                }
+            }
+            GIT_gitwrite.say("Checking rename of '" + source + "' to '" + shown_target + "'");
+        }
+        str target = dest_rel;
+        if (is_dest_dir) {
+            target = dest_rel + "/" + GIT_gitwrite.basename(source);
+            if (dest_rel == "") {
+                target = GIT_gitwrite.basename(source);
+            }
+        }
+        str problem = "";
+        int source_kind = GIT_gitwrite.kind_of(fs.join(ctx.root, source));
+        int target_kind = GIT_gitwrite.kind_of(fs.join(ctx.root, target));
+        if (source_kind == 0) {
+            problem = "bad source";
+        } else if (source_kind == 3 && (target == source || target.starts_with(source + "/"))) {
+            problem = "can not move directory into itself";
+        } else if (source_kind == 3) {
+            bool has_any = false;
+            for (str known in idx.entries.keys()) {
+                if (known.starts_with(source + "/")) {
+                    has_any = true;
+                    break;
+                }
+            }
+            if (!has_any) {
+                problem = "source directory is empty";
+            }
+        } else if (idx.is_conflicted(source)) {
+            problem = "conflicted";
+        } else if (!idx.entries.contains(source)) {
+            problem = "not under version control";
+        }
+        if (problem == "") {
+            if (target_kind != 0 && target != source) {
+                if (!is_force) {
+                    problem = "destination exists";
+                } else if (target_kind == 3 || source_kind == 3) {
+                    problem = "destination exists";
+                }
+            } else if (target == source) {
+                problem = "destination exists";
+            } else if (idx.entries.contains(target) && !is_force) {
+                problem = "destination exists";
+            }
+        }
+        if (problem == "") {
+            str parent = GIT_gitwrite.dirname(target);
+            if (parent != "" && GIT_gitwrite.kind_of(fs.join(ctx.root, parent)) != 3) {
+                problem = "destination directory does not exist";
+            }
+        }
+        if (problem == "" && claimed.contains(target)) {
+            problem = "multiple sources for the same target";
+        }
+        if (problem != "") {
+            if (is_skip) {
+                continue;
+            }
+            return GIT_gitcommon.fatal(problem + ", source=" + source_given + ", destination=" + destination);
+        }
+        claimed.set(target, true);
+        moves.push(Move(source, target));
+    }
+    for (Move move in moves) {
+        if (is_verbose || is_dry) {
+            GIT_gitwrite.say("Renaming " + move.from + " to " + move.to);
+        }
+        if (is_dry) {
+            continue;
+        }
+        str from_full = fs.join(ctx.root, move.from);
+        str to_full = fs.join(ctx.root, move.to);
+        if (GIT_gitwrite.kind_of(to_full) == 1 || GIT_gitwrite.kind_of(to_full) == 2) {
+            GIT_gitwrite.rm_quiet(to_full);
+        }
+        match (fs.rename(from_full, to_full)) {
+            case Ok(_): {
+            }
+            case Err(_): {
+                return GIT_gitcommon.fatal("renaming '" + move.from + "' failed: cannot rename");
+            }
+        }
+        // the entries
+        List<str> paths = idx.entries.keys();
+        for (str path in paths) {
+            if (path == move.from || path.starts_with(move.from + "/")) {
+                GIT_index.Entry entry = idx.entries.get(path).or(GIT_gitwrite.blank_entry());
+                str moved = move.to + path.substr(move.from.size(), path.size());
+                idx.entries.remove(path);
+                GIT_index.Entry fresh = GIT_gitwrite.fresh_entry(ctx.root, moved, entry.mode, entry.id);
+                if (entry.is_link() || entry.is_gitlink()) {
+                    fresh = entry;
+                    fresh.path = moved.to_bytes();
+                }
+                idx.put(fresh);
+            }
+        }
+    }
+    if (!is_dry && moves.size() > 0) {
+        if (!GIT_gitwrite.write_idx(ctx.gitdir, idx)) {
+            return 128;
+        }
+    }
+    return 0;
+}
+
+// --- restore ------------------------------------------------------------------------------
+
+// Does the work tree file match what `flat` says (content, executable bit)?
+pub bool file_is(str gitdir, str root, str path, GIT_gitwrite.Flat flat, bool filemode, Map<str, GIT_gitwrite.Flat> index_before, bool is_trusting_links) {
+    str full = fs.join(root, path);
+    int kind = GIT_gitwrite.kind_of(full);
+    if (flat.mode >> 12 == 0o12) {
+        if (kind != 2 || !is_trusting_links) {
+            // there is no readlink: unless the caller trusts the index, a
+            // link is rewritten rather than assumed to be right
+            return false;
+        }
+        match (index_before.get(path)) {
+            case Some(GIT_gitwrite.Flat entry): {
+                return entry.id == flat.id && entry.mode == flat.mode;
+            }
+            case None: {
+                return false;
+            }
+        }
+    }
+    if (flat.mode >> 12 == 0o16) {
+        return kind == 3;
+    }
+    if (kind != 1) {
+        return false;
+    }
+    match (fs.stat(full)) {
+        case Ok(fs.Stat stat): {
+            if (filemode) {
+                bool is_exec = stat.perm() & 0o100 != 0;
+                if (is_exec != (flat.mode & 0o100 != 0)) {
+                    return false;
+                }
+            }
+        }
+        case Err(_): {
+            return false;
+        }
+    }
+    match (io.read_bytes(full)) {
+        case Ok(bytes content): {
+            return GIT_object.blob_id_like(flat.id, content) == flat.id;
+        }
+        case Err(_): {
+            return false;
+        }
+    }
+}
+
+pub int run_restore(str start, List<str> overrides, List<str> argv) {
+    GIT_gitcommon.Opened opened = GIT_gitcommon.open(start, overrides);
+    if (!opened.ok) {
+        return 128;
+    }
+    GIT_gitcommon.Ctx ctx = opened.ctx;
+    str usage = "usage: git restore [<options>] [--source=<branch>] <file>...";
+    GIT_gitwrite.Opts opts = GIT_gitwrite.parse_opts(argv, ["-s --source=", "-S --staged", "-W --worktree", "-p --patch", "-q --quiet", "--ours", "--theirs", "-m --merge", "--ignore-unmerged", "--overlay", "--recurse-submodules", "--progress", "--ignore-skip-worktree-bits", "--pathspec-from-file=", "--pathspec-file-nul", "-2 --theirs-alias", "--conflict="]);
+    int bad = GIT_gitwrite.check_opts(opts, usage);
+    if (bad >= 0) {
+        return bad;
+    }
+    if (ctx.is_bare) {
+        return GIT_gitcommon.fatal("this operation must be run in a work tree");
+    }
+    if (opts.flag("patch") || opts.flag("merge") || opts.has("conflict")) {
+        io.eprint("error: this option of restore is not in 1git (see docs/GIT-COMPAT.md)");
+        return 129;
+    }
+    List<str> given = opts.paths();
+    if (given.size() == 0) {
+        return GIT_gitcommon.fatal("you must specify path(s) to restore");
+    }
+    bool is_staged = opts.flag("staged");
+    bool is_worktree = opts.flag("worktree") || !is_staged;
+    bool is_ours = opts.flag("ours");
+    bool is_theirs = opts.flag("theirs");
+    if ((is_ours || is_theirs) && is_staged) {
+        return GIT_gitcommon.fatal("--ours/--theirs is incompatible with --staged");
+    }
+    return restore_paths(ctx, given, opts.value("source", ""), is_staged, is_worktree, opts.flag("overlay"), is_ours, is_theirs, opts.flag("ignore-unmerged"), opts.flag("quiet"));
+}
+
+/// Put the content of `source_spec` (the index when "" and not staged, HEAD
+/// when "" and staged) at `given`, in the index and/or the work tree: what
+/// `restore` and `checkout <tree-ish> -- <paths>` do.
+pub int restore_paths(GIT_gitcommon.Ctx ctx, List<str> given, str source_spec, bool is_staged, bool is_worktree, bool is_overlay, bool is_ours, bool is_theirs, bool is_ignore_unmerged, bool is_quiet) {
+    GIT_gitstore.Store store = GIT_gitstore.open(ctx.gitdir);
+    GIT_gitwrite.IdxLoaded loaded = GIT_gitwrite.read_idx(ctx.gitdir);
+    if (!loaded.ok) {
+        return 128;
+    }
+    GIT_gitwrite.Idx idx = loaded.idx;
+    Map<str, GIT_gitwrite.Flat> before = GIT_gitwrite.idx_flat(idx);
+    // where the content comes from
+    bool has_source = false;
+    Map<str, GIT_gitwrite.Flat> source = {};
+    if (source_spec != "") {
+        str spec_text = source_spec;
+        match (GIT_revparse.tree_id(ctx.gitdir, spec_text)) {
+            case Ok(str tree): {
+                GIT_gitwrite.flatten(store, tree, "", source);
+                has_source = true;
+            }
+            case Err(GIT_revparse.Error error): {
+                return GIT_gitcommon.fatal("could not resolve " + spec_text);
+            }
+        }
+    } else if (is_staged) {
+        GIT_gitwrite.HeadInfo head = GIT_gitwrite.read_head(ctx.gitdir);
+        if (!head.is_born) {
+            return GIT_gitcommon.fatal("could not resolve HEAD");
+        }
+        source = GIT_gitwrite.commit_flat(store, head.id);
+        has_source = true;
+    }
+    if (!has_source) {
+        source = GIT_gitwrite.idx_flat(idx);
+    }
+    List<GIT_gitcommon.Spec> specs = GIT_gitcommon.parse_specs(given, ctx.prefix);
+    List<str> universe = [];
+    Map<str, bool> in_universe = {};
+    for (str path in source.keys()) {
+        if (!in_universe.contains(path)) {
+            in_universe.set(path, true);
+            universe.push(path);
+        }
+    }
+    for (str path in idx.entries.keys()) {
+        if (!in_universe.contains(path)) {
+            in_universe.set(path, true);
+            universe.push(path);
+        }
+    }
+    List<str> conflicted = idx.conflicted_paths();
+    for (str path in conflicted) {
+        if (!in_universe.contains(path)) {
+            in_universe.set(path, true);
+            universe.push(path);
+        }
+    }
+    universe.sort();
+    // each spec must name something known
+    for (int i in 0 .. specs.size()) {
+        if (specs[i].is_exclude || specs[i].pattern == "") {
+            continue;
+        }
+        if (!spec_hits_any(specs[i], universe)) {
+            io.eprint("error: pathspec '" + given[i] + "' did not match any file(s) known to git");
+            return 1;
+        }
+    }
+    List<str> hits = [];
+    for (str path in universe) {
+        if (GIT_gitcommon.spec_match(specs, path)) {
+            hits.push(path);
+        }
+    }
+    Map<str, bool> is_conflicted = {};
+    for (str path in conflicted) {
+        is_conflicted.set(path, true);
+    }
+    // unmerged paths: from the index only with --ours / --theirs
+    int errors = 0;
+    if (!has_source && !is_ours && !is_theirs) {
+        for (str path in hits) {
+            if (is_conflicted.contains(path)) {
+                if (is_ignore_unmerged) {
+                    continue;
+                }
+                io.eprint("error: path '" + path + "' is unmerged");
+                errors = errors + 1;
+            }
+        }
+        if (errors > 0) {
+            return 1;
+        }
+    }
+    bool is_filemode_on = is_filemode(ctx);
+    bool is_dirty = false;
+    // the stage-2 / stage-3 sides
+    Map<str, GIT_gitwrite.Flat> side = {};
+    if (is_ours || is_theirs) {
+        int want = 2;
+        if (is_theirs) {
+            want = 3;
+        }
+        for (GIT_index.Entry entry in idx.conflicts) {
+            if (entry.stage == want) {
+                side.set(GIT_gitwrite.entry_path(entry), GIT_gitwrite.Flat(entry.mode, entry.id));
+            }
+        }
+    }
+    // --- the index
+    if (is_staged) {
+        for (str path in hits) {
+            match (source.get(path)) {
+                case Some(GIT_gitwrite.Flat flat): {
+                    GIT_index.Entry old = idx.entries.get(path).or(GIT_gitwrite.blank_entry());
+                    if (idx.entries.contains(path) && old.id == flat.id && old.mode == flat.mode && !is_conflicted.contains(path)) {
+                        continue;
+                    }
+                    idx.put(GIT_gitwrite.entry_from_flat(path, flat));
+                    is_dirty = true;
+                }
+                case None: {
+                    if (is_overlay) {
+                        continue;
+                    }
+                    if (idx.entries.contains(path) || is_conflicted.contains(path)) {
+                        idx.remove(path);
+                        is_dirty = true;
+                    }
+                }
+            }
+        }
+    }
+    // --- the work tree
+    if (is_worktree) {
+        for (str path in hits) {
+            GIT_gitwrite.Flat want_flat = GIT_gitwrite.Flat(0, "");
+            bool has_want = false;
+            if (is_ours || is_theirs) {
+                match (side.get(path)) {
+                    case Some(GIT_gitwrite.Flat found): {
+                        want_flat = found;
+                        has_want = true;
+                    }
+                    case None: {
+                        if (is_conflicted.contains(path)) {
+                            io.eprint("error: path '" + path + "' does not have " + word_side(is_ours));
+                            errors = errors + 1;
+                            continue;
+                        }
+                    }
+                }
+            }
+            if (!has_want) {
+                match (source.get(path)) {
+                    case Some(GIT_gitwrite.Flat found): {
+                        want_flat = found;
+                        has_want = true;
+                    }
+                    case None: {
+                    }
+                }
+            }
+            str full = fs.join(ctx.root, path);
+            if (!has_want) {
+                if (is_overlay) {
+                    continue;
+                }
+                int kind = GIT_gitwrite.kind_of(full);
+                if (kind == 1 || kind == 2) {
+                    GIT_gitwrite.remove_file(ctx.root, path);
+                }
+                continue;
+            }
+            if (file_is(ctx.gitdir, ctx.root, path, want_flat, is_filemode_on, before, false)) {
+                continue;
+            }
+            if (!GIT_gitwrite.write_blob_to(ctx.gitdir, ctx.root, path, want_flat.mode, want_flat.id)) {
+                io.eprint("error: unable to write '" + path + "'");
+                errors = errors + 1;
+                continue;
+            }
+            if (!is_staged && idx.entries.contains(path)) {
+                GIT_index.Entry old = idx.entries.get(path).or(GIT_gitwrite.blank_entry());
+                if (old.id == want_flat.id) {
+                    idx.entries.set(path, GIT_gitwrite.fresh_entry(ctx.root, path, want_flat.mode, want_flat.id));
+                    is_dirty = true;
+                }
+            }
+        }
+    }
+    if (is_dirty) {
+        if (!GIT_gitwrite.write_idx(ctx.gitdir, idx)) {
+            return 128;
+        }
+    }
+    if (errors > 0) {
+        return 1;
+    }
+    return 0;
+}
+
+str word_side(bool is_ours) {
+    if (is_ours) {
+        return "our version";
+    }
+    return "their version";
+}

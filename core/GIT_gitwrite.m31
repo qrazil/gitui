@@ -1,0 +1,1415 @@
+// What the change commands of `1git` (`add`, `rm`, `mv`, `restore`, `reset`,
+// `commit`, `switch`, `checkout`, `branch`, `tag`) share: git's option
+// grammar (clusters, `--name=value`, `--no-name`, `--`), the index as a map
+// that keeps its conflicts, trees flattened to `path -> (mode, id)` and
+// built back, HEAD, identities and dates, reflog lines, `stripspace`, hooks
+// and the editor.
+//
+// Everything here goes through the same library the TUI uses (`GIT_index`,
+// `GIT_object`, `GIT_refs`, `GIT_reflog`, `GIT_config`); the command modules
+// are thin on top of it. A path that is not valid UTF-8 is carried through the
+// index untouched (`Idx.opaque`) but is not something these commands can name.
+
+import io;
+import os;
+import fs;
+import date;
+import core.GIT_object;
+import core.GIT_refs;
+import core.GIT_index;
+import core.GIT_reflog;
+import core.GIT_ident;
+import core.GIT_config;
+import core.GIT_repository;
+import core.GIT_checkout;
+import core.GIT_gitcommon;
+import core.GIT_gitstore;
+import core.GIT_gitstatus;
+
+// --- git's option grammar ------------------------------------------------------------
+
+/// What a command line said. `flags` holds each switch under its long name
+/// (or its short letter when it has none): true, or false for `--no-name`.
+pub type Opts {
+    pub Map<str, bool> flags = {};
+    pub Map<str, int> counts = {};
+    pub Map<str, List<str>> values = {};
+    /// the non-option words, in order, and the words after `--`
+    pub List<str> words = [];
+    pub List<str> after = [];
+    pub bool has_dashes = false;
+    /// the first option no spec knew, as typed ("" when none)
+    pub str bad = "";
+    /// an option that needed a value and had none
+    pub str missing = "";
+}
+
+pub bool Opts.flag(str key) {
+    return flags.get(key).or(false);
+}
+
+pub bool Opts.has(str key) {
+    return flags.contains(key) || values.contains(key);
+}
+
+pub int Opts.count(str key) {
+    return counts.get(key).or(0);
+}
+
+/// the last value given for `key`, or `fallback`
+pub str Opts.value(str key, str fallback) {
+    match (values.get(key)) {
+        case Some(List<str> found): {
+            if (found.size() > 0) {
+                return found[found.size() - 1];
+            }
+        }
+        case None: {
+        }
+    }
+    return fallback;
+}
+
+pub List<str> Opts.all(str key) {
+    match (values.get(key)) {
+        case Some(List<str> found): {
+            return found;
+        }
+        case None: {
+            return [];
+        }
+    }
+}
+
+/// every word that is not an option, wherever it came
+pub List<str> Opts.paths() {
+    List<str> out = [];
+    for (str word in words) {
+        out.push(word);
+    }
+    for (str word in after) {
+        out.push(word);
+    }
+    return out;
+}
+
+type Known {
+    str key;
+    bool is_value;
+    bool is_optional;
+}
+
+void learn(Map<str, Known> table, str alias, str key, bool is_value, bool is_optional) {
+    table.set(alias, Known(key, is_value, is_optional));
+}
+
+/// `specs`: one entry per option, its spellings separated by spaces; a
+/// trailing `=` on the last one says it takes a value: `"-A --all"`,
+/// `"-m --message="`, `"--cleanup="`.
+pub Opts parse_opts(List<str> argv, List<str> specs) {
+    Map<str, Known> table = {};
+    for (str spec in specs) {
+        List<str> names = spec.split(" ");
+        bool is_optional = names[names.size() - 1].ends_with("=?");
+        bool is_value = names[names.size() - 1].ends_with("=") || is_optional;
+        str key = "";
+        for (str name in names) {
+            str bare = name;
+            if (bare.ends_with("=?")) {
+                bare = bare.substr(0, bare.size() - 2);
+            } else if (bare.ends_with("=")) {
+                bare = bare.substr(0, bare.size() - 1);
+            }
+            if (bare.starts_with("--") && key == "") {
+                key = bare.substr(2, bare.size());
+            }
+        }
+        if (key == "") {
+            str first = names[0];
+            if (first.ends_with("=?")) {
+                first = first.substr(0, first.size() - 2);
+            } else if (first.ends_with("=")) {
+                first = first.substr(0, first.size() - 1);
+            }
+            key = first.substr(1, first.size());
+        }
+        for (str name in names) {
+            str bare = name;
+            if (bare.ends_with("=?")) {
+                bare = bare.substr(0, bare.size() - 2);
+            } else if (bare.ends_with("=")) {
+                bare = bare.substr(0, bare.size() - 1);
+            }
+            learn(table, bare, key, is_value, is_optional);
+        }
+    }
+    Opts out = Opts();
+    int i = 0;
+    while (i < argv.size()) {
+        str arg = argv[i];
+        i = i + 1;
+        if (out.has_dashes) {
+            out.after.push(arg);
+            continue;
+        }
+        if (arg == "--") {
+            out.has_dashes = true;
+            continue;
+        }
+        if (arg.starts_with("--")) {
+            str name = arg;
+            str given = "";
+            bool has_given = false;
+            match (arg.index_of("=")) {
+                case Some(int at): {
+                    name = arg.substr(0, at);
+                    given = arg.substr(at + 1, arg.size());
+                    has_given = true;
+                }
+                case None: {
+                }
+            }
+            match (table.get(name)) {
+                case Some(Known known): {
+                    if (known.is_value) {
+                        if (!has_given) {
+                            if (known.is_optional) {
+                                if (i < argv.size() && !argv[i].starts_with("-")) {
+                                    given = argv[i];
+                                    i = i + 1;
+                                }
+                            } else if (i < argv.size()) {
+                                given = argv[i];
+                                i = i + 1;
+                            } else {
+                                out.missing = name;
+                                continue;
+                            }
+                        }
+                        add_value(out, known.key, given);
+                    } else {
+                        out.flags.set(known.key, true);
+                        out.counts.set(known.key, out.count(known.key) + 1);
+                    }
+                    continue;
+                }
+                case None: {
+                }
+            }
+            if (name.starts_with("--no-")) {
+                match (table.get("--" + name.substr(5, name.size()))) {
+                    case Some(Known known): {
+                        if (!known.is_value) {
+                            out.flags.set(known.key, false);
+                            continue;
+                        }
+                        // `--no-message`-style: drop what was given
+                        out.values.set(known.key, []);
+                        out.flags.set("no-" + known.key, true);
+                        continue;
+                    }
+                    case None: {
+                    }
+                }
+            }
+            if (out.bad == "") {
+                out.bad = name;
+            }
+            continue;
+        }
+        if (arg.starts_with("-") && arg.size() > 1) {
+            int at = 1;
+            while (at < arg.size()) {
+                str letter = arg.substr(at, at + 1);
+                at = at + 1;
+                match (table.get("-" + letter)) {
+                    case Some(Known known): {
+                        if (known.is_value) {
+                            str given = arg.substr(at, arg.size());
+                            at = arg.size();
+                            if (given == "") {
+                                if (i < argv.size()) {
+                                    given = argv[i];
+                                    i = i + 1;
+                                } else {
+                                    out.missing = "-" + letter;
+                                    continue;
+                                }
+                            }
+                            add_value(out, known.key, given);
+                        } else {
+                            out.flags.set(known.key, true);
+                            out.counts.set(known.key, out.count(known.key) + 1);
+                        }
+                    }
+                    case None: {
+                        if (out.bad == "") {
+                            out.bad = "-" + letter;
+                        }
+                    }
+                }
+            }
+            continue;
+        }
+        out.words.push(arg);
+    }
+    return out;
+}
+
+void add_value(Opts out, str key, str given) {
+    List<str> now = out.all(key);
+    now.push(given);
+    out.values.set(key, now);
+    out.flags.set(key, true);
+}
+
+/// Report a bad command line the way git's parse-options does; returns the
+/// exit status to use (129), or -1 when the line was fine.
+pub int check_opts(Opts opts, str usage) {
+    if (opts.bad != "") {
+        if (opts.bad.starts_with("--")) {
+            io.eprint("error: unknown option `" + opts.bad.substr(2, opts.bad.size()) + "'");
+        } else {
+            io.eprint("error: unknown switch `" + opts.bad.substr(1, opts.bad.size()) + "'");
+        }
+        io.eprint(usage);
+        return 129;
+    }
+    if (opts.missing != "") {
+        if (opts.missing.starts_with("--")) {
+            io.eprint("error: option `" + opts.missing.substr(2, opts.missing.size()) + "' requires a value");
+        } else {
+            io.eprint("error: switch `" + opts.missing.substr(1, opts.missing.size()) + "' requires a value");
+        }
+        io.eprint(usage);
+        return 129;
+    }
+    return -1;
+}
+
+// --- paths ----------------------------------------------------------------------------
+
+/// `path` as typed in the directory `prefix` (repository-relative), made
+/// repository-relative.
+pub str rooted(str prefix, str path) {
+    if (path.starts_with("/")) {
+        return GIT_gitstatus.normalize(path);
+    }
+    if (prefix == "") {
+        return GIT_gitstatus.normalize(path);
+    }
+    return GIT_gitstatus.normalize(prefix + "/" + path);
+}
+
+pub str full_path(str root, str path) {
+    return fs.join(root, path);
+}
+
+pub str dirname(str path) {
+    int cut = path.size();
+    while (cut > 0 && path.byte_at(cut - 1) != '/') {
+        cut = cut - 1;
+    }
+    if (cut <= 1) {
+        return "";
+    }
+    return path.substr(0, cut - 1);
+}
+
+pub str basename(str path) {
+    int cut = path.size();
+    while (cut > 0 && path.byte_at(cut - 1) != '/') {
+        cut = cut - 1;
+    }
+    return path.substr(cut, path.size());
+}
+
+/// 0 absent, 1 regular file, 2 symlink, 3 directory, 4 anything else
+pub int kind_of(str full) {
+    if (fs.is_link(full)) {
+        return 2;
+    }
+    match (fs.stat(full)) {
+        case Ok(fs.Stat stat): {
+            if (stat.is_directory()) {
+                return 3;
+            }
+            if (stat.is_file()) {
+                return 1;
+            }
+            return 4;
+        }
+        case Err(_): {
+            return 0;
+        }
+    }
+}
+
+// --- the index --------------------------------------------------------------------------
+
+/// The index, stage-0 entries by path, with the conflicted ones apart.
+pub type Idx {
+    pub Map<str, GIT_index.Entry> entries = {};
+    pub List<GIT_index.Entry> conflicts = [];
+    pub List<GIT_index.Entry> opaque = [];
+    // every directory above an entry (may be stale after removals)
+    pub Map<str, bool> dirs = {};
+}
+
+void Idx.note_dirs(str path) {
+    str current = dirname(path);
+    while (current != "") {
+        if (dirs.contains(current)) {
+            return;
+        }
+        dirs.set(current, true);
+        current = dirname(current);
+    }
+}
+
+pub List<GIT_index.Entry> Idx.list() {
+    List<GIT_index.Entry> out = [];
+    for (GIT_index.Entry entry in entries.values()) {
+        out.push(entry);
+    }
+    for (GIT_index.Entry entry in conflicts) {
+        out.push(entry);
+    }
+    for (GIT_index.Entry entry in opaque) {
+        out.push(entry);
+    }
+    return out;
+}
+
+/// Paths of the conflicted entries, once each, in path order.
+pub List<str> Idx.conflicted_paths() {
+    Map<str, bool> seen = {};
+    List<str> out = [];
+    for (GIT_index.Entry entry in conflicts) {
+        str path = entry_path(entry);
+        if (!seen.contains(path)) {
+            seen.set(path, true);
+            out.push(path);
+        }
+    }
+    out.sort();
+    return out;
+}
+
+pub bool Idx.is_conflicted(str path) {
+    for (GIT_index.Entry entry in conflicts) {
+        if (entry_path(entry) == path) {
+            return true;
+        }
+    }
+    return false;
+}
+
+pub void Idx.drop_conflicts(str path) {
+    List<GIT_index.Entry> keep = [];
+    for (GIT_index.Entry entry in conflicts) {
+        if (entry_path(entry) != path) {
+            keep.push(entry);
+        }
+    }
+    conflicts = keep;
+}
+
+/// Is `path` a directory some entry lives under?
+pub bool Idx.is_dir(str path) {
+    if (!dirs.contains(path)) {
+        return false;
+    }
+    for (str known in entries.keys()) {
+        if (known.starts_with(path + "/")) {
+            return true;
+        }
+    }
+    for (GIT_index.Entry entry in conflicts) {
+        if (entry_path(entry).starts_with(path + "/")) {
+            return true;
+        }
+    }
+    return false;
+}
+
+/// Drop what a file at `path` replaces: a file where a directory was, or a
+/// directory's entries where a file is now.
+pub void Idx.make_room(str path) {
+    str up = dirname(path);
+    while (up != "") {
+        entries.remove(up);
+        drop_conflicts(up);
+        up = dirname(up);
+    }
+    if (dirs.contains(path)) {
+        for (str known in entries.keys()) {
+            if (known.starts_with(path + "/")) {
+                entries.remove(known);
+            }
+        }
+        List<GIT_index.Entry> keep = [];
+        for (GIT_index.Entry entry in conflicts) {
+            if (!entry_path(entry).starts_with(path + "/")) {
+                keep.push(entry);
+            }
+        }
+        conflicts = keep;
+        dirs.remove(path);
+    }
+}
+
+pub void Idx.put(GIT_index.Entry entry) {
+    str path = entry_path(entry);
+    make_room(path);
+    drop_conflicts(path);
+    entries.set(path, entry);
+    note_dirs(path);
+}
+
+pub void Idx.remove(str path) {
+    entries.remove(path);
+    drop_conflicts(path);
+}
+
+/// Entries sorted by path, stage 0 only.
+pub List<str> Idx.sorted_paths() {
+    List<str> paths = entries.keys();
+    paths.sort();
+    return paths;
+}
+
+pub str entry_path(GIT_index.Entry entry) {
+    return entry.path.utf8().or("");
+}
+
+/// The index of `gitdir`; an index that is not there is empty. On a corrupt
+/// one the message was printed and `ok` is false.
+pub type IdxLoaded {
+    pub bool ok;
+    pub Idx idx;
+}
+
+pub IdxLoaded read_idx(str gitdir) {
+    Idx idx = Idx();
+    match (GIT_index.read(gitdir)) {
+        case Ok(GIT_index.Index index): {
+            for (GIT_index.Entry entry in index.entries) {
+                match (entry.path.utf8()) {
+                    case Some(str path): {
+                        if (entry.stage == 0) {
+                            idx.entries.set(path, entry);
+                        } else {
+                            idx.conflicts.push(entry);
+                        }
+                        idx.note_dirs(path);
+                    }
+                    case None: {
+                        idx.opaque.push(entry);
+                    }
+                }
+            }
+        }
+        case Err(GIT_index.Error error): {
+            match (error) {
+                case NotFound: {
+                    return IdxLoaded(true, idx);
+                }
+                case Io: {
+                    io.eprint("fatal: " + error.to_str());
+                    return IdxLoaded(false, idx);
+                }
+                case BadSignature: {
+                    io.eprint("fatal: " + error.to_str());
+                    return IdxLoaded(false, idx);
+                }
+                case BadVersion: {
+                    io.eprint("fatal: " + error.to_str());
+                    return IdxLoaded(false, idx);
+                }
+                case Truncated: {
+                    io.eprint("fatal: " + error.to_str());
+                    return IdxLoaded(false, idx);
+                }
+                case BadExtension: {
+                    io.eprint("fatal: " + error.to_str());
+                    return IdxLoaded(false, idx);
+                }
+                case Checksum: {
+                    io.eprint("fatal: " + error.to_str());
+                    return IdxLoaded(false, idx);
+                }
+            }
+        }
+    }
+    return IdxLoaded(true, idx);
+}
+
+pub bool write_idx(str gitdir, Idx idx) {
+    match (GIT_index.write(gitdir, GIT_index.Index(idx.list()))) {
+        case Ok(_): {
+            return true;
+        }
+        case Err(GIT_index.Error error): {
+            io.eprint("fatal: unable to write new index file: " + error.to_str());
+            return false;
+        }
+    }
+}
+
+// --- trees -------------------------------------------------------------------------------
+
+/// A blob or gitlink in a tree.
+pub type Flat {
+    pub int mode;
+    pub str id;
+}
+
+/// `tree` flattened into `out`: every non-tree entry by full path.
+pub bool flatten(GIT_gitstore.Store store, str tree, str prefix, Map<str, Flat> out) {
+    if (tree == "") {
+        return true;
+    }
+    match (store.read(tree)) {
+        case Ok(GIT_object.Object object): {
+            match (object.body) {
+                case Tree(List<GIT_object.Entry> entries): {
+                    for (GIT_object.Entry entry in entries) {
+                        match (entry.name.utf8()) {
+                            case Some(str name): {
+                                str path = name;
+                                if (prefix != "") {
+                                    path = prefix + "/" + name;
+                                }
+                                if (entry.is_tree()) {
+                                    if (!flatten(store, entry.id, path, out)) {
+                                        return false;
+                                    }
+                                } else {
+                                    out.set(path, Flat(entry.mode, entry.id));
+                                }
+                            }
+                            case None: {
+                            }
+                        }
+                    }
+                    return true;
+                }
+                case Blob: {
+                    return false;
+                }
+                case Commit(_): {
+                    return false;
+                }
+                case Tag(_): {
+                    return false;
+                }
+            }
+        }
+        case Err(_): {
+            return false;
+        }
+    }
+}
+
+/// The tree a commit names; "" if it is not a commit.
+pub str tree_of_commit(GIT_gitstore.Store store, str commit) {
+    match (store.read(commit)) {
+        case Ok(GIT_object.Object object): {
+            match (object.body) {
+                case Commit(GIT_object.Commit found): {
+                    return found.tree;
+                }
+                case Blob: {
+                    return "";
+                }
+                case Tree(_): {
+                    return object.id;
+                }
+                case Tag(_): {
+                    return "";
+                }
+            }
+        }
+        case Err(_): {
+            return "";
+        }
+    }
+}
+
+/// The flattened tree of a commit (or of a tree id).
+pub Map<str, Flat> commit_flat(GIT_gitstore.Store store, str commit) {
+    Map<str, Flat> out = {};
+    if (commit == "") {
+        return out;
+    }
+    str tree = tree_of_commit(store, commit);
+    flatten(store, tree, "", out);
+    return out;
+}
+
+/// Write the trees for `files` and answer the root's name ("" on failure).
+pub str build_tree(str gitdir, Map<str, Flat> files) {
+    Map<str, List<GIT_object.Entry>> dirs = {};
+    dirs.set("", []);
+    List<str> dir_names = [];
+    for (str path in files.keys()) {
+        Flat flat = files.get(path).or(Flat(0, ""));
+        str parent = dirname(path);
+        str current = parent;
+        while (!dirs.contains(current)) {
+            dirs.set(current, []);
+            dir_names.push(current);
+            current = dirname(current);
+        }
+        List<GIT_object.Entry> list = dirs.get(parent).or([]);
+        list.push(GIT_object.Entry(flat.mode, basename(path).to_bytes(), flat.id));
+        dirs.set(parent, list);
+    }
+    // deepest first
+    List<str> order = [];
+    for (str name in dir_names) {
+        int depth = name.split("/").size();
+        order.push(pad_depth(depth) + name);
+    }
+    order.sort();
+    order.reverse();
+    for (str keyed in order) {
+        str name = keyed.substr(4, keyed.size());
+        List<GIT_object.Entry> list = dirs.get(name).or([]);
+        match (GIT_object.write_tree(gitdir, list)) {
+            case Ok(str id): {
+                str parent = dirname(name);
+                List<GIT_object.Entry> up = dirs.get(parent).or([]);
+                up.push(GIT_object.Entry(0o40000, basename(name).to_bytes(), id));
+                dirs.set(parent, up);
+            }
+            case Err(_): {
+                return "";
+            }
+        }
+    }
+    match (GIT_object.write_tree(gitdir, dirs.get("").or([]))) {
+        case Ok(str id): {
+            return id;
+        }
+        case Err(_): {
+            return "";
+        }
+    }
+}
+
+str pad_depth(int depth) {
+    str digits = depth.to_str();
+    while (digits.size() < 4) {
+        digits = "0" + digits;
+    }
+    return digits;
+}
+
+/// The flat form of an index (stage 0 only).
+pub Map<str, Flat> idx_flat(Idx idx) {
+    Map<str, Flat> out = {};
+    for (str path in idx.entries.keys()) {
+        GIT_index.Entry entry = idx.entries.get(path).or(blank_entry());
+        out.set(path, Flat(entry.mode, entry.id));
+    }
+    return out;
+}
+
+pub GIT_index.Entry blank_entry() {
+    return GIT_index.Entry(0, 0, 0, 0, 0, 0, 0o100644, 0, 0, 0, "", 0, false, "".to_bytes());
+}
+
+/// An index entry for a tree's (mode, id), with no stat data.
+pub GIT_index.Entry entry_from_flat(str path, Flat flat) {
+    return GIT_index.Entry(0, 0, 0, 0, 0, 0, flat.mode, 0, 0, 0, flat.id, 0, false, path.to_bytes());
+}
+
+// --- HEAD --------------------------------------------------------------------------------
+
+pub type HeadInfo {
+    pub bool ok = true;
+    pub bool is_born = false;
+    pub bool is_detached = false;
+    /// the full ref name HEAD is on (even if unborn), "" when detached
+    pub str ref = "";
+    pub str id = "";
+}
+
+pub HeadInfo read_head(str gitdir) {
+    HeadInfo info = HeadInfo();
+    match (GIT_refs.head(gitdir)) {
+        case Ok(GIT_refs.Head head): {
+            match (head) {
+                case Detached(str id): {
+                    info.is_born = true;
+                    info.is_detached = true;
+                    info.id = id;
+                }
+                case Born(str name, str id): {
+                    info.is_born = true;
+                    info.ref = name;
+                    info.id = id;
+                }
+                case Unborn(str name): {
+                    info.ref = name;
+                }
+            }
+        }
+        case Err(_): {
+            info.ok = false;
+        }
+    }
+    return info;
+}
+
+pub str short_ref(str ref) {
+    if (ref.starts_with("refs/heads/")) {
+        return ref.substr(11, ref.size());
+    }
+    return ref;
+}
+
+// --- the working tree -----------------------------------------------------------------------
+
+/// Does the file at `full` match the index entry (content and, with
+/// `filemode`, the executable bit)?
+pub bool worktree_matches(str full, GIT_index.Entry entry, bool filemode) {
+    int kind = kind_of(full);
+    if (kind == 0 || kind == 3 || kind == 4) {
+        return false;
+    }
+    if (kind == 2) {
+        // no readlink in m31's fs: a link is a link
+        return entry.is_link();
+    }
+    if (entry.is_link() || entry.is_gitlink()) {
+        return false;
+    }
+    match (fs.stat(full)) {
+        case Ok(fs.Stat stat): {
+            if (filemode) {
+                bool is_exec = stat.perm() & 0o100 != 0;
+                if (is_exec != (entry.mode & 0o100 != 0)) {
+                    return false;
+                }
+            }
+            int mtime = entry.mtime_s * 1_000_000_000 + entry.mtime_ns;
+            if (stat.size == entry.size && stat.mtime_ns == mtime && entry.mtime_s != 0) {
+                return true;
+            }
+            match (io.read_bytes(full)) {
+                case Ok(bytes content): {
+                    return GIT_object.blob_id_like(entry.id, content) == entry.id;
+                }
+                case Err(_): {
+                    return false;
+                }
+            }
+        }
+        case Err(_): {
+            return false;
+        }
+    }
+}
+
+/// Put a blob in the work tree. A symlink's blob is its target.
+pub bool write_blob_to(str gitdir, str root, str path, int mode, str id) {
+    str full = fs.join(root, path);
+    if (mode >> 12 == 0o16) {
+        if (kind_of(full) == 2 || kind_of(full) == 1) {
+            rm_quiet(full);
+        }
+        match (fs.makedirs(full)) {
+            case Ok(_): {
+                return true;
+            }
+            case Err(_): {
+                return false;
+            }
+        }
+    }
+    bytes content = [];
+    match (GIT_object.read(gitdir, id)) {
+        case Ok(GIT_object.Object object): {
+            content = object.raw;
+        }
+        case Err(_): {
+            return false;
+        }
+    }
+    // a directory in the way (a file replaces a tracked directory)
+    if (kind_of(full) == 3) {
+        remove_tree_files(full);
+    }
+    // a file where a parent directory must be
+    str up = dirname(path);
+    while (up != "") {
+        str up_full = fs.join(root, up);
+        int up_kind = kind_of(up_full);
+        if (up_kind == 1 || up_kind == 2) {
+            rm_quiet(up_full);
+        }
+        up = dirname(up);
+    }
+    match (GIT_checkout.write_path(full, content, mode)) {
+        case Ok(_): {
+            return true;
+        }
+        case Err(_): {
+            return false;
+        }
+    }
+}
+
+// Remove a directory's files and the directories left empty (what a tracked
+// directory becoming a file needs); untracked files inside survive as an
+// error the caller sees when the write fails.
+void remove_tree_files(str full) {
+    match (fs.listdir(full)) {
+        case Ok(List<str> names): {
+            for (str name in names) {
+                str inner = fs.join(full, name);
+                if (kind_of(inner) == 3) {
+                    remove_tree_files(inner);
+                } else {
+                    rm_quiet(inner);
+                }
+            }
+        }
+        case Err(_): {
+        }
+    }
+    match (fs.rmdir(full)) {
+        case Ok(_): {
+        }
+        case Err(_): {
+        }
+    }
+}
+
+/// Remove a work-tree file and the directories it leaves empty.
+pub void remove_file(str root, str path) {
+    match (GIT_checkout.remove_path(root, fs.join(root, path))) {
+        case Ok(_): {
+        }
+        case Err(_): {
+        }
+    }
+}
+
+/// Remove a file or link, ignoring failure.
+pub void rm_quiet(str full) {
+    match (fs.remove(full)) {
+        case Ok(_): {
+        }
+        case Err(_): {
+        }
+    }
+}
+
+/// Index entry for a work-tree file just written.
+pub GIT_index.Entry fresh_entry(str root, str path, int mode, str id) {
+    str full = fs.join(root, path);
+    if (mode >> 12 == 0o12) {
+        // `fs.stat` follows a link, so its numbers are the target's: leave
+        // them zero and git looks at the link itself
+        return entry_from_flat(path, Flat(mode, id));
+    }
+    match (fs.stat(full)) {
+        case Ok(fs.Stat stat): {
+            GIT_index.Entry entry = GIT_index.from_stat(path.to_bytes(), stat, mode >> 12 == 0o12, id);
+            entry.mode = mode;
+            return entry;
+        }
+        case Err(_): {
+            return entry_from_flat(path, Flat(mode, id));
+        }
+    }
+}
+
+// --- identities and dates --------------------------------------------------------------------
+
+/// A moment and its zone as git writes it: `1700000000`, `+0100`.
+pub type When {
+    pub bool ok;
+    pub int when;
+    pub int offset;
+    pub str zone;
+}
+
+pub When no_date() {
+    return When(false, 0, 0, "+0000");
+}
+
+str zone_text(int offset_minutes) {
+    int minutes = offset_minutes;
+    str sign = "+";
+    if (minutes < 0) {
+        sign = "-";
+        minutes = 0 - minutes;
+    }
+    return sign + GIT_gitcommon.two(minutes / 60) + GIT_gitcommon.two(minutes % 60);
+}
+
+int zone_minutes(str zone) {
+    if (zone.size() != 5) {
+        return 0;
+    }
+    int hours = zone.substr(1, 3).parse_int().or(0);
+    int minutes = zone.substr(3, 5).parse_int().or(0);
+    int total = hours * 60 + minutes;
+    if (zone.byte_at(0) == '-') {
+        return 0 - total;
+    }
+    return total;
+}
+
+bool is_zone(str word) {
+    if (word.size() != 5 && word.size() != 6 && word != "Z" && word != "UTC" && word != "GMT") {
+        return false;
+    }
+    if (word == "Z" || word == "UTC" || word == "GMT") {
+        return true;
+    }
+    if (word.byte_at(0) != '+' && word.byte_at(0) != '-') {
+        return false;
+    }
+    for (int i in 1 .. word.size()) {
+        int c = word.byte_at(i);
+        if (!(c >= '0' && c <= '9') && !(c == ':' && i == 3)) {
+            return false;
+        }
+    }
+    return true;
+}
+
+str zone_word(str word) {
+    if (word == "Z" || word == "UTC" || word == "GMT") {
+        return "+0000";
+    }
+    return word.substr(0, 3) + word.substr(word.size() - 2, word.size());
+}
+
+int month_number(str word) {
+    List<str> months = ["jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec"];
+    str lower = word.to_lower();
+    if (lower.size() < 3) {
+        return 0;
+    }
+    for (int i in 0 .. 12) {
+        if (lower.substr(0, 3) == months[i]) {
+            return i + 1;
+        }
+    }
+    return 0;
+}
+
+/// git's date forms that scripts use: `@<epoch>`, `<epoch> <zone>`, ISO 8601
+/// (`2005-04-07T22:13:13`, with a space, with a zone), RFC 2822 (`Thu, 07
+/// Apr 2005 22:13:13 +0200`).
+pub When parse_date(str raw) {
+    str text_in = raw.trim();
+    When none = no_date();
+    if (text_in == "") {
+        return none;
+    }
+    if (text_in.starts_with("@")) {
+        text_in = text_in.substr(1, text_in.size());
+    }
+    List<str> words = [];
+    for (str piece in text_in.split(" ")) {
+        if (piece != "") {
+            words.push(piece);
+        }
+    }
+    if (words.size() == 0) {
+        return none;
+    }
+    // raw: <epoch> [<zone>]
+    match (words[0].parse_int()) {
+        case Some(int epoch): {
+            if (words[0].size() >= 5 || words.size() == 2) {
+                if (words.size() == 1) {
+                    return When(true, epoch, 0, "+0000");
+                }
+                if (words.size() == 2 && is_zone(words[1])) {
+                    str zone = zone_word(words[1]);
+                    return When(true, epoch, zone_minutes(zone), zone);
+                }
+            }
+        }
+        case None: {
+        }
+    }
+    // ISO: 2005-04-07[T ]22:13:13[.fff][ ][zone]
+    str first = words[0];
+    int year = 0;
+    int month = 0;
+    int day = 0;
+    int hour = 0;
+    int minute = 0;
+    int second = 0;
+    str zone = "+0000";
+    bool is_iso = false;
+    if (first.size() >= 10 && first.byte_at(4) == '-' && first.byte_at(7) == '-') {
+        year = first.substr(0, 4).parse_int().or(-1);
+        month = first.substr(5, 7).parse_int().or(-1);
+        day = first.substr(8, 10).parse_int().or(-1);
+        if (year < 0 || month < 1 || month > 12 || day < 1 || day > 31) {
+            return none;
+        }
+        is_iso = true;
+        str time_part = "";
+        str rest = first.substr(10, first.size());
+        if (rest.starts_with("T") || rest.starts_with("t")) {
+            time_part = rest.substr(1, rest.size());
+        } else if (rest == "" && words.size() > 1) {
+            time_part = words[1];
+        } else if (rest != "") {
+            return none;
+        }
+        if (time_part == "") {
+            return none;
+        }
+        // split a trailing zone glued to the time
+        str zone_glued = "";
+        for (int i in 0 .. time_part.size()) {
+            int c = time_part.byte_at(i);
+            if ((c == '+' || c == '-' || c == 'Z') && i >= 5) {
+                zone_glued = time_part.substr(i, time_part.size());
+                time_part = time_part.substr(0, i);
+                break;
+            }
+        }
+        match (time_part.index_of(".")) {
+            case Some(int dot): {
+                time_part = time_part.substr(0, dot);
+            }
+            case None: {
+            }
+        }
+        List<str> clock = time_part.split(":");
+        if (clock.size() < 2) {
+            return none;
+        }
+        hour = clock[0].parse_int().or(-1);
+        minute = clock[1].parse_int().or(-1);
+        if (clock.size() > 2) {
+            second = clock[2].parse_int().or(-1);
+        }
+        if (hour < 0 || hour > 23 || minute < 0 || minute > 59 || second < 0 || second > 60) {
+            return none;
+        }
+        if (zone_glued != "" && is_zone(zone_glued)) {
+            zone = zone_word(zone_glued);
+        } else {
+            for (int i in 1 .. words.size()) {
+                if (is_zone(words[i]) && words[i] != time_part) {
+                    zone = zone_word(words[i]);
+                }
+            }
+        }
+    } else {
+        // RFC 2822: [Thu,] 07 Apr 2005 22:13:13 +0200
+        int at = 0;
+        if (words[0].ends_with(",")) {
+            at = 1;
+        }
+        if (words.size() < at + 4) {
+            return none;
+        }
+        day = words[at].parse_int().or(-1);
+        month = month_number(words[at + 1]);
+        year = words[at + 2].parse_int().or(-1);
+        List<str> clock = words[at + 3].split(":");
+        if (day < 1 || day > 31 || month == 0 || year < 1970 || clock.size() < 2) {
+            return none;
+        }
+        hour = clock[0].parse_int().or(-1);
+        minute = clock[1].parse_int().or(-1);
+        if (clock.size() > 2) {
+            second = clock[2].parse_int().or(-1);
+        }
+        if (hour < 0 || hour > 23 || minute < 0 || minute > 59 || second < 0) {
+            return none;
+        }
+        if (words.size() > at + 4 && is_zone(words[at + 4])) {
+            zone = zone_word(words[at + 4]);
+        }
+    }
+    match (date.epoch(year, month, day, hour: hour, minute: minute, second: second)) {
+        case Ok(int epoch): {
+            int offset = zone_minutes(zone);
+            return When(true, epoch - offset * 60, offset, zone);
+        }
+        case Err(_): {
+            return none;
+        }
+    }
+}
+
+// git's `strbuf_addstr_without_crud`: whitespace and these marks at both ends.
+bool is_crud(int c) {
+    return c <= 32 || c == '.' || c == ',' || c == ':' || c == ';' || c == '<' || c == '>' || c == '"' || c == '\\' || c == '\'';
+}
+
+pub str without_crud(str raw) {
+    List<int> chars = raw.chars();
+    int start = 0;
+    int stop = chars.size();
+    while (start < stop && is_crud(chars[start])) {
+        start = start + 1;
+    }
+    while (stop > start && is_crud(chars[stop - 1])) {
+        stop = stop - 1;
+    }
+    List<int> out = [];
+    for (int i in start .. stop) {
+        int c = chars[i];
+        if (c != '\n' && c != '<' && c != '>') {
+            out.push(c);
+        }
+    }
+    return str.from_chars(out);
+}
+
+/// The identity for `role` ("AUTHOR" or "COMMITTER"): name and email from
+/// the environment and config, the date from `GIT_<ROLE>_DATE` unless
+/// `forced` says otherwise, else now (UTC).
+pub GIT_object.Ident ident_for(str gitdir, str role, When forced) {
+    str who = GIT_ident.name(gitdir, role);
+    str mail = GIT_ident.email(gitdir, role, who);
+    When when = no_date();
+    if (forced.ok) {
+        when = forced;
+    } else {
+        When from_env = parse_date(os.env("GIT_" + role + "_DATE").or(""));
+        if (from_env.ok) {
+            when = from_env;
+        } else {
+            when = When(true, date.now(), 0, "+0000");
+        }
+    }
+    return GIT_object.Ident(without_crud(who).to_bytes(), without_crud(mail).to_bytes(), when.when, when.offset, when.zone);
+}
+
+pub str ident_text(GIT_object.Ident who) {
+    return who.name.utf8().or("") + " <" + who.email.utf8().or("") + ">";
+}
+
+pub str ident_with_date(GIT_object.Ident who) {
+    return ident_text(who) + " " + who.when.to_str() + " " + who.zone;
+}
+
+/// `Name <email>` as `--author` takes it.
+pub Option<GIT_object.Ident> parse_author(str given, GIT_object.Ident base) {
+    match (given.index_of("<")) {
+        case Some(int open): {
+            match (given.index_of(">")) {
+                case Some(int closing): {
+                    if (closing > open) {
+                        str who = without_crud(given.substr(0, open));
+                        str mail = given.substr(open + 1, closing).trim();
+                        if (who == "") {
+                            return Option<GIT_object.Ident>.None;
+                        }
+                        return Option<GIT_object.Ident>.Some(GIT_object.Ident(who.to_bytes(), mail.to_bytes(), base.when, base.offset, base.zone));
+                    }
+                }
+                case None: {
+                }
+            }
+        }
+        case None: {
+        }
+    }
+    return Option<GIT_object.Ident>.None;
+}
+
+// --- reflogs -------------------------------------------------------------------------------
+
+/// Append one line to the reflog of `ref` only (no HEAD echo).
+pub void log_only(str gitdir, str ref, str old, str new, str message) {
+    if (!GIT_reflog.should_log(gitdir, ref)) {
+        return;
+    }
+    match (GIT_reflog.append(gitdir, ref, old, new, GIT_reflog.default_ident(gitdir), message)) {
+        case Ok(_): {
+        }
+        case Err(_): {
+        }
+    }
+}
+
+pub str zero_id(str gitdir) {
+    return GIT_reflog.zero(gitdir);
+}
+
+// --- messages --------------------------------------------------------------------------------
+
+/// `git stripspace`: trailing blanks off every line, runs of empty lines to
+/// one, none at either end, a final newline; with `comment` (not "") lines
+/// that start with it are dropped.
+pub str stripspace(str raw, str comment) {
+    List<str> kept = [];
+    bool is_pending_blank = false;
+    for (str line in raw.split("\n")) {
+        str cut = line;
+        while (cut.size() > 0 && (cut.byte_at(cut.size() - 1) == ' ' || cut.byte_at(cut.size() - 1) == '\t' || cut.byte_at(cut.size() - 1) == '\r')) {
+            cut = cut.substr(0, cut.size() - 1);
+        }
+        if (comment != "" && cut.starts_with(comment)) {
+            continue;
+        }
+        if (cut == "") {
+            if (kept.size() > 0) {
+                is_pending_blank = true;
+            }
+            continue;
+        }
+        if (is_pending_blank) {
+            kept.push("");
+            is_pending_blank = false;
+        }
+        kept.push(cut);
+    }
+    if (kept.size() == 0) {
+        return "";
+    }
+    return kept.join("\n") + "\n";
+}
+
+/// The first line of a message (the subject for reflogs and summaries).
+pub str subject_of(str message) {
+    str trimmed = message;
+    while (trimmed.starts_with("\n")) {
+        trimmed = trimmed.substr(1, trimmed.size());
+    }
+    // git: the first paragraph, its lines joined by spaces
+    List<str> parts = [];
+    for (str line in trimmed.split("\n")) {
+        if (line.trim() == "") {
+            break;
+        }
+        parts.push(line);
+    }
+    return parts.join(" ");
+}
+
+// --- hooks and the editor -------------------------------------------------------------------
+
+pub str hooks_dir(GIT_gitcommon.Ctx ctx) {
+    match (GIT_gitcommon.cfg(ctx, "core", "", "hooksPath")) {
+        case Some(str value): {
+            if (value.starts_with("/")) {
+                return value;
+            }
+            return fs.join(ctx.root, value);
+        }
+        case None: {
+        }
+    }
+    return fs.join(GIT_repository.common(ctx.gitdir), "hooks");
+}
+
+/// Run hook `name` from the work tree root with `args`. Returns -1 when
+/// there is no such hook (or it is not executable), else its exit status.
+pub int run_hook(GIT_gitcommon.Ctx ctx, str name, List<str> args) {
+    str path = fs.join(hooks_dir(ctx), name);
+    match (fs.stat(path)) {
+        case Ok(fs.Stat stat): {
+            if (!stat.is_file() || stat.perm() & 0o111 == 0) {
+                return -1;
+            }
+        }
+        case Err(_): {
+            return -1;
+        }
+    }
+    List<str> argv = ["sh", "-c", "cd \"$0\" && GIT_DIR=\"$1\" && export GIT_DIR && shift && exec \"$@\"", ctx.root, ctx.gitdir, path];
+    for (str arg in args) {
+        argv.push(arg);
+    }
+    match (os.run(argv)) {
+        case Ok(os.ExitStatus status): {
+            match (status) {
+                case Exited(int code): {
+                    return code;
+                }
+                case Signaled(int sig): {
+                    return 128 + sig;
+                }
+            }
+        }
+        case Err(_): {
+            return -1;
+        }
+    }
+}
+
+/// The editor git would use: `GIT_EDITOR`, `core.editor`, `VISUAL`,
+/// `EDITOR`, then `vi`.
+pub str editor_command(GIT_gitcommon.Ctx ctx) {
+    str value = os.env("GIT_EDITOR").or("");
+    if (value != "") {
+        return value;
+    }
+    match (GIT_gitcommon.cfg(ctx, "core", "", "editor")) {
+        case Some(str configured): {
+            if (configured != "") {
+                return configured;
+            }
+        }
+        case None: {
+        }
+    }
+    value = os.env("VISUAL").or("");
+    if (value != "") {
+        return value;
+    }
+    value = os.env("EDITOR").or("");
+    if (value != "") {
+        return value;
+    }
+    return "vi";
+}
+
+/// Open `file` in the editor, from the work tree root. True when it exited 0.
+pub bool run_editor(GIT_gitcommon.Ctx ctx, str file) {
+    str editor = editor_command(ctx);
+    if (editor == ":") {
+        return true;
+    }
+    List<str> argv = ["sh", "-c", "cd \"$0\" && " + editor + " \"$1\"", ctx.root, file];
+    match (os.run(argv)) {
+        case Ok(os.ExitStatus status): {
+            return status.is_success();
+        }
+        case Err(_): {
+            return false;
+        }
+    }
+}
+
+// --- output ------------------------------------------------------------------------------
+
+/// A line on standard output.
+pub void say(str line) {
+    put_bytes((line + "\n").to_bytes());
+}
+
+pub void put_bytes(bytes data) {
+    match (io.stdout().write(data)) {
+        case Ok(_): {
+        }
+        case Err(_): {
+            os.exit(0);
+        }
+    }
+}
+
+pub GIT_object.Ident no_ident() {
+    return GIT_object.Ident("".to_bytes(), "".to_bytes(), 0, 0, "+0000");
+}
