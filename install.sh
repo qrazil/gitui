@@ -1,10 +1,10 @@
 #!/bin/sh
-# Install the latest gitui release for this machine, no tarball juggling:
+# Install the latest m31git release (mgit and 1git) for this machine, no tarball juggling:
 #
-#   curl -fsSL https://raw.githubusercontent.com/qrazil/gitui/master/install.sh | sh
+#   curl -fsSL https://raw.githubusercontent.com/qrazil/m31git/master/install.sh | sh
 #
 # Picks the asset for this OS and CPU (Linux x86-64 / aarch64, macOS arm64),
-# unpacks it under $PREFIX/opt/gitui/<version> and links the programs into
+# unpacks it under $PREFIX/opt/m31git/<version> and links the programs into
 # $PREFIX/bin. PREFIX defaults to ~/.local. Re-running upgrades; old versions
 # stay in opt/ until you delete them.
 #
@@ -13,7 +13,7 @@
 #   sh install.sh --uninstall   remove the links and this program's opt/ dir
 set -eu
 
-REPO=gitui
+REPO=m31git
 ASSET=gitui          # release asset prefix: <ASSET>-<os>-<arch>.tar.gz
 BINS="mgit 1git"          # programs linked into $PREFIX/bin
 PREFIX=${PREFIX:-$HOME/.local}

@@ -16,10 +16,10 @@ stay at the root; the library modules live in `core/`, `diff/`, `net/` and `ui/`
 ## Install
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/qrazil/gitui/master/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/qrazil/m31git/master/install.sh | sh
 ```
 
-Picks the release for your OS and CPU, unpacks it under `~/.local/opt/gitui/<version>` and links the programs into `~/.local/bin`. `VERSION=v1.2.3` pins a release, `PREFIX=...` moves the install, `sh install.sh --uninstall` removes it.
+Picks the release for your OS and CPU, unpacks it under `~/.local/opt/m31git/<version>` and links the programs into `~/.local/bin`. `VERSION=v1.2.3` pins a release, `PREFIX=...` moves the install, `sh install.sh --uninstall` removes it.
 
 ## Layout
 
