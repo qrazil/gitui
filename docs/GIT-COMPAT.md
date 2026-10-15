@@ -241,3 +241,13 @@ matches; these do not):
 Not promised: porting git's own test suite wholesale (it is the north star:
 `t/` scripts run against `1git` give the honest score), and anything that
 needs a feature m31 does not have (stop and discuss).
+
+## Target version
+
+The oracle is the newest released git (2.55 on CI). Where releases differ
+1git follows the newest: since 2.55 a commit named on the command line is
+shown with its real header and parents even when a pathspec leaves no diff
+(`show HEAD -- path`); `compare_show.sh` runs those forms only against git
+2.55 or later. Known gap: the combined diff (`diff --cc`) a merge commit
+prints in `show` is not implemented (`compare_show.sh` counts those forms
+as excluded and says how many).

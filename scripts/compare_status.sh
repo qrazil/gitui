@@ -55,7 +55,7 @@ compare() {
     if ! cmp -s "$WORK/want" "$WORK/got" || [ $want_rc -ne $got_rc ]; then
         printf '\033[31mdiffer\033[0m %s: status %s\n' "$label" "$*"
         printf '       exit: git %s, 1git %s\n' "$want_rc" "$got_rc"
-        diff <(cat -A "$WORK/want") <(cat -A "$WORK/got") | head -12 | sed 's/^/       /'
+        diff <(sed 's/$/$/' "$WORK/want" | cat -v) <(sed 's/$/$/' "$WORK/got" | cat -v) | head -12 | sed 's/^/       /'
         head -3 "$WORK/got.err" | sed 's/^/       stderr: /'
         bad=$((bad + 1))
     fi
@@ -245,7 +245,7 @@ for args in "" "-s" "-sb" "--porcelain" "-s ."; do
     ( cd "$r/dir" && "$OURS" status $args ) > "$WORK/got" 2>&1; got_rc=$?
     if ! cmp -s "$WORK/want" "$WORK/got" || [ $want_rc -ne $got_rc ]; then
         printf '\033[31mdiffer\033[0m subdir (cwd dir): status %s\n' "$args"
-        diff <(cat -A "$WORK/want") <(cat -A "$WORK/got") | head -12 | sed 's/^/       /'
+        diff <(sed 's/$/$/' "$WORK/want" | cat -v) <(sed 's/$/$/' "$WORK/got" | cat -v) | head -12 | sed 's/^/       /'
         bad=$((bad + 1))
     fi
 done

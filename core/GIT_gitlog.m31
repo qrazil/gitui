@@ -342,8 +342,15 @@ void Walk.process_parents(str id, bool is_into_list) {
         }
         return;
     }
+    // git 2.55 names a commit asked for by name with its real parents, even
+    // when a pathspec made it TREESAME to one of them.
+    List<str> given = [];
+    for (str p in parents_of(id)) {
+        given.push(p);
+    }
     try_to_simplify(id);
     if (is_no_walk) {
+        parents.set(id, given);
         return;
     }
     for (str p in parents_of(id)) {
@@ -525,7 +532,7 @@ bool Walk.is_show(str id) {
     if (!commit_match(id)) {
         return false;
     }
-    if (is_prune() && has(id, F_TREESAME)) {
+    if (is_prune() && has(id, F_TREESAME) && !is_no_walk) {
         if (!is_want_ancestry) {
             return false;
         }
