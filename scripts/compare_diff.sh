@@ -220,6 +220,16 @@ for combo in "--name-only --numstat" "-s --stat" "-s -p" "--stat -s" "-p -s" "--
     compare combos "$WORK/fx/linear" diff $combo
 done
 
+# word diffs
+for form in "--word-diff" "--word-diff=plain" "--word-diff=color" "--word-diff=porcelain" "--color-words" "--word-diff --color=always" "--word-diff=color --no-color" "--word-diff -U0" "--word-diff -w" "--word-diff=porcelain -U1" "--word-diff --stat"; do
+    for fx in linear space crlf renames noeol; do
+        if [ -d "$WORK/fx/$fx" ]; then
+            # shellcheck disable=SC2086
+            compare words-$fx "$WORK/fx/$fx" diff $form HEAD~1 HEAD
+        fi
+    done
+done
+
 # configuration: diff.noprefix, diff.renames, diff.context, color.diff, core.abbrev
 compare history-config "$fixtures_dir/renames" -c diff.noprefix=true diff HEAD~3 HEAD
 compare history-config "$fixtures_dir/renames" -c diff.renames=false diff --name-status HEAD~3 HEAD

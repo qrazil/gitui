@@ -187,10 +187,11 @@ matches; these do not):
   every parent) are not implemented: `-m`/`-c`/`--cc` are an error, and
   such a `show` prints the header and the stat formats only. `log` prints
   no diff for a merge, as git does by default.
-- **`--word-diff`, `--color-words`, `--color-moved`, `-G`, `-O`, `-B`,
+- **`--word-diff-regex`, `--color-moved`, `-G`, `-O`, `-B`,
   `-C`, `--find-copies-harder`, `-L`, `--ignore-blank-lines`, `-I`,
   `--ignore-space-at-eol`, `--patience`, `--histogram`, `--minimal`**:
-  error (`--patience` / `--histogram` / `--minimal` are accepted and use
+  error (`--word-diff[=plain|color|porcelain]` and `--color-words` work with
+  the default word regex; `--patience` / `--histogram` / `--minimal` are accepted and use
   Myers with git's heuristics). Copy detection exists only inside
   `--follow`, where git turns it on.
 - **Not in the walk**: `--full-history`, `--simplify-merges`,
@@ -219,9 +220,8 @@ matches; these do not):
 - **Terminal**: there is no pager; `log` and `show` write to the terminal
   directly. `--stat` uses `COLUMNS` or the terminal's width, 80 when there
   is neither.
-- **Performance**: every object read opens the pack files again (the
-  library's read is stateless), so path-limited history of a repository with
-  a pack of many megabytes is slow: ~4 ms per commit for an 8 MB pack.
+- **Performance**: packs are read once per run through a cache
+  (`GIT_gitstore`), so path-limited history of an 8 MB pack is ~0.3 s.
 - `NO_COLOR` switches colour off under `auto`, as `status` does; git itself
   ignores it.
 

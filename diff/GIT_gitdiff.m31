@@ -90,6 +90,8 @@ pub type DOpts {
     pub bool is_raw_names = false;
     // colour the code of added and removed lines by syntax (a terminal only)
     pub bool is_syntax = false;
+    // --word-diff: "", plain, color or porcelain
+    pub str word_diff = "";
     pub bool is_dark = true;
     // --diff-filter: letters to keep, letters to drop
     pub str filter = "";
@@ -1288,6 +1290,10 @@ pub bytes hunks_bytes(Loaded loaded, DOpts opts) {
             }
         }
         out.push('\n');
+        if (opts.word_diff != "") {
+            out.extend(word_diff_hunk(ops, span.start, span.end, opts));
+            continue;
+        }
         // the line numbers the hunk header announces
         int lno_pre = old_before[span.start];
         if (old_count > 0) {
@@ -2568,4 +2574,220 @@ Item make_follow_item(str source_path, Side src, Item added, int score, bool is_
     Item item = Item(status, added.path, source_path, src, added.new);
     item.score = score;
     return item;
+}
+
+// --- --word-diff ---------------------------------------------------------------------------
+
+// a word of a buffer: where it begins and ends
+type WordSpan {
+    int begin;
+    int end;
+}
+
+// `diff_words_fill`: words are runs of non-blanks; the 0th is an empty one
+// at the start so a word's number is its position
+List<WordSpan> split_words(bytes text, List<bytes> out) {
+    List<WordSpan> words = [WordSpan(0, 0)];
+    int i = 0;
+    int n = text.size();
+    while (i < n) {
+        while (i < n && is_ws_byte(text[i])) {
+            i = i + 1;
+        }
+        if (i >= n) {
+            break;
+        }
+        int j = i + 1;
+        while (j < n && !is_ws_byte(text[j])) {
+            j = j + 1;
+        }
+        words.push(WordSpan(i, j));
+        bytes word = text.substr(i, j);
+        word.push('\n');
+        out.push(word);
+        i = j;
+    }
+    return words;
+}
+
+// `fn_out_diff_words_write_helper`: `buf` line by line in one style
+void word_write(bytes out, bytes buf, str color, str prefix, str suffix, str newline, str reset) {
+    int count = buf.size();
+    int position = 0;
+    while (position < count) {
+        int end = position;
+        while (end < count && buf[end] != '\n') {
+            end = end + 1;
+        }
+        if (end > position) {
+            if (color != "") {
+                out.extend(color.to_bytes());
+            }
+            out.extend(prefix.to_bytes());
+            out.extend(buf.substr(position, end));
+            out.extend(suffix.to_bytes());
+            if (color != "") {
+                out.extend(reset.to_bytes());
+            }
+        }
+        if (end >= count) {
+            return;
+        }
+        out.extend(newline.to_bytes());
+        position = end + 1;
+    }
+}
+
+// one hunk of `--word-diff`: the removed lines and the added lines of each
+// run are compared word by word; context lines are printed as they are
+bytes word_diff_hunk(List<diff.Op> ops, int start, int end, DOpts opts) {
+    bytes out = [];
+    Pal pal = opts.pal;
+    str mode = opts.word_diff;
+    bytes minus = [];
+    bytes plus = [];
+    str old_color = "";
+    str new_color = "";
+    str ctx_color = "";
+    str reset = "";
+    if (pal.is_on && mode != "porcelain") {
+        old_color = pal.old;
+        new_color = pal.new;
+        ctx_color = pal.context;
+        reset = pal.reset;
+    }
+    str old_prefix = "[-";
+    str old_suffix = "-]";
+    str new_prefix = "{+";
+    str new_suffix = "+}";
+    str ctx_prefix = "";
+    str ctx_suffix = "";
+    str newline = "\n";
+    if (mode == "color") {
+        old_prefix = "";
+        old_suffix = "";
+        new_prefix = "";
+        new_suffix = "";
+    } else if (mode == "porcelain") {
+        old_prefix = "-";
+        old_suffix = "\n";
+        new_prefix = "+";
+        new_suffix = "\n";
+        ctx_prefix = " ";
+        ctx_suffix = "\n";
+        newline = "~\n";
+    }
+    for (int i in start .. end) {
+        diff.Op op = ops[i];
+        bytes text = strip_nl(op.line);
+        match (op.kind) {
+            case Keep: {
+                word_flush(out, minus, plus, old_color, new_color, ctx_color, reset, old_prefix, old_suffix, new_prefix, new_suffix, ctx_prefix, ctx_suffix, newline);
+                minus = [];
+                plus = [];
+                if (mode == "porcelain") {
+                    out.extend(" ".to_bytes());
+                    out.extend(text);
+                    out.extend("\n~\n".to_bytes());
+                } else {
+                    bytes body = text;
+                    bool is_cr = body.size() > 0 && body[body.size() - 1] == '\r';
+                    if (is_cr) {
+                        body = body.substr(0, body.size() - 1);
+                    }
+                    if (body.size() > 0) {
+                        out.extend(ctx_color.to_bytes());
+                        out.extend(body);
+                        out.extend(reset.to_bytes());
+                    }
+                    if (is_cr) {
+                        out.push('\r');
+                    }
+                    out.push('\n');
+                }
+            }
+            case Remove: {
+                minus.extend(text);
+                minus.push('\n');
+            }
+            case Add: {
+                plus.extend(text);
+                plus.push('\n');
+            }
+        }
+    }
+    word_flush(out, minus, plus, old_color, new_color, ctx_color, reset, old_prefix, old_suffix, new_prefix, new_suffix, ctx_prefix, ctx_suffix, newline);
+    return out;
+}
+
+// `diff_words_show`
+void word_flush(bytes out, bytes minus, bytes plus, str old_color, str new_color, str ctx_color, str reset, str old_prefix, str old_suffix, str new_prefix, str new_suffix, str ctx_prefix, str ctx_suffix, str newline) {
+    if (minus.size() == 0 && plus.size() == 0) {
+        return;
+    }
+    if (plus.size() == 0) {
+        word_write(out, minus, old_color, old_prefix, old_suffix, newline, reset);
+        return;
+    }
+    List<bytes> minus_lines = [];
+    List<bytes> plus_lines = [];
+    List<WordSpan> minus_words = split_words(minus, minus_lines);
+    List<WordSpan> plus_words = split_words(plus, plus_lines);
+    bytes joined_minus = [];
+    for (bytes w in minus_lines) {
+        joined_minus.extend(w);
+    }
+    bytes joined_plus = [];
+    for (bytes w in plus_lines) {
+        joined_plus.extend(w);
+    }
+    // xdi_diff trims the common tail of both when there is no context
+    int cut = common_tail_trim(joined_minus, joined_plus);
+    if (cut > 0) {
+        minus_lines = GIT_xdiff.split_lines(joined_minus.substr(0, joined_minus.size() - cut));
+        plus_lines = GIT_xdiff.split_lines(joined_plus.substr(0, joined_plus.size() - cut));
+    }
+    GIT_xdiff.Diff changes = GIT_xdiff.diff_lines(minus_lines, plus_lines);
+    int current = 0;
+    for (GIT_xdiff.Edit edit in GIT_xdiff.edits(changes)) {
+        int minus_first = edit.a_start;
+        if (edit.a_length > 0) {
+            minus_first = edit.a_start + 1;
+        }
+        int plus_first = edit.b_start;
+        if (edit.b_length > 0) {
+            plus_first = edit.b_start + 1;
+        }
+        int minus_begin = 0;
+        int minus_end = 0;
+        if (edit.a_length > 0) {
+            minus_begin = minus_words[minus_first].begin;
+            minus_end = minus_words[minus_first + edit.a_length - 1].end;
+        } else {
+            minus_begin = minus_words[minus_first].end;
+            minus_end = minus_begin;
+        }
+        int plus_begin = 0;
+        int plus_end = 0;
+        if (edit.b_length > 0) {
+            plus_begin = plus_words[plus_first].begin;
+            plus_end = plus_words[plus_first + edit.b_length - 1].end;
+        } else {
+            plus_begin = plus_words[plus_first].end;
+            plus_end = plus_begin;
+        }
+        if (current != plus_begin) {
+            word_write(out, plus.substr(current, plus_begin), ctx_color, ctx_prefix, ctx_suffix, newline, reset);
+        }
+        if (minus_begin != minus_end) {
+            word_write(out, minus.substr(minus_begin, minus_end), old_color, old_prefix, old_suffix, newline, reset);
+        }
+        if (plus_begin != plus_end) {
+            word_write(out, plus.substr(plus_begin, plus_end), new_color, new_prefix, new_suffix, newline, reset);
+        }
+        current = plus_end;
+    }
+    if (current != plus.size()) {
+        word_write(out, plus.substr(current, plus.size()), ctx_color, ctx_prefix, ctx_suffix, newline, reset);
+    }
 }

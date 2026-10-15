@@ -201,6 +201,16 @@ for combo in "--name-only --numstat" "-s --stat" "-s -p" "--stat -s" "-p -s" "--
     compare combos "$WORK/fx/linear" log $combo
 done
 
+# word diffs
+for form in "--word-diff" "--word-diff=plain" "--word-diff=color" "--word-diff=porcelain" "--color-words" "--word-diff --color=always" "--word-diff=color --no-color" "--word-diff -U0" "--word-diff -w" "--word-diff=porcelain -U1" "--word-diff --stat"; do
+    for fx in linear space crlf renames noeol; do
+        if [ -d "$WORK/fx/$fx" ]; then
+            # shellcheck disable=SC2086
+            compare words-$fx "$WORK/fx/$fx" log -p $form
+        fi
+    done
+done
+
 # a subdirectory as the working directory: paths relative to it
 compare linear-sub "$WORK/fx/linear/src" log --oneline -- main.c
 compare linear-sub "$WORK/fx/linear/src" log --oneline -- ../a.txt

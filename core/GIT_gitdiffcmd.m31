@@ -239,7 +239,31 @@ pub int parse_diff_option(GIT_gitdiff.DOpts opts, List<str> args, int index, Set
         }
         return 1;
     }
-    if (arg == "--word-diff" || arg.starts_with("--word-diff=") || arg.starts_with("--color-words") || arg.starts_with("-G")) {
+    if (arg == "--word-diff") {
+        opts.word_diff = "plain";
+        return 1;
+    }
+    if (arg.starts_with("--word-diff=")) {
+        str mode = arg.substr(12, arg.size());
+        if (mode == "plain" || mode == "color" || mode == "porcelain") {
+            opts.word_diff = mode;
+            if (mode == "color") {
+                settings.color = "always";
+            }
+        } else if (mode == "none") {
+            opts.word_diff = "";
+        } else {
+            io.eprint("error: bad --word-diff argument: " + mode);
+            return -1;
+        }
+        return 1;
+    }
+    if (arg == "--color-words") {
+        opts.word_diff = "color";
+        settings.color = "always";
+        return 1;
+    }
+    if (arg.starts_with("--color-words=") || arg.starts_with("--word-diff-regex") || arg.starts_with("-G")) {
         io.eprint("error: unsupported option: " + arg);
         return -1;
     }

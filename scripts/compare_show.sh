@@ -145,6 +145,16 @@ for combo in "--name-only --numstat" "-s --stat" "-s -p" "--stat -s" "-p -s" "--
     compare combos "$WORK/fx/linear" show $combo
 done
 
+# word diffs
+for form in "--word-diff" "--word-diff=plain" "--word-diff=color" "--word-diff=porcelain" "--color-words" "--word-diff --color=always" "--word-diff=color --no-color" "--word-diff -U0" "--word-diff -w" "--word-diff=porcelain -U1" "--word-diff --stat"; do
+    for fx in linear space crlf renames noeol; do
+        if [ -d "$WORK/fx/$fx" ]; then
+            # shellcheck disable=SC2086
+            compare words-$fx "$WORK/fx/$fx" show $form HEAD
+        fi
+    done
+done
+
 # from a subdirectory
 compare linear-sub "$WORK/fx/linear/src" show HEAD
 compare linear-sub "$WORK/fx/linear/src" show --name-only HEAD
