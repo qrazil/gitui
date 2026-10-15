@@ -525,6 +525,11 @@ pub Result<bool, Error> delete_tag(str gitdir, str name) {
     if (!is_valid_tag_name(name) || !GIT_refs.has_ref(gitdir, full)) {
         return Result<bool, Error>.Err(Error.NotFound);
     }
+    return delete_ref(gitdir, full);
+}
+
+/// Remove the ref `full` (loose file and packed line); not an error if absent.
+pub Result<bool, Error> delete_ref(str gitdir, str full) {
     str common = GIT_repository.common(gitdir);
     str loose = fs.join(common, full);
     if (fs.is_present(loose)) {

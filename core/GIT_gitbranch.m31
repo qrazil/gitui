@@ -1,0 +1,2241 @@
+// `1git switch`, `checkout`, `branch` and `tag`: git's grammar, git's
+// decisions and git's reflog lines over the library. See docs/GIT-COMPAT.md
+// for what differs.
+
+import io;
+import os;
+import fs;
+import core.GIT_object;
+import core.GIT_refs;
+import core.GIT_index;
+import core.GIT_config;
+import core.GIT_reflog;
+import core.GIT_revparse;
+import core.GIT_graph;
+import core.GIT_branches;
+import core.GIT_repository;
+import core.GIT_gitcommon;
+import core.GIT_gitstore;
+import core.GIT_gitstatus;
+import core.GIT_gitwrite;
+import core.GIT_gitadd;
+import core.GIT_gitcommit;
+import core.GIT_checkoutplan;
+
+// --- helpers --------------------------------------------------------------------------------
+
+bool is_branch_name(str name) {
+    return name != "" && name != "HEAD" && !name.starts_with("-") && GIT_branches.is_valid_tag_name(name) && name != "@";
+}
+
+pub bool is_full_id(str gitdir, str text) {
+    return GIT_object.is_full(gitdir, text);
+}
+
+// What HEAD was left as: a branch's short name, or the full id.
+str head_label(GIT_gitwrite.HeadInfo head) {
+    if (head.is_detached) {
+        return head.id;
+    }
+    return GIT_gitwrite.short_ref(head.ref);
+}
+
+// The branch `switch -` / `checkout -` goes back to: the last "moving from X".
+str previous_checkout(str gitdir) {
+    match (GIT_reflog.read(gitdir, "HEAD")) {
+        case Ok(List<GIT_reflog.Entry> entries): {
+            int count = entries.size();
+            for (int i in 0 .. count) {
+                GIT_reflog.Entry entry = entries[count - 1 - i];
+                str prefix = "checkout: moving from ";
+                if (!entry.message.starts_with(prefix)) {
+                    continue;
+                }
+                str rest = entry.message.substr(prefix.size(), entry.message.size());
+                match (rest.index_of(" to ")) {
+                    case Some(int at): {
+                        return rest.substr(0, at);
+                    }
+                    case None: {
+                    }
+                }
+            }
+        }
+        case Err(_): {
+        }
+    }
+    return "";
+}
+
+// A name that is a branch here? (`refs/heads/<name>`)
+bool has_branch(str gitdir, str name) {
+    return GIT_refs.has_ref(gitdir, "refs/heads/" + name);
+}
+
+// The remote-tracking ref a plain name stands for, when exactly one remote
+// has it: `refs/remotes/<remote>/<name>`; "" when none, "?" when several.
+str remote_guess(GIT_gitcommon.Ctx ctx, str name) {
+    if (name.contains("/") && name.starts_with("refs/")) {
+        return "";
+    }
+    List<str> found = [];
+    match (GIT_refs.all(ctx.gitdir)) {
+        case Ok(List<GIT_refs.Ref> refs): {
+            for (GIT_refs.Ref ref in refs) {
+                if (!ref.name.starts_with("refs/remotes/")) {
+                    continue;
+                }
+                str rest = ref.name.substr(13, ref.name.size());
+                match (rest.index_of("/")) {
+                    case Some(int at): {
+                        if (rest.substr(at + 1, rest.size()) == name && name != "HEAD") {
+                            found.push(ref.name);
+                        }
+                    }
+                    case None: {
+                    }
+                }
+            }
+        }
+        case Err(_): {
+        }
+    }
+    if (found.size() == 1) {
+        return found[0];
+    }
+    if (found.size() > 1) {
+        match (GIT_gitcommon.cfg(ctx, "checkout", "", "defaultRemote")) {
+            case Some(str remote): {
+                for (str ref in found) {
+                    if (ref == "refs/remotes/" + remote + "/" + name) {
+                        return ref;
+                    }
+                }
+            }
+            case None: {
+            }
+        }
+        return "?";
+    }
+    return "";
+}
+
+// The (remote, merge ref) a start point sets as upstream, when it is a
+// remote-tracking ref (or a local branch with `track`); remote "" when not.
+type Upstream {
+    str remote;
+    str merge;
+    str shown;
+}
+
+Upstream upstream_for(str gitdir, str start, bool is_force_track) {
+    Upstream none = Upstream("", "", "");
+    if (start == "") {
+        return none;
+    }
+    List<str> tries = [];
+    if (start.starts_with("refs/")) {
+        tries.push(start);
+    } else {
+        tries.push("refs/" + start);
+        tries.push("refs/tags/" + start);
+        tries.push("refs/heads/" + start);
+        tries.push("refs/remotes/" + start);
+        tries.push("refs/remotes/" + start + "/HEAD");
+    }
+    for (str candidate in tries) {
+        if (!GIT_refs.has_ref(gitdir, candidate)) {
+            continue;
+        }
+        if (candidate.starts_with("refs/remotes/")) {
+            str rest = candidate.substr(13, candidate.size());
+            match (rest.index_of("/")) {
+                case Some(int at): {
+                    str remote = rest.substr(0, at);
+                    str merge = rest.substr(at + 1, rest.size());
+                    if (merge.ends_with("/HEAD")) {
+                        return none;
+                    }
+                    return Upstream(remote, "refs/heads/" + merge, rest);
+                }
+                case None: {
+                    return none;
+                }
+            }
+        }
+        if (candidate.starts_with("refs/heads/") && is_force_track) {
+            return Upstream(".", candidate, candidate.substr(11, candidate.size()));
+        }
+        return none;
+    }
+    return none;
+}
+
+// "branch 'x' set up to track 'y'."
+void set_tracking(GIT_gitcommon.Ctx ctx, str branch, Upstream up, bool is_quiet) {
+    if (up.remote == "") {
+        return;
+    }
+    match (GIT_branches.set_upstream(ctx.gitdir, branch, up.remote, up.merge)) {
+        case Ok(_): {
+            if (!is_quiet) {
+                GIT_gitwrite.say("branch '" + branch + "' set up to track '" + up.shown + "'.");
+            }
+        }
+        case Err(GIT_branches.Error error): {
+            io.eprint("error: " + error.to_str());
+        }
+    }
+}
+
+// What `switch` and `checkout` print about the upstream after landing.
+void report_tracking(GIT_gitcommon.Ctx ctx, str branch) {
+    match (GIT_branches.tracking(ctx.gitdir, branch)) {
+        case Some(GIT_branches.Tracking found): {
+            if (found.is_gone) {
+                GIT_gitwrite.say("Your branch is based on '" + found.upstream + "', but the upstream is gone.");
+                GIT_gitwrite.say("  (use \"git branch --unset-upstream\" to fixup)");
+                return;
+            }
+            if (found.ahead == 0 && found.behind == 0) {
+                GIT_gitwrite.say("Your branch is up to date with '" + found.upstream + "'.");
+            } else if (found.behind == 0) {
+                GIT_gitwrite.say("Your branch is ahead of '" + found.upstream + "' by " + plural(found.ahead, "commit", "commits") + ".");
+                GIT_gitwrite.say("  (use \"git push\" to publish your local commits)");
+            } else if (found.ahead == 0) {
+                GIT_gitwrite.say("Your branch is behind '" + found.upstream + "' by " + plural(found.behind, "commit", "commits") + ", and can be fast-forwarded.");
+                GIT_gitwrite.say("  (use \"git pull\" to update your local branch)");
+            } else {
+                GIT_gitwrite.say("Your branch and '" + found.upstream + "' have diverged,");
+                GIT_gitwrite.say("and have " + found.ahead.to_str() + " and " + found.behind.to_str() + " different commits each, respectively.");
+                GIT_gitwrite.say("  (use \"git pull\" if you want to integrate the remote branch with yours)");
+            }
+        }
+        case None: {
+        }
+    }
+}
+
+str plural(int n, str one, str many) {
+    if (n == 1) {
+        return "1 " + one;
+    }
+    return n.to_str() + " " + many;
+}
+
+// --- the switch itself -------------------------------------------------------------------------
+
+type Request {
+    // as typed, for "moving from X to <label>"
+    str label;
+    str commit;
+    // the branch to land on ("" detached)
+    str branch;
+    bool is_create;
+    bool is_reset;
+    str start_label;
+    bool is_force;
+    bool is_quiet;
+    Upstream upstream;
+    // an existing local branch the user named
+    bool is_existing;
+    // the verb in "Switched to a new branch"
+    bool is_checkout_spelling;
+}
+
+Request new_request() {
+    return Request("", "", "", false, false, "HEAD", false, false, Upstream("", "", ""), false, false);
+}
+
+// Move HEAD, the index and the work tree. 0 on success.
+int do_switch(GIT_gitcommon.Ctx ctx, Request req) {
+    GIT_gitstore.Store store = GIT_gitstore.open(ctx.gitdir);
+    GIT_gitwrite.HeadInfo head = GIT_gitwrite.read_head(ctx.gitdir);
+    if (!head.ok) {
+        return GIT_gitcommon.fatal("HEAD is broken");
+    }
+    if (!req.is_checkout_spelling && !req.is_force) {
+        if (GIT_gitcommit.has_state(ctx.gitdir, "MERGE_HEAD")) {
+            io.eprint("fatal: cannot switch branch while merging");
+            io.eprint("Consider \"git merge --quit\" or \"git worktree add\".");
+            return 128;
+        }
+        if (GIT_gitcommit.has_state(ctx.gitdir, "CHERRY_PICK_HEAD")) {
+            io.eprint("fatal: cannot switch branch while cherry-picking");
+            io.eprint("Consider \"git cherry-pick --quit\" or \"git worktree add\".");
+            return 128;
+        }
+        if (GIT_gitcommit.has_state(ctx.gitdir, "REVERT_HEAD")) {
+            io.eprint("fatal: cannot switch branch while reverting");
+            io.eprint("Consider \"git revert --quit\" or \"git worktree add\".");
+            return 128;
+        }
+        if (GIT_gitcommit.has_state(ctx.gitdir, "rebase-merge") || GIT_gitcommit.has_state(ctx.gitdir, "rebase-apply")) {
+            io.eprint("fatal: cannot switch branch while rebasing");
+            io.eprint("Consider \"git rebase --quit\" or \"git worktree add\".");
+            return 128;
+        }
+    }
+    GIT_gitwrite.IdxLoaded loaded = GIT_gitwrite.read_idx(ctx.gitdir);
+    if (!loaded.ok) {
+        return 128;
+    }
+    GIT_gitwrite.Idx idx = loaded.idx;
+    str from_label = head_label(head);
+    str from_id = "";
+    if (head.is_born) {
+        from_id = head.id;
+    }
+    if (idx.conflicts.size() > 0 && !req.is_force) {
+        if (req.is_checkout_spelling) {
+            for (str path in idx.conflicted_paths()) {
+                GIT_gitwrite.say(path + ": needs merge");
+            }
+        }
+        io.eprint("error: you need to resolve your current index first");
+        return 1;
+    }
+    Map<str, GIT_gitwrite.Flat> head_flat = {};
+    if (head.is_born) {
+        head_flat = GIT_gitwrite.commit_flat(store, head.id);
+    }
+    // the tree change (none when HEAD is unborn and so is the target)
+    if (req.commit != "") {
+        Map<str, GIT_gitwrite.Flat> target = GIT_gitwrite.commit_flat(store, req.commit);
+        if (!head.is_born) {
+            // an unborn HEAD owns nothing: keep what is in the index
+            head_flat = GIT_gitwrite.idx_flat(idx);
+        }
+        if (req.is_force) {
+            if (!GIT_gitcommit.reset_hard_tree(ctx, idx, target)) {
+                return 128;
+            }
+        } else {
+            GIT_checkoutplan.Plan plan = GIT_checkoutplan.two_way(ctx, store, idx, head_flat, target, false, "checkout");
+            if (plan.refused) {
+                return 1;
+            }
+            if (!GIT_checkoutplan.apply(ctx, idx, plan)) {
+                return 128;
+            }
+        }
+    }
+    // the branch ref
+    str ref = "";
+    if (req.branch != "") {
+        ref = "refs/heads/" + req.branch;
+        if (req.is_create) {
+            if (req.commit != "") {
+                str message = "branch: Created from " + req.start_label;
+                Option<str> expect = Option<str>.Some("");
+                if (req.is_reset) {
+                    if (has_branch(ctx.gitdir, req.branch)) {
+                        message = "branch: Reset to " + req.start_label;
+                        expect = Option<str>.None;
+                    }
+                }
+                match (GIT_refs.update(ctx.gitdir, ref, req.commit, expect, reflog_message: message)) {
+                    case Ok(_): {
+                    }
+                    case Err(GIT_refs.Error error): {
+                        return GIT_gitcommon.fatal("cannot create branch '" + req.branch + "': " + error.to_str());
+                    }
+                }
+            }
+        }
+    }
+    // HEAD
+    str target_id = req.commit;
+    if (req.branch != "" && req.is_create && head.is_born && !head.is_detached) {
+        // the branch HEAD is on may just have moved
+        match (GIT_refs.resolve(ctx.gitdir, "HEAD")) {
+            case Ok(str now): {
+                from_id = now;
+            }
+            case Err(_): {
+            }
+        }
+    }
+    if (req.branch != "") {
+        match (GIT_refs.update_symbolic(ctx.gitdir, "HEAD", ref)) {
+            case Ok(_): {
+            }
+            case Err(GIT_refs.Error error): {
+                return GIT_gitcommon.fatal("unable to update HEAD: " + error.to_str());
+            }
+        }
+        if (head.is_born && target_id != "") {
+            GIT_gitwrite.log_only(ctx.gitdir, "HEAD", from_id, target_id, "checkout: moving from " + from_label + " to " + req.label);
+        } else if (target_id == "" && head.is_born) {
+            // orphan-like: nothing to log
+        } else if (!head.is_born && target_id != "") {
+            GIT_gitwrite.log_only(ctx.gitdir, "HEAD", GIT_gitwrite.zero_id(ctx.gitdir), target_id, "checkout: moving from " + from_label + " to " + req.label);
+        }
+    } else {
+        // detached
+        match (GIT_refs.update(ctx.gitdir, "HEAD", target_id, Option<str>.None, reflog_message: "checkout: moving from " + from_label + " to " + req.label)) {
+            case Ok(_): {
+            }
+            case Err(GIT_refs.Error error): {
+                return GIT_gitcommon.fatal("unable to update HEAD: " + error.to_str());
+            }
+        }
+    }
+    GIT_gitcommit.remove_branch_state(ctx.gitdir);
+    // tracking configuration
+    if (req.is_create && req.upstream.remote != "") {
+        set_tracking(ctx, req.branch, req.upstream, req.is_quiet);
+    }
+    // what is still different from the new HEAD
+    if (!req.is_quiet && !req.is_force && !req.is_create && req.commit != "") {
+        GIT_gitwrite.IdxLoaded after = GIT_gitwrite.read_idx(ctx.gitdir);
+        if (after.ok) {
+            for (str line in local_changes(ctx, after.idx, GIT_gitwrite.commit_flat(store, req.commit))) {
+                GIT_gitwrite.say(line);
+            }
+        }
+    }
+    // messages
+    if (!req.is_quiet) {
+        if (req.branch != "") {
+            if (req.is_create && req.is_reset && req.is_checkout_spelling && from_label != req.branch) {
+                io.eprint("Switched to and reset branch '" + req.branch + "'");
+            } else if (req.is_create && req.is_reset && !req.is_checkout_spelling) {
+                io.eprint("Reset branch '" + req.branch + "'");
+            } else if (req.is_create) {
+                io.eprint("Switched to a new branch '" + req.branch + "'");
+            } else if (!head.is_detached && from_label == req.branch) {
+                io.eprint("Already on '" + req.branch + "'");
+            } else {
+                io.eprint("Switched to branch '" + req.branch + "'");
+            }
+            if (head.is_detached && from_id != target_id) {
+                // leaving a detached HEAD
+            }
+            if (!req.is_create) {
+                report_tracking(ctx, req.branch);
+            }
+        } else {
+            if (head.is_detached && from_id != target_id) {
+                io.eprint("Previous HEAD position was " + store.unique_abbrev(from_id, GIT_gitcommon.default_abbrev(ctx)) + " " + GIT_gitcommit.commit_subject(store, from_id));
+            }
+            io.eprint("HEAD is now at " + store.unique_abbrev(target_id, GIT_gitcommon.default_abbrev(ctx)) + " " + GIT_gitcommit.commit_subject(store, target_id));
+        }
+    }
+    return 0;
+}
+
+// `diff-index --name-status` of the new HEAD against the work tree: what a
+// switch prints when local changes came along.
+List<str> local_changes(GIT_gitcommon.Ctx ctx, GIT_gitwrite.Idx idx, Map<str, GIT_gitwrite.Flat> tree) {
+    bool is_filemode_on = GIT_gitcommon.cfg_bool(ctx, "core", "", "filemode", true);
+    List<str> paths = [];
+    Map<str, bool> seen = {};
+    for (str path in tree.keys()) {
+        seen.set(path, true);
+        paths.push(path);
+    }
+    for (str path in idx.entries.keys()) {
+        if (!seen.contains(path)) {
+            seen.set(path, true);
+            paths.push(path);
+        }
+    }
+    paths.sort();
+    Map<str, GIT_gitwrite.Flat> before = GIT_gitwrite.idx_flat(idx);
+    List<str> out = [];
+    for (str path in paths) {
+        str full = fs.join(ctx.root, path);
+        int kind = GIT_gitwrite.kind_of(full);
+        if (tree.contains(path)) {
+            GIT_gitwrite.Flat flat = tree.get(path).or(GIT_gitwrite.Flat(0, ""));
+            if (kind == 0 || kind == 3) {
+                out.push("D\t" + path);
+            } else if (!GIT_gitadd.file_is(ctx.gitdir, ctx.root, path, flat, is_filemode_on, before, true)) {
+                out.push("M\t" + path);
+            }
+        } else if (idx.entries.contains(path)) {
+            // staged as new
+            if (kind != 0 && kind != 3) {
+                out.push("A\t" + path);
+            }
+        }
+    }
+    return out;
+}
+
+// `--track <remote>/<branch>`: a local branch of the same short name that
+// tracks it. commit is "" when `spec_text` is not a remote-tracking ref.
+Request track_request(GIT_gitcommon.Ctx ctx, str spec_text, Request base) {
+    Request req = base;
+    str full = "refs/remotes/" + spec_text;
+    if (!GIT_refs.has_ref(ctx.gitdir, full)) {
+        return req;
+    }
+    str rest = spec_text;
+    match (rest.index_of("/")) {
+        case Some(int at): {
+            rest = rest.substr(at + 1, rest.size());
+        }
+        case None: {
+            return req;
+        }
+    }
+    match (GIT_refs.resolve(ctx.gitdir, full)) {
+        case Ok(str id): {
+            req.commit = id;
+            req.branch = rest;
+            req.is_create = true;
+            req.label = rest;
+            req.start_label = spec_text;
+            req.upstream = upstream_for(ctx.gitdir, spec_text, false);
+        }
+        case Err(_): {
+        }
+    }
+    return req;
+}
+
+// --- switch ---------------------------------------------------------------------------------
+
+str switch_usage() {
+    return "usage: git switch [<options>] [<branch>]";
+}
+
+pub int run_switch(str start, List<str> overrides, List<str> argv) {
+    GIT_gitcommon.Opened opened = GIT_gitcommon.open(start, overrides);
+    if (!opened.ok) {
+        return 128;
+    }
+    GIT_gitcommon.Ctx ctx = opened.ctx;
+    GIT_gitwrite.Opts opts = GIT_gitwrite.parse_opts(argv, ["-c --create=", "-C --force-create=", "-d --detach", "-f --force --discard-changes", "-m --merge", "-t --track", "--guess", "--orphan=", "-q --quiet", "--progress", "--recurse-submodules", "--ignore-other-worktrees"]);
+    int bad = GIT_gitwrite.check_opts(opts, switch_usage());
+    if (bad >= 0) {
+        return bad;
+    }
+    if (opts.flag("merge") || opts.has("orphan")) {
+        io.eprint("error: this option of switch is not in 1git (see docs/GIT-COMPAT.md)");
+        return 129;
+    }
+    List<str> words = opts.paths();
+    Request req = new_request();
+    req.is_force = opts.flag("force");
+    req.is_quiet = opts.flag("quiet");
+    bool is_detach = opts.flag("detach");
+    bool is_create = opts.has("create") || opts.has("force-create");
+    str new_name = opts.value("create", "");
+    if (opts.has("force-create")) {
+        new_name = opts.value("force-create", "");
+        req.is_reset = true;
+    }
+    if (is_create && is_detach) {
+        return GIT_gitcommon.fatal("options '-c' and '--detach' cannot be used together");
+    }
+    if (is_create) {
+        if (!is_branch_name(new_name)) {
+            return GIT_gitcommon.fatal("'" + new_name + "' is not a valid branch name");
+        }
+        if (words.size() > 1) {
+            io.eprint(switch_usage());
+            return 129;
+        }
+        if (!req.is_reset && has_branch(ctx.gitdir, new_name)) {
+            return GIT_gitcommon.fatal("a branch named '" + new_name + "' already exists");
+        }
+        str start_spec = "HEAD";
+        if (words.size() == 1) {
+            start_spec = words[0];
+        }
+        req.start_label = start_spec;
+        GIT_gitwrite.HeadInfo head = GIT_gitwrite.read_head(ctx.gitdir);
+        if (words.size() == 0 && !head.is_born) {
+            // a new branch on an unborn HEAD: only HEAD moves
+            req.commit = "";
+        } else {
+            match (GIT_revparse.commit_id(ctx.gitdir, start_spec)) {
+                case Ok(str id): {
+                    req.commit = id;
+                }
+                case Err(_): {
+                    return GIT_gitcommon.fatal("invalid reference: " + start_spec);
+                }
+            }
+        }
+        req.branch = new_name;
+        req.is_create = true;
+        req.label = new_name;
+        req.upstream = upstream_for(ctx.gitdir, start_spec, opts.flag("track"));
+        if (words.size() == 0 && !opts.flag("track")) {
+            req.upstream = Upstream("", "", "");
+        }
+        if (req.is_reset && has_branch(ctx.gitdir, new_name) && head.ref == "refs/heads/" + new_name && req.commit != "") {
+            // -C on the branch HEAD is on: the reflog says so
+        }
+        return do_switch(ctx, req);
+    }
+    if (words.size() == 0) {
+        if (is_detach) {
+            words.push("HEAD");
+        } else {
+            return GIT_gitcommon.fatal("missing branch or commit argument");
+        }
+    }
+    if (words.size() > 1) {
+        io.eprint(switch_usage());
+        return 129;
+    }
+    str spec_text = words[0];
+    str typed = spec_text;
+    if (spec_text == "-") {
+        spec_text = previous_checkout(ctx.gitdir);
+        typed = spec_text;
+        if (spec_text == "") {
+            return GIT_gitcommon.fatal("invalid reference: @{-1}");
+        }
+    }
+    if (is_detach) {
+        match (GIT_revparse.commit_id(ctx.gitdir, spec_text)) {
+            case Ok(str id): {
+                req.commit = id;
+                req.label = typed;
+                return do_switch(ctx, req);
+            }
+            case Err(_): {
+                return GIT_gitcommon.fatal("invalid reference: " + spec_text);
+            }
+        }
+    }
+    if (opts.flag("track") && !has_branch(ctx.gitdir, spec_text)) {
+        Request tracked = track_request(ctx, spec_text, req);
+        if (tracked.commit != "") {
+            return do_switch(ctx, tracked);
+        }
+    }
+    if (has_branch(ctx.gitdir, spec_text)) {
+        match (GIT_refs.resolve(ctx.gitdir, "refs/heads/" + spec_text)) {
+            case Ok(str id): {
+                req.commit = id;
+            }
+            case Err(_): {
+                return GIT_gitcommon.fatal("invalid reference: " + spec_text);
+            }
+        }
+        req.branch = spec_text;
+        req.label = spec_text;
+        req.is_existing = true;
+        return do_switch(ctx, req);
+    }
+    // a previous detached position
+    if (typed != words[0] && GIT_object.is_full(ctx.gitdir, spec_text)) {
+        req.commit = spec_text;
+        req.label = spec_text;
+        return do_switch(ctx, req);
+    }
+    // DWIM: a remote branch of that name
+    str guess = remote_guess(ctx, spec_text);
+    if (guess == "?") {
+        return GIT_gitcommon.fatal("'" + spec_text + "' matched multiple remote tracking branches");
+    }
+    if (guess != "" && !(opts.has("guess") && !opts.flag("guess"))) {
+        match (GIT_refs.resolve(ctx.gitdir, guess)) {
+            case Ok(str id): {
+                req.commit = id;
+                req.branch = spec_text;
+                req.is_create = true;
+                req.label = spec_text;
+                req.start_label = guess;
+                req.upstream = upstream_for(ctx.gitdir, guess, false);
+                return do_switch(ctx, req);
+            }
+            case Err(_): {
+            }
+        }
+    }
+    // not a branch
+    match (GIT_revparse.object_id(ctx.gitdir, spec_text)) {
+        case Ok(str id): {
+            str kind = "commit";
+            if (GIT_refs.has_ref(ctx.gitdir, "refs/tags/" + spec_text)) {
+                kind = "tag";
+            } else if (GIT_refs.has_ref(ctx.gitdir, "refs/remotes/" + spec_text)) {
+                kind = "remote branch";
+            }
+            io.eprint("fatal: a branch is expected, got " + kind + " '" + spec_text + "'");
+            io.eprint("hint: If you want to detach HEAD at the commit, try again with the --detach option.");
+            return 128;
+        }
+        case Err(_): {
+            return GIT_gitcommon.fatal("invalid reference: " + spec_text);
+        }
+    }
+}
+
+// --- checkout -------------------------------------------------------------------------------
+
+str checkout_usage() {
+    return "usage: git checkout [<options>] <branch>\n   or: git checkout [<options>] [<branch>] -- <file>...";
+}
+
+pub int run_checkout(str start, List<str> overrides, List<str> argv) {
+    GIT_gitcommon.Opened opened = GIT_gitcommon.open(start, overrides);
+    if (!opened.ok) {
+        return 128;
+    }
+    GIT_gitcommon.Ctx ctx = opened.ctx;
+    GIT_gitwrite.Opts opts = GIT_gitwrite.parse_opts(argv, ["-b=", "-B=", "--orphan=", "-d --detach", "-f --force", "-m --merge", "-t --track", "--no-track", "--guess", "-q --quiet", "--ours", "--theirs", "-p --patch", "--progress", "--recurse-submodules", "--ignore-other-worktrees", "--ignore-skip-worktree-bits", "--overlay", "--conflict=", "--pathspec-from-file="]);
+    int bad = GIT_gitwrite.check_opts(opts, checkout_usage());
+    if (bad >= 0) {
+        return bad;
+    }
+    if (opts.flag("merge") || opts.has("orphan") || opts.flag("patch") || opts.has("conflict") || opts.has("pathspec-from-file")) {
+        io.eprint("error: this option of checkout is not in 1git (see docs/GIT-COMPAT.md)");
+        return 129;
+    }
+    Request req = new_request();
+    req.is_force = opts.flag("force");
+    req.is_quiet = opts.flag("quiet");
+    req.is_checkout_spelling = true;
+    bool is_detach = opts.flag("detach");
+    bool is_create = opts.has("b") || opts.has("B");
+    str new_name = opts.value("b", "");
+    if (opts.has("B")) {
+        new_name = opts.value("B", "");
+        req.is_reset = true;
+    }
+    List<str> words = opts.words;
+    List<str> after = opts.after;
+    // `git checkout -b new [<start>]`
+    if (is_create) {
+        if (!is_branch_name(new_name)) {
+            return GIT_gitcommon.fatal("'" + new_name + "' is not a valid branch name");
+        }
+        if (words.size() > 1 || after.size() > 0) {
+            io.eprint(checkout_usage());
+            return 129;
+        }
+        if (!req.is_reset && has_branch(ctx.gitdir, new_name)) {
+            return GIT_gitcommon.fatal("a branch named '" + new_name + "' already exists");
+        }
+        str start_spec = "HEAD";
+        if (words.size() == 1) {
+            start_spec = words[0];
+        }
+        if (start_spec == "-") {
+            start_spec = previous_checkout(ctx.gitdir);
+        }
+        req.start_label = start_spec;
+        GIT_gitwrite.HeadInfo head = GIT_gitwrite.read_head(ctx.gitdir);
+        if (words.size() == 0 && !head.is_born) {
+            req.commit = "";
+        } else {
+            match (GIT_revparse.commit_id(ctx.gitdir, start_spec)) {
+                case Ok(str id): {
+                    req.commit = id;
+                }
+                case Err(_): {
+                    return GIT_gitcommon.fatal("'" + start_spec + "' is not a commit and a branch '" + new_name + "' cannot be created from it");
+                }
+            }
+        }
+        req.branch = new_name;
+        req.is_create = true;
+        req.label = new_name;
+        req.upstream = upstream_for(ctx.gitdir, start_spec, opts.flag("track"));
+        if (words.size() == 0 && !opts.flag("track")) {
+            req.upstream = Upstream("", "", "");
+        }
+        return do_switch(ctx, req);
+    }
+    // paths or a branch
+    bool has_dashes = opts.has_dashes;
+    GIT_gitwrite.IdxLoaded loaded = GIT_gitwrite.read_idx(ctx.gitdir);
+    if (!loaded.ok) {
+        return 128;
+    }
+    str tree_ish = "";
+    List<str> path_words = [];
+    if (has_dashes) {
+        if (words.size() > 1) {
+            io.eprint(checkout_usage());
+            return 129;
+        }
+        if (words.size() == 1) {
+            tree_ish = words[0];
+        }
+        path_words = after;
+        if (path_words.size() == 0 && tree_ish == "") {
+            return GIT_gitcommon.fatal("--pathspec-from-file is required with --pathspec-file-nul");
+        }
+        if (path_words.size() == 0) {
+            // `git checkout topic --` : the branch
+            has_dashes = false;
+        }
+    } else if (words.size() == 0) {
+        if (is_detach) {
+            words.push("HEAD");
+        } else {
+            // plain `git checkout`: the tracking report
+            GIT_gitwrite.HeadInfo head = GIT_gitwrite.read_head(ctx.gitdir);
+            if (!head.is_detached && head.ref != "") {
+                report_tracking(ctx, GIT_gitwrite.short_ref(head.ref));
+            }
+            return 0;
+        }
+    }
+    if (!has_dashes && path_words.size() == 0) {
+        str first = words[0];
+        // `git checkout -`
+        str spec_text = first;
+        if (first == "-") {
+            spec_text = previous_checkout(ctx.gitdir);
+            if (spec_text == "") {
+                return GIT_gitcommon.fatal("invalid reference: @{-1}");
+            }
+        }
+        if (opts.flag("track") && !is_detach && !has_branch(ctx.gitdir, spec_text) && words.size() == 1) {
+            Request tracked = track_request(ctx, spec_text, req);
+            if (tracked.commit != "") {
+                return do_switch(ctx, tracked);
+            }
+        }
+        if (spec_text == "HEAD" && words.size() == 1 && !is_detach) {
+            // `git checkout HEAD`: stay where HEAD is
+            GIT_gitwrite.HeadInfo here = GIT_gitwrite.read_head(ctx.gitdir);
+            GIT_gitwrite.IdxLoaded now = GIT_gitwrite.read_idx(ctx.gitdir);
+            if (here.is_born && now.ok && !req.is_quiet && !req.is_force) {
+                GIT_gitstore.Store here_store = GIT_gitstore.open(ctx.gitdir);
+                for (str line in local_changes(ctx, now.idx, GIT_gitwrite.commit_flat(here_store, here.id))) {
+                    GIT_gitwrite.say(line);
+                }
+            }
+            return 0;
+        }
+        bool is_rev = false;
+        if (has_branch(ctx.gitdir, spec_text)) {
+            is_rev = true;
+        } else {
+            match (GIT_revparse.commit_id(ctx.gitdir, spec_text)) {
+                case Ok(_): {
+                    is_rev = true;
+                }
+                case Err(_): {
+                }
+            }
+        }
+        if (!is_rev && !is_detach) {
+            str guess = remote_guess(ctx, spec_text);
+            if (guess != "" && guess != "?" && words.size() == 1) {
+                match (GIT_refs.resolve(ctx.gitdir, guess)) {
+                    case Ok(str id): {
+                        req.commit = id;
+                        req.branch = spec_text;
+                        req.is_create = true;
+                        req.label = spec_text;
+                        req.start_label = guess;
+                        req.upstream = upstream_for(ctx.gitdir, guess, false);
+                        return do_switch(ctx, req);
+                    }
+                    case Err(_): {
+                    }
+                }
+            }
+        }
+        if (is_rev && !is_detach) {
+            // a rev that is also a file with extra words: paths come after it
+            if (words.size() > 1) {
+                tree_ish = first;
+                for (int i in 1 .. words.size()) {
+                    path_words.push(words[i]);
+                }
+            }
+        } else if (!is_rev && !is_detach) {
+            // not a revision: all of them are paths, from the index
+            path_words = words;
+        }
+        if (path_words.size() == 0) {
+            // switch to `first`
+            req.label = first;
+            if (first == "-") {
+                req.label = spec_text;
+            }
+            if (is_detach || !has_branch(ctx.gitdir, spec_text)) {
+                match (GIT_revparse.commit_id(ctx.gitdir, spec_text)) {
+                    case Ok(str id): {
+                        req.commit = id;
+                        req.branch = "";
+                        return do_switch(ctx, req);
+                    }
+                    case Err(_): {
+                        return GIT_gitcommon.fatal("invalid reference: " + spec_text);
+                    }
+                }
+            }
+            match (GIT_refs.resolve(ctx.gitdir, "refs/heads/" + spec_text)) {
+                case Ok(str id): {
+                    req.commit = id;
+                    req.branch = spec_text;
+                    req.is_existing = true;
+                    return do_switch(ctx, req);
+                }
+                case Err(_): {
+                    return GIT_gitcommon.fatal("invalid reference: " + spec_text);
+                }
+            }
+        }
+    }
+    // --- paths
+    if (path_words.size() == 0) {
+        return GIT_gitcommon.fatal("you must specify path(s)");
+    }
+    return GIT_gitadd.restore_paths(ctx, path_words, tree_ish, tree_ish != "", true, true, opts.flag("ours"), opts.flag("theirs"), false, req.is_quiet);
+}
+
+// --- branch ---------------------------------------------------------------------------------
+
+str branch_usage() {
+    return "usage: git branch [<options>] [-r | -a] [--merged] [--no-merged]\n   or: git branch [<options>] [-f] [--recurse-submodules] <branch-name> [<start-point>]\n   or: git branch [<options>] [-l] [<pattern>...]\n   or: git branch [<options>] [-r] (-d | -D) <branch-name>...\n   or: git branch [<options>] (-m | -M) [<old-branch>] <new-branch>\n   or: git branch [<options>] (-c | -C) [<old-branch>] <new-branch>\n   or: git branch [<options>] [-r | -a] [--points-at]\n   or: git branch [<options>] [-r | -a] [--format]";
+}
+
+// One line of a listing.
+type Row {
+    str name;
+    str display;
+    str full;
+    str id;
+    bool is_current;
+    // "" or the symref's target, shown ` -> target`
+    str symref;
+    bool is_detached_row;
+}
+
+str read_symref(str gitdir, str full) {
+    str path = fs.join(GIT_repository.common(gitdir), full);
+    match (io.read(path)) {
+        case Ok(str body): {
+            str line = body.trim();
+            if (line.starts_with("ref: ")) {
+                return line.substr(5, line.size()).trim();
+            }
+        }
+        case Err(_): {
+        }
+    }
+    return "";
+}
+
+str resolve_or_empty(str gitdir, str name) {
+    match (GIT_refs.resolve(gitdir, name)) {
+        case Ok(str id): {
+            return id;
+        }
+        case Err(_): {
+            return "";
+        }
+    }
+}
+
+str pad_right(str text, int width) {
+    str out = text;
+    while (out.size() < width) {
+        out = out + " ";
+    }
+    return out;
+}
+
+// the `-vv` bracket: upstream and how far
+str track_text(GIT_branches.Tracking found, bool is_name) {
+    str inner = "";
+    if (found.is_gone) {
+        inner = "gone";
+    } else if (found.ahead > 0 && found.behind > 0) {
+        inner = "ahead " + found.ahead.to_str() + ", behind " + found.behind.to_str();
+    } else if (found.ahead > 0) {
+        inner = "ahead " + found.ahead.to_str();
+    } else if (found.behind > 0) {
+        inner = "behind " + found.behind.to_str();
+    }
+    if (is_name) {
+        if (inner == "") {
+            return "[" + found.upstream + "]";
+        }
+        return "[" + found.upstream + ": " + inner + "]";
+    }
+    if (inner == "") {
+        return "";
+    }
+    return "[" + inner + "]";
+}
+
+bool matches_any(List<str> patterns, str name) {
+    if (patterns.size() == 0) {
+        return true;
+    }
+    for (str pattern in patterns) {
+        if (GIT_gitcommon.fnmatch(pattern, name)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+bool is_ancestor_of(GIT_graph.Graph graph, str older, str newer) {
+    if (older == newer) {
+        return true;
+    }
+    match (graph.is_ancestor(older, newer)) {
+        case Ok(bool answer): {
+            return answer;
+        }
+        case Err(_): {
+            return false;
+        }
+    }
+}
+
+str commit_of(GIT_gitstore.Store store, str id) {
+    // the commit an object ends at (a tag peeled)
+    str current = id;
+    for (int i in 0 .. 8) {
+        match (store.read(current)) {
+            case Ok(GIT_object.Object object): {
+                match (object.body) {
+                    case Tag(GIT_object.Tag tag): {
+                        current = tag.object;
+                    }
+                    case Commit(_): {
+                        return current;
+                    }
+                    case Blob: {
+                        return "";
+                    }
+                    case Tree(_): {
+                        return "";
+                    }
+                }
+            }
+            case Err(_): {
+                return "";
+            }
+        }
+    }
+    return "";
+}
+
+pub int run_branch(str start, List<str> overrides, List<str> argv) {
+    GIT_gitcommon.Opened opened = GIT_gitcommon.open(start, overrides);
+    if (!opened.ok) {
+        return 128;
+    }
+    GIT_gitcommon.Ctx ctx = opened.ctx;
+    GIT_gitwrite.Opts opts = GIT_gitwrite.parse_opts(argv, ["-l --list", "-a --all", "-r --remotes", "-v --verbose", "-q --quiet", "-d --delete", "-D", "-m --move", "-M", "-c --copy", "-C", "-f --force", "-u --set-upstream-to=", "--unset-upstream", "-t --track", "--no-track", "--show-current", "--contains=?", "--no-contains=?", "--merged=?", "--no-merged=?", "--points-at=", "--sort=", "--format=", "--column", "--no-column", "--color", "--no-color", "--abbrev=", "--no-abbrev", "-i --ignore-case", "--create-reflog", "--edit-description", "--set-upstream"]);
+    int bad = GIT_gitwrite.check_opts(opts, branch_usage());
+    if (bad >= 0) {
+        return bad;
+    }
+    if (opts.has("edit-description") || opts.has("set-upstream")) {
+        io.eprint("error: this option of branch is not in 1git (see docs/GIT-COMPAT.md)");
+        return 129;
+    }
+    GIT_gitstore.Store store = GIT_gitstore.open(ctx.gitdir);
+    GIT_gitwrite.HeadInfo head = GIT_gitwrite.read_head(ctx.gitdir);
+    List<str> words = opts.paths();
+    bool is_delete = opts.flag("delete") || opts.flag("D");
+    bool is_move = opts.flag("move") || opts.flag("M");
+    bool is_copy = opts.flag("copy") || opts.flag("C");
+    bool is_force = opts.flag("force");
+    bool is_quiet = opts.flag("quiet");
+    if (opts.flag("show-current")) {
+        if (!head.is_detached && head.ref != "") {
+            GIT_gitwrite.say(GIT_gitwrite.short_ref(head.ref));
+        }
+        return 0;
+    }
+    if (is_delete) {
+        return branch_delete(ctx, store, head, words, opts.flag("D") || is_force, opts.flag("remotes"), is_quiet);
+    }
+    if (is_move || is_copy) {
+        return branch_move(ctx, head, words, is_copy, opts.flag("M") || opts.flag("C") || is_force);
+    }
+    if (opts.has("set-upstream-to")) {
+        return branch_set_upstream(ctx, head, opts.value("set-upstream-to", ""), words, is_quiet);
+    }
+    if (opts.flag("unset-upstream")) {
+        return branch_unset_upstream(ctx, head, words);
+    }
+    bool is_listing = opts.flag("list") || opts.flag("all") || opts.flag("remotes") || opts.has("contains") || opts.has("no-contains") || opts.has("merged") || opts.has("no-merged") || opts.has("points-at") || opts.has("format");
+    if (words.size() == 0 || (opts.flag("list") && !is_listing) || opts.flag("list")) {
+        if (words.size() == 0 || opts.flag("list") || is_listing) {
+            return branch_list(ctx, store, head, opts, words);
+        }
+    }
+    if (is_listing) {
+        return branch_list(ctx, store, head, opts, words);
+    }
+    // create
+    if (words.size() > 2) {
+        return GIT_gitcommon.fatal("too many arguments");
+    }
+    str name = words[0];
+    if (!is_branch_name(name)) {
+        return GIT_gitcommon.fatal("'" + name + "' is not a valid branch name");
+    }
+    str full = "refs/heads/" + name;
+    bool exists = GIT_refs.has_ref(ctx.gitdir, full);
+    if (exists && !is_force) {
+        return GIT_gitcommon.fatal("a branch named '" + name + "' already exists");
+    }
+    if (exists && !head.is_detached && head.ref == full) {
+        return GIT_gitcommon.fatal("cannot force update the branch '" + name + "' used by worktree at '" + ctx.root + "'");
+    }
+    str start_spec = "HEAD";
+    str start_label = "HEAD";
+    if (!head.is_detached && head.ref != "") {
+        start_label = GIT_gitwrite.short_ref(head.ref);
+    }
+    if (words.size() == 2) {
+        start_spec = words[1];
+        start_label = words[1];
+    } else if (!head.is_born) {
+        return GIT_gitcommon.fatal("not a valid object name: '" + GIT_gitwrite.short_ref(head.ref) + "'");
+    }
+    str commit = "";
+    match (GIT_revparse.commit_id(ctx.gitdir, start_spec)) {
+        case Ok(str id): {
+            commit = id;
+        }
+        case Err(_): {
+            return GIT_gitcommon.fatal("not a valid object name: '" + start_spec + "'");
+        }
+    }
+    str message = "branch: Created from " + start_label;
+    Option<str> expect = Option<str>.Some("");
+    if (exists) {
+        message = "branch: Reset to " + start_label;
+        expect = Option<str>.None;
+    }
+    match (GIT_refs.update(ctx.gitdir, full, commit, expect, reflog_message: message)) {
+        case Ok(_): {
+        }
+        case Err(GIT_refs.Error error): {
+            return GIT_gitcommon.fatal("cannot create branch '" + name + "': " + error.to_str());
+        }
+    }
+    if (!opts.has("no-track")) {
+        Upstream up = upstream_for(ctx.gitdir, start_spec, opts.flag("track"));
+        if (words.size() == 1 && !opts.flag("track")) {
+            up = Upstream("", "", "");
+        }
+        set_tracking(ctx, name, up, is_quiet);
+    }
+    return 0;
+}
+
+int branch_list(GIT_gitcommon.Ctx ctx, GIT_gitstore.Store store, GIT_gitwrite.HeadInfo head, GIT_gitwrite.Opts opts, List<str> patterns) {
+    bool is_all = opts.flag("all");
+    bool is_remote = opts.flag("remotes");
+    int verbose = opts.count("verbose");
+    List<GIT_refs.Ref> refs = [];
+    match (GIT_refs.all(ctx.gitdir)) {
+        case Ok(List<GIT_refs.Ref> found): {
+            refs = found;
+        }
+        case Err(GIT_refs.Error error): {
+            return GIT_gitcommon.fatal("cannot list refs: " + error.to_str());
+        }
+    }
+    GIT_graph.Graph graph = GIT_graph.open(ctx.gitdir);
+    // filters on the commits
+    List<str> contains = [];
+    for (str given in opts.all("contains")) {
+        str spec = given;
+        if (spec == "") {
+            spec = "HEAD";
+        }
+        match (GIT_revparse.commit_id(ctx.gitdir, spec)) {
+            case Ok(str id): {
+                contains.push(id);
+            }
+            case Err(_): {
+                return GIT_gitcommon.fatal("malformed object name " + spec);
+            }
+        }
+    }
+    List<str> not_contains = [];
+    for (str given in opts.all("no-contains")) {
+        str spec = given;
+        if (spec == "") {
+            spec = "HEAD";
+        }
+        match (GIT_revparse.commit_id(ctx.gitdir, spec)) {
+            case Ok(str id): {
+                not_contains.push(id);
+            }
+            case Err(_): {
+                return GIT_gitcommon.fatal("malformed object name " + spec);
+            }
+        }
+    }
+    List<str> merged = [];
+    for (str spec in opts.all("merged")) {
+        str use = spec;
+        if (use == "") {
+            use = "HEAD";
+        }
+        match (GIT_revparse.commit_id(ctx.gitdir, use)) {
+            case Ok(str id): {
+                merged.push(id);
+            }
+            case Err(_): {
+                return GIT_gitcommon.fatal("malformed object name " + spec);
+            }
+        }
+    }
+    List<str> not_merged = [];
+    for (str spec in opts.all("no-merged")) {
+        str use = spec;
+        if (use == "") {
+            use = "HEAD";
+        }
+        match (GIT_revparse.commit_id(ctx.gitdir, use)) {
+            case Ok(str id): {
+                not_merged.push(id);
+            }
+            case Err(_): {
+                return GIT_gitcommon.fatal("malformed object name " + spec);
+            }
+        }
+    }
+    List<str> points_at = [];
+    for (str spec in opts.all("points-at")) {
+        match (GIT_revparse.object_id(ctx.gitdir, spec)) {
+            case Ok(str id): {
+                points_at.push(id);
+            }
+            case Err(_): {
+                return GIT_gitcommon.fatal("malformed object name " + spec);
+            }
+        }
+    }
+    List<Row> rows = [];
+    if (head.is_detached && !is_remote) {
+        Row detached = Row("", "(HEAD detached " + GIT_gitstatus.detached_words(ctx.gitdir, head.id) + ")", "HEAD", head.id, true, "", true);
+        if (matches_any(patterns, "HEAD") || patterns.size() == 0) {
+            rows.push(detached);
+        }
+    }
+    refs.sort();
+    List<GIT_refs.Ref> chosen = [];
+    for (GIT_refs.Ref ref in refs) {
+        if (ref.name.starts_with("refs/heads/") && !is_remote) {
+            chosen.push(ref);
+        }
+    }
+    for (GIT_refs.Ref ref in refs) {
+        if (ref.name.starts_with("refs/remotes/") && (is_remote || is_all)) {
+            chosen.push(ref);
+        }
+    }
+    for (GIT_refs.Ref ref in chosen) {
+        bool is_remote_ref = ref.name.starts_with("refs/remotes/");
+        str short = ref.name.substr(11, ref.name.size());
+        if (is_remote_ref) {
+            short = ref.name.substr(13, ref.name.size());
+        }
+        str shown = short;
+        if (is_remote_ref && is_all) {
+            shown = "remotes/" + short;
+        }
+        if (!matches_any(patterns, short) && !matches_any(patterns, shown)) {
+            continue;
+        }
+        str commit = commit_of(store, ref.id);
+        if (commit == "") {
+            commit = ref.id;
+        }
+        bool is_keep = true;
+        for (str wanted in contains) {
+            if (!is_ancestor_of(graph, wanted, commit)) {
+                is_keep = false;
+            }
+        }
+        for (str unwanted in not_contains) {
+            if (is_ancestor_of(graph, unwanted, commit)) {
+                is_keep = false;
+            }
+        }
+        for (str target in merged) {
+            if (!is_ancestor_of(graph, commit, target)) {
+                is_keep = false;
+            }
+        }
+        for (str target in not_merged) {
+            if (is_ancestor_of(graph, commit, target)) {
+                is_keep = false;
+            }
+        }
+        if (points_at.size() > 0 && !points_at.contains(ref.id)) {
+            is_keep = false;
+        }
+        if (!is_keep) {
+            continue;
+        }
+        bool is_current = !head.is_detached && head.ref == ref.name;
+        str symref = "";
+        if (is_remote_ref) {
+            symref = read_symref(ctx.gitdir, ref.name);
+            if (symref.starts_with("refs/remotes/")) {
+                symref = symref.substr(13, symref.size());
+            }
+        }
+        rows.push(Row(short, shown, ref.name, ref.id, is_current, symref, false));
+    }
+    str sort_key = opts.value("sort", "refname");
+    if (sort_key == "-refname") {
+        List<Row> reversed = [];
+        // detached row stays first
+        List<Row> rest = [];
+        for (Row row in rows) {
+            if (row.is_detached_row) {
+                reversed.push(row);
+            } else {
+                rest.push(row);
+            }
+        }
+        rest.reverse();
+        for (Row row in rest) {
+            reversed.push(row);
+        }
+        rows = reversed;
+    }
+    if (opts.has("format")) {
+        for (Row row in rows) {
+            if (row.is_detached_row) {
+                continue;
+            }
+            GIT_gitwrite.say(format_ref(store, ctx, row.full, row.id, row.is_current, opts.value("format", "")));
+        }
+        return 0;
+    }
+    int width = 0;
+    for (Row row in rows) {
+        if (row.display.size() > width) {
+            width = row.display.size();
+        }
+    }
+    int abbrev = GIT_gitcommon.default_abbrev(ctx);
+    str out = "";
+    for (Row row in rows) {
+        str marker = "  ";
+        if (row.is_current) {
+            marker = "* ";
+        }
+        if (verbose == 0) {
+            if (row.symref != "") {
+                out = out + marker + row.display + " -> " + row.symref + "\n";
+            } else {
+                out = out + marker + row.display + "\n";
+            }
+            continue;
+        }
+        if (row.symref != "") {
+            out = out + marker + pad_right(row.display, width) + " -> " + row.symref + "\n";
+            continue;
+        }
+        str line = marker + pad_right(row.display, width) + " " + store.unique_abbrev(row.id, abbrev);
+        if (!row.is_detached_row && row.full.starts_with("refs/heads/")) {
+            match (GIT_branches.tracking(ctx.gitdir, row.name)) {
+                case Some(GIT_branches.Tracking found): {
+                    str bracket = track_text(found, verbose > 1);
+                    if (bracket != "") {
+                        line = line + " " + bracket;
+                    }
+                }
+                case None: {
+                }
+            }
+        }
+        str subject = GIT_gitcommit.commit_subject(store, commit_of(store, row.id));
+        out = out + line + " " + subject + "\n";
+    }
+    GIT_gitwrite.put_bytes(out.to_bytes());
+    return 0;
+}
+
+// `--format` for branch and tag: the handful of atoms scripts use.
+str format_ref(GIT_gitstore.Store store, GIT_gitcommon.Ctx ctx, str full, str id, bool is_head, str format) {
+    str out = "";
+    int i = 0;
+    while (i < format.size()) {
+        if (format.byte_at(i) == '%' && i + 1 < format.size() && format.byte_at(i + 1) == '(') {
+            int stop = i + 2;
+            while (stop < format.size() && format.byte_at(stop) != ')') {
+                stop = stop + 1;
+            }
+            str atom = format.substr(i + 2, stop);
+            i = stop + 1;
+            if (atom == "refname") {
+                out = out + full;
+            } else if (atom == "refname:short") {
+                str short = full;
+                if (short.starts_with("refs/heads/")) {
+                    short = short.substr(11, short.size());
+                } else if (short.starts_with("refs/tags/")) {
+                    short = short.substr(10, short.size());
+                } else if (short.starts_with("refs/remotes/")) {
+                    short = short.substr(13, short.size());
+                }
+                out = out + short;
+            } else if (atom == "objectname") {
+                out = out + id;
+            } else if (atom == "objectname:short") {
+                out = out + store.unique_abbrev(id, GIT_gitcommon.default_abbrev(ctx));
+            } else if (atom == "objecttype") {
+                match (store.read(id)) {
+                    case Ok(GIT_object.Object object): {
+                        out = out + object.kind();
+                    }
+                    case Err(_): {
+                    }
+                }
+            } else if (atom == "HEAD") {
+                if (is_head) {
+                    out = out + "*";
+                } else {
+                    out = out + " ";
+                }
+            } else if (atom == "subject" || atom == "contents:subject") {
+                out = out + GIT_gitcommit.commit_subject(store, commit_of(store, id));
+            } else if (atom == "upstream:short") {
+                if (full.starts_with("refs/heads/")) {
+                    match (GIT_branches.tracking(ctx.gitdir, full.substr(11, full.size()))) {
+                        case Some(GIT_branches.Tracking found): {
+                            out = out + found.upstream;
+                        }
+                        case None: {
+                        }
+                    }
+                }
+            }
+            continue;
+        }
+        out = out + format.substr(i, i + 1);
+        i = i + 1;
+    }
+    return out;
+}
+
+// Remove `full` and the directories above it that are left empty.
+void remove_ref_dirs(str gitdir, str full) {
+    str common = GIT_repository.common(gitdir);
+    str boundary = fs.join(common, "refs");
+    str dir = GIT_gitwrite.dirname(fs.join(common, full));
+    while (dir != "" && dir != boundary && dir.starts_with(boundary + "/")) {
+        match (fs.rmdir(dir)) {
+            case Ok(_): {
+            }
+            case Err(_): {
+                return;
+            }
+        }
+        dir = GIT_gitwrite.dirname(dir);
+    }
+}
+
+int branch_delete(GIT_gitcommon.Ctx ctx, GIT_gitstore.Store store, GIT_gitwrite.HeadInfo head, List<str> names, bool is_force, bool is_remote, bool is_quiet) {
+    if (names.size() == 0) {
+        return GIT_gitcommon.fatal("branch name required");
+    }
+    GIT_graph.Graph graph = GIT_graph.open(ctx.gitdir);
+    int rc = 0;
+    for (str name in names) {
+        str full = "refs/heads/" + name;
+        if (is_remote) {
+            full = "refs/remotes/" + name;
+        }
+        if (!GIT_refs.has_ref(ctx.gitdir, full)) {
+            if (is_remote) {
+                io.eprint("error: remote-tracking branch '" + name + "' not found");
+            } else {
+                io.eprint("error: branch '" + name + "' not found");
+            }
+            rc = 1;
+            continue;
+        }
+        if (!is_remote && !head.is_detached && head.ref == full) {
+            io.eprint("error: cannot delete branch '" + name + "' used by worktree at '" + ctx.root + "'");
+            rc = 1;
+            continue;
+        }
+        str id = "";
+        match (GIT_refs.resolve(ctx.gitdir, full)) {
+            case Ok(str found): {
+                id = found;
+            }
+            case Err(_): {
+                io.eprint("error: branch '" + name + "' not found");
+                rc = 1;
+                continue;
+            }
+        }
+        if (!is_force) {
+            // merged into its upstream, else into HEAD
+            str into = head.id;
+            if (!is_remote) {
+                match (GIT_branches.tracking(ctx.gitdir, name)) {
+                    case Some(GIT_branches.Tracking found): {
+                        if (!found.is_gone) {
+                            match (GIT_refs.resolve(ctx.gitdir, found.tracking_ref)) {
+                                case Ok(str up_id): {
+                                    into = up_id;
+                                }
+                                case Err(_): {
+                                }
+                            }
+                        }
+                    }
+                    case None: {
+                    }
+                }
+            }
+            if (into == "" || !is_ancestor_of(graph, id, into)) {
+                io.eprint("error: the branch '" + name + "' is not fully merged.");
+                io.eprint("hint: If you are sure you want to delete it, run 'git branch -D " + name + "'.");
+                io.eprint("hint: Disable this message with \"git config advice.forceDeleteBranch false\"");
+                rc = 1;
+                continue;
+            }
+        }
+        match (GIT_branches.delete_ref(ctx.gitdir, full)) {
+            case Ok(_): {
+            }
+            case Err(GIT_branches.Error error): {
+                io.eprint("error: could not delete branch '" + name + "': " + error.to_str());
+                rc = 1;
+                continue;
+            }
+        }
+        remove_ref_dirs(ctx.gitdir, full);
+        match (GIT_reflog.delete_log(ctx.gitdir, full)) {
+            case Ok(_): {
+            }
+            case Err(_): {
+            }
+        }
+        if (!is_remote) {
+            drop_branch_config(ctx.gitdir, name);
+        }
+        if (!is_quiet) {
+            str shown = store.unique_abbrev(id, GIT_gitcommon.default_abbrev(ctx));
+            if (is_remote) {
+                GIT_gitwrite.say("Deleted remote-tracking branch " + name + " (was " + shown + ").");
+            } else {
+                GIT_gitwrite.say("Deleted branch " + name + " (was " + shown + ").");
+            }
+        }
+    }
+    return rc;
+}
+
+void drop_branch_config(str gitdir, str name) {
+    GIT_config.Config config = GIT_config.effective(gitdir);
+    for (str key in config.keys_of("branch", name)) {
+        match (GIT_config.unset(gitdir, "branch", name, key)) {
+            case Ok(_): {
+            }
+            case Err(_): {
+            }
+        }
+    }
+}
+
+void copy_branch_config(str gitdir, str from, str to, bool is_move) {
+    GIT_config.Config config = GIT_config.effective(gitdir);
+    for (str key in config.keys_of("branch", from)) {
+        for (str value in config.get_all("branch", from, key)) {
+            match (GIT_config.add(gitdir, "branch", to, key, value)) {
+                case Ok(_): {
+                }
+                case Err(_): {
+                }
+            }
+        }
+    }
+    if (is_move) {
+        drop_branch_config(gitdir, from);
+    }
+}
+
+int branch_move(GIT_gitcommon.Ctx ctx, GIT_gitwrite.HeadInfo head, List<str> words, bool is_copy, bool is_force) {
+    str old_name = "";
+    str new_name = "";
+    if (words.size() == 1) {
+        if (head.is_detached || head.ref == "") {
+            return GIT_gitcommon.fatal("cannot rename the current branch while not on any.");
+        }
+        old_name = GIT_gitwrite.short_ref(head.ref);
+        new_name = words[0];
+    } else if (words.size() == 2) {
+        old_name = words[0];
+        new_name = words[1];
+    } else {
+        return GIT_gitcommon.fatal("too many arguments");
+    }
+    str verb = "rename";
+    if (is_copy) {
+        verb = "copy";
+    }
+    str old_full = "refs/heads/" + old_name;
+    str new_full = "refs/heads/" + new_name;
+    bool is_current = !head.is_detached && head.ref == old_full;
+    bool old_exists = GIT_refs.has_ref(ctx.gitdir, old_full);
+    if (!old_exists && !(is_current && !head.is_born)) {
+        return GIT_gitcommon.fatal("no branch named '" + old_name + "'");
+    }
+    if (!is_branch_name(new_name)) {
+        return GIT_gitcommon.fatal("'" + new_name + "' is not a valid branch name");
+    }
+    if (old_name == new_name) {
+        // renaming to itself is a no-op
+        return 0;
+    }
+    if (GIT_refs.has_ref(ctx.gitdir, new_full)) {
+        if (!is_force) {
+            return GIT_gitcommon.fatal("a branch named '" + new_name + "' already exists");
+        }
+        if (!head.is_detached && head.ref == new_full) {
+            return GIT_gitcommon.fatal("cannot force update the branch '" + new_name + "' used by worktree at '" + ctx.root + "'");
+        }
+    }
+    if (!old_exists) {
+        // an unborn current branch: only HEAD's target changes
+        match (GIT_refs.update_symbolic(ctx.gitdir, "HEAD", new_full)) {
+            case Ok(_): {
+            }
+            case Err(GIT_refs.Error error): {
+                return GIT_gitcommon.fatal("unable to update HEAD: " + error.to_str());
+            }
+        }
+        return 0;
+    }
+    str id = "";
+    match (GIT_refs.resolve(ctx.gitdir, old_full)) {
+        case Ok(str found): {
+            id = found;
+        }
+        case Err(_): {
+            return GIT_gitcommon.fatal("no branch named '" + old_name + "'");
+        }
+    }
+    // the log travels with the branch
+    str old_log = "";
+    match (io.read(GIT_reflog.log_path(ctx.gitdir, old_full))) {
+        case Ok(str body): {
+            old_log = body;
+        }
+        case Err(_): {
+        }
+    }
+    str message = "Branch: " + verb + "d " + old_full + " to " + new_full;
+    if (is_copy) {
+        message = "Branch: copied " + old_full + " to " + new_full;
+    } else {
+        message = "Branch: renamed " + old_full + " to " + new_full;
+    }
+    if (!is_copy) {
+        // HEAD's own log records the old branch going away
+        if (is_current) {
+            GIT_gitwrite.log_only(ctx.gitdir, "HEAD", id, GIT_gitwrite.zero_id(ctx.gitdir), message);
+        }
+        match (GIT_branches.delete_ref(ctx.gitdir, old_full)) {
+            case Ok(_): {
+            }
+            case Err(_): {
+            }
+        }
+        remove_ref_dirs(ctx.gitdir, old_full);
+        match (GIT_reflog.delete_log(ctx.gitdir, old_full)) {
+            case Ok(_): {
+            }
+            case Err(_): {
+            }
+        }
+    }
+    // the new ref, its log (old lines, then this one)
+    match (GIT_refs.update(ctx.gitdir, new_full, id, Option<str>.None)) {
+        case Ok(_): {
+        }
+        case Err(GIT_refs.Error error): {
+            return GIT_gitcommon.fatal("could not write the branch: " + error.to_str());
+        }
+    }
+    // update() logged "update"; replace the log by the carried one + the move
+    str new_log_path = GIT_reflog.log_path(ctx.gitdir, new_full);
+    match (GIT_reflog.delete_log(ctx.gitdir, new_full)) {
+        case Ok(_): {
+        }
+        case Err(_): {
+        }
+    }
+    if (old_log != "" || GIT_reflog.should_log(ctx.gitdir, new_full)) {
+        match (fs.makedirs(GIT_gitwrite.dirname(new_log_path))) {
+            case Ok(_): {
+            }
+            case Err(_): {
+            }
+        }
+        match (io.write(new_log_path, old_log)) {
+            case Ok(_): {
+            }
+            case Err(_): {
+            }
+        }
+        GIT_gitwrite.log_only(ctx.gitdir, new_full, id, id, message);
+    }
+    if (is_current && !is_copy) {
+        match (GIT_refs.update_symbolic(ctx.gitdir, "HEAD", new_full)) {
+            case Ok(_): {
+            }
+            case Err(GIT_refs.Error error): {
+                return GIT_gitcommon.fatal("unable to update HEAD: " + error.to_str());
+            }
+        }
+        GIT_gitwrite.log_only(ctx.gitdir, "HEAD", GIT_gitwrite.zero_id(ctx.gitdir), id, message);
+    }
+    copy_branch_config(ctx.gitdir, old_name, new_name, !is_copy);
+    return 0;
+}
+
+int branch_set_upstream(GIT_gitcommon.Ctx ctx, GIT_gitwrite.HeadInfo head, str upstream, List<str> words, bool is_quiet) {
+    str name = "";
+    if (words.size() == 0) {
+        if (head.is_detached || head.ref == "") {
+            return GIT_gitcommon.fatal("could not set upstream of HEAD to '" + upstream + "' when it does not point to any branch.");
+        }
+        name = GIT_gitwrite.short_ref(head.ref);
+    } else {
+        name = words[0];
+    }
+    if (!GIT_refs.has_ref(ctx.gitdir, "refs/heads/" + name)) {
+        return GIT_gitcommon.fatal("branch '" + name + "' does not exist");
+    }
+    Upstream up = upstream_for(ctx.gitdir, upstream, true);
+    if (up.remote == "") {
+        return GIT_gitcommon.fatal("the requested upstream branch '" + upstream + "' does not exist");
+    }
+    set_tracking(ctx, name, up, is_quiet);
+    return 0;
+}
+
+int branch_unset_upstream(GIT_gitcommon.Ctx ctx, GIT_gitwrite.HeadInfo head, List<str> words) {
+    str name = "";
+    if (words.size() == 0) {
+        if (head.is_detached || head.ref == "") {
+            return GIT_gitcommon.fatal("could not unset upstream of HEAD when it does not point to any branch.");
+        }
+        name = GIT_gitwrite.short_ref(head.ref);
+    } else {
+        name = words[0];
+    }
+    if (!GIT_refs.has_ref(ctx.gitdir, "refs/heads/" + name)) {
+        return GIT_gitcommon.fatal("branch '" + name + "' does not exist");
+    }
+    GIT_config.Config config = GIT_config.effective(ctx.gitdir);
+    if (!config.has_key("branch", name, "remote") && !config.has_key("branch", name, "merge")) {
+        return GIT_gitcommon.fatal("branch '" + name + "' has no upstream information");
+    }
+    match (GIT_branches.unset_upstream(ctx.gitdir, name)) {
+        case Ok(_): {
+        }
+        case Err(GIT_branches.Error error): {
+            return GIT_gitcommon.fatal(error.to_str());
+        }
+    }
+    return 0;
+}
+
+// --- tag ------------------------------------------------------------------------------------
+
+str tag_usage() {
+    return "usage: git tag [-a | -s | -u <key-id>] [-f] [-m <msg> | -F <file>] [-e]\n               <tagname> [<commit> | <object>]\n   or: git tag -d <tagname>...\n   or: git tag [-n[<num>]] -l [--contains <commit>] [--no-contains <commit>]\n               [--points-at <object>] [--column[=<options>] | --no-column]\n               [--create-reflog] [--sort=<key>] [--format=<format>]\n               [--merged <commit>] [--no-merged <commit>] [<pattern>...]";
+}
+
+// A version-ish order: digit runs compare as numbers.
+int version_cmp(str left, str right) {
+    int i = 0;
+    int j = 0;
+    while (i < left.size() && j < right.size()) {
+        int a = left.byte_at(i);
+        int b = right.byte_at(j);
+        bool is_a_digit = a >= '0' && a <= '9';
+        bool is_b_digit = b >= '0' && b <= '9';
+        if (is_a_digit && is_b_digit) {
+            int start_i = i;
+            while (i < left.size() && left.byte_at(i) >= '0' && left.byte_at(i) <= '9') {
+                i = i + 1;
+            }
+            int start_j = j;
+            while (j < right.size() && right.byte_at(j) >= '0' && right.byte_at(j) <= '9') {
+                j = j + 1;
+            }
+            str run_a = left.substr(start_i, i);
+            str run_b = right.substr(start_j, j);
+            while (run_a.size() > 1 && run_a.starts_with("0")) {
+                run_a = run_a.substr(1, run_a.size());
+            }
+            while (run_b.size() > 1 && run_b.starts_with("0")) {
+                run_b = run_b.substr(1, run_b.size());
+            }
+            if (run_a.size() != run_b.size()) {
+                return run_a.size() - run_b.size();
+            }
+            if (run_a != run_b) {
+                for (int k in 0 .. run_a.size()) {
+                    int da = run_a.byte_at(k);
+                    int db = run_b.byte_at(k);
+                    if (da != db) {
+                        return da - db;
+                    }
+                }
+                return 0;
+            }
+            continue;
+        }
+        if (a != b) {
+            return a - b;
+        }
+        i = i + 1;
+        j = j + 1;
+    }
+    return (left.size() - i) - (right.size() - j);
+}
+
+pub int run_tag(str start, List<str> overrides, List<str> argv) {
+    GIT_gitcommon.Opened opened = GIT_gitcommon.open(start, overrides);
+    if (!opened.ok) {
+        return 128;
+    }
+    GIT_gitcommon.Ctx ctx = opened.ctx;
+    // `-n` takes an optional number glued to it
+    List<str> cleaned = [];
+    int notes = 0;
+    bool has_notes = false;
+    for (str word in argv) {
+        if (word.starts_with("-n") && !word.starts_with("--")) {
+            str digits = word.substr(2, word.size());
+            if (digits == "") {
+                notes = 1;
+                has_notes = true;
+                continue;
+            }
+            match (digits.parse_int()) {
+                case Some(int n): {
+                    notes = n;
+                    has_notes = true;
+                    continue;
+                }
+                case None: {
+                }
+            }
+        }
+        cleaned.push(word);
+    }
+    GIT_gitwrite.Opts opts = GIT_gitwrite.parse_opts(cleaned, ["-l --list", "-d --delete", "-v --verify", "-a --annotate", "-s --sign", "-u --local-user=", "-f --force", "-m --message=", "-F --file=", "-e --edit", "-q", "--contains=?", "--no-contains=?", "--merged=?", "--no-merged=?", "--points-at=", "--sort=", "--format=", "--column", "--no-column", "--color", "--no-color", "-i --ignore-case", "--create-reflog", "--cleanup=", "--trailer="]);
+    int bad = GIT_gitwrite.check_opts(opts, tag_usage());
+    if (bad >= 0) {
+        return bad;
+    }
+    if (opts.flag("sign") || opts.has("local-user") || opts.flag("verify") || opts.has("trailer")) {
+        return GIT_gitcommon.fatal("this client does not sign or verify tags (see docs/GIT-COMPAT.md)");
+    }
+    GIT_gitstore.Store store = GIT_gitstore.open(ctx.gitdir);
+    List<str> words = opts.paths();
+    bool is_force = opts.flag("force");
+    if (opts.flag("delete")) {
+        if (words.size() == 0) {
+            return GIT_gitcommon.fatal("tag name required");
+        }
+        int rc = 0;
+        for (str name in words) {
+            str full = "refs/tags/" + name;
+            if (!GIT_refs.has_ref(ctx.gitdir, full)) {
+                io.eprint("error: tag '" + name + "' not found.");
+                rc = 1;
+                continue;
+            }
+            str id = resolve_or_empty(ctx.gitdir, full);
+            match (GIT_branches.delete_ref(ctx.gitdir, full)) {
+                case Ok(_): {
+                }
+                case Err(GIT_branches.Error error): {
+                    io.eprint("error: " + error.to_str());
+                    rc = 1;
+                    continue;
+                }
+            }
+            remove_ref_dirs(ctx.gitdir, full);
+            GIT_gitwrite.say("Deleted tag '" + name + "' (was " + store.unique_abbrev(id, GIT_gitcommon.default_abbrev(ctx)) + ")");
+        }
+        return rc;
+    }
+    bool is_annotated = opts.flag("annotate") || opts.has("message") || opts.has("file") || opts.flag("edit");
+    bool is_listing = opts.flag("list") || has_notes || opts.has("contains") || opts.has("no-contains") || opts.has("merged") || opts.has("no-merged") || opts.has("points-at") || opts.has("format") || opts.has("sort");
+    if (words.size() == 0 && !is_annotated) {
+        is_listing = true;
+    }
+    if (is_listing && !(words.size() > 0 && is_annotated)) {
+        return tag_list(ctx, store, opts, words, notes);
+    }
+    // create
+    if (words.size() == 0) {
+        io.eprint(tag_usage());
+        return 129;
+    }
+    if (words.size() > 2) {
+        io.eprint(tag_usage());
+        return 129;
+    }
+    str name = words[0];
+    if (!GIT_branches.is_valid_tag_name(name)) {
+        return GIT_gitcommon.fatal("'" + name + "' is not a valid tag name.");
+    }
+    str full = "refs/tags/" + name;
+    str previous = "";
+    if (GIT_refs.has_ref(ctx.gitdir, full)) {
+        if (!is_force) {
+            return GIT_gitcommon.fatal("tag '" + name + "' already exists");
+        }
+        previous = resolve_or_empty(ctx.gitdir, full);
+    }
+    str object_spec = "HEAD";
+    if (words.size() == 2) {
+        object_spec = words[1];
+    }
+    str object_id = "";
+    match (GIT_revparse.object_id(ctx.gitdir, object_spec)) {
+        case Ok(str id): {
+            object_id = id;
+        }
+        case Err(_): {
+            return GIT_gitcommon.fatal("Failed to resolve '" + object_spec + "' as a valid ref.");
+        }
+    }
+    str ref_value = object_id;
+    if (is_annotated) {
+        str message = "";
+        if (opts.has("file")) {
+            str file = opts.value("file", "");
+            if (file == "-") {
+                match (io.stdin().read_all()) {
+                    case Ok(bytes data): {
+                        message = data.utf8().or("");
+                    }
+                    case Err(_): {
+                        return GIT_gitcommon.fatal("could not read from standard input");
+                    }
+                }
+            } else {
+                match (io.read(file)) {
+                    case Ok(str body): {
+                        message = body;
+                    }
+                    case Err(_): {
+                        return GIT_gitcommon.fatal("could not open or read '" + file + "'");
+                    }
+                }
+            }
+        } else if (opts.has("message")) {
+            message = opts.all("message").join("\n\n");
+        }
+        bool is_editing = opts.flag("edit") || (!opts.has("message") && !opts.has("file"));
+        if (is_editing) {
+            str edit_path = fs.join(ctx.gitdir, "TAG_EDITMSG");
+            str text = message;
+            if (text != "" && !text.ends_with("\n")) {
+                text = text + "\n";
+            }
+            text = text + "\n#\n# Write a message for tag:\n#   " + name + "\n# Lines starting with '#' will be ignored.\n";
+            match (io.write(edit_path, text)) {
+                case Ok(_): {
+                }
+                case Err(_): {
+                    return GIT_gitcommon.fatal("could not write " + edit_path);
+                }
+            }
+            if (!GIT_gitwrite.run_editor(ctx, edit_path)) {
+                return GIT_gitcommon.fatal("there was a problem with the editor");
+            }
+            match (io.read(edit_path)) {
+                case Ok(str body): {
+                    message = GIT_gitwrite.stripspace(body, "#");
+                }
+                case Err(_): {
+                }
+            }
+        } else {
+            message = GIT_gitwrite.stripspace(message, "");
+        }
+        if ((message == "" || message.trim() == "") && is_editing) {
+            return GIT_gitcommon.fatal("no tag message?");
+        }
+        str kind = "commit";
+        match (store.read(object_id)) {
+            case Ok(GIT_object.Object object): {
+                kind = object.kind();
+            }
+            case Err(_): {
+                return GIT_gitcommon.fatal("Failed to resolve '" + object_spec + "' as a valid ref.");
+            }
+        }
+        GIT_object.Ident who = GIT_gitwrite.ident_for(ctx.gitdir, "COMMITTER", GIT_gitwrite.no_date());
+        bytes content = [];
+        content.extend(("object " + object_id + "\ntype " + kind + "\ntag " + name + "\ntagger ").to_bytes());
+        content.extend(who.name);
+        content.extend(" <".to_bytes());
+        content.extend(who.email);
+        content.extend(("> " + who.when.to_str() + " " + who.zone + "\n\n" + message).to_bytes());
+        match (GIT_object.write(ctx.gitdir, "tag", content)) {
+            case Ok(str written): {
+                ref_value = written;
+            }
+            case Err(GIT_object.Error error): {
+                return GIT_gitcommon.fatal("unable to write tag file: " + error.to_str());
+            }
+        }
+    }
+    Option<str> expect = Option<str>.Some("");
+    if (previous != "") {
+        expect = Option<str>.Some(previous);
+    }
+    match (GIT_refs.update(ctx.gitdir, full, ref_value, expect)) {
+        case Ok(_): {
+        }
+        case Err(GIT_refs.Error error): {
+            return GIT_gitcommon.fatal("cannot update ref '" + full + "': " + error.to_str());
+        }
+    }
+    if (previous != "" && previous != ref_value) {
+        GIT_gitwrite.say("Updated tag '" + name + "' (was " + store.unique_abbrev(previous, GIT_gitcommon.default_abbrev(ctx)) + ")");
+    }
+    return 0;
+}
+
+int tag_list(GIT_gitcommon.Ctx ctx, GIT_gitstore.Store store, GIT_gitwrite.Opts opts, List<str> patterns, int notes) {
+    List<GIT_refs.Ref> refs = [];
+    match (GIT_refs.all(ctx.gitdir)) {
+        case Ok(List<GIT_refs.Ref> found): {
+            refs = found;
+        }
+        case Err(GIT_refs.Error error): {
+            return GIT_gitcommon.fatal("cannot list tags: " + error.to_str());
+        }
+    }
+    GIT_graph.Graph graph = GIT_graph.open(ctx.gitdir);
+    List<str> contains = [];
+    for (str given in opts.all("contains")) {
+        str spec = given;
+        if (spec == "") {
+            spec = "HEAD";
+        }
+        match (GIT_revparse.commit_id(ctx.gitdir, spec)) {
+            case Ok(str id): {
+                contains.push(id);
+            }
+            case Err(_): {
+                return GIT_gitcommon.fatal("malformed object name " + spec);
+            }
+        }
+    }
+    List<str> not_contains = [];
+    for (str given in opts.all("no-contains")) {
+        str spec = given;
+        if (spec == "") {
+            spec = "HEAD";
+        }
+        match (GIT_revparse.commit_id(ctx.gitdir, spec)) {
+            case Ok(str id): {
+                not_contains.push(id);
+            }
+            case Err(_): {
+                return GIT_gitcommon.fatal("malformed object name " + spec);
+            }
+        }
+    }
+    List<str> merged = [];
+    for (str given in opts.all("merged")) {
+        str spec = given;
+        if (spec == "") {
+            spec = "HEAD";
+        }
+        match (GIT_revparse.commit_id(ctx.gitdir, spec)) {
+            case Ok(str id): {
+                merged.push(id);
+            }
+            case Err(_): {
+                return GIT_gitcommon.fatal("malformed object name " + spec);
+            }
+        }
+    }
+    List<str> not_merged = [];
+    for (str given in opts.all("no-merged")) {
+        str spec = given;
+        if (spec == "") {
+            spec = "HEAD";
+        }
+        match (GIT_revparse.commit_id(ctx.gitdir, spec)) {
+            case Ok(str id): {
+                not_merged.push(id);
+            }
+            case Err(_): {
+                return GIT_gitcommon.fatal("malformed object name " + spec);
+            }
+        }
+    }
+    List<str> points_at = [];
+    for (str spec in opts.all("points-at")) {
+        match (GIT_revparse.object_id(ctx.gitdir, spec)) {
+            case Ok(str id): {
+                points_at.push(id);
+            }
+            case Err(_): {
+                return GIT_gitcommon.fatal("malformed object name " + spec);
+            }
+        }
+    }
+    List<str> names = [];
+    Map<str, str> ids = {};
+    for (GIT_refs.Ref ref in refs) {
+        if (!ref.name.starts_with("refs/tags/")) {
+            continue;
+        }
+        str name = ref.name.substr(10, ref.name.size());
+        if (!matches_any(patterns, name)) {
+            continue;
+        }
+        str commit = commit_of(store, ref.id);
+        bool is_keep = true;
+        for (str wanted in contains) {
+            if (commit == "" || !is_ancestor_of(graph, wanted, commit)) {
+                is_keep = false;
+            }
+        }
+        for (str unwanted in not_contains) {
+            if (commit != "" && is_ancestor_of(graph, unwanted, commit)) {
+                is_keep = false;
+            }
+        }
+        for (str target in merged) {
+            if (commit == "" || !is_ancestor_of(graph, commit, target)) {
+                is_keep = false;
+            }
+        }
+        for (str target in not_merged) {
+            if (commit != "" && is_ancestor_of(graph, commit, target)) {
+                is_keep = false;
+            }
+        }
+        if (points_at.size() > 0) {
+            bool is_at = points_at.contains(ref.id);
+            if (!is_at) {
+                // an annotated tag points at what it tags
+                match (store.read(ref.id)) {
+                    case Ok(GIT_object.Object object): {
+                        match (object.body) {
+                            case Tag(GIT_object.Tag tag): {
+                                is_at = points_at.contains(tag.object);
+                            }
+                            case Commit(_): {
+                            }
+                            case Blob: {
+                            }
+                            case Tree(_): {
+                            }
+                        }
+                    }
+                    case Err(_): {
+                    }
+                }
+            }
+            if (!is_at) {
+                is_keep = false;
+            }
+        }
+        if (!is_keep) {
+            continue;
+        }
+        names.push(name);
+        ids.set(name, ref.id);
+    }
+    str key = opts.value("sort", "refname");
+    if (key == "version:refname" || key == "v:refname" || key == "-version:refname" || key == "-v:refname") {
+        // insertion sort with the version order
+        List<str> sorted = [];
+        for (str name in names) {
+            int at = sorted.size();
+            while (at > 0 && version_cmp(sorted[at - 1], name) > 0) {
+                at = at - 1;
+            }
+            sorted.insert(at, name);
+        }
+        names = sorted;
+        if (key.starts_with("-")) {
+            names.reverse();
+        }
+    } else {
+        names.sort();
+        if (key == "-refname") {
+            names.reverse();
+        }
+    }
+    str out = "";
+    for (str name in names) {
+        str id = ids.get(name).or("");
+        if (opts.has("format")) {
+            out = out + format_ref(store, ctx, "refs/tags/" + name, id, false, opts.value("format", "")) + "\n";
+            continue;
+        }
+        if (notes == 0) {
+            out = out + name + "\n";
+            continue;
+        }
+        // the annotation, or the commit's message for a lightweight tag
+        str message = "";
+        match (store.read(id)) {
+            case Ok(GIT_object.Object object): {
+                match (object.body) {
+                    case Tag(GIT_object.Tag tag): {
+                        message = tag.message.utf8().or("");
+                    }
+                    case Commit(GIT_object.Commit commit): {
+                        message = commit.message.utf8().or("");
+                    }
+                    case Blob: {
+                    }
+                    case Tree(_): {
+                    }
+                }
+            }
+            case Err(_): {
+            }
+        }
+        List<str> lines = [];
+        for (str line in GIT_gitwrite.stripspace(message, "").split("\n")) {
+            if (lines.size() < notes) {
+                lines.push(line);
+            }
+        }
+        if (lines.size() > 0 && lines[lines.size() - 1] == "" && message != "") {
+            lines.pop();
+        }
+        str shown = name;
+        while (shown.size() < 15) {
+            shown = shown + " ";
+        }
+        if (lines.size() == 0) {
+            out = out + name + "\n";
+        } else {
+            out = out + shown + " " + lines.join("\n    ") + "\n";
+        }
+    }
+    GIT_gitwrite.put_bytes(out.to_bytes());
+    return 0;
+}
