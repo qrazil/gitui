@@ -176,7 +176,7 @@ pub type Index {
 /// print, just "there is no index", which `GIT_status.m31` treats as an empty
 /// one.
 pub Result<Index, Error> read(str gitdir) {
-    str path = fs.join(GIT_repository.common(gitdir), "index");
+    str path = fs.join(gitdir, "index");
     bytes data = [];
     match (io.read_bytes(path)) {
         case Ok(bytes contents): {
@@ -317,7 +317,7 @@ pub Entry from_stat(bytes path, fs.Stat stat, bool is_link, str blob_id) {
 /// for a ref.
 pub Result<bool, Error> write(str gitdir, Index index) {
     bytes out = encode(index, GIT_hash.raw_length(gitdir));
-    str path = fs.join(GIT_repository.common(gitdir), "index");
+    str path = fs.join(gitdir, "index");
     random.System rnd = random.system();
     str temp = path + ".tmp" + rnd.hex(12);
     match (io.write_bytes(temp, out)) {

@@ -210,14 +210,14 @@ dump_state() {
         done
         for d in sequencer rebase-merge rebase-apply worktrees; do
             if [ -d ".git/$d" ]; then
-                (cd ".git/$d" && find . -type f | LC_ALL=C sort | while read -r f; do echo "$d/$f: $(head -c 600 "$f" | tr '\n' '|')"; done)
+                (cd ".git/$d" && find . -type f ! -name index | LC_ALL=C sort | while read -r f; do echo "$d/$f: $(head -c 600 "$f" | tr '\n' '|')"; done)
             fi
         done
         echo "## unmerged"
         git ls-files -u
         echo "## tree"
         find . -path ./.git -prune -o \( -type f -o -type l \) -print | LC_ALL=C sort | while read -r f; do
-            if [ -L "$f" ]; then echo "L $f"; else printf '%s %s %s\n' "$(stat -c %a "$f")" "$f" "$(sha1sum < "$f" | cut -c1-12)"; fi
+            if [ -L "$f" ]; then echo "L $f"; elif [ "$(basename "$f")" = .git ]; then printf 'gitfile %s %s\n' "$f" "$(sed "s|$repo|REPO|g" "$f")"; else printf '%s %s %s\n' "$(stat -c %a "$f")" "$f" "$(sha1sum < "$f" | cut -c1-12)"; fi
         done
         echo "## dirs"
         find . -path ./.git -prune -o -type d -print | LC_ALL=C sort
@@ -267,6 +267,9 @@ case_() {
     run_side "$OURS" "$b" "$fixture" "$setup" "$script" "$WORK/log-b"
     dump_state "$a" > "$WORK/dump-a" 2>&1
     dump_state "$b" > "$WORK/dump-b" 2>&1
+    # absolute paths (worktree commands print and store them) differ by side
+    sed -i "s|$a|REPO|g" "$WORK/log-a" "$WORK/dump-a"
+    sed -i "s|$b|REPO|g" "$WORK/log-b" "$WORK/dump-b"
     local failed=0
     if [ -n "${SHOW:-}" ]; then
         echo "=== $label"; echo "--- git"; cat "$WORK/log-a"; echo "--- ours"; cat "$WORK/log-b"; echo "--- stderr"; cat "$WORK/log-b.err"

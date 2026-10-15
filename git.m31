@@ -67,6 +67,8 @@ import core.GIT_gitstash;
 import core.GIT_gitpick;
 import core.GIT_gitmerge;
 import core.GIT_gitrebase;
+import core.GIT_gitclean;
+import core.GIT_gitworktree;
 
 args.Parser parser = args.Parser("1git", summary: "read-only git plumbing over loose objects");
 parser.value("git-dir", help: "the repository's git directory", placeholder: "DIR");
@@ -192,6 +194,12 @@ int git_spelling(List<str> argv) {
     }
     if (argv[index] == "cherry-pick" || argv[index] == "revert") {
         return GIT_gitpick.run_pick(cwd, overrides, argv.slice(index + 1, argv.size()), argv[index] == "revert");
+    }
+    if (argv[index] == "worktree") {
+        return GIT_gitworktree.run_worktree(cwd, overrides, argv.slice(index + 1, argv.size()));
+    }
+    if (argv[index] == "clean") {
+        return GIT_gitclean.run_clean(cwd, overrides, argv.slice(index + 1, argv.size()));
     }
     if (argv[index] == "rebase") {
         return GIT_gitrebase.run_rebase(cwd, overrides, argv.slice(index + 1, argv.size()));
