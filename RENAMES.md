@@ -1,3 +1,16 @@
+# gitui 0.19.0: `core.ignorecase` and `core.precomposeunicode`
+
+Version 0.19.0, from master 6816a27 (0.18.0). No module was renamed or
+removed. Added `core/GIT_icase.m31` (`enabled`, `precompose`, `fold`, `nfc`,
+`nfc_if`, `is_macos`, `Names`, `Names.is_alias_of_tracked`, `from_paths`).
+Library changes, none breaking: `GIT_status.status_with(gitdir, worktree,
+is_icase)` beside `status`; `GIT_ignore.load_with(gitdir, worktree, is_icase,
+is_precomposed)` beside `load`; `GIT_gitwrite.Idx` gained `is_icase`, `names`
+and `enable_icase`; `GIT_gitadd.walk_files_with`; `GIT_gitcommon.precomposed`;
+`GIT_gitclone.probe_volume`. `init` and `clone` write `core.ignorecase` and
+`core.precomposeunicode` as git does, and `[extensions]` comes before `[core]`
+for SHA-256. Nothing to migrate.
+
 # gitui 0.18.0: mgit network actions, remote branches, "mgit:" messages
 
 Version 0.18.0, from master a4ee5d3 (0.17.0). No module was renamed or

@@ -74,6 +74,8 @@ import core.GIT_object;
 import core.GIT_refs;
 import core.GIT_reflog;
 import core.GIT_status;
+import core.GIT_config;
+import core.GIT_icase;
 
 /// Why a checkout did not happen (nothing written) or did not finish.
 pub enum Error {
@@ -393,7 +395,7 @@ pub Result<Summary, Error> checkout(str gitdir, str worktree, str target_commit_
             // silently; this refuses it too, the stricter and safer choice
             // for a client whose whole promise is never losing a file).
             str full = fs.join(worktree, step.path);
-            if (untracked.contains(step.path) || fs.is_present(full) || fs.is_link(full)) {
+            if ((untracked.contains(step.path) || fs.is_present(full) || fs.is_link(full)) && !is_icase_alias(gitdir, worktree, step.path)) {
                 return Result<Summary, Error>.Err(Error.UntrackedCollision);
             }
         }
@@ -844,7 +846,7 @@ pub Result<Summary, Error> apply_tree_diff(str gitdir, str worktree, str from_tr
         }
     }
     for (Step step in plan) {
-        if (step.old.id == "" && is_blocked(worktree, step.path, deleted)) {
+        if (step.old.id == "" && is_blocked(worktree, step.path, deleted) && !is_icase_alias(gitdir, worktree, step.path)) {
             return Result<Summary, Error>.Err(Error.UntrackedCollision);
         }
     }
@@ -1099,6 +1101,37 @@ int worktree_state(str full, GIT_index.Entry entry) {
         }
         case Err(_): {
             return 1;
+        }
+    }
+}
+
+// With `core.ignorecase`: is the file at `path` really a tracked file under
+// another spelling (git's `icase_exists`)? Then it is no obstacle: on a
+// volume that folds case it is the very file the index already has.
+bool is_icase_alias(str gitdir, str worktree, str path) {
+    if (!GIT_icase.enabled(GIT_config.effective(gitdir))) {
+        return false;
+    }
+    match (GIT_index.read(gitdir)) {
+        case Ok(GIT_index.Index index): {
+            GIT_icase.Names names = GIT_icase.Names();
+            Map<str, GIT_index.Entry> staged = {};
+            for (GIT_index.Entry entry in index.entries) {
+                match (entry.path.utf8()) {
+                    case Some(str known): {
+                        names.add(known);
+                        if (entry.stage == 0) {
+                            staged.set(known, entry);
+                        }
+                    }
+                    case None: {
+                    }
+                }
+            }
+            return names.is_alias_of_tracked(staged, fs.join(worktree, path), path);
+        }
+        case Err(_): {
+            return false;
         }
     }
 }

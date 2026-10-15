@@ -140,7 +140,7 @@ dump_local() {
         git symbolic-ref -q HEAD || true
         git rev-parse -q --verify HEAD || true
         echo "## config"
-        git config --local --list | grep -v -E "^core\.(ignorecase|precomposeunicode)=" | LC_ALL=C sort
+        git config --local --list | LC_ALL=C sort
         echo "## logs"
         if [ -d "$gd/logs" ]; then
             (cd "$gd/logs" && find . -type f | LC_ALL=C sort | while read -r f; do echo "-- $f"; cat "$f"; done)

@@ -25,6 +25,7 @@ import core.GIT_checkout;
 import core.GIT_gitcommon;
 import core.GIT_gitstore;
 import core.GIT_gitstatus;
+import core.GIT_icase;
 
 // --- git's option grammar ------------------------------------------------------------
 
@@ -354,6 +355,21 @@ pub type Idx {
     pub List<GIT_index.Entry> opaque = [];
     // every directory above an entry (may be stale after removals)
     pub Map<str, bool> dirs = {};
+    // `core.ignorecase`: the folded names of the index (see `GIT_icase`)
+    pub bool is_icase = false;
+    pub GIT_icase.Names names = GIT_icase.Names();
+}
+
+/// Index case-folding on, from the entries read so far.
+pub void Idx.enable_icase() {
+    is_icase = true;
+    names = GIT_icase.Names();
+    for (str path in entries.keys()) {
+        names.add(path);
+    }
+    for (GIT_index.Entry entry in conflicts) {
+        names.add(entry_path(entry));
+    }
 }
 
 void Idx.note_dirs(str path) {
@@ -465,6 +481,9 @@ pub void Idx.put(GIT_index.Entry entry) {
     drop_conflicts(path);
     entries.set(path, entry);
     note_dirs(path);
+    if (is_icase) {
+        names.add(path);
+    }
 }
 
 pub void Idx.remove(str path) {

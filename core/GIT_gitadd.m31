@@ -13,6 +13,7 @@ import core.GIT_revparse;
 import core.GIT_gitcommon;
 import core.GIT_gitstore;
 import core.GIT_gitwrite;
+import core.GIT_icase;
 import core.GIT_gitaddp;
 
 // --- shared -----------------------------------------------------------------------------
@@ -34,6 +35,11 @@ bool spec_hits_any(GIT_gitcommon.Spec spec, List<str> paths) {
 // The files below `dir` (repository-relative, "" for the root) in the work
 // tree, `.git` excluded, nested repositories skipped, in path order.
 pub List<str> walk_files(str root, str dir) {
+    return walk_files_with(root, dir, false);
+}
+
+// `walk_files`, with `core.precomposeunicode` given: names come back NFC.
+pub List<str> walk_files_with(str root, str dir, bool is_pre) {
     List<str> out = [];
     str full = root;
     if (dir != "") {
@@ -42,10 +48,11 @@ pub List<str> walk_files(str root, str dir) {
     match (fs.listdir(full)) {
         case Ok(List<str> names): {
             names.sort();
-            for (str name in names) {
-                if (name == ".git") {
+            for (str raw_name in names) {
+                if (raw_name == ".git") {
                     continue;
                 }
+                str name = GIT_icase.nfc_if(is_pre, raw_name);
                 str rel = name;
                 if (dir != "") {
                     rel = dir + "/" + name;
@@ -55,7 +62,7 @@ pub List<str> walk_files(str root, str dir) {
                     if (fs.is_present(fs.join(fs.join(root, rel), ".git"))) {
                         continue;
                     }
-                    for (str inner in walk_files(root, rel)) {
+                    for (str inner in walk_files_with(root, rel, is_pre)) {
                         out.push(inner);
                     }
                 } else {
@@ -70,8 +77,15 @@ pub List<str> walk_files(str root, str dir) {
 }
 
 // Make the entry for the file at `path`; "" on success, else why not.
-pub str stage_file(GIT_gitcommon.Ctx ctx, GIT_gitwrite.Idx idx, str path, bool filemode, int chmod) {
-    str full = fs.join(ctx.root, path);
+pub str stage_file(GIT_gitcommon.Ctx ctx, GIT_gitwrite.Idx idx, str named, bool filemode, int chmod) {
+    str full = fs.join(ctx.root, named);
+    str path = named;
+    if (idx.is_icase) {
+        // git's `add_to_index`: the directories take the index's spelling,
+        // and a name that folds to an entry is that entry
+        path = idx.names.adjust_dirname(path);
+        path = idx.names.file_spelling(path);
+    }
     int kind = GIT_gitwrite.kind_of(full);
     if (kind == 2) {
         // a link's blob is its target text, as written
@@ -117,6 +131,20 @@ pub str stage_file(GIT_gitcommon.Ctx ctx, GIT_gitwrite.Idx idx, str path, bool f
             return "unable to stat '" + path + "'";
         }
     }
+    if (path != named) {
+        // the name folds to an entry: when that entry already matches the
+        // file there is nothing to do ("Nothing changed, really")
+        match (idx.entries.get(path)) {
+            case Some(GIT_index.Entry alias): {
+                int stamp = alias.mtime_s * 1_000_000_000 + alias.mtime_ns;
+                if (alias.size == stat.size && stamp == stat.mtime_ns && !alias.is_link() && !alias.is_gitlink()) {
+                    return "";
+                }
+            }
+            case None: {
+            }
+        }
+    }
     int mode = 0o100644;
     if (filemode) {
         if (stat.perm() & 0o100 != 0) {
@@ -155,7 +183,8 @@ pub str stage_file(GIT_gitcommon.Ctx ctx, GIT_gitwrite.Idx idx, str path, bool f
 
 // The status of the work tree, or exit 128 after printing why.
 pub GIT_status.Status status_or_die(GIT_gitcommon.Ctx ctx, List<bool> failed) {
-    match (GIT_status.status(ctx.gitdir, ctx.root)) {
+    bool is_icase = GIT_gitcommon.cfg_bool(ctx, "core", "", "ignorecase", false);
+    match (GIT_status.status_with(ctx.gitdir, ctx.root, is_icase)) {
         case Ok(GIT_status.Status found): {
             return found;
         }
@@ -245,6 +274,10 @@ pub int run_add(str start, List<str> overrides, List<str> argv) {
         return 128;
     }
     GIT_gitwrite.Idx idx = loaded.idx;
+    bool is_icase = GIT_gitcommon.cfg_bool(ctx, "core", "", "ignorecase", false);
+    if (is_icase) {
+        idx.enable_icase();
+    }
     List<bool> failed = [];
     GIT_status.Status lib = status_or_die(ctx, failed);
     if (failed.size() > 0) {
@@ -288,7 +321,7 @@ pub int run_add(str start, List<str> overrides, List<str> argv) {
         }
         if (kind == 0 && spec.is_glob) {
             // a glob that matches only ignored files
-            for (str path in walk_files(ctx.root, "")) {
+            for (str path in walk_files_with(ctx.root, "", GIT_gitcommon.precomposed(ctx))) {
                 if (GIT_gitcommon.spec_match([spec], path)) {
                     is_hit = true;
                     break;
@@ -303,12 +336,13 @@ pub int run_add(str start, List<str> overrides, List<str> argv) {
             return GIT_gitcommon.fatal("pathspec '" + given[i] + "' did not match any files");
         }
         if (kind == 1 || kind == 2) {
-            // an existing file nothing lists: ignored
-            if (!is_force) {
+            // an existing file nothing lists: ignored (unless it only
+            // differs in case from a tracked one: that is no news)
+            if (!is_force && !(idx.is_icase && idx.names.has_file(spec.pattern))) {
                 ignored_named.push(spec.pattern);
             }
         } else if (kind == 3) {
-            List<str> inside = walk_files(ctx.root, spec.pattern);
+            List<str> inside = walk_files_with(ctx.root, spec.pattern, GIT_gitcommon.precomposed(ctx));
             if (inside.size() > 0 && !is_force) {
                 ignored_named.push(spec.pattern);
             }
@@ -402,8 +436,8 @@ pub int run_add(str start, List<str> overrides, List<str> argv) {
     if (!is_update) {
         List<str> fresh = [];
         if (is_force) {
-            for (str path in walk_files(ctx.root, "")) {
-                if (!idx.entries.contains(path) && !is_conflicted.contains(path) && GIT_gitcommon.spec_match(specs, path)) {
+            for (str path in walk_files_with(ctx.root, "", GIT_gitcommon.precomposed(ctx))) {
+                if (!idx.entries.contains(path) && !is_conflicted.contains(path) && !(idx.is_icase && idx.names.has_file(path)) && GIT_gitcommon.spec_match(specs, path)) {
                     fresh.push(path);
                 }
             }
@@ -699,6 +733,7 @@ pub int run_mv(str start, List<str> overrides, List<str> argv) {
     bool is_skip = opts.flag("k");
     bool is_dry = opts.flag("dry-run");
     bool is_verbose = opts.flag("verbose");
+    bool is_icase = GIT_gitcommon.cfg_bool(ctx, "core", "", "ignorecase", false);
     GIT_gitwrite.IdxLoaded loaded = GIT_gitwrite.read_idx(ctx.gitdir);
     if (!loaded.ok) {
         return 128;
@@ -758,7 +793,10 @@ pub int run_mv(str start, List<str> overrides, List<str> argv) {
             problem = "not under version control";
         }
         if (problem == "") {
-            if (target_kind != 0 && target != source) {
+            if (is_icase && source_kind != 3 && target_kind != 0 && target != source && GIT_icase.fold(target) == GIT_icase.fold(source)) {
+                // on a volume that folds case this is the file itself
+                // (`mv a.txt A.txt`), which git does not refuse
+            } else if (target_kind != 0 && target != source) {
                 if (!is_force) {
                     problem = "destination exists";
                 } else if (target_kind == 3 || source_kind == 3) {
@@ -797,7 +835,9 @@ pub int run_mv(str start, List<str> overrides, List<str> argv) {
         }
         str from_full = fs.join(ctx.root, move.from);
         str to_full = fs.join(ctx.root, move.to);
-        if (GIT_gitwrite.kind_of(to_full) == 1 || GIT_gitwrite.kind_of(to_full) == 2) {
+        bool is_same_file = is_icase && GIT_icase.fold(move.from) == GIT_icase.fold(move.to);
+        if (!is_same_file && (GIT_gitwrite.kind_of(to_full) == 1 || GIT_gitwrite.kind_of(to_full) == 2)) {
+            // (on a volume that folds case `A.txt` may be the file itself)
             GIT_gitwrite.rm_quiet(to_full);
         }
         match (fs.rename(from_full, to_full)) {

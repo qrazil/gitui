@@ -16,6 +16,7 @@ import term;
 import core.GIT_config;
 import core.GIT_repository;
 import core.GIT_gitstatus;
+import core.GIT_icase;
 
 // --- output ------------------------------------------------------------------------
 
@@ -129,6 +130,9 @@ pub Opened open(str start, List<str> overrides) {
     }
     Ctx ctx = Ctx(gitdir, root, prefix, overrides, GIT_config.effective(gitdir));
     ctx.is_bare = is_bare;
+    if (precomposed(ctx)) {
+        ctx.prefix = GIT_icase.nfc(ctx.prefix);
+    }
     return Opened(true, ctx);
 }
 
@@ -168,6 +172,11 @@ pub bool cfg_bool(Ctx ctx, str section, str subsection, str key, bool fallback) 
             return fallback;
         }
     }
+}
+
+/// `core.precomposeunicode` in effect (macOS only, as in git).
+pub bool precomposed(Ctx ctx) {
+    return cfg_bool(ctx, "core", "", "precomposeunicode", false) && GIT_icase.is_macos();
 }
 
 pub int cfg_int(Ctx ctx, str section, str subsection, str key, int fallback) {

@@ -413,6 +413,28 @@ fx_crisscross() {
     g branch -q -D a1
 }
 
+# A case-only rename (a.txt -> A.txt) needs 1git to honor core.ignorecase when
+# the volume folds case (macOS), as git itself does. $CASE_ONLY is the new
+# name for such a rename, or moved.txt when this 1git does not honor it on this
+# volume (the cases then still run, as plain renames).
+probe_case_only() {
+    local d=$WORK/icase-probe
+    rm -rf "$d"; mkdir -p "$d/.git"; : > "$d/.git/config"
+    if [ ! -e "$d/.git/CoNfIg" ]; then
+        rm -rf "$d"
+        echo A.txt
+        return
+    fi
+    rm -rf "$d"; mkdir -p "$d"
+    if (cd "$d" && "$OURS" init -q . > /dev/null 2>&1 && [ "$(git config --local core.ignorecase)" = true ]); then
+        echo A.txt
+    else
+        echo moved.txt
+    fi
+    rm -rf "$d"
+}
+CASE_ONLY=$(probe_case_only)
+
 for more in "$HERE"/compare_merge_*.sh; do
     . "$more"
 done

@@ -80,6 +80,7 @@
 import io;
 import fs;
 import text;
+import text.unicode;
 import core.GIT_repository;
 
 /// Why the ignore rules for a repository could not be loaded. Payload-free
@@ -135,6 +136,9 @@ int IgnoreFile.cmp(IgnoreFile other) {
 /// excluded), ready for repeated, I/O-free `is_ignored` calls.
 pub type Ignore {
     List<IgnoreFile> files;
+    // `core.ignorecase`: patterns and paths are compared folded (ASCII, as
+    // git's wildmatch with WM_CASEFOLD does)
+    bool is_icase = false;
 }
 
 /// Is `relpath` -- a file, repository-relative, `/`-separated, exactly as
@@ -146,7 +150,11 @@ pub type Ignore {
 /// every ancestor is clear does the file's own name get checked against the
 /// patterns that reach it.
 pub bool Ignore.is_ignored(str relpath) {
-    List<str> segments = split_segments(relpath);
+    str spelled = relpath;
+    if (is_icase) {
+        spelled = relpath.to_lower();
+    }
+    List<str> segments = split_segments(spelled);
     int segment_count = segments.size();
     for (int depth in 1 .. segment_count) {
         if (is_path_matched(files, segments, depth, true)) {
@@ -161,11 +169,18 @@ pub bool Ignore.is_ignored(str relpath) {
 /// anywhere is not an error -- it is a repository with no rules, which
 /// `is_ignored` then always answers `false` for.
 pub Result<Ignore, Error> load(str gitdir, str worktree) {
+    return load_with(gitdir, worktree, false, false);
+}
+
+/// `load`, with `core.ignorecase` given: when true every pattern and every
+/// candidate path is compared case-folded. `is_precomposed` (`core.
+/// precomposeunicode`) reads the work tree's directory names as NFC.
+pub Result<Ignore, Error> load_with(str gitdir, str worktree, bool is_icase, bool is_precomposed) {
     List<IgnoreFile> files = [];
     str excl = fs.join(GIT_repository.common(gitdir), "info/exclude");
     match (io.read(excl)) {
         case Ok(str contents): {
-            files.push(IgnoreFile([], parse_patterns(contents)));
+            files.push(IgnoreFile([], parse_patterns(contents, is_icase)));
         }
         case Err: {
         }
@@ -181,6 +196,9 @@ pub Result<Ignore, Error> load(str gitdir, str worktree) {
                 if (relative_path != ".gitignore" && !relative_path.ends_with("/.gitignore")) {
                     continue;
                 }
+                if (is_precomposed) {
+                    relative_path = nfc_of(relative_path);
+                }
                 if (!fs.is_file(file_path)) {
                     continue;
                 }
@@ -190,7 +208,10 @@ pub Result<Ignore, Error> load(str gitdir, str worktree) {
                         if (relative_path != ".gitignore") {
                             directory = text.strip_suffix(relative_path, "/.gitignore");
                         }
-                        files.push(IgnoreFile(split_segments(directory), parse_patterns(contents)));
+                        if (is_icase) {
+                            directory = directory.to_lower();
+                        }
+                        files.push(IgnoreFile(split_segments(directory), parse_patterns(contents, is_icase)));
                     }
                     case Err: {
                     }
@@ -202,7 +223,9 @@ pub Result<Ignore, Error> load(str gitdir, str worktree) {
         }
     }
     files.sort();
-    return Result<Ignore, Error>.Ok(Ignore(files));
+    Ignore found = Ignore(files);
+    found.is_icase = is_icase;
+    return Result<Ignore, Error>.Ok(found);
 }
 
 // The last-match-wins answer for the candidate made of `segs[0 .. k)`, over
@@ -241,12 +264,26 @@ bool is_path_matched(List<IgnoreFile> files, List<str> segments, int depth, bool
     return is_matched;
 }
 
+// `name` in NFC when it has a byte above 0x7f.
+str nfc_of(str name) {
+    for (int byte_value in name.to_bytes()) {
+        if (byte_value >= 0x80) {
+            return unicode.nfc(name);
+        }
+    }
+    return name;
+}
+
 // --- one .gitignore file's text, into `Pattern`s -----------------------------
 
-List<Pattern> parse_patterns(str content) {
+List<Pattern> parse_patterns(str content, bool is_icase) {
     List<Pattern> out = [];
     for (str raw in text.lines(content)) {
-        match (parse_line(raw)) {
+        str line = raw;
+        if (is_icase) {
+            line = raw.to_lower();
+        }
+        match (parse_line(line)) {
             case Some(Pattern pattern): {
                 out.push(pattern);
             }

@@ -9,6 +9,7 @@ import core.GIT_gitcommon;
 import core.GIT_gitstatus;
 import core.GIT_gitwrite;
 import core.GIT_ignore;
+import core.GIT_icase;
 
 str usage_text() {
     return "usage: git clean [-d] [-f] [-i] [-n] [-q] [-e <pattern>] [-x | -X] [--] [<pathspec>...]";
@@ -40,7 +41,18 @@ type Scan {
     List<str> specs;
     bool has_glob = false;
     bool is_all = false;
+    // `core.ignorecase`: both maps are keyed by folded name
+    bool is_icase = false;
+    // `core.precomposeunicode`: directory entries are read as NFC
+    bool is_pre = false;
     List<Entry> entries = [];
+}
+
+str Scan.key(str name) {
+    if (is_icase) {
+        return GIT_icase.fold(name);
+    }
+    return name;
 }
 
 bool Scan.is_dir_ignored(str dir) {
@@ -68,7 +80,8 @@ bool Scan.is_spec_inside(str dir) {
 Facts Scan.facts_of(str dir) {
     Facts out = Facts();
     match (fs.listdir(fs.join(root, dir))) {
-        case Ok(List<str> names): {
+        case Ok(List<str> raw_names): {
+            List<str> names = nfc_names(raw_names, is_pre);
             for (str name in names) {
                 if (name == ".git") {
                     continue;
@@ -121,7 +134,8 @@ void Scan.walk_tracked(str dir) {
         full = fs.join(root, dir);
     }
     match (fs.listdir(full)) {
-        case Ok(List<str> names): {
+        case Ok(List<str> raw_names): {
+            List<str> names = nfc_names(raw_names, is_pre);
             names.sort();
             for (str name in names) {
                 if (name == ".git" && dir == "") {
@@ -133,14 +147,14 @@ void Scan.walk_tracked(str dir) {
                 }
                 int kind = GIT_gitwrite.kind_of(fs.join(root, rel));
                 if (kind == 3) {
-                    if (tracked_dirs.contains(rel)) {
+                    if (tracked_dirs.contains(key(rel))) {
                         walk_tracked(rel);
                     } else if (is_repository(rel)) {
                         add(rel + "/", true, false, true, false);
                     } else {
                         untracked_dir(rel, false);
                     }
-                } else if (!tracked_files.contains(rel)) {
+                } else if (!tracked_files.contains(key(rel))) {
                     add(rel, false, ignore.is_ignored(rel), false, false);
                 }
             }
@@ -182,7 +196,8 @@ void Scan.untracked_dir(str dir, bool is_nested) {
         return;
     }
     match (fs.listdir(fs.join(root, dir))) {
-        case Ok(List<str> names): {
+        case Ok(List<str> raw_names): {
+            List<str> names = nfc_names(raw_names, is_pre);
             names.sort();
             for (str name in names) {
                 if (name == ".git") {
@@ -274,7 +289,7 @@ pub int run_clean(str start, List<str> overrides, List<str> argv) {
         // from a subdirectory, clean works below it
         specs.push(ctx.prefix);
     }
-    match (GIT_ignore.load(ctx.gitdir, ctx.root)) {
+    match (GIT_ignore.load_with(ctx.gitdir, ctx.root, GIT_gitcommon.cfg_bool(ctx, "core", "", "ignorecase", false), GIT_gitcommon.precomposed(ctx))) {
         case Ok(GIT_ignore.Ignore ignore): {
             return clean_with(ctx, ignore, specs, named_count, is_dirs, is_all, is_only_ignored, is_dry, is_quiet, force_count);
         }
@@ -284,16 +299,35 @@ pub int run_clean(str start, List<str> overrides, List<str> argv) {
     }
 }
 
+List<str> nfc_names(List<str> names, bool is_pre) {
+    if (!is_pre) {
+        return names;
+    }
+    List<str> out = [];
+    for (str name in names) {
+        out.push(GIT_icase.nfc(name));
+    }
+    return out;
+}
+
+str fold_if(bool is_icase, str name) {
+    if (is_icase) {
+        return GIT_icase.fold(name);
+    }
+    return name;
+}
+
 int clean_with(GIT_gitcommon.Ctx ctx, GIT_ignore.Ignore ignore, List<str> specs, int named_count, bool is_dirs, bool is_all, bool is_only_ignored, bool is_dry, bool is_quiet, int force_count) {
     GIT_gitwrite.IdxLoaded loaded_index = GIT_gitwrite.read_idx(ctx.gitdir);
     Map<str, bool> tracked_files = {};
     Map<str, bool> tracked_dirs = {};
+    bool is_icase = GIT_gitcommon.cfg_bool(ctx, "core", "", "ignorecase", false);
     if (loaded_index.ok) {
         for (str path in loaded_index.idx.sorted_paths()) {
-            tracked_files.set(path, true);
+            tracked_files.set(fold_if(is_icase, path), true);
             str dir = GIT_gitwrite.dirname(path);
             while (dir != "" && dir != ".") {
-                tracked_dirs.set(dir, true);
+                tracked_dirs.set(fold_if(is_icase, dir), true);
                 dir = GIT_gitwrite.dirname(dir);
             }
         }
@@ -305,6 +339,8 @@ int clean_with(GIT_gitcommon.Ctx ctx, GIT_ignore.Ignore ignore, List<str> specs,
         }
     }
     scan.is_all = is_all;
+    scan.is_icase = is_icase;
+    scan.is_pre = GIT_gitcommon.precomposed(ctx);
     scan.walk_tracked("");
     List<GIT_gitcommon.Spec> parsed = GIT_gitcommon.parse_specs(specs, "");
     List<Entry> entries = [];

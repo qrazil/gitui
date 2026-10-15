@@ -1,0 +1,208 @@
+// `core.ignorecase` and `core.precomposeunicode`: how git compares names on
+// a volume that folds case (macOS APFS and HFS+ by default, Windows) and one
+// that stores a name in another Unicode normalisation than the one typed.
+//
+// git's own rules, which this module keeps (name-hash.c, dir.c,
+// read-cache.c, compat/precompose_utf8.c):
+//
+//   - the comparison is ASCII-only (`strcasecmp`, `toupper` in the C locale):
+//     a byte above 0x7f folds to itself. `str.to_lower()` is exactly that.
+//   - the index keeps the spelling it was given first. A lookup that folds
+//     answers with that spelling (`ls-files` and the commit show index case).
+//   - a file is "tracked" for the untracked scan when its whole path folds to
+//     an index path; a directory is "in the index" when it folds to a
+//     directory above an index path (`index_dir_exists`), or names a gitlink.
+//   - `add` takes the directory spelling of the index for the new path
+//     (`adjust_dirname_case`), and a file whose name folds to an index entry
+//     is that entry (`create_alias_ce`).
+//   - `core.precomposeunicode` makes every argument and every directory
+//     entry name NFC (git converts from the volume's NFD with iconv).
+//
+// API
+// ---
+//   GIT_icase.enabled(config)           -> bool   `core.ignorecase`
+//   GIT_icase.precompose(config)        -> bool   `core.precomposeunicode`
+//   GIT_icase.fold(name)                -> str
+//   GIT_icase.nfc(name)                 -> str    NFC when it has non-ASCII bytes
+//   GIT_icase.Names                     the folded name sets of an index
+//   GIT_icase.from_paths(paths)         -> Names
+
+import fs;
+import core.GIT_config;
+import core.GIT_index;
+import text.unicode;
+
+/// `core.ignorecase` from `config` (false when unset).
+pub bool enabled(GIT_config.Config config) {
+    return flag(config, "ignorecase");
+}
+
+/// `core.precomposeunicode` from `config` (false when unset: git only
+/// defaults it on by probing the volume, and the probe writes the key). Only
+/// macOS is a platform git builds the conversion for (its compat layer is
+/// `#ifdef`'d away elsewhere), so elsewhere the key is inert, as in git.
+pub bool precompose(GIT_config.Config config) {
+    return flag(config, "precomposeunicode") && is_macos();
+}
+
+/// Is this macOS (the one platform whose git precomposes names)?
+pub bool is_macos() {
+    return fs.is_directory("/System/Library/CoreServices");
+}
+
+/// `nfc(name)` when `is_on`, else `name`.
+pub str nfc_if(bool is_on, str name) {
+    if (is_on) {
+        return nfc(name);
+    }
+    return name;
+}
+
+bool flag(GIT_config.Config config, str key) {
+    match (config.get("core", "", key)) {
+        case Some(str value): {
+            str lower = value.to_lower();
+            return lower == "true" || lower == "yes" || lower == "on" || lower == "1" || lower == "";
+        }
+        case None: {
+            return false;
+        }
+    }
+}
+
+/// The key a case-insensitive comparison uses (ASCII fold, like git).
+pub str fold(str name) {
+    return name.to_lower();
+}
+
+/// `name` in NFC when it has a byte above 0x7f, else itself.
+pub str nfc(str name) {
+    bool is_ascii = true;
+    for (int byte_value in name.to_bytes()) {
+        if (byte_value >= 0x80) {
+            is_ascii = false;
+            break;
+        }
+    }
+    if (is_ascii) {
+        return name;
+    }
+    return unicode.nfc(name);
+}
+
+/// The names of an index, folded: every file path and every directory above
+/// one, each mapped to the spelling the index has.
+pub type Names {
+    pub Map<str, str> files = {};
+    pub Map<str, str> dirs = {};
+}
+
+/// Add one index path.
+pub void Names.add(str path) {
+    str key = fold(path);
+    if (!files.contains(key)) {
+        files.set(key, path);
+    }
+    int end = path.size();
+    while (true) {
+        int cut = end - 1;
+        while (cut > 0 && path.byte_at(cut) != '/') {
+            cut = cut - 1;
+        }
+        if (cut <= 0) {
+            break;
+        }
+        str dir = path.substr(0, cut);
+        str dir_key = fold(dir);
+        if (dirs.contains(dir_key)) {
+            break;
+        }
+        dirs.set(dir_key, dir);
+        end = cut;
+    }
+}
+
+/// Does an index path fold to `path`?
+pub bool Names.has_file(str path) {
+    return files.contains(fold(path));
+}
+
+/// Does `dir` fold to a directory the index has paths in?
+pub bool Names.has_dir(str dir) {
+    return dirs.contains(fold(dir));
+}
+
+/// The index spelling of file `path`, or `path` itself.
+pub str Names.file_spelling(str path) {
+    return files.get(fold(path)).or(path);
+}
+
+/// `path` with every directory part spelled as the index has it
+/// (`adjust_dirname_case`).
+pub str Names.adjust_dirname(str path) {
+    List<str> parts = path.split("/");
+    if (parts.size() < 2) {
+        return path;
+    }
+    str out = "";
+    str prefix = "";
+    for (int i in 0 .. parts.size() - 1) {
+        if (prefix == "") {
+            prefix = parts[i];
+        } else {
+            prefix = prefix + "/" + parts[i];
+        }
+        match (dirs.get(fold(prefix))) {
+            case Some(str known): {
+                prefix = known;
+            }
+            case None: {
+            }
+        }
+    }
+    out = prefix + "/" + parts[parts.size() - 1];
+    return out;
+}
+
+/// git's `icase_exists` (unpack-trees.c): the file at `full` is, as far as
+/// the volume says, the tracked file `path` folds to -- an entry of
+/// `entries` under another spelling whose size, mtime and kind it has.
+/// Such a file is not "untracked in the way" of the path being written.
+pub bool Names.is_alias_of_tracked(Map<str, GIT_index.Entry> entries, str full, str path) {
+    str spelled = files.get(fold(path)).or("");
+    if (spelled == "" || spelled == path) {
+        return false;
+    }
+    match (entries.get(spelled)) {
+        case Some(GIT_index.Entry entry): {
+            if (entry.is_gitlink() || fs.is_link(full)) {
+                return false;
+            }
+            match (fs.stat(full)) {
+                case Ok(fs.Stat stat): {
+                    if (!stat.is_file()) {
+                        return false;
+                    }
+                    int stamp = entry.mtime_s * 1_000_000_000 + entry.mtime_ns;
+                    return stat.size == entry.size && stat.mtime_ns == stamp && (stat.perm() & 0o111 != 0) == (entry.mode & 0o111 != 0);
+                }
+                case Err(_): {
+                    return false;
+                }
+            }
+        }
+        case None: {
+            return false;
+        }
+    }
+}
+
+/// The folded name sets of `paths` (repository-relative, `/`-separated).
+/// The first spelling of a name wins, as in git's hash.
+pub Names from_paths(List<str> paths) {
+    Names names = Names();
+    for (str path in paths) {
+        names.add(path);
+    }
+    return names;
+}

@@ -63,9 +63,13 @@ Option<GIT_gitwrite.Flat> index_flat_at(GIT_gitwrite.Idx idx, str path) {
 
 // Is the work tree at `path` something an untracked file or directory of
 // ours would be lost to? Ignored files do not count.
-bool is_in_the_way(GIT_gitcommon.Ctx ctx, str path, Option<GIT_ignore.Ignore> ignore, Map<str, bool> going) {
+bool is_in_the_way(GIT_gitcommon.Ctx ctx, GIT_gitwrite.Idx idx, str path, Option<GIT_ignore.Ignore> ignore, Map<str, bool> going) {
     str full = fs.join(ctx.root, path);
     int kind = GIT_gitwrite.kind_of(full);
+    if (kind == 1 && idx.is_icase && idx.names.is_alias_of_tracked(idx.entries, full, path)) {
+        // the volume answers for a tracked file under another case
+        return false;
+    }
     if (kind == 0) {
         // a file standing where a parent directory has to be
         str up = GIT_gitwrite.dirname(path);
@@ -86,7 +90,7 @@ bool is_in_the_way(GIT_gitcommon.Ctx ctx, str path, Option<GIT_ignore.Ignore> ig
     }
     if (kind == 3) {
         // an empty directory may go; so may one whose files all go
-        List<str> inside = GIT_gitadd.walk_files(ctx.root, path);
+        List<str> inside = GIT_gitadd.walk_files_with(ctx.root, path, GIT_gitcommon.precomposed(ctx));
         for (str file in inside) {
             if (!going.contains(file)) {
                 return true;
@@ -114,7 +118,11 @@ pub Plan two_way(GIT_gitcommon.Ctx ctx, GIT_gitstore.Store store, GIT_gitwrite.I
     Plan plan = Plan();
     bool is_filemode_on = GIT_gitcommon.cfg_bool(ctx, "core", "", "filemode", true);
     Option<GIT_ignore.Ignore> ignore = Option<GIT_ignore.Ignore>.None;
-    match (GIT_ignore.load(ctx.gitdir, ctx.root)) {
+    bool is_icase = GIT_gitcommon.cfg_bool(ctx, "core", "", "ignorecase", false);
+    if (is_icase && !idx.is_icase) {
+        idx.enable_icase();
+    }
+    match (GIT_ignore.load_with(ctx.gitdir, ctx.root, is_icase, GIT_gitcommon.precomposed(ctx))) {
         case Ok(GIT_ignore.Ignore loaded): {
             ignore = Option<GIT_ignore.Ignore>.Some(loaded);
         }
@@ -211,7 +219,7 @@ pub Plan two_way(GIT_gitcommon.Ctx ctx, GIT_gitstore.Store store, GIT_gitwrite.I
                     local.push(path);
                     continue;
                 }
-                if (is_in_the_way(ctx, path, ignore, going)) {
+                if (is_in_the_way(ctx, idx, path, ignore, going)) {
                     untracked.push(path);
                     continue;
                 }

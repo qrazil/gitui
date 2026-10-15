@@ -88,6 +88,8 @@ import core.GIT_object;
 import core.GIT_refs;
 import core.GIT_index;
 import core.GIT_ignore;
+import core.GIT_icase;
+import core.GIT_config;
 
 /// Why a status could not be produced. Payload-free variants wrap the
 /// underlying error (docs/errors-decision.md §4): the path or the object
@@ -222,6 +224,14 @@ pub type Status {
 /// The status of the repository at `gitdir` whose working tree is at
 /// `worktree`.
 pub Result<Status, Error> status(str gitdir, str worktree) {
+    return status_with(gitdir, worktree, GIT_icase.enabled(GIT_config.effective(gitdir)));
+}
+
+/// `status`, with `core.ignorecase` given (a `-c core.ignorecase=...` on the
+/// command line is not in the files `status` reads it from): a work-tree path
+/// that folds to an index path is that path, not an untracked file.
+pub Result<Status, Error> status_with(str gitdir, str worktree, bool is_icase) {
+    bool is_pre = GIT_icase.precompose(GIT_config.effective(gitdir));
     Map<str, GIT_index.Entry> staged_entries = {};
     List<Unmerged> unmerged = [];
     List<str> conflict_order = [];
@@ -282,7 +292,7 @@ pub Result<Status, Error> status(str gitdir, str worktree) {
             return Result<Status, Error>.Err(error);
         }
     }
-    List<WFile> worktree_files = list_worktree(worktree)?;
+    List<WFile> worktree_files = list_worktree(worktree, is_pre)?;
     Map<str, bool> wt_link = {};
     for (WFile file in worktree_files) {
         wt_link.set(file.path, file.is_link);
@@ -361,9 +371,21 @@ pub Result<Status, Error> status(str gitdir, str worktree) {
             }
         }
     }
-    GIT_ignore.Ignore ignore = load_ignore(gitdir, worktree)?;
+    GIT_ignore.Ignore ignore = load_ignore(gitdir, worktree, is_icase, is_pre)?;
     List<bytes> untracked = [];
+    GIT_icase.Names folded = GIT_icase.Names();
+    if (is_icase) {
+        for (str path in staged_entries.keys()) {
+            folded.add(path);
+        }
+        for (str path in conflicts.keys()) {
+            folded.add(path);
+        }
+    }
     for (WFile file in worktree_files) {
+        if (is_icase && folded.has_file(file.path)) {
+            continue;
+        }
         if (!staged_entries.contains(file.path) && !conflicts.contains(file.path) && !ignore.is_ignored(file.path)) {
             untracked.push(file.path.to_bytes());
         }
@@ -471,8 +493,8 @@ Result<Option<str>, Error> head_tree(str gitdir) {
 // the same shape `commit_tree` below uses for `GIT_object.Error` -- so `status`
 // can propagate it with a plain `?` (§6.3: `?`'s error type must match the
 // enclosing function's exactly, with no conversion).
-Result<GIT_ignore.Ignore, Error> load_ignore(str gitdir, str worktree) {
-    match (GIT_ignore.load(gitdir, worktree)) {
+Result<GIT_ignore.Ignore, Error> load_ignore(str gitdir, str worktree, bool is_icase, bool is_precomposed) {
+    match (GIT_ignore.load_with(gitdir, worktree, is_icase, is_precomposed)) {
         case Ok(GIT_ignore.Ignore ignore): {
             return Result<GIT_ignore.Ignore, Error>.Ok(ignore);
         }
@@ -558,7 +580,7 @@ type WFile {
 // Every regular file and symlink under `worktree`, `.git` excluded, as paths
 // relative to it. A directory contributes nothing itself -- only what is
 // inside it, which `fs.walk` already visits.
-Result<List<WFile>, Error> list_worktree(str worktree) {
+Result<List<WFile>, Error> list_worktree(str worktree, bool is_precomposed) {
     List<WFile> out = [];
     str base = fs.join(worktree, "");
     match (fs.walk(worktree)) {
@@ -568,6 +590,8 @@ Result<List<WFile>, Error> list_worktree(str worktree) {
                 if (relative_path == ".git" || relative_path.starts_with(".git/")) {
                     continue;
                 }
+                // `core.precomposeunicode`: the name as git's readdir hands it over
+                relative_path = GIT_icase.nfc_if(is_precomposed, relative_path);
                 if (fs.is_link(path)) {
                     out.push(WFile(relative_path, true));
                 } else if (fs.is_directory(path)) {

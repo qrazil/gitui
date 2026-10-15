@@ -11,6 +11,7 @@ import io;
 import os;
 import fs;
 import core.GIT_config;
+import core.GIT_icase;
 import core.GIT_object;
 import core.GIT_refs;
 import core.GIT_reflog;
@@ -24,6 +25,41 @@ import net.GIT_transport;
 const str CLONE_USAGE = "usage: git clone [<options>] [--] <repo> [<dir>]";
 const str INIT_USAGE = "usage: git init [-q | --quiet] [--bare] [--template=<template-directory>]\n                [--separate-git-dir <git-dir>] [--object-format=<format>]\n                [-b <branch-name> | --initial-branch=<branch-name>]\n                [--shared[=<permissions>]] [<directory>]";
 
+/// The `[core]` lines git adds after probing the volume the repository is on:
+/// `ignorecase = true` when `config` can be reached as `CoNfIg`, and on macOS
+/// `precomposeunicode` (unless the user's own configuration has it) from
+/// creating `ä` precomposed and asking for it decomposed. "" when neither.
+pub str probe_volume(str gitdir) {
+    str lines = "";
+    if (fs.is_file(fs.join(gitdir, "CoNfIg"))) {
+        lines = lines + "\tignorecase = true\n";
+    }
+    if (GIT_icase.is_macos() && GIT_config.effective(gitdir).get("core", "", "precomposeunicode").is_none()) {
+        // U+00E4, and `a` followed by U+0308
+        str nfc = fs.join(gitdir, "\u{e4}");
+        str nfd = fs.join(gitdir, "a\u{308}");
+        match (io.write(nfc, "")) {
+            case Ok(_): {
+                bool is_same = fs.is_present(nfd);
+                match (fs.remove(nfc)) {
+                    case Ok(_): {
+                    }
+                    case Err(_): {
+                    }
+                }
+                if (is_same) {
+                    lines = lines + "\tprecomposeunicode = true\n";
+                } else {
+                    lines = lines + "\tprecomposeunicode = false\n";
+                }
+            }
+            case Err(_): {
+            }
+        }
+    }
+    return lines;
+}
+
 /// Make the skeleton of a repository at `gitdir`.
 pub bool make_repo(str gitdir, bool is_bare, str branch, str format) {
     List<str> dirs = [gitdir, fs.join(gitdir, "objects"), fs.join(fs.join(gitdir, "objects"), "info"), fs.join(fs.join(gitdir, "objects"), "pack"), fs.join(gitdir, "refs"), fs.join(fs.join(gitdir, "refs"), "heads"), fs.join(fs.join(gitdir, "refs"), "tags"), fs.join(gitdir, "hooks"), fs.join(gitdir, "info")];
@@ -36,7 +72,13 @@ pub bool make_repo(str gitdir, bool is_bare, str branch, str format) {
             }
         }
     }
-    str config = "[core]\n";
+    // git writes `extensions.objectformat` before it settles the rest of
+    // [core] (the section it then appends to)
+    str config = "";
+    if (format == "sha256") {
+        config = "[extensions]\n\tobjectformat = sha256\n";
+    }
+    config = config + "[core]\n";
     if (format == "sha256") {
         config = config + "\trepositoryformatversion = 1\n";
     } else {
@@ -48,14 +90,24 @@ pub bool make_repo(str gitdir, bool is_bare, str branch, str format) {
     } else {
         config = config + "\tbare = false\n\tlogallrefupdates = true\n";
     }
-    if (format == "sha256") {
-        config = config + "[extensions]\n\tobjectformat = sha256\n";
-    }
     match (io.write(fs.join(gitdir, "config"), config)) {
         case Ok(_): {
         }
         case Err(_): {
             return false;
+        }
+    }
+    // what git's `create_default_files` finds out about the volume (setup.c):
+    // does `CoNfIg` name the `config` just written, and does a precomposed
+    // name answer to its decomposed spelling
+    str probed = probe_volume(gitdir);
+    if (probed != "") {
+        match (io.write(fs.join(gitdir, "config"), config + probed)) {
+            case Ok(_): {
+            }
+            case Err(_): {
+                return false;
+            }
         }
     }
     match (io.write(fs.join(gitdir, "HEAD"), "ref: refs/heads/" + branch + "\n")) {

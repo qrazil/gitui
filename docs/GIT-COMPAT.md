@@ -537,7 +537,58 @@ Deliberate departures, and gaps:
   ~40 s at `-O0`, a 21 MB repository 7 s at `-O2`). This is an m31 library
   limit, not worked around.
 - `init` writes no templates (no sample hooks, `info/exclude`, `description`).
-- The advertised user agent is `1git/0.18.0`.
+- The advertised user agent is `1git/0.19.0`.
+
+## Case-insensitive and Unicode-normalizing volumes (0.19.0)
+
+`init` and `clone` probe the volume the way git's `create_default_files`
+does (`setup.c`, git 2.55): `core.ignorecase = true` is written when
+`.git/CoNfIg` answers for the `config` just written; on macOS also
+`core.precomposeunicode`, `true` when a file created as U+00E4 can be opened
+as `a` + U+0308, `false` when not (and not at all when the user's own
+configuration already has the key). The keys go after `logallrefupdates` in
+`[core]`, in that order, so `.git/config` is byte for byte git's (for SHA-256
+the `[extensions]` section comes first, as in git). `core.symlinks` is not
+probed.
+
+With `core.ignorecase=true` the commands follow git's `dir.c`, `name-hash.c`,
+`read-cache.c` and `unpack-trees.c`:
+
+- names are folded the way git folds them: ASCII only (`strcasecmp`);
+- `status`, `add`, `clean`, `stash -u`: a work-tree file whose whole path
+  folds to an index path is that file, not an untracked one; a directory that
+  folds to a directory of the index is walked, not collapsed to `dir/` (and
+  `clean`/`stash -u` leave it standing); `.gitignore` patterns match folded;
+- `add`: the directories of a new file take the spelling the index has
+  (`add DIR/new.txt` stages `dir/new.txt`); a name that folds to an entry is
+  that entry and, when the file already matches it, nothing is staged; a case
+  variant of a tracked file is no news (no "ignored" hint);
+- `mv a.txt A.txt` does not refuse "destination exists" for the same file
+  under another case, and does not delete it first;
+- `switch`, `checkout`, `reset --hard`, `merge`, `cherry-pick`, `revert`,
+  `rebase`, `stash pop`: a work-tree file that only differs in case from a
+  tracked path and whose size and mtime are the index entry's is the tracked
+  file itself (git's `icase_exists`), so a merge that renames `a.txt` to
+  `A.txt` does not report an untracked file in the way;
+- the index keeps its entries' spelling: nothing renames an entry for a
+  work-tree file's case.
+
+With `core.precomposeunicode=true` (macOS only: elsewhere git does not
+compile the conversion in, and the key is inert here too) every argument after
+the subcommand, the directory the command runs in, and every name read from a
+work-tree directory are converted to NFC (`text.unicode.nfc`).
+
+Gaps: `core.ignorecase` and `core.precomposeunicode` are read from the
+configuration files by the library layers (the merge, rebase, stash and
+undo engines and `mgit`); `-c core.ignorecase=true` is honoured by `status`,
+`add`, `mv`, `clean`, `switch`, `checkout` and `init`/`clone`
+only. A case conflict between refs (`refs/heads/foo` and `refs/heads/Foo/bar`
+with `ignorecase`), the "the following paths have collided" warning of a clone
+onto a folding volume, and `git mv dir Dir` (which git itself refuses on such
+a volume) are not reproduced. Tests run on a case-sensitive volume with the
+config set, and a hard link standing in for the same file under another case
+(`scripts/compare_write.sh icase`, `scripts/compare_merge_icase.sh`); on
+macOS they run on the real volume.
 
 ## Order
 

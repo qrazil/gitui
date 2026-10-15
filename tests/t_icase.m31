@@ -1,0 +1,70 @@
+// Drives `GIT_icase.m31` so `test_icase.sh` can check it against known
+// answers (and Python's `unicodedata` for NFC).
+//
+//   ./t_icase nfc <text>                       the text in NFC
+//   ./t_icase fold <text>                      ASCII-only fold
+//   ./t_icase file <name> <path>...            the index spelling of <name>, or `-`
+//   ./t_icase dir <name> <path>...             `yes` when <name> folds to a directory of the paths
+//   ./t_icase adjust <name> <path>...          <name> with its directories spelled as the paths have them
+//   ./t_icase config <key> <text>              `core.<key>` of the config <text>: true | false
+
+import core.GIT_icase;
+import core.GIT_config;
+import io;
+import os;
+
+List<str> argv = os.arguments();
+if (argv.size() < 3) {
+    io.eprint("usage: t_icase nfc|fold|file|dir|adjust|config <arg> [path...]");
+    os.exit(2);
+}
+str operation = argv[1];
+str arg = argv[2];
+List<str> paths = [];
+for (int i in 3 .. argv.size()) {
+    paths.push(argv[i]);
+}
+GIT_icase.Names names = GIT_icase.from_paths(paths);
+if (operation == "nfc") {
+    print(GIT_icase.nfc(arg));
+} else if (operation == "fold") {
+    print(GIT_icase.fold(arg));
+} else if (operation == "file") {
+    if (names.has_file(arg)) {
+        print(names.file_spelling(arg));
+    } else {
+        print("-");
+    }
+} else if (operation == "dir") {
+    if (names.has_dir(arg)) {
+        print("yes");
+    } else {
+        print("no");
+    }
+} else if (operation == "adjust") {
+    print(names.adjust_dirname(arg));
+} else if (operation == "config") {
+    str body = "";
+    if (paths.size() > 0) {
+        body = paths[0];
+    }
+    match (GIT_config.parse(body)) {
+        case Ok(GIT_config.Config config): {
+            bool is_on = GIT_icase.enabled(config);
+            if (arg != "ignorecase") {
+                is_on = GIT_icase.precompose(config);
+            }
+            if (is_on) {
+                print("true");
+            } else {
+                print("false");
+            }
+        }
+        case Err(_): {
+            print("parse error");
+        }
+    }
+} else {
+    io.eprint("unknown operation " + operation);
+    os.exit(2);
+}

@@ -4,7 +4,7 @@
 #
 #   bash scripts/compare_write.sh <1git-binary> [workdir] [group...]
 #
-# groups: add rm mv restore reset commit switch checkout branch tag gerrit misc patch
+# groups: add rm mv restore reset commit switch checkout branch tag gerrit misc patch icase
 #         (default: all)
 #
 # A case is a fixture (built twice from the same script with fixed identities
@@ -33,7 +33,7 @@ mkdir -p "$WORK"
 WORK=$(cd "$WORK" && pwd)
 shift
 shift || true
-GROUPS_WANTED=${*:-add rm mv restore reset commit switch checkout branch tag gerrit misc patch}
+GROUPS_WANTED=${*:-add rm mv restore reset commit switch checkout branch tag gerrit misc patch icase}
 
 # shellcheck source=fixtures_look.sh
 . "$HERE/fixtures_look.sh"
@@ -958,6 +958,97 @@ if wanted misc; then
     case_ "branch -d after a merge commit" fx_merge ':' 'G branch -d feat'
     case_ "commit with a long subject" fx_base 'echo m >> a.txt; git add a.txt' 'G commit -m "a very long subject line that goes on and on and on and on and on and on and on and on and on and on"'
     case_ "commit message with CR LF" fx_base 'echo m >> a.txt; git add a.txt' 'G commit -m "$(printf "crlf subject\r\n\r\nbody\r\n")"'
+fi
+
+
+# --- core.ignorecase -----------------------------------------------------------------------
+# The work tree here is case-sensitive; `core.ignorecase=true` makes git (and 1git)
+# compare names against the index the way it does on a case-insensitive volume.
+
+fx_case() {
+    fx_base "$1"
+    mkdir -p Docs
+    printf 'rd\n' > Docs/Readme.md
+    printf 'mk\n' > Makefile
+    g add -A
+    commit_at "case names"
+}
+
+IC='git config core.ignorecase true'
+fx_dir() { rm -rf "$1"; mkdir -p "$1"; }
+if wanted icase; then
+    case_ "icase: status after a case-only rename" fx_case "$IC; mv a.txt A.txt" 'G status -s; G status --porcelain=v2 -b'
+    case_ "icase: untracked case variant of a tracked file" fx_case "$IC; echo n > B.TXT" 'G status -s; G status --porcelain=v2 -b'
+    case_ "icase: untracked case variant of a tracked directory" fx_case "$IC; mkdir DIR; echo n > DIR/new.txt" 'G status -s -uall; G status -s'
+    case_ "icase: untracked variant, nested" fx_case "$IC; mkdir -p docs; echo n > docs/README.MD; echo m > docs/new.md" 'G status -s -uall'
+    case_ "icase: add a case variant of a tracked file" fx_case "$IC; echo n > B.TXT" 'G add B.TXT; G status -s; git ls-files -s'
+    case_ "icase: add after a case-only rename" fx_case "$IC; mv a.txt A.txt" 'G add A.txt; G status -s; git ls-files'
+    case_ "icase: add -A after a case-only rename" fx_case "$IC; mv a.txt A.txt" 'G add -A; G status -s; git ls-files'
+    case_ "icase: add . after a case-only rename" fx_case "$IC; mv a.txt A.txt" 'G add .; G status -s; git ls-files'
+    case_ "icase: add a new file in a case variant directory" fx_case "$IC; mkdir DIR; echo n > DIR/new.txt" 'G add DIR/new.txt; git ls-files'
+    case_ "icase: add changed file by variant name" fx_case "$IC; echo m >> a.txt" 'G add A.TXT; G status -s'
+    case_ "icase: add -u after rename" fx_case "$IC; mv a.txt A.txt" 'G add -u; G status -s; git ls-files'
+    case_ "icase: rm by variant name" fx_case "$IC" 'G rm A.TXT; G status -s'
+    case_ "icase: rm --cached by variant name" fx_case "$IC" 'G rm --cached B.txt; G status -s'
+    case_ "icase: rm -r by variant directory" fx_case "$IC" 'G rm -r DIR; G status -s'
+    case_ "icase: mv to a case-only name" fx_case "$IC" 'G mv a.txt A.txt; G status -s; git ls-files'
+    case_ "icase: mv by variant name" fx_case "$IC" 'G mv B.TXT bb.txt; G status -s'
+    case_ "icase: mv onto a case variant" fx_case "$IC" 'G mv a.txt B.TXT; G status -s'
+    case_ "icase: mv -f onto a case variant" fx_case "$IC" 'G mv -f a.txt B.TXT; G status -s'
+    case_ "icase: mv directory to a case-only name" fx_case "$IC" 'G mv dir Dir; G status -s; git ls-files'
+    case_ "icase: restore by variant name" fx_case "$IC; echo m >> a.txt" 'G restore A.TXT; G status -s'
+    case_ "icase: restore --staged by variant name" fx_case "$IC; echo m >> a.txt; git add a.txt" 'G restore --staged A.TXT; G status -s'
+    case_ "icase: checkout -- by variant name" fx_case "$IC; echo m >> a.txt" 'G checkout -- A.TXT; G status -s'
+    case_ "icase: reset by variant name" fx_case "$IC; echo m >> a.txt; git add a.txt" 'G reset A.TXT; G status -s'
+    case_ "icase: diff by variant name" fx_case "$IC; echo m >> a.txt" 'G diff A.TXT; G diff --stat DIR'
+    case_ "icase: commit by variant name" fx_case "$IC; echo m >> a.txt" 'G commit -m x A.TXT; G status -s'
+    case_ "icase: switch over a case variant untracked" fx_case "$IC; git switch -q side; echo n > Zed.txt; git add Zed.txt; git commit -qm z; git switch -q main; echo mine > zed.txt" 'G switch side; G status -s'
+    case_ "icase: switch where branch has case variant of a tracked file" fx_case "$IC; git switch -q side; git rm -q --cached a.txt; mv a.txt A.txt; git add A.txt; git commit -qm case; git switch -q main" 'G switch side; G status -s; git ls-files'
+    case_ "icase: switch back after case rename" fx_case "$IC; git switch -q side; git mv a.txt A.txt; git commit -qm case; git switch -q main" 'G switch side; git ls-files; G switch main; git ls-files; G status -s'
+    case_ "icase: reset --hard over a case rename" fx_case "$IC; git mv a.txt A.txt; git commit -qm case" 'G reset --hard HEAD~1; git ls-files; G status -s'
+    case_ "icase: clean does not delete case variants of tracked files" fx_case "$IC; echo n > B.TXT; echo m > new.txt" 'G clean -n; G clean -f; G status -s'
+    # A hard link stands in for the same file under another case, which is what
+    # a case-insensitive volume answers (same size, same mtime, same inode).
+    FXR="$IC; git switch -q side; git mv a.txt A.txt; git commit -qm case; git switch -q main"
+    case_ "icase: switch onto a case-only rename, the new name already there" fx_case "$FXR; ln a.txt A.txt" 'G switch side; G status -s; git ls-files'
+    case_ "icase: switch onto a case-only rename, different content there" fx_case "$FXR; echo mine > A.txt" 'G switch side; G status -s; git ls-files'
+    case_ "icase: switch back over the case-only rename" fx_case "$FXR; git switch -q side; ln a.txt a.txt.x; rm a.txt.x" 'G switch main; G status -s; git ls-files'
+    case_ "icase: reset --hard onto a case-only rename" fx_case "$FXR; ln a.txt A.txt" 'G reset --hard side; G status -s; git ls-files'
+    case_ "icase: merge a case-only rename" fx_case "$FXR; ln a.txt A.txt" 'G merge side; G status -s; git ls-files'
+    case_ "icase: merge a case-only rename, different content there" fx_case "$FXR; echo mine > A.txt" 'G merge side; G status -s; git ls-files'
+    case_ "icase: merge a case-only rename over an edit" fx_case "$FXR; echo more >> a.txt; git commit -qam edit" 'G merge side; G status -s; git ls-files'
+    case_ "icase: cherry-pick a case-only rename" fx_case "$FXR; ln a.txt A.txt" 'G cherry-pick side; G status -s; git ls-files'
+    case_ "icase: rebase over a case-only rename" fx_case "$FXR; echo more >> b.txt; git commit -qam edit; git switch -q side" 'G rebase main; G status -s; git ls-files'
+    case_ "icase: checkout a branch with a case-only rename" fx_case "$FXR; ln a.txt A.txt" 'G checkout side; G status -s; git ls-files'
+    case_ "icase: checkout a path from a case-only rename" fx_case "$FXR" 'G checkout side -- A.txt; G status -s; git ls-files'
+    case_ "icase: restore a path from a case-only rename" fx_case "$FXR" 'G restore --source=side --staged --worktree A.txt; G status -s; git ls-files'
+    case_ "icase: stash apply over a case-only rename" fx_case "$IC; echo m >> a.txt; git stash -q; git mv a.txt A.txt; git commit -qm case" 'G stash pop; G status -s; git ls-files'
+    case_ "icase: untracked directory spelled differently" fx_case "$IC; mkdir -p Dir/sub; echo n > Dir/sub/new.txt; echo m > Dir/c.txt" 'G status -s; G status -s -uall; G add -A; G status -s; git ls-files'
+    case_ "icase: add --dry-run -v with a variant directory" fx_case "$IC; mkdir -p Dir; echo n > Dir/new.txt" 'G add -n -v Dir/new.txt; G add -v Dir/new.txt; git ls-files'
+    case_ "icase: add -f with a variant name" fx_case "$IC; echo n > B.TXT" 'G add -f B.TXT; G status -s; git ls-files'
+    case_ "icase: commit -a with a case-only rename" fx_case "$IC; mv a.txt A.txt" 'G commit -am x; git ls-files; G status -s'
+    case_ "icase: rm a case-only renamed file" fx_case "$IC; mv a.txt A.txt" 'G rm a.txt; G status -s'
+    case_ "icase: mv an untracked variant" fx_case "$IC; echo n > B.TXT" 'G mv B.TXT c.txt; G status -s'
+    case_ "icase: ignored file shadows nothing" fx_case "$IC; echo '*.log' > .gitignore; echo n > X.LOG; echo n > a.LOG" 'G status -s --ignored; G add .; G status -s'
+    case_ "icase: mv onto the same file under another case" fx_case "$IC; ln a.txt A.txt" 'G mv a.txt A.txt; G status -s; git ls-files'
+    case_ "icase: mv a file to its own name" fx_case "$IC" 'G mv a.txt a.txt; G status -s'
+    case_ "icase: mv into a case variant of a directory" fx_case "$IC" 'G mv a.txt DIR/a.txt; G status -s; git ls-files'
+    case_ "icase: switch over a case-only directory rename" fx_case "$IC; git switch -q side; git mv dir Dir; git commit -qm dir; git switch -q main" 'G switch side; G status -s; git ls-files; G switch main; G status -s; git ls-files'
+    case_ "icase: untracked file in a variant directory is added under the index spelling" fx_case "$IC; mkdir -p DOCS; echo n > DOCS/New.md" 'G add DOCS/New.md; G status -s; git ls-files'
+    case_ "icase: add with a variant directory and a variant file" fx_case "$IC; mkdir -p DOCS; echo changed > DOCS/README.MD" 'G add DOCS/README.MD; G status -s; git ls-files'
+    # `init` probes the volume by asking whether `.git/CoNfIg` exists: on a
+    # case-insensitive volume it is the `config` just written. Creating the
+    # stray file first makes a case-sensitive one answer the same way.
+    case_ "icase: init on a volume where CoNfIg is config" fx_dir ':' 'mkdir -p .git; : > .git/CoNfIg; G init -q .; cat .git/config >> "$log"'
+    case_ "icase: init --bare on such a volume" fx_dir ':' 'mkdir -p r.git; : > r.git/CoNfIg; G init -q --bare r.git; rm -rf r.git/hooks r.git/info r.git/description; cat r.git/config >> "$log"'
+    case_ "icase: init sha256 on such a volume" fx_dir ':' 'mkdir -p .git; : > .git/CoNfIg; G init -q --object-format=sha256 .; cat .git/config >> "$log"'
+    case_ "icase: init on a case-sensitive volume" fx_dir ':' 'G init -q .; cat .git/config >> "$log"'
+    case_ "icase: init sha256 on a case-sensitive volume" fx_dir ':' 'G init -q --object-format=sha256 .; cat .git/config >> "$log"'
+    # the same through `-c` on the command line, without the repository's config
+    case_ "icase: -c core.ignorecase on status" fx_case "echo n > B.TXT; mkdir DIR; echo n > DIR/new.txt" 'G -c core.ignorecase=true status -s -uall; G status -s -uall'
+    case_ "icase: -c core.ignorecase on add -A" fx_case "mv a.txt A.txt; echo n > B.TXT; mkdir DIR; echo n > DIR/new.txt" 'G -c core.ignorecase=true add -A; G status -s; git ls-files'
+    case_ "icase: -c core.ignorecase on clean" fx_case "echo n > B.TXT; echo z > zzz.txt" 'G -c core.ignorecase=true clean -n; G clean -n'
+    case_ "icase: -c core.ignorecase on mv" fx_case "ln a.txt A.txt" 'G -c core.ignorecase=true mv a.txt A.txt; G status -s'
 fi
 
 [ -f "$HERE/compare_write_more.sh" ] && . "$HERE/compare_write_more.sh"

@@ -32,6 +32,7 @@ import core.GIT_index;
 import core.GIT_ignore;
 import core.GIT_config;
 import core.GIT_status;
+import core.GIT_icase;
 import core.GIT_branches;
 import core.GIT_reflog;
 import core.GIT_repository;
@@ -992,6 +993,10 @@ pub str detached_words(str gitdir, str head_id) {
     return "from " + snap.detached_name;
 }
 
+// With `core.ignorecase`, `tracked_dirs` also holds each directory folded,
+// under this prefix (a real path never starts with a control byte).
+const str ICASE_MARK = "\x01";
+
 // Untracked and ignored paths as git lists them: whole directories that hold
 // nothing tracked collapse to `dir/` (not with -uall), nested repositories
 // are always one `dir/`.
@@ -1035,7 +1040,7 @@ List<str> collapse(List<str> paths, Map<str, bool> tracked_dirs, bool is_all, Ma
                 shown = dir + "/";
                 break;
             }
-            if (!is_all && !tracked_dirs.contains(dir) && !blocked.contains(dir)) {
+            if (!is_all && !tracked_dirs.contains(dir) && !tracked_dirs.contains(ICASE_MARK + GIT_icase.fold(dir)) && !blocked.contains(dir)) {
                 shown = dir + "/";
                 break;
             }
@@ -1157,7 +1162,24 @@ Result<Snapshot, GIT_status.Error> gather(str gitdir, str root, Opts opts, List<
         }
     }
     // --- the library's view of the index and the working tree
-    GIT_status.Status lib = GIT_status.status(gitdir, root)?;
+    bool is_icase = false;
+    match (config_value(opts, GIT_config.effective(gitdir), "core", "ignorecase")) {
+        case Some(str value): {
+            is_icase = bool_value(value, false);
+        }
+        case None: {
+        }
+    }
+    bool is_pre = false;
+    match (config_value(opts, GIT_config.effective(gitdir), "core", "precomposeunicode")) {
+        case Some(str value): {
+            is_pre = bool_value(value, false) && GIT_icase.is_macos();
+        }
+        case None: {
+        }
+    }
+    GIT_icase.Names folded = GIT_icase.Names();
+    GIT_status.Status lib = GIT_status.status_with(gitdir, root, is_icase)?;
     Map<str, HeadItem> staged_index = {};
     Map<str, GIT_index.Entry> entries = {};
     Map<str, bool> tracked_dirs = {};
@@ -1167,6 +1189,9 @@ Result<Snapshot, GIT_status.Error> gather(str gitdir, str root, Opts opts, List<
                 match (entry.path.utf8()) {
                     case Some(str path): {
                         add_dirs(tracked_dirs, path);
+                        if (is_icase) {
+                            folded.add(path);
+                        }
                         if (entry.stage == 0) {
                             staged_index.set(path, HeadItem(entry.mode, entry.id));
                             entries.set(path, entry);
@@ -1178,6 +1203,11 @@ Result<Snapshot, GIT_status.Error> gather(str gitdir, str root, Opts opts, List<
             }
         }
         case Err: {
+        }
+    }
+    if (is_icase) {
+        for (str dir in tracked_dirs.keys()) {
+            tracked_dirs.set(ICASE_MARK + GIT_icase.fold(dir), true);
         }
     }
     Map<str, Change> by_path = {};
@@ -1387,7 +1417,7 @@ Result<Snapshot, GIT_status.Error> gather(str gitdir, str root, Opts opts, List<
             // git does not list an untracked directory that stands where
             // the index has a file (`rm f; mkdir f; echo > f/x`: ` D f`
             // only), unless -uall lists what is in it
-            if (opts.untracked != 2 && path.ends_with("/") && entries.contains(path.substr(0, path.size() - 1))) {
+            if (opts.untracked != 2 && path.ends_with("/") && (entries.contains(path.substr(0, path.size() - 1)) || (is_icase && folded.has_file(path.substr(0, path.size() - 1))))) {
                 continue;
             }
             if (in_spec(specs, path)) {
@@ -1396,7 +1426,7 @@ Result<Snapshot, GIT_status.Error> gather(str gitdir, str root, Opts opts, List<
         }
     }
     if (opts.ignored > 0) {
-        collect_ignored(gitdir, root, entries, tracked_dirs, snap, opts, specs);
+        collect_ignored(gitdir, root, entries, tracked_dirs, snap, opts, specs, is_icase, folded, is_pre);
     }
     // --- upstream
     if (snap.branch != "" && !snap.is_detached && !snap.is_initial) {
@@ -1427,17 +1457,17 @@ Result<Snapshot, GIT_status.Error> gather(str gitdir, str root, Opts opts, List<
 
 // Ignored paths, collapsed to a directory when nothing in it is tracked or
 // untracked.
-void collect_ignored(str gitdir, str root, Map<str, GIT_index.Entry> entries, Map<str, bool> tracked_dirs, Snapshot snap, Opts opts, List<str> specs) {
-    match (GIT_ignore.load(gitdir, root)) {
+void collect_ignored(str gitdir, str root, Map<str, GIT_index.Entry> entries, Map<str, bool> tracked_dirs, Snapshot snap, Opts opts, List<str> specs, bool is_icase, GIT_icase.Names folded, bool is_pre) {
+    match (GIT_ignore.load_with(gitdir, root, is_icase, is_pre)) {
         case Ok(GIT_ignore.Ignore ignore): {
-            ignored_with(ignore, root, entries, tracked_dirs, snap, opts, specs);
+            ignored_with(ignore, root, entries, tracked_dirs, snap, opts, specs, is_icase, folded, is_pre);
         }
         case Err: {
         }
     }
 }
 
-void ignored_with(GIT_ignore.Ignore ignore, str root, Map<str, GIT_index.Entry> entries, Map<str, bool> tracked_dirs, Snapshot snap, Opts opts, List<str> specs) {
+void ignored_with(GIT_ignore.Ignore ignore, str root, Map<str, GIT_index.Entry> entries, Map<str, bool> tracked_dirs, Snapshot snap, Opts opts, List<str> specs, bool is_icase, GIT_icase.Names folded, bool is_pre) {
     List<str> files = [];
     Map<str, bool> blocked = {};
     match (fs.walk(root)) {
@@ -1454,7 +1484,8 @@ void ignored_with(GIT_ignore.Ignore ignore, str root, Map<str, GIT_index.Entry> 
                 if (fs.is_directory(path) && !fs.is_link(path)) {
                     continue;
                 }
-                if (entries.contains(relative)) {
+                relative = GIT_icase.nfc_if(is_pre, relative);
+                if (entries.contains(relative) || (is_icase && folded.has_file(relative))) {
                     continue;
                 }
                 if (ignore.is_ignored(relative)) {

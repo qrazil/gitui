@@ -67,6 +67,8 @@
 
 import fs;
 import core.GIT_checkout;
+import core.GIT_config;
+import core.GIT_icase;
 import diff.GIT_diff3;
 import core.GIT_index;
 import diff.GIT_merge;
@@ -767,8 +769,18 @@ pub Result<Saved, Error> push(str gitdir, str worktree, bool should_include_untr
             }
         }
     }
+    // with `core.ignorecase` a directory that only differs in case from a
+    // tracked one is not an untracked directory (git's `clean -d` keeps it)
+    GIT_icase.Names kept = GIT_icase.Names();
+    bool is_icase = GIT_icase.enabled(GIT_config.effective(gitdir));
+    if (is_icase) {
+        GIT_index.Index current = read_index(gitdir)?;
+        for (GIT_index.Entry entry in current.entries) {
+            kept.add(entry.path.utf8().or(""));
+        }
+    }
     for (bytes path in untracked) {
-        remove_and_prune(worktree, fs.join(worktree, path.utf8().or("")));
+        remove_and_prune(worktree, fs.join(worktree, path.utf8().or("")), is_icase, kept);
     }
     if (should_keep_index) {
         GIT_index.Index fresh = read_index(gitdir)?;
@@ -803,7 +815,7 @@ pub Result<bool, Error> put_on_stack(str gitdir, str commit, str text) {
     return write_ref(gitdir, STASH_REF, commit);
 }
 
-void remove_and_prune(str worktree, str full) {
+void remove_and_prune(str worktree, str full, bool is_icase, GIT_icase.Names kept) {
     match (fs.remove(full)) {
         case Ok: {
         }
@@ -814,6 +826,9 @@ void remove_and_prune(str worktree, str full) {
     str directory = directory_of(full);
     str root = fs.join(worktree, "");
     while (directory != "" && directory != worktree && directory != root && directory.starts_with(worktree)) {
+        if (is_icase && kept.has_dir(directory.substr(root.size(), directory.size()))) {
+            return;
+        }
         match (fs.rmdir(directory)) {
             case Ok: {
             }
