@@ -318,6 +318,16 @@ if build git; then
     done
 fi
 
+# --- `1git add`, `commit`, `switch`, ... against real git ----------------------
+
+if build git; then
+    if out=$(bash scripts/compare_write.sh "$WORK/git" "$WORK/write-fixtures" 2>&1); then
+        note "git write commands: ${out## }"
+    else
+        bad "git write commands" "$out"
+    fi
+fi
+
 # --- the write path: .git/index, loose objects, refs, status -------------------
 #
 # `test_write.sh` shares this script's shell, `$WORK`, `$LANGC`, `build`,

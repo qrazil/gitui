@@ -82,7 +82,8 @@ deliberately differ.
 
 ## Status
 
-Done: `status` (0.11.0), `log`, `show` and `diff` (0.12.0).
+Done: `status` (0.11.0), `log`, `show` and `diff` (0.12.0), `add`, `rm`, `mv`,
+`restore`, `reset`, `commit`, `switch`, `checkout`, `branch` and `tag` (0.13.0).
 
 `1git status` is git's grammar and git's bytes: long form (branch, upstream
 ahead/behind/diverged/gone, detached at/from, merge / cherry-pick / revert /
@@ -165,6 +166,108 @@ changes and unrelated roots. They were also run against this project's own
 repositories (`log --graph --all`, `-p`, `--stat`, `--follow`, `-w`, `-U0`)
 with no difference.
 
+### Change commands, batch 1 (0.13.0)
+
+`scripts/compare_write.sh` builds two identical repositories per case
+(fixed identities and dates, same umask), runs real git on one and `1git`
+on the other, and compares every call's stdout and exit status, then
+`ls-files -s`, refs, HEAD, `status --porcelain=v2 -b`, reflog bytes, the
+work tree (names, modes, content), `.git/config` and the unfinished-
+operation files; `git fsck --strict` must be clean on ours. Commit and tree
+ids come out identical because dates and identities are fixed. 486 cases:
+happy paths and refusals (dirty switch, unmerged paths, non-ff, existing
+branch, detached HEAD, empty repository, root commit, amend of a merge,
+spaces and unicode, executable bit, CRLF, symlinks that exist in commits).
+
+Forms that match git (stdout, status, repository state, object ids):
+
+- `add`: paths, directories, globs, `.`, `-A`/`--all`, `-u`/`--update`,
+  `-f`, `-n`, `-v`, `--chmod=+x|-x`, `--ignore-removal`, `--ignore-errors`,
+  resolving conflicts, deletions, file/directory replacement, ignored-file
+  refusal, `core.filemode`, from a subdirectory.
+- `rm`: `--cached`, `-r`, `-f`, `-n`, `-q`, `--ignore-unmatch`, globs, the
+  three refusals (staged, local, both) and their exit status.
+- `mv`: file, directory, into a directory, several sources, `-f`, `-k`,
+  `-n`, `-v`, every `bad source` / `destination exists` refusal.
+- `restore`: `--staged`, `--worktree`, `--source`, `--ours`/`--theirs`,
+  `--ignore-unmerged`, no-overlay deletion, unmerged refusal.
+- `reset`: `--soft`, `--mixed`, `--hard`, `--keep`, `<tree-ish> -- paths`,
+  `-q`, `ORIG_HEAD`, reflog lines (HEAD only when nothing moves), the
+  `Unstaged changes after reset:` list, clearing merge state.
+- `commit`: `-m` (several), `-F` (file, `-`), `-a`, `--amend`, `--no-edit`,
+  `--allow-empty`, `--allow-empty-message`, `--author`, `--date` (raw, ISO,
+  RFC 2822), `--reset-author`, `-s`, `--fixup`, `--squash`, `-C`, `-c`,
+  `--cleanup`, `-e`, `commit <paths>` (`--only`, `-i`), `-n`/`--no-verify`,
+  merges (`MERGE_HEAD`, `MERGE_MSG`) and cherry-picks (`CHERRY_PICK_HEAD`,
+  the picked author), the editor (`GIT_EDITOR`, `core.editor`, `VISUAL`,
+  `EDITOR`), `commit.template` (including "you did not edit the message"),
+  `core.commentChar`, hooks (`pre-commit`, `prepare-commit-msg`,
+  `commit-msg`, `post-commit`, `core.hooksPath`), the summary with
+  `(root-commit)`, `Author:`, `Date:`, shortstat and rename summary, and
+  the "nothing to commit" status report.
+- **Gerrit**: with `gerrit.createChangeId=true`, or `--change-id` (not a
+  git option), `commit` appends `Change-Id: I<40 hex>` as Gerrit's
+  `commit-msg` hook does: the hash of a commit made of the new tree, the
+  parent, both identities and the message without sign-off and comment
+  lines; the trailer goes after a leading run of `Bug:`/`Issue:`/`Test:`...
+  lines and before the other footer lines (`Signed-off-by:`), or at the end;
+  left alone when a `Change-Id:` exists, on `fixup!`/`squash!` subjects and
+  empty messages. The oracle is `scripts/gerrit-commit-msg.sh`, the 2.x-3.x
+  hook reconstructed from memory of Gerrit's source: compare it with the
+  hook your server serves before relying on id equality.
+- `switch`: `<branch>`, `-c`, `-C`, `--detach`, `-`, `-f`/`--discard-
+  changes`, `-t`/`--track`, the remote-branch guess, the refusals with the
+  paths named, "cannot switch branch while merging", the local-changes list,
+  the upstream report, and git's reflog lines (`checkout: moving from A to
+  B`, `branch: Created from X`, `branch: Reset to X`).
+- `checkout`: the above plus `-b`, `-B`, `checkout <tree-ish> [--] <paths>`,
+  `checkout -- <paths>`, `--ours`/`--theirs`, `checkout HEAD`.
+- `branch`: list (`-v`, `-vv`, `-a`, `-r`, patterns, `--show-current`,
+  `--contains`, `--no-contains`, `--merged`, `--no-merged`, `--points-at`,
+  `--sort=[-]refname`, `--format` atoms `refname[:short]`,
+  `objectname[:short]`, `objecttype`, `HEAD`, `subject`, `upstream:short`),
+  create (`-f`, `--track`, `--no-track`, automatic upstream from a remote
+  branch), `-d`/`-D` (merged check, config and log removed), `-m`/`-M`,
+  `-c`/`-C` (reflog and config follow), `-u`, `--unset-upstream`.
+- `tag`: list (`-l`, patterns, `-n[<n>]`, `--sort=[-]refname|[-]version:
+  refname`, `--contains`, `--no-contains`, `--merged`, `--no-merged`,
+  `--points-at`, `--format`), lightweight, `-a`, `-m`, `-F`, editor, `-f`,
+  `-d`.
+
+Known divergences and gaps (everything else listed above matches):
+
+- **Symlinks in the work tree** (m31 v0.4.2's `fs` has no `readlink`; v0.4.5
+  has it, which would also let `status`/`diff` see retargeted links): `add`
+  of a new or changed symlink is an error naming this; a link already
+  tracked is assumed unchanged by `add -A`, `commit -a` and `rm`'s check;
+  `restore`, `reset --hard` and `checkout` always rewrite the links they
+  are asked about; writing links (`fs.symlink`) and everything about links
+  in commits is exact.
+- `add -p`, `-N` (intent-to-add), `-e`, `-i`, `--pathspec-from-file`;
+  `restore -p`/`-m`, `checkout -p`/`-m`/`--orphan`, `switch -m`/`--orphan`,
+  `reset -p`/`--merge`, `commit --interactive`/`-p`/`--trailer`/`--short`/
+  `--porcelain`, `commit -S`/`tag -s/-u/-v` (signing; `commit.gpgsign=true`
+  refuses), `branch --edit-description`, `tag --column`: error (exit 129,
+  or 128 for signing) naming the option.
+- Paths that are not valid UTF-8 are carried through the index untouched
+  but cannot be named; `commit` refuses when the index holds one.
+- No `.gitattributes` or `core.autocrlf` conversion on `add`/checkout
+  (CRLF content is stored and written as is); no sparse checkout, no
+  submodules (a gitlink is kept, never entered), no linked-worktree checks
+  (`branch -d` of a branch checked out elsewhere is not refused).
+- The index is written without the cached-tree, untracked-cache and fsmonitor
+  extensions and without inode/device/ownership data, so real git
+  re-checks content of files once.
+- Identities: a committer without name or email configured falls back to
+  `$USER` / `<name>@localhost` as the library always has (git's hostname
+  and GECOS lookup is not done); dates without a zone use UTC.
+- Messages on stderr (hints, advice, `fatal:` text) are shorter than git's
+  and not compared; stdout and exit status are.
+- `branch`/`tag` listings: no colour, no `--column`, `--format` knows only
+  the atoms above, `--sort` only the keys above.
+- `commit` does not run `post-rewrite`/`post-checkout` hooks and sets only
+  `GIT_DIR` for hooks.
+
 Known divergences of `status`: object names are seven digits (git sizes the
 abbreviation by object count; `core.abbrev` is not read); `status -v`
 (the diff), `--column`, submodule summaries, `rebase-apply` / `am` state and
@@ -230,9 +333,9 @@ matches; these do not):
 1. Read side, git spelling: ~~`log`~~ ~~`show`~~ ~~`diff`~~ ~~`status`~~ (done) `blame` `cat-file`
    `ls-tree` `ls-files` `rev-parse` `rev-list` `branch` `tag` `describe`
    `shortlog` `grep` `config`.
-2. Write side: `add` `rm` `mv` `restore` `reset` `commit` `checkout`
-   `switch` `branch -d/-m` `tag -a` `stash` `cherry-pick` `revert` `merge`
-   `rebase` (non-interactive first).
+2. Write side: ~~`add`~~ ~~`rm`~~ ~~`mv`~~ ~~`restore`~~ ~~`reset`~~ ~~`commit`~~
+   ~~`checkout`~~ ~~`switch`~~ ~~`branch`~~ ~~`tag`~~ (done, 0.13.0) `stash`
+   `cherry-pick` `revert` `merge` `rebase` (non-interactive first).
 3. Network: `clone` `fetch` `pull` `push` `remote` (HTTP(S) smart protocol
    exists; ssh when m31 grows a client).
 4. The long tail: hooks, `.gitattributes`, filters, worktrees, submodules,

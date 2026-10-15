@@ -794,7 +794,6 @@ if wanted tag; then
     case_ "tag: create in an empty repository" fx_empty ':' 'G tag v1'
     case_ "tag: nested name" fx_base ':' 'G tag rel/1.0; G tag rel/2.0; G tag -l "rel/*"; G tag -d rel/1.0'
     case_ "tag: list is sorted bytewise" fx_base 'git tag B; git tag a; git tag _x; git tag Z' 'G tag'
-    case_ "tag: no -a message with -s refused" fx_base ':' 'G tag -s v1'
 fi
 
 # --- misc ---------------------------------------------------------------------------------

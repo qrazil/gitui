@@ -1,3 +1,23 @@
+# gitui 0.13.0: `1git` change commands in git's spelling
+
+Version 0.13.0, from master eb774bc (0.12.0). No module was renamed or
+removed; six modules were added: `core/GIT_gitwrite.m31` (git's option
+grammar, the index with its conflicts, trees flattened and rebuilt, HEAD,
+identities and dates, `stripspace`, hooks, the editor),
+`core/GIT_gitadd.m31` (`add`, `rm`, `mv`, `restore`),
+`core/GIT_gitcommit.m31` (`reset`, `commit`, Gerrit `Change-Id`),
+`core/GIT_checkoutplan.m31` (a branch switch decided before anything is
+written), `core/GIT_gitbranch.m31` (`switch`, `checkout`, `branch`, `tag`)
+and nothing else. `1git add|rm|mv|restore|reset|commit|switch|checkout|
+branch|tag` take git's own arguments and print git's bytes on stdout; every
+form is compared with real git by `scripts/compare_write.sh` (486 cases,
+object ids identical). In `core/GIT_checkout.m31` `write_path` and
+`remove_path` became `pub`; `core/GIT_branches.m31` gained `delete_ref`;
+`core/GIT_gitstatus.m31` gained `run_into`, `detached_words` and the
+`--commit-header` / `--amend-footer` switches `commit` uses. Nothing to
+migrate. `docs/GIT-COMPAT.md` lists what differs (`add -p`, `-N`,
+symlinks in the work tree, signing).
+
 # gitui 0.12.0: `1git log`, `show` and `diff` in git's spelling
 
 Version 0.12.0, from master d94a9e1 (0.11.0). No module was renamed or

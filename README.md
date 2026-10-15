@@ -36,7 +36,7 @@ import all of them.
 | `diff/` | content work: xdiff, udiff, diff3, hunks, patch, blame, file log, merge, sequencer (cherry-pick, revert), rebase and its todo, stash, undo |
 | `net/` | remotes and transports: remote URLs, wire protocol, smart-HTTP fetch and push, ssh transport, pull |
 | `ui/` | the interactive client: `GIT_client` (the top), and every `GIT_ui_*` layer and overlay |
-| root | `git.m31` (command line client: `1git status`, `log`, `show` and `diff` in git's grammar, `-log`-style plumbing), `gitui.m31` (interactive client), `deps`, `deps.lock` |
+| root | `git.m31` (command line client: `1git status`, `log`, `show`, `diff` and the change commands (`add`, `commit`, `switch`, ...) in git's grammar, `-log`-style plumbing), `gitui.m31` (interactive client), `deps`, `deps.lock` |
 
 Two placements are by import graph, not by name: `GIT_client` is in `ui/` (it imports
 every `GIT_ui_*` module), and `GIT_watch` is in `core/` (it imports only ignore and
@@ -59,6 +59,10 @@ bash scripts/build.sh git.m31         # the command line client -> ./1git
 ./1git log --follow --name-status -- git.m31  # renames and copies followed
 ./1git show HEAD~2 --stat                     # commits, tags, trees, blobs, rev:path
 ./1git diff --cached -w                       # also: A B, A..B, A...B, --stat, --name-status, -U<n>
+./1git add -A && ./1git commit -s -m "msg"    # also add -u/-f, commit --amend/--fixup, -a, -F, paths
+./1git switch -c topic origin/main            # also checkout -b, switch -, --detach, branch -vv, tag -a
+./1git restore --staged --source=HEAD~1 f    # also rm --cached, mv, reset --soft/--hard, restore -W
+./1git -c gerrit.createChangeId=true commit -m "x"   # appends Gerrit's Change-Id trailer
 ./1git -log --max 5                   # the older `-word` grammar, unchanged
 
 bash scripts/build.sh                 # gitui.m31 -> ./mgit   (-o name to rename)
@@ -119,6 +123,7 @@ bash scripts/build.sh                 # gitui.m31 -> ./mgit   (-o name to rename
 | `tests/pty_e2e.py`, `tests/pty_blame_undo.py` | drive `mgit` under a real pty against disposable fixtures, real `git` as the oracle (the second file: blame, history, undo, tags, ahead/behind, `push -u`, auto-refresh) |
 | `scripts/compare.sh` | every command beside the real `git`, compared octet for octet |
 | `scripts/compare_status.sh` | `1git status` beside the real `git status` on disposable fixtures: ~20 forms each, bytes and exit status |
+| `scripts/compare_write.sh` | the change commands beside the real git: two identical repositories per case (fixed identities and dates), then output, exit status, index, refs, reflogs, work tree and `fsck` compared; object ids identical; a reconstruction of Gerrit's `commit-msg` hook (`scripts/gerrit-commit-msg.sh`) is the oracle for `Change-Id` |
 | `scripts/compare_log.sh`, `compare_show.sh`, `compare_diff.sh` | `1git log`, `show` and `diff` beside the real git on the fixtures of `scripts/fixtures_look.sh` (13 histories, 8 work-tree states): ~1500 forms each, bytes and exit status |
 | `core/GIT_gitlog.m31` | `log` and `show`: revision.c's walk (list, `limit_list`, TREESAME simplification, parent rewriting, topological order, `--follow`), log-tree.c's header / message / diff assembly, pretty.c's formats and placeholders, decorations, date parsing for `--since` / `--until` |
 | `core/GIT_gitgraph.m31` | `log --graph`: graph.c's state machine (padding, pre-commit, commit, post-merge and collapsing rows, octopus merges, colours) |
