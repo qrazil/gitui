@@ -81,7 +81,9 @@ class Handler(http.server.BaseHTTPRequestHandler):
         if body[:2] == b"\x1f\x8b":
             import gzip
             body = gzip.decompress(body)
-        backend = os.environ.get("NET_BACKEND", "/usr/libexec/git-core/git-http-backend")
+        backend = os.environ.get("NET_BACKEND") or os.path.join(
+            subprocess.run(["git", "--exec-path"], capture_output=True, text=True).stdout.strip(),
+            "git-http-backend")
         exec_dir = os.path.dirname(backend)
         env = {
             "PATH": exec_dir + ":/usr/bin:/bin:/usr/local/bin",
