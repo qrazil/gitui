@@ -756,6 +756,24 @@ with nothing sent, a server-side refusal (a `pre-receive` hook) is reported
 with its `ng` reason, and the Basic-auth paths (URL, environment, none,
 wrong) are covered against an authenticating server.
 
+## Fetch, pull and push through the library's own commands (`mgit` 0.18.0)
+
+`F` and `P` open which-key menus. Besides the fast-forward-only `p` and `P u`
+over `GIT_http_push` / `GIT_pull`, they take the library commands `1git` uses:
+`F f` is `fetch`, `F g` fetches and then fast-forwards, merges or rebases the
+branch onto its upstream (per `pull.rebase`; a diverged branch asks), `F r`
+fetches and rebases, `P g` is `push`. These hand the terminal over as the
+`$EDITOR` handoff does so progress, credential prompts (askpass, netrc,
+`credential.helper`, the terminal) and ssh host-key questions work; mgit prints
+no secret. When the command ends, Enter returns to the outline and the status
+line says `fetch: done` or `fetch: failed (exit N)`. `tests/pty_net.py` drives
+all of it against `git http-backend` with Basic auth.
+
+`b r` picks a remote-tracking branch (`b /` lists them too, as `origin/<name>`):
+a local branch of that name is created at its commit with `branch.<n>.remote`
+and `.merge` set, and checked out; an existing local branch is just switched to.
+`docs/MGIT-AUDIT.md` lists what the client covers of the library and what not.
+
 ## Pull (`GIT_pull.m31`, `GIT_pack.read_pack`)
 
 `F` then `p` in `mgit` pulls the current branch from the same-named

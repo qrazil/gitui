@@ -37,7 +37,7 @@ import tui.core.TUI_geometry;
 import tui.widgets.TUI_menu;
 import tui.widgets.TUI_outline;
 import tui.core.TUI_style;
-import tui.core.TUI_syntax;
+import ui.GIT_ui_syntax;
 import tui.core.TUI_text;
 
 pub type MergeLayer {
@@ -707,7 +707,7 @@ pub void ResolveOverlay.render(TUI_buffer.Buffer buffer, TUI_geometry.Rect area)
         }
         TUI_style.Style style = line_style(line.kind);
         buffer.set_str(inner.x, inner.y + row, gutter, style, max: inner.width);
-        TUI_syntax.draw(buffer, inner.x + 2, inner.y + row, inner.width - 2, line.text, syntax.classes_of(offset + row), style, host.is_dark);
+        GIT_ui_syntax.draw(buffer, inner.x + 2, inner.y + row, inner.width - 2, line.text, syntax.classes_of(offset + row), style, host.is_dark);
         row = row + 1;
     }
 }

@@ -55,16 +55,16 @@ if (argv.size() > 1) {
 }
 str git_directory = GIT_repository.find(path);
 if (git_directory == "") {
-    io.eprint("gitui: not a git repository (or any parent up to /): no .git directory");
+    io.eprint("mgit: not a git repository (or any parent up to /): no .git directory");
     return;
 }
 str refusal = GIT_hash.refusal(git_directory);
 if (refusal != "") {
-    io.eprint("gitui: " + refusal);
+    io.eprint("mgit: " + refusal);
     return;
 }
 if (!term.is_terminal(0)) {
-    io.eprint("gitui: standard input is not a terminal");
+    io.eprint("mgit: standard input is not a terminal");
     return;
 }
 GIT_client.State state = GIT_client.State.open(git_directory, path);
@@ -82,7 +82,7 @@ while (is_running) {
             }
         }
         case Err(term.Error error): {
-            io.eprint("gitui: " + error.to_str());
+            io.eprint("mgit: " + error.to_str());
             is_running = false;
         }
     }

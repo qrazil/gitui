@@ -232,5 +232,5 @@ void open_operation(GIT_ui_remote.RemoteLayer host) {
         host.open_merge();
         return;
     }
-    host.say(host.facts.operation + " is under way; gitui does not drive it -- use git");
+    host.say(host.facts.operation + " is under way; mgit does not drive it -- use git");
 }

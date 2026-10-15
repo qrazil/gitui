@@ -159,6 +159,11 @@ pub static State State.open(str gitdir, str worktree) {
 ///     `is_editor_wanted`), and the operator is told to edit it externally.
 pub void State.launch_editor() {
     is_editor_wanted = false;
+    if (net_verb != "") {
+        run_net_now();
+        settle();
+        return;
+    }
     if (resolve_edit_path != "") {
         launch_resolve_editor();
         settle();
@@ -213,6 +218,13 @@ pub void State.settle() {
     match (take_pick(GIT_ui_core.PICK_CHECKOUT)) {
         case Some(str name): {
             checkout_branch(GIT_ui_model.picked_name(name));
+        }
+        case None: {
+        }
+    }
+    match (take_pick(GIT_ui_core.PICK_REMOTE_CHECKOUT)) {
+        case Some(str item): {
+            track_remote(GIT_ui_model.picked_name(item));
         }
         case None: {
         }

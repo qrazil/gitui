@@ -1,7 +1,7 @@
 // Syntax highlighting for the places gitui shows file text outside a
 // `TUI_diff_view.DiffView` (which colours its own hunks, given a `language`):
 // the commit view, the stash preview, the blame view and the conflict view.
-// The lexer is tui's `TUI_syntax`; this module is the gitui side of it -- when
+// The lexer is the `syntax` library's, styled by `GIT_ui_syntax`; this module is the gitui side of it -- when
 // highlighting is on, which language a path is, and how a diff, a blame or a
 // conflict is walked line by line so the carried lexer state is right.
 //
@@ -20,6 +20,8 @@ import core.GIT_config;
 import tui.core.TUI_buffer;
 import tui.core.TUI_style;
 import tui.core.TUI_syntax;
+import ui.GIT_ui_syntax;
+import syntax.core.SYN_highlight;
 import tui.core.TUI_text;
 
 /// What one line of a diff text is.
@@ -188,17 +190,17 @@ void DiffText.step() {
         if (kind != KIND_PLAIN && is_on && current != "") {
             str code = text.substr(marker_width, text.size());
             if (kind == KIND_REMOVE) {
-                TUI_syntax.Tokens tokens = TUI_syntax.classify(current, code, old_state);
+                SYN_highlight.Tokens tokens = GIT_ui_syntax.classify(current, code, old_state);
                 old_state = tokens.state;
                 found = tokens.classes;
             } else if (kind == KIND_ADD) {
-                TUI_syntax.Tokens tokens = TUI_syntax.classify(current, code, new_state);
+                SYN_highlight.Tokens tokens = GIT_ui_syntax.classify(current, code, new_state);
                 new_state = tokens.state;
                 found = tokens.classes;
             } else {
-                TUI_syntax.Tokens tokens = TUI_syntax.classify(current, code, new_state);
+                SYN_highlight.Tokens tokens = GIT_ui_syntax.classify(current, code, new_state);
                 if (old_state != new_state) {
-                    old_state = TUI_syntax.classify(current, code, old_state).state;
+                    old_state = GIT_ui_syntax.classify(current, code, old_state).state;
                 } else {
                     old_state = tokens.state;
                 }
@@ -253,13 +255,13 @@ pub void DiffText.draw(TUI_buffer.Buffer buffer, int x, int y, int width, int in
         return;
     }
     int used = buffer.set_str(x, y, text.substr(0, marker_width), base.merged(over), max: width);
-    TUI_syntax.draw(buffer, x + used, y, width - used, text.substr(marker_width, text.size()), found, base, is_dark, over: over);
+    GIT_ui_syntax.draw(buffer, x + used, y, width - used, text.substr(marker_width, text.size()), found, base, is_dark, over: over);
 }
 
 /// The blame view's lines of one file: the code of line `i` is
 /// `texts[i]`, classified in order with the state carried.
-pub TUI_syntax.Highlighter highlighter_of(str language, List<str> texts) {
-    TUI_syntax.Highlighter out = TUI_syntax.Highlighter(language);
+pub GIT_ui_syntax.Highlighter highlighter_of(str language, List<str> texts) {
+    GIT_ui_syntax.Highlighter out = GIT_ui_syntax.Highlighter(language);
     if (language == "") {
         return out;
     }
@@ -295,7 +297,7 @@ void ConflictText.step() {
             state = saved;
         }
     } else if (language != "") {
-        TUI_syntax.Tokens tokens = TUI_syntax.classify(language, lines[index], state);
+        SYN_highlight.Tokens tokens = GIT_ui_syntax.classify(language, lines[index], state);
         state = tokens.state;
         found = tokens.classes;
     }

@@ -10,6 +10,7 @@ import ui.GIT_ui_highlight;
 import tui.core.TUI_buffer;
 import tui.core.TUI_style;
 import tui.core.TUI_syntax;
+import ui.GIT_ui_syntax;
 
 type Counter {
     int checks = 0;
@@ -125,8 +126,20 @@ eq_int(counter, "no language: no classes", none.classes_of(0).size(), 0);
 
 // --- the blame view's highlighter ------------------------------------------------
 
-TUI_syntax.Highlighter blame = GIT_ui_highlight.highlighter_of("c", ["int a; /* c", "b */ return 0;"]);
+GIT_ui_syntax.Highlighter blame = GIT_ui_highlight.highlighter_of("c", ["int a; /* c", "b */ return 0;"]);
 eq_int(counter, "blame: state carried between lines", blame.classes(1)[0], TUI_syntax.COMMENT);
 eq_int(counter, "blame: and out of the comment", blame.classes(1)[5], TUI_syntax.KEYWORD);
 eq_int(counter, "blame: no language, nothing classified", GIT_ui_highlight.highlighter_of("", ["int a;"]).classes(0).size(), 0);
+// --- the richer classes ------------------------------------------------------------
+
+GIT_ui_syntax.Highlighter rich = GIT_ui_highlight.highlighter_of("javascript", ["const v = obj.field + call(1);"]);
+int top = 0;
+for (int class_value in rich.classes(0)) {
+    if (class_value > top) {
+        top = class_value;
+    }
+}
+counter.check("a call or property is classified beyond the twelve folded classes", top >= 12, "highest class " + top.to_str());
+counter.check("a call is styled apart from a definition", GIT_ui_syntax.class_style(16, true).attrs != GIT_ui_syntax.class_style(6, true).attrs, "same attrs");
+counter.check("a property is styled apart from a type", GIT_ui_syntax.class_style(12, true).foreground != GIT_ui_syntax.class_style(5, true).foreground, "same colour");
 print(counter.checks.to_str() + " checks, " + counter.failed.to_str() + " failed");

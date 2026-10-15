@@ -6,7 +6,9 @@
 // `GIT_client.State.settle` calls `checkout_branch` with it.
 
 import fs;
+import core.GIT_branches;
 import core.GIT_checkout;
+import core.GIT_refs;
 import ui.GIT_ui_commit;
 import ui.GIT_ui_core;
 import ui.GIT_ui_model;
@@ -38,7 +40,99 @@ pub void BranchLayer.open_branch_picker() {
     for (GIT_ui_model.BranchRow branch_row in branch_rows) {
         names.push(GIT_ui_model.picker_item(branch_row));
     }
-    GIT_ui_picker.open(core(), GIT_ui_core.PICK_CHECKOUT, "check out a branch", names);
+    for (str remote_name in remote_branch_names()) {
+        names.push(remote_name);
+    }
+    GIT_ui_picker.open(core(), GIT_ui_core.PICK_CHECKOUT, "check out a branch (origin/<name>: remote, a tracking branch is made)", names);
+}
+
+/// `b`, then `r`: the picker over the remote-tracking branches only.
+pub void BranchLayer.open_remote_picker() {
+    List<str> names = remote_branch_names();
+    if (names.size() == 0) {
+        message = "no remote-tracking branches yet (fetch first: F, f)";
+        return;
+    }
+    GIT_ui_picker.open(core(), GIT_ui_core.PICK_REMOTE_CHECKOUT, "check out a remote branch", names);
+}
+
+/// `origin/main`, `origin/feature/x`, ...: every `refs/remotes/*/*` but a
+/// remote's `HEAD`, sorted.
+pub List<str> BranchLayer.remote_branch_names() {
+    List<str> names = [];
+    match (GIT_refs.all(gitdir)) {
+        case Ok(List<GIT_refs.Ref> refs): {
+            for (GIT_refs.Ref entry in refs) {
+                if (entry.name.starts_with("refs/remotes/") && !entry.name.ends_with("/HEAD")) {
+                    names.push(entry.name.substr(13, entry.name.size()));
+                }
+            }
+        }
+        case Err: {
+        }
+    }
+    names.sort();
+    return names;
+}
+
+/// `git switch <name>` for a remote-tracking branch `origin/<name>`: when a
+/// local branch `<name>` exists, switch to it; otherwise create it at the
+/// remote branch's commit with `branch.<name>.remote` and `.merge` set
+/// (tracking), switch to it, and undo the creation if the switch is refused.
+pub void BranchLayer.track_remote(str remote_branch) {
+    int slash = remote_branch.index_of("/").or(-1);
+    if (slash <= 0 || slash == remote_branch.size() - 1) {
+        message = "no such branch: " + remote_branch;
+        return;
+    }
+    str remote = remote_branch.substr(0, slash);
+    str name = remote_branch.substr(slash + 1, remote_branch.size());
+    str id = "";
+    match (GIT_refs.resolve(gitdir, "refs/remotes/" + remote_branch)) {
+        case Ok(str found): {
+            id = found;
+        }
+        case Err: {
+            message = "no such branch: " + remote_branch;
+            return;
+        }
+    }
+    str full = "refs/heads/" + name;
+    if (GIT_refs.has_ref(gitdir, full)) {
+        checkout_branch(name);
+        return;
+    }
+    match (GIT_refs.update(gitdir, full, id, Option<str>.Some(""), reflog_message: "branch: Created from " + remote_branch)) {
+        case Ok: {
+        }
+        case Err(GIT_refs.Error error): {
+            message = "new branch refused: " + error.to_str();
+            return;
+        }
+    }
+    match (GIT_checkout.checkout(gitdir, worktree, id, full)) {
+        case Ok(GIT_checkout.Summary summary): {
+            match (GIT_branches.set_upstream(gitdir, name, remote, "refs/heads/" + name)) {
+                case Ok: {
+                }
+                case Err(GIT_branches.Error error): {
+                    message = "tracking not recorded: " + error.to_str();
+                }
+            }
+            message = "switched to new branch " + name + " tracking " + remote_branch;
+            log_command("checkout --track " + remote_branch);
+            reload();
+        }
+        case Err(GIT_checkout.Error error): {
+            match (GIT_branches.delete_ref(gitdir, full)) {
+                case Ok: {
+                }
+                case Err: {
+                }
+            }
+            message = "checkout refused: " + error.to_str();
+        }
+    }
 }
 
 /// Check out the branch under the cursor (`b`, then `c`): `GIT_checkout.checkout`
@@ -84,6 +178,10 @@ pub void BranchLayer.checkout_branch(str name) {
             }
             return;
         }
+    }
+    if (name.contains("/")) {
+        track_remote(name);
+        return;
     }
     message = "no such branch: " + name;
 }
@@ -192,6 +290,9 @@ pub TUI_app.Action BranchOverlay.handle_key(term.Code code) {
             if (cmd == GIT_ui_core.CMD_PICK_BRANCH) {
                 host.open_branch_picker();
             }
+            if (cmd == GIT_ui_core.CMD_REMOTE_BRANCH) {
+                host.open_remote_picker();
+            }
             if (cmd == GIT_ui_core.CMD_NEW_BRANCH) {
                 host.new_branch();
                 if (host.is_editor_wanted) {
@@ -207,7 +308,7 @@ pub TUI_app.Action BranchOverlay.handle_key(term.Code code) {
 }
 
 pub void BranchOverlay.render(TUI_buffer.Buffer buffer, TUI_geometry.Rect area) {
-    TUI_menu.WhichKey which_key = TUI_menu.WhichKey("branch", [TUI_menu.Item("c", "check out the branch under the cursor"), TUI_menu.Item("/", "check out a branch picked by typing part of its name"), TUI_menu.Item("n", "new branch from HEAD: name it in $EDITOR, then switch to it"), TUI_menu.Item("a", "abort")]);
+    TUI_menu.WhichKey which_key = TUI_menu.WhichKey("branch", [TUI_menu.Item("c", "check out the branch under the cursor"), TUI_menu.Item("/", "check out a branch picked by typing part of its name"), TUI_menu.Item("r", "check out a remote branch: creates a local branch tracking it"), TUI_menu.Item("n", "new branch from HEAD: name it in $EDITOR, then switch to it"), TUI_menu.Item("a", "abort")]);
     which_key.render(buffer, area);
 }
 

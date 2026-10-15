@@ -25,7 +25,7 @@ import tui.core.TUI_buffer;
 import tui.core.TUI_geometry;
 import tui.widgets.TUI_outline;
 import tui.core.TUI_style;
-import tui.core.TUI_syntax;
+import ui.GIT_ui_syntax;
 import tui.core.TUI_text;
 
 /// What `B` / `H` act on: a revision ("HEAD", or a commit id) and a path.
@@ -127,7 +127,7 @@ type BlameOverlay {
     // Why the last key did nothing, shown in the title until the next key.
     str notice = "";
     // The file's lines for syntax colours, rebuilt when `lines` or the switch changes.
-    TUI_syntax.Highlighter syntax = TUI_syntax.Highlighter("");
+    GIT_ui_syntax.Highlighter syntax = GIT_ui_syntax.Highlighter("");
     bool is_syntax_ready = false;
     bool is_syntax_for_on = true;
 }
@@ -263,7 +263,7 @@ pub void BlameOverlay.render(TUI_buffer.Buffer buffer, TUI_geometry.Rect area) {
         str prefix = TUI_text.truncate(margin_text(lines[index], index + 1, number_width), inner.width);
         int used = buffer.set_str(inner.x, inner.y + row, prefix, over, max: inner.width);
         str code = lines[index].text.utf8().or("(not UTF-8)");
-        TUI_syntax.draw(buffer, inner.x + used, inner.y + row, inner.width - used, code, syntax.classes(index), TUI_style.Style(), host.is_dark, over: over);
+        GIT_ui_syntax.draw(buffer, inner.x + used, inner.y + row, inner.width - used, code, syntax.classes(index), TUI_style.Style(), host.is_dark, over: over);
         row = row + 1;
     }
 }

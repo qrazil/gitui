@@ -471,6 +471,11 @@ source tests/test_rebase.sh
 
 source tests/test_ssh.sh
 
+# `test_mgitnet.sh` drives mgit's fetch, pull and push handoff and the remote-branch
+# switcher under a pty against a local git http-backend with Basic auth.
+
+source tests/test_mgitnet.sh
+
 # --- the revision grammar: GIT_revparse against git rev-parse, and its callers -----
 #
 # `test_revparse.sh` builds a fixture with merges, tags of every kind, clashing

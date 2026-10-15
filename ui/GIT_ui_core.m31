@@ -211,10 +211,16 @@ pub const str CMD_FOLD = "fold";
 pub const str CMD_FOLD_ALL = "fold-all";
 pub const str CMD_UNFOLD_ALL = "unfold-all";
 pub const str CMD_OVERVIEW = "overview";
+pub const str CMD_FETCH = "fetch";
+pub const str CMD_PULL_LIBRARY = "pull-library";
+pub const str CMD_PULL_REBASE = "pull-rebase";
+pub const str CMD_PUSH_LIBRARY = "push-library";
+pub const str CMD_REMOTE_BRANCH = "remote-branch";
 /// What `pick_purpose` says a finished remote-ref picker was for.
 pub const str PICK_REMOTE_REF = "remote-ref";
 /// What `pick_purpose` says a finished `GIT_ui_picker` was for.
 pub const str PICK_CHECKOUT = "checkout";
+pub const str PICK_REMOTE_CHECKOUT = "remote-checkout";
 /// The merge menu's three pickers: the branch to merge, and how.
 pub const str PICK_MERGE = "merge";
 pub const str PICK_MERGE_NO_FF = "merge-no-ff";
@@ -300,6 +306,15 @@ pub type Core {
     /// `$EDITOR` could have the terminal, not because the operator pressed
     /// `q`. See `GIT_client.m31`'s header, "launching `$EDITOR`".
     pub bool is_editor_wanted = false;
+    /// A network command waiting for the terminal (`fetch`, `pull`, `push`):
+    /// set with `is_editor_wanted`, run by `GIT_client.State.launch_editor`
+    /// through the library's own command, so its progress, credential
+    /// prompts and errors reach the real terminal. "" when none.
+    pub str net_verb = "";
+    pub List<str> net_args = [];
+    /// What to do with the fetched upstream once a `net_verb` fetch is over:
+    /// "" nothing, "merge" integrate as `F p` would, "rebase" rebase onto it.
+    pub str net_after = "";
     pub str commit_message_path = "";
     pub str branch_label = "";
     /// What the statusline and the overview are drawn from: set by `refresh`.
@@ -872,12 +887,17 @@ pub List<Binding> key_table() {
     table.push(Binding(SCOPE_BRANCH, CMD_CHECKOUT, ["c"], "check out the branch under the cursor", "c", "checkout"));
     table.push(Binding(SCOPE_BRANCH, CMD_PICK_BRANCH, ["/"], "check out a branch picked by typing part of its name", "/", "pick"));
     table.push(Binding(SCOPE_BRANCH, CMD_NEW_BRANCH, ["n"], "new branch from HEAD: name it in $EDITOR, then switch to it", "n", "new"));
+    table.push(Binding(SCOPE_BRANCH, CMD_REMOTE_BRANCH, ["r"], "check out a remote branch: a local branch tracking it is created", "r", "remote"));
     table.push(Binding(SCOPE_BRANCH, CMD_ABORT, ["a", "escape"], "abort", "a", "abort"));
     // The push and pull overlays.
     table.push(Binding(SCOPE_PUSH, CMD_PUSH, ["p"], "push the current branch to origin", "p", "push"));
     table.push(Binding(SCOPE_PUSH, CMD_PUSH_UPSTREAM, ["u"], "push and set the upstream (git push -u): branch.<n>.remote and .merge", "u", "push -u"));
+    table.push(Binding(SCOPE_PUSH, CMD_PUSH_LIBRARY, ["g"], "push with git's rules on the terminal: upstream remote, credential helpers and prompts, any branch state it allows", "g", "push (git rules)"));
     table.push(Binding(SCOPE_PUSH, CMD_CLOSE, ["escape"], "close", "esc", "close"));
     table.push(Binding(SCOPE_PULL, CMD_PULL, ["p"], "pull the current branch from origin", "p", "pull"));
+    table.push(Binding(SCOPE_PULL, CMD_FETCH, ["f"], "fetch from the upstream remote (origin by default), progress on the terminal", "f", "fetch"));
+    table.push(Binding(SCOPE_PULL, CMD_PULL_LIBRARY, ["g"], "pull with git's rules on the terminal: merge or rebase per pull.rebase, credential prompts", "g", "pull (git rules)"));
+    table.push(Binding(SCOPE_PULL, CMD_PULL_REBASE, ["r"], "pull --rebase on the terminal", "r", "pull --rebase"));
     table.push(Binding(SCOPE_PULL, CMD_CLOSE, ["escape"], "close", "esc", "close"));
     // The discard confirmation: "y" and anything else.
     table.push(Binding(SCOPE_STASH, CMD_STASH_PUSH, ["z"], "push: stash the changes to tracked files", "z", "push"));

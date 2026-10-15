@@ -6,8 +6,14 @@
 import core.GIT_branches;
 import core.GIT_config;
 import net.GIT_http_push;
+import net.GIT_gitfetch;
+import net.GIT_gitpush;
+import io;
+import os;
 import net.GIT_pull;
 import core.GIT_refs;
+import diff.GIT_merge;
+import diff.GIT_rebase;
 import net.GIT_remote;
 import net.GIT_ssh_transport;
 import ui.GIT_ui_core;
@@ -198,6 +204,121 @@ pub void RemoteLayer.record_pushed(str refname, str id, bool should_set_upstream
     }
 }
 
+// --- the library's own commands, on the terminal -------------------------------------
+
+/// Ask for `fetch`, `pull` or `push` through the library's command (`1git`'s
+/// own: upstream remote, credential helpers, netrc, askpass or a terminal
+/// prompt, ssh known_hosts, git's reflog lines). The TUI cannot draw a
+/// password prompt or git's progress, so this sets `is_editor_wanted` and the
+/// loop in `gitui.m31` hands the terminal over, runs `run_net_now`, and
+/// comes back; the status line then says how it ended.
+pub void RemoteLayer.want_net(str verb, List<str> args) {
+    want_net_then(verb, args, "");
+}
+
+/// `want_net`, then `after` ("merge" or "rebase") with the upstream it fetched.
+/// The library's `pull` re-runs the `1git` executable for its merge or rebase,
+/// which this program is not; so a pull here is the library's fetch followed
+/// by this client's own merge and rebase, which keep the conflict view.
+pub void RemoteLayer.want_net_then(str verb, List<str> args, str after) {
+    if ((verb != "fetch" || after != "") && is_blocked_by_sequence("pull")) {
+        return;
+    }
+    net_after = after;
+    net_verb = verb;
+    net_args = args;
+    is_editor_wanted = true;
+    message = verb + ": running on the terminal...";
+}
+
+/// The second half of `want_net`, with the terminal cooked and on the normal
+/// screen. Prints one header line, runs the command, waits for Enter so
+/// whatever it printed can be read, and leaves the outcome in the message.
+/// Nothing here ever prints a credential: the library's lines carry URLs
+/// with the password already removed (`GIT_transport.anonymize`).
+pub void RemoteLayer.run_net_now() {
+    str verb = net_verb;
+    List<str> args = net_args;
+    net_verb = "";
+    net_args = [];
+    if (verb == "") {
+        return;
+    }
+    str shown = verb;
+    if (args.size() > 0) {
+        shown = verb + " " + args.join(" ");
+    }
+    io.eprint("mgit: running '" + shown + "' (Ctrl-C stops it)");
+    int status = 0;
+    if (verb == "fetch") {
+        status = GIT_gitfetch.run_fetch(worktree, [], args);
+    } else if (verb == "push") {
+        status = GIT_gitpush.run_push(worktree, [], args);
+    } else {
+        status = 2;
+    }
+    if (status == 0) {
+        io.eprint("mgit: '" + shown + "' finished");
+    } else {
+        io.eprint("mgit: '" + shown + "' failed (exit " + status.to_str() + ")");
+    }
+    // Leave the output on screen until Enter, so an error can be read.
+    match (os.run(["sh", "-c", "printf 'press Enter to return to mgit ' >&2; read answer"])) {
+        case Ok(_): {
+        }
+        case Err(_): {
+        }
+    }
+    str after = net_after;
+    net_after = "";
+    if (status == 0) {
+        message = shown + ": done";
+        log_command(shown);
+    } else {
+        message = shown + ": failed (exit " + status.to_str() + "); see the command's output -- @ has the log";
+        after = "";
+    }
+    reload();
+    if (after != "") {
+        integrate_fetched(after);
+    }
+}
+
+// After the fetch of a pull: what the upstream now holds goes into the branch.
+// Level: nothing to do. Only behind: a fast-forward (or the rebase asked for).
+// Diverged: the merge-or-rebase question, or what `pull.rebase` says.
+pub void RemoteLayer.integrate_fetched(str how) {
+    str branch = current_branch_name();
+    if (branch == "") {
+        message = "pull: HEAD is not on a branch";
+        return;
+    }
+    match (GIT_branches.tracking(gitdir, branch)) {
+        case Some(GIT_branches.Tracking tracking): {
+            if (tracking.is_gone) {
+                message = "pull: the upstream " + tracking.upstream + " does not exist on the remote";
+                return;
+            }
+            if (tracking.behind == 0) {
+                message = "pull: already up to date with " + tracking.upstream;
+                return;
+            }
+            if (how == "rebase") {
+                begin_rebase(GIT_rebase.PlanOpts(upstream: tracking.upstream), "rebase " + tracking.upstream);
+                return;
+            }
+            if (tracking.ahead == 0) {
+                start_merge(tracking.upstream, GIT_merge.FastForward.Only);
+                return;
+            }
+            offer_pull(tracking.upstream);
+        }
+        case None: {
+            message = "pull: " + branch + " has no upstream (push -u sets one)";
+        }
+    }
+}
+
 // --- over ssh ------------------------------------------------------------------------
 
 // A refusal from the ssh transport as the status line's message -- or, for a
@@ -306,6 +427,21 @@ pub TUI_app.Action RemoteOverlay.handle_key(term.Code code) {
             if (cmd == GIT_ui_core.CMD_PULL) {
                 host.pull_current();
             }
+            if (cmd == GIT_ui_core.CMD_FETCH) {
+                host.want_net("fetch", []);
+            }
+            if (cmd == GIT_ui_core.CMD_PULL_LIBRARY) {
+                host.want_net_then("fetch", [], "merge");
+            }
+            if (cmd == GIT_ui_core.CMD_PULL_REBASE) {
+                host.want_net_then("fetch", [], "rebase");
+            }
+            if (cmd == GIT_ui_core.CMD_PUSH_LIBRARY) {
+                host.want_net("push", []);
+            }
+            if (host.is_editor_wanted) {
+                return TUI_app.Action.Quit;
+            }
             return TUI_app.Action.Redraw;
         }
         case None: {
@@ -315,9 +451,9 @@ pub TUI_app.Action RemoteOverlay.handle_key(term.Code code) {
 }
 
 pub void RemoteOverlay.render(TUI_buffer.Buffer buffer, TUI_geometry.Rect area) {
-    TUI_menu.WhichKey which_key = TUI_menu.WhichKey("pull", [TUI_menu.Item("p", "pull current branch from origin (fast-forward only)")]);
+    TUI_menu.WhichKey which_key = TUI_menu.WhichKey("pull", [TUI_menu.Item("p", "pull current branch from origin (fast-forward only)"), TUI_menu.Item("f", "fetch (terminal: progress, credential prompts)"), TUI_menu.Item("g", "pull with git's rules (merge or rebase per config)"), TUI_menu.Item("r", "pull --rebase")]);
     if (is_push) {
-        which_key = TUI_menu.WhichKey("push", [TUI_menu.Item("p", "push current branch to origin (fast-forward only)"), TUI_menu.Item("u", "push and set origin/<branch> as the upstream")]);
+        which_key = TUI_menu.WhichKey("push", [TUI_menu.Item("p", "push current branch to origin (fast-forward only)"), TUI_menu.Item("u", "push and set origin/<branch> as the upstream"), TUI_menu.Item("g", "push with git's rules (terminal: credential prompts)")]);
     }
     which_key.render(buffer, area);
 }

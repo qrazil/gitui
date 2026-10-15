@@ -1,3 +1,18 @@
+# gitui 0.18.0: mgit network actions, remote branches, "mgit:" messages
+
+Version 0.18.0, from master a4ee5d3 (0.17.0). No module was renamed or
+removed. `mgit`: `F f` (fetch), `F g` (fetch, then fast-forward, merge or
+rebase), `F r` (fetch, then rebase) and `P g` (push) run the library's
+`GIT_gitfetch.run_fetch` / `GIT_gitpush.run_push` on the terminal, through
+the same handoff as `$EDITOR`; `b r` and the `b /` picker check out a remote
+branch, creating a tracking branch. `GIT_ui_core.Core` gained `net_verb`,
+`net_args`, `net_after`; `GIT_ui_remote.RemoteLayer` gained `want_net`,
+`want_net_then`, `run_net_now`, `integrate_fetched`; `GIT_ui_branch.BranchLayer`
+gained `open_remote_picker`, `remote_branch_names`, `track_remote`. Program
+messages say `mgit:` (the library modules and the `gitui.*` config keys keep
+their names). Added `docs/MGIT-AUDIT.md`, `tests/pty_net.py`. Nothing to
+migrate.
+
 # gitui 0.17.0: `1git` clone, fetch, pull, push, remote, ls-remote, init over HTTPS and ssh
 
 Version 0.17.0, from master 61188a5 (0.16.0). No module was renamed or

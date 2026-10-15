@@ -1,0 +1,165 @@
+// The syntax colours, one step richer than tui's `TUI_syntax` adapter.
+//
+// `TUI_syntax` folds the `syntax` library's twenty-five classes onto twelve
+// (`SYN_class.legacy`), so a property, a call, a tag, an attribute, a link
+// and emphasis all look like some older class. mgit takes the classes as the
+// library gives them and styles the ones the fold merged, in the terminal's
+// own 16 colours like the adapter (so they follow the user's scheme):
+//
+//   FUNCTION (a definition) bold blue     CALL      blue
+//   PROPERTY, MEMBER        bright cyan   TAG       red
+//   ATTRIBUTE               yellow        PUNCTUATION  dim
+//   ADDED green, REMOVED red, LINK underlined blue, EMPHASIS italic,
+//   STRONG bold, RAW green, BUILTIN_VAR like a constant.
+//
+// The twelve older classes keep the adapter's colours (`TUI_syntax.class_style`)
+// and the class numbers are `SYN_class`'s, whose first twelve are TUI_syntax's.
+
+import syntax.core.SYN_class;
+import syntax.core.SYN_highlight;
+import tui.core.TUI_buffer;
+import tui.core.TUI_style;
+import tui.core.TUI_syntax;
+import tui.core.TUI_text;
+import tui.core.TUI_widget;
+
+/// One line classified from `state`: the library's own classes.
+pub SYN_highlight.Tokens classify(str lang, str line, int state) {
+    return SYN_highlight.classify(lang, line, state);
+}
+
+/// The style of `class_value`.
+pub TUI_style.Style class_style(int class_value, bool is_dark) {
+    if (class_value < SYN_class.PROPERTY) {
+        TUI_style.Style own = TUI_syntax.class_style(class_value, is_dark);
+        if (class_value == SYN_class.FUNCTION) {
+            return own.merged(TUI_style.Style(attrs: TUI_style.BOLD));
+        }
+        return own;
+    }
+    if (class_value == SYN_class.PROPERTY || class_value == SYN_class.MEMBER) {
+        return TUI_style.Style(foreground: TUI_style.Colour.Indexed(pick(is_dark, 14, 6)));
+    }
+    if (class_value == SYN_class.CALL) {
+        return TUI_style.Style(foreground: TUI_style.Colour.Indexed(pick(is_dark, 12, 4)));
+    }
+    if (class_value == SYN_class.TAG) {
+        return TUI_style.Style(foreground: TUI_style.Colour.Indexed(pick(is_dark, 9, 1)));
+    }
+    if (class_value == SYN_class.ATTRIBUTE) {
+        return TUI_style.Style(foreground: TUI_style.Colour.Indexed(pick(is_dark, 11, 5)));
+    }
+    if (class_value == SYN_class.PUNCTUATION) {
+        return TUI_style.Style(attrs: TUI_style.DIM);
+    }
+    if (class_value == SYN_class.ADDED || class_value == SYN_class.RAW) {
+        return TUI_style.Style(foreground: TUI_style.Colour.Indexed(2));
+    }
+    if (class_value == SYN_class.REMOVED) {
+        return TUI_style.Style(foreground: TUI_style.Colour.Indexed(1));
+    }
+    if (class_value == SYN_class.LINK) {
+        return TUI_style.Style(foreground: TUI_style.Colour.Indexed(pick(is_dark, 12, 4)), attrs: TUI_style.UNDERLINE);
+    }
+    if (class_value == SYN_class.EMPHASIS) {
+        return TUI_style.Style(attrs: TUI_style.ITALIC);
+    }
+    if (class_value == SYN_class.STRONG) {
+        return TUI_style.Style(attrs: TUI_style.BOLD);
+    }
+    if (class_value == SYN_class.BUILTIN_VAR) {
+        return TUI_syntax.class_style(SYN_class.CONSTANT, is_dark);
+    }
+    return TUI_style.Style();
+}
+
+int pick(bool is_dark, int dark, int light) {
+    if (is_dark) {
+        return dark;
+    }
+    return light;
+}
+
+/// `text` as styled spans, one per run of equal class; a run never splits a
+/// UTF-8 sequence. NORMAL runs take `base` as it is.
+pub List<TUI_widget.Span> spans(str text, List<int> classes, TUI_style.Style base, bool is_dark) {
+    List<TUI_widget.Span> out = [];
+    int size = text.size();
+    int start = 0;
+    while (start < size) {
+        int class_value = SYN_class.NORMAL;
+        if (start < classes.size()) {
+            class_value = classes[start];
+        }
+        int stop = start + 1;
+        while (stop < size) {
+            int other = SYN_class.NORMAL;
+            if (stop < classes.size()) {
+                other = classes[stop];
+            }
+            bool is_continuation = text.byte_at(stop) >= 128 && text.byte_at(stop) < 192;
+            if (other != class_value && !is_continuation) {
+                break;
+            }
+            stop = stop + 1;
+        }
+        TUI_style.Style style = base;
+        if (class_value != SYN_class.NORMAL) {
+            style = base.merged(class_style(class_value, is_dark));
+        }
+        out.push(TUI_widget.Span(text.substr(start, stop), style: style));
+        start = stop;
+    }
+    return out;
+}
+
+/// Write `text` at `x`, `y`, at most `width` columns, coloured by `classes`,
+/// with `over` laid on every span; text that does not fit ends in the
+/// ellipsis. Answers the columns used. `TUI_syntax.draw`, with this module's
+/// styles.
+pub int draw(TUI_buffer.Buffer buffer, int x, int y, int width, str text, List<int> classes, TUI_style.Style base, bool is_dark, TUI_style.Style over = TUI_style.Style()) {
+    if (width <= 0) {
+        return 0;
+    }
+    int total = TUI_text.width(text);
+    int room = width;
+    if (total > width) {
+        room = width - 1;
+    }
+    int column = x;
+    TUI_style.Style last = base.merged(over);
+    for (TUI_widget.Span run in spans(text, classes, base, is_dark)) {
+        int left = room - (column - x);
+        if (left <= 0) {
+            break;
+        }
+        TUI_style.Style style = run.style.merged(over);
+        last = style;
+        column = column + buffer.set_str(column, y, run.text, style, max: left);
+    }
+    if (total > width) {
+        buffer.set_str(x + width - 1, y, TUI_text.ELLIPSIS, last, max: 1);
+        return width;
+    }
+    return column - x;
+}
+
+/// Lines of one file fed in order and classified lazily (the library's
+/// highlighter, state carried), with the rich classes.
+pub type Highlighter {
+    pub str language;
+    pub SYN_highlight.Highlighter inner = SYN_highlight.Highlighter();
+}
+
+pub void Highlighter.add(str text) {
+    inner.language = language;
+    inner.add(text);
+}
+
+pub List<int> Highlighter.classes(int index) {
+    if (language == "" || index < 0 || index >= inner.lines.size()) {
+        return [];
+    }
+    inner.language = language;
+    return inner.classes(index);
+}
