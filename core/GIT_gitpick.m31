@@ -1,0 +1,468 @@
+// `1git cherry-pick` and `1git revert`: git's grammar and git's bytes over
+// `GIT_sequencer`, the library the TUI uses. See docs/GIT-COMPAT.md.
+
+import io;
+import term;
+import os;
+import fs;
+import core.GIT_object;
+import core.GIT_refs;
+import core.GIT_revparse;
+import core.GIT_gitcommon;
+import core.GIT_gitcommit;
+import core.GIT_gitstore;
+import core.GIT_gitstatus;
+import core.GIT_gitwrite;
+import diff.GIT_diff3;
+import diff.GIT_merge;
+import diff.GIT_sequencer;
+
+str usage_text(bool is_revert) {
+    if (is_revert) {
+        return "usage: git revert [--[no-]edit] [-n] [-m <parent-number>] [-s] [-S[<keyid>]] <commit>...\n   or: git revert (--continue | --skip | --abort | --quit)";
+    }
+    return "usage: git cherry-pick [--edit] [-n] [-m <parent-number>] [-s] [-x] [--ff]\n                  [-S[<keyid>]] <commit>...\n   or: git cherry-pick (--continue | --skip | --abort | --quit)";
+}
+
+str verb_word(bool is_revert) {
+    if (is_revert) {
+        return "revert";
+    }
+    return "cherry-pick";
+}
+
+List<str> unmerged_paths(str gitdir) {
+    GIT_gitwrite.IdxLoaded loaded = GIT_gitwrite.read_idx(gitdir);
+    if (!loaded.ok) {
+        return [];
+    }
+    return loaded.idx.conflicted_paths();
+}
+
+/// The error as git says it; returns the exit status.
+int report_error(str gitdir, GIT_sequencer.Error error, bool is_revert) {
+    str word = verb_word(is_revert);
+    match (error) {
+        case NoSequence: {
+            io.eprint("error: no cherry-pick or revert in progress");
+            io.eprint("fatal: " + word + " failed");
+            return 128;
+        }
+        case UnmergedPaths: {
+            for (str path in unmerged_paths(gitdir)) {
+                GIT_gitwrite.say("U\t" + path);
+            }
+            io.eprint("error: Committing is not possible because you have unmerged files.");
+            io.eprint("hint: Fix them up in the work tree, and then use 'git add/rm <file>'");
+            io.eprint("hint: as appropriate to mark resolution and make a commit.");
+            io.eprint("fatal: Exiting because of an unresolved conflict.");
+            return 128;
+        }
+        case NeedsMainline(str id): {
+            io.eprint("error: commit " + id + " is a merge but no -m option was given.");
+            io.eprint("fatal: " + word + " failed");
+            return 128;
+        }
+        case NotACommit(str what): {
+            io.eprint("fatal: bad revision '" + what + "'");
+            return 128;
+        }
+        case InProgress(_): {
+            io.eprint("error: " + word + " is already in progress");
+            io.eprint("hint: try \"git " + word + " (--continue | --skip | --abort | --quit)\"");
+            io.eprint("fatal: " + word + " failed");
+            return 128;
+        }
+        case Merging: {
+            io.eprint("error: your local changes would be overwritten by " + word + ".");
+            io.eprint("hint: commit your changes or stash them to proceed.");
+            io.eprint("fatal: " + word + " failed");
+            return 128;
+        }
+        case NoSuchParent(_, _): {
+            io.eprint("error: " + error.to_str());
+            io.eprint("fatal: " + word + " failed");
+            return 128;
+        }
+        case EmptyMessage: {
+            io.eprint("error: " + error.to_str());
+            io.eprint("fatal: " + word + " failed");
+            return 128;
+        }
+        case Nothing: {
+            io.eprint("error: " + error.to_str());
+            io.eprint("fatal: " + word + " failed");
+            return 128;
+        }
+        case Unborn: {
+            io.eprint("error: " + error.to_str());
+            io.eprint("fatal: " + word + " failed");
+            return 128;
+        }
+        case BadState(_): {
+            io.eprint("error: " + error.to_str());
+            io.eprint("fatal: " + word + " failed");
+            return 128;
+        }
+        case Unsupported(_): {
+            io.eprint("error: " + error.to_str());
+            io.eprint("fatal: " + word + " failed");
+            return 128;
+        }
+        case Merge(_): {
+            io.eprint("error: " + error.to_str());
+            io.eprint("fatal: " + word + " failed");
+            return 128;
+        }
+    }
+}
+
+/// What the stop on conflicts or an empty result says (standard error).
+void print_stop(GIT_gitcommon.Ctx ctx, GIT_sequencer.Report report, bool is_revert) {
+    str word = verb_word(is_revert);
+    GIT_gitstore.Store store = GIT_gitstore.open(ctx.gitdir);
+    str short_id = store.unique_abbrev(report.stopped, 7);
+    str subject = "";
+    match (GIT_merge.read_commit(ctx.gitdir, report.stopped)) {
+        case Ok(GIT_object.Commit commit): {
+            subject = GIT_gitwrite.subject_of(commit.message.utf8().or(""));
+        }
+        case Err(_): {
+        }
+    }
+    if (report.ending.eq(GIT_sequencer.Ending.Empty)) {
+        io.eprint("The previous " + word + " is now empty, possibly due to conflict resolution.");
+        io.eprint("If you wish to commit it anyway, use:");
+        io.eprint("");
+        io.eprint("    git commit --allow-empty");
+        io.eprint("");
+        io.eprint("Otherwise, please use 'git " + word + " --skip'");
+        return;
+    }
+    io.eprint("error: could not " + word_for_error(is_revert) + " " + short_id + "... " + subject);
+    io.eprint("hint: After resolving the conflicts, mark them with");
+    io.eprint("hint: \"git add/rm <pathspec>\", then run");
+    io.eprint("hint: \"git " + word + " --continue\".");
+    io.eprint("hint: You can instead skip this commit with \"git " + word + " --skip\".");
+    io.eprint("hint: To abort and get back to the state before \"git " + word + "\",");
+    io.eprint("hint: run \"git " + word + " --abort\".");
+}
+
+str word_for_error(bool is_revert) {
+    if (is_revert) {
+        return "revert";
+    }
+    return "apply";
+}
+
+/// What a run said, in order: each step's merge lines, then the summary
+/// `git commit` prints for the commit it made.
+void print_report(GIT_gitcommon.Ctx ctx, GIT_gitwrite.HeadInfo head, GIT_sequencer.Report report, bool is_quiet, bool is_continued_revert) {
+    GIT_gitstore.Store store = GIT_gitstore.open(ctx.gitdir);
+    List<str> lines = report.trace;
+    if (lines.size() == 0) {
+        lines = [];
+        for (str id in report.commits) {
+            lines.push("@@commit " + id);
+        }
+    }
+    for (str line in lines) {
+        if (line.starts_with("@@commit ")) {
+            if (is_quiet) {
+                continue;
+            }
+            str id = line.substr(9, line.size());
+            match (GIT_merge.read_commit(ctx.gitdir, id)) {
+                case Ok(GIT_object.Commit made): {
+                    // a revert finished by `--continue` is made by `git commit`,
+                    // which has no author date to show
+                    GIT_gitcommit.print_summary(ctx, store, head, id, made, "", !is_continued_revert, made.committer);
+                    is_continued_revert = false;
+                }
+                case Err(_): {
+                }
+            }
+        } else {
+            GIT_gitwrite.say(line);
+        }
+    }
+}
+
+int finish_report(GIT_gitcommon.Ctx ctx, GIT_gitwrite.HeadInfo head, GIT_sequencer.Report report, bool is_revert, bool is_quiet, bool is_continued = false) {
+    print_report(ctx, head, report, is_quiet, is_continued && is_revert);
+    for (str line in report.messages) {
+        GIT_gitwrite.say(line);
+    }
+    if (report.ending.eq(GIT_sequencer.Ending.Finished)) {
+        return 0;
+    }
+    if (report.ending.eq(GIT_sequencer.Ending.Empty)) {
+        if (is_revert) {
+            // git's revert of what is already undone ends in `git commit`'s
+            // "nothing to commit" with no state left behind
+            GIT_gitwrite.rm_quiet(fs.join(ctx.gitdir, "REVERT_HEAD"));
+        } else {
+            print_stop(ctx, report, is_revert);
+        }
+        GIT_gitstatus.run(ctx.root, ctx.overrides, []);
+        return 1;
+    }
+    print_stop(ctx, report, is_revert);
+    return 1;
+}
+
+pub int run_pick(str start, List<str> overrides, List<str> argv, bool is_revert) {
+    GIT_gitcommon.Opened opened = GIT_gitcommon.open(start, overrides);
+    if (!opened.ok) {
+        return 128;
+    }
+    GIT_gitcommon.Ctx ctx = opened.ctx;
+    GIT_gitwrite.Opts opts = GIT_gitwrite.parse_opts(argv, ["-x", "-n --no-commit", "-e --edit", "--no-edit", "-m --mainline=", "-s --signoff", "--ff", "--allow-empty", "--allow-empty-message", "--keep-redundant-commits", "--empty=", "--continue", "--skip", "--abort", "--quit", "-S --gpg-sign=?", "--no-gpg-sign", "--strategy=", "-X --strategy-option=", "--rerere-autoupdate", "--no-rerere-autoupdate", "--cleanup="]);
+    int bad = GIT_gitwrite.check_opts(opts, usage_text(is_revert));
+    if (bad >= 0) {
+        return bad;
+    }
+    List<str> unsupported = ["signoff", "ff", "gpg-sign", "strategy", "strategy-option", "cleanup", "empty", "allow-empty-message"];
+    for (str name in unsupported) {
+        if (opts.has(name)) {
+            io.eprint("error: option '" + name + "' of " + verb_word(is_revert) + " is not in 1git (see docs/GIT-COMPAT.md)");
+            return 129;
+        }
+    }
+    if (ctx.is_bare) {
+        return GIT_gitcommon.fatal("this operation must be run in a work tree");
+    }
+    int modes = 0;
+    List<str> mode_names = ["continue", "skip", "abort", "quit"];
+    for (str name in mode_names) {
+        if (opts.flag(name)) {
+            modes = modes + 1;
+        }
+    }
+    List<str> words = opts.paths();
+    bool is_quiet = false;
+    GIT_gitwrite.HeadInfo head = GIT_gitwrite.read_head(ctx.gitdir);
+    if (modes > 1) {
+        io.eprint("fatal: cannot do '--continue' with '--skip'");
+        return 128;
+    }
+    if (modes == 1) {
+        if (words.size() > 0) {
+            io.eprint(usage_text(is_revert));
+            return 129;
+        }
+        if (opts.flag("continue")) {
+            match (GIT_sequencer.continue_sequence(ctx.gitdir, ctx.root)) {
+                case Ok(GIT_sequencer.Report report): {
+                    return finish_report(ctx, head, report, is_revert, is_quiet, is_continued: true);
+                }
+                case Err(GIT_sequencer.Error error): {
+                    return report_error(ctx.gitdir, error, is_revert);
+                }
+            }
+        }
+        if (opts.flag("skip")) {
+            match (GIT_sequencer.skip(ctx.gitdir, ctx.root)) {
+                case Ok(GIT_sequencer.Report report): {
+                    return finish_report(ctx, head, report, is_revert, is_quiet);
+                }
+                case Err(GIT_sequencer.Error error): {
+                    return report_error(ctx.gitdir, error, is_revert);
+                }
+            }
+        }
+        if (opts.flag("abort")) {
+            match (GIT_sequencer.abort(ctx.gitdir, ctx.root)) {
+                case Ok(_): {
+                    return 0;
+                }
+                case Err(GIT_sequencer.Error error): {
+                    return report_error(ctx.gitdir, error, is_revert);
+                }
+            }
+        }
+        match (GIT_sequencer.quit(ctx.gitdir)) {
+            case Ok(_): {
+                return 0;
+            }
+            case Err(GIT_sequencer.Error error): {
+                if (error.to_str() == GIT_sequencer.Error.NoSequence.to_str()) {
+                    GIT_gitwrite.rm_quiet(fs.join(ctx.gitdir, "AUTO_MERGE"));
+                    return 0;
+                }
+                return report_error(ctx.gitdir, error, is_revert);
+            }
+        }
+    }
+    if (words.size() == 0) {
+        io.eprint(usage_text(is_revert));
+        return 129;
+    }
+    GIT_sequencer.Options sopts = GIT_sequencer.Options();
+    sopts.should_skip_commit = opts.flag("no-commit");
+    sopts.should_record_origin = opts.flag("x") && !is_revert;
+    sopts.is_empty_allowed = opts.flag("allow-empty");
+    sopts.should_keep_redundant = opts.flag("keep-redundant-commits");
+    if (opts.has("mainline")) {
+        match (opts.value("mainline", "").parse_int()) {
+            case Some(int number): {
+                if (number <= 0) {
+                    return GIT_gitcommon.fatal("switch `m' expects a number greater than zero");
+                }
+                sopts.mainline = number;
+            }
+            case None: {
+                io.eprint("error: switch `m' expects a numerical value");
+                io.eprint(usage_text(is_revert));
+                return 129;
+            }
+        }
+    }
+    GIT_sequencer.Verb verb = GIT_sequencer.Verb.Pick;
+    if (is_revert) {
+        verb = GIT_sequencer.Verb.Revert;
+    }
+    // `revert` opens the editor by default, but git only does so on a terminal
+    bool is_editing = is_revert && !opts.flag("no-edit") && !sopts.should_skip_commit && term.is_terminal(0) && term.is_terminal(1);
+    if (opts.has("edit")) {
+        is_editing = opts.flag("edit") && !sopts.should_skip_commit;
+    }
+    if (opts.flag("no-edit")) {
+        is_editing = false;
+    }
+    for (str spec in words) {
+        match (GIT_revparse.is_range(ctx.gitdir, spec)) {
+            case Ok(bool answer): {
+                if (answer) {
+                    sopts.is_range = true;
+                }
+            }
+            case Err(_): {
+            }
+        }
+    }
+    sopts.style = GIT_merge.configured_style(ctx.gitdir);
+    List<str> ids = [];
+    match (GIT_sequencer.expand(ctx.gitdir, verb, words)) {
+        case Ok(List<str> found): {
+            ids = found;
+        }
+        case Err(GIT_sequencer.Error error): {
+            return report_error(ctx.gitdir, error, is_revert);
+        }
+    }
+    // git walks the words as a revision list: a commit named twice is picked once
+    List<str> unique = [];
+    for (str id in ids) {
+        if (!unique.contains(id)) {
+            unique.push(id);
+        }
+    }
+    ids = unique;
+    if (is_editing && (ids.size() != 1 || sopts.is_range)) {
+        io.eprint("error: editing several commits is not in 1git: use --no-edit (see docs/GIT-COMPAT.md)");
+        return 129;
+    }
+    if (is_editing) {
+        return run_edited(ctx, head, verb, ids[0], sopts, is_revert, is_quiet);
+    }
+    match (GIT_sequencer.start(ctx.gitdir, ctx.root, verb, ids, sopts)) {
+        case Ok(GIT_sequencer.Report report): {
+            return finish_report(ctx, head, report, is_revert, is_quiet);
+        }
+        case Err(GIT_sequencer.Error error): {
+            return report_error(ctx.gitdir, error, is_revert);
+        }
+    }
+}
+
+/// One commit with the editor on its message, as `git revert` does by default:
+/// the changes are staged without committing, the editor changes MERGE_MSG's
+/// text, and the library commits the step as `--continue` does.
+int run_edited(GIT_gitcommon.Ctx ctx, GIT_gitwrite.HeadInfo head, GIT_sequencer.Verb verb, str id, GIT_sequencer.Options sopts, bool is_revert, bool is_quiet) {
+    GIT_sequencer.Options staged = sopts;
+    staged.should_skip_commit = true;
+    GIT_sequencer.Report report = GIT_sequencer.Report(GIT_sequencer.Ending.Finished, [], "", verb, [], []);
+    match (GIT_sequencer.start(ctx.gitdir, ctx.root, verb, [id], staged)) {
+        case Ok(GIT_sequencer.Report found): {
+            report = found;
+        }
+        case Err(GIT_sequencer.Error error): {
+            return report_error(ctx.gitdir, error, is_revert);
+        }
+    }
+    if (!report.ending.eq(GIT_sequencer.Ending.Finished)) {
+        return finish_report(ctx, head, report, is_revert, is_quiet);
+    }
+    for (str line in report.messages) {
+        GIT_gitwrite.say(line);
+    }
+    str head_file = "CHERRY_PICK_HEAD";
+    if (is_revert) {
+        head_file = "REVERT_HEAD";
+    }
+    GIT_gitwrite.rm_quiet(fs.join(ctx.gitdir, "CHERRY_PICK_HEAD"));
+    match (io.write(fs.join(ctx.gitdir, head_file), id + "\n")) {
+        case Ok: {
+        }
+        case Err(_): {
+            return GIT_gitcommon.fatal("could not write " + head_file);
+        }
+    }
+    str message_path = fs.join(ctx.gitdir, "MERGE_MSG");
+    str message = "";
+    match (io.read(message_path)) {
+        case Ok(str body): {
+            message = body;
+        }
+        case Err(_): {
+        }
+    }
+    str edit_path = fs.join(ctx.gitdir, "COMMIT_EDITMSG");
+    str text = message + "\n" + GIT_gitcommit.editor_comment(ctx, "#", false);
+    match (io.write(edit_path, text)) {
+        case Ok: {
+        }
+        case Err(_): {
+            return GIT_gitcommon.fatal("could not write COMMIT_EDITMSG");
+        }
+    }
+    if (!GIT_gitwrite.run_editor(ctx, edit_path)) {
+        io.eprint("error: there was a problem with the editor 'vi'.");
+        return 1;
+    }
+    str edited = "";
+    match (io.read(edit_path)) {
+        case Ok(str body): {
+            edited = body;
+        }
+        case Err(_): {
+            return 1;
+        }
+    }
+    str cleaned = GIT_gitwrite.stripspace(edited, "#");
+    if (cleaned.trim() == "") {
+        io.eprint("Aborting commit due to empty commit message.");
+        return 1;
+    }
+    match (io.write(message_path, cleaned)) {
+        case Ok: {
+        }
+        case Err(_): {
+            return GIT_gitcommon.fatal("could not write MERGE_MSG");
+        }
+    }
+    match (GIT_sequencer.finish_step(ctx.gitdir, ctx.root, GIT_sequencer.Pending(verb, id), sopts, verb.noun())) {
+        case Ok(GIT_sequencer.StepResult step): {
+            if (step.landed.eq(GIT_sequencer.Landed.Committed)) {
+                GIT_sequencer.Report done = GIT_sequencer.Report(GIT_sequencer.Ending.Finished, [step.commit], "", verb, [], []);
+                return finish_report(ctx, head, done, is_revert, is_quiet);
+            }
+            GIT_sequencer.Report stopped = GIT_sequencer.Report(GIT_sequencer.Ending.Empty, [], id, verb, [], []);
+            return finish_report(ctx, head, stopped, is_revert, is_quiet);
+        }
+        case Err(GIT_sequencer.Error error): {
+            return report_error(ctx.gitdir, error, is_revert);
+        }
+    }
+}

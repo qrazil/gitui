@@ -325,6 +325,10 @@ pub type Report {
     pub Verb verb;
     pub List<GIT_merge.Conflicted> conflicts;
     pub List<str> messages;
+    /// What every finished step said, in order: each step's merge lines, then
+    /// `@@commit <id>` for the commit it made (empty: `commits` is all there
+    /// is). A stop's own lines are in `messages`.
+    pub List<str> trace = [];
 }
 
 pub enum Aborted {
@@ -1120,6 +1124,7 @@ Report stopped_report(Ending ending, List<str> made, Item item, StepResult step)
 Result<Report, Error> run(str gitdir, str worktree, List<Item> items, Options opts, bool is_sequence) {
     str directory = sequencer_directory(gitdir);
     List<str> made = [];
+    List<str> trace = [];
     for (int i in 0 .. items.size()) {
         Item item = items[i];
         if (is_sequence) {
@@ -1129,17 +1134,28 @@ Result<Report, Error> run(str gitdir, str worktree, List<Item> items, Options op
         match (step.landed) {
             case Committed: {
                 made.push(step.commit);
+                for (str line in step.messages) {
+                    trace.push(line);
+                }
+                trace.push("@@commit " + step.commit);
                 if (is_sequence) {
                     write_abort_safety(directory, step.commit)?;
                 }
             }
             case Staged: {
+                for (str line in step.messages) {
+                    trace.push(line);
+                }
             }
             case Conflicted: {
-                return Result<Report, Error>.Ok(stopped_report(Ending.Conflicts, made, item, step));
+                Report stopped = stopped_report(Ending.Conflicts, made, item, step);
+                stopped.trace = trace;
+                return Result<Report, Error>.Ok(stopped);
             }
             case Empty: {
-                return Result<Report, Error>.Ok(stopped_report(Ending.Empty, made, item, step));
+                Report stopped = stopped_report(Ending.Empty, made, item, step);
+                stopped.trace = trace;
+                return Result<Report, Error>.Ok(stopped);
             }
         }
     }
@@ -1152,7 +1168,9 @@ Result<Report, Error> run(str gitdir, str worktree, List<Item> items, Options op
     if (items.size() > 0) {
         last = items[items.size() - 1].verb;
     }
-    return Result<Report, Error>.Ok(Report(Ending.Finished, made, "", last, none, no_messages));
+    Report finished = Report(Ending.Finished, made, "", last, none, no_messages);
+    finished.trace = trace;
+    return Result<Report, Error>.Ok(finished);
 }
 
 Result<bool, Error> refuse_if_busy(str gitdir) {
@@ -1225,10 +1243,18 @@ Result<Report, Error> carry_on(str gitdir, str worktree, List<Item> rest, Option
     }
     Report report = run(gitdir, worktree, rest, opts, true)?;
     List<str> all = clone(made);
+    List<str> trace = [];
+    for (str id in made) {
+        trace.push("@@commit " + id);
+    }
     for (str id in report.commits) {
         all.push(id);
     }
+    for (str line in report.trace) {
+        trace.push(line);
+    }
     report.commits = all;
+    report.trace = trace;
     return Result<Report, Error>.Ok(report);
 }
 

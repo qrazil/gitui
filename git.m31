@@ -64,6 +64,7 @@ import core.GIT_gitadd;
 import core.GIT_gitcommit;
 import core.GIT_gitbranch;
 import core.GIT_gitstash;
+import core.GIT_gitpick;
 
 args.Parser parser = args.Parser("1git", summary: "read-only git plumbing over loose objects");
 parser.value("git-dir", help: "the repository's git directory", placeholder: "DIR");
@@ -186,6 +187,9 @@ int git_spelling(List<str> argv) {
     }
     if (argv[index] == "diff") {
         return GIT_gitdiffcmd.run(cwd, overrides, argv.slice(index + 1, argv.size()));
+    }
+    if (argv[index] == "cherry-pick" || argv[index] == "revert") {
+        return GIT_gitpick.run_pick(cwd, overrides, argv.slice(index + 1, argv.size()), argv[index] == "revert");
     }
     if (argv[index] == "stash") {
         return GIT_gitstash.run_stash(cwd, overrides, argv.slice(index + 1, argv.size()));

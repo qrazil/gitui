@@ -1367,7 +1367,7 @@ int report_dry(GIT_gitcommon.Ctx ctx) {
 }
 
 // The comment block the editor shows under the message.
-str editor_comment(GIT_gitcommon.Ctx ctx, str comment, bool is_amend) {
+pub str editor_comment(GIT_gitcommon.Ctx ctx, str comment, bool is_amend) {
     str text = comment + " Please enter the commit message for your changes. Lines starting\n";
     text = text + comment + " with '" + comment + "' will be ignored, and an empty message aborts the commit.\n";
     List<str> sink = [];
@@ -1392,7 +1392,7 @@ str editor_comment(GIT_gitcommon.Ctx ctx, str comment, bool is_amend) {
     return text;
 }
 
-void print_summary(GIT_gitcommon.Ctx ctx, GIT_gitstore.Store store, GIT_gitwrite.HeadInfo head, str id, GIT_object.Commit made, str base_tree, bool is_date_interesting, GIT_object.Ident committer) {
+pub void print_summary(GIT_gitcommon.Ctx ctx, GIT_gitstore.Store store, GIT_gitwrite.HeadInfo head, str id, GIT_object.Commit made, str base_tree, bool is_date_interesting, GIT_object.Ident committer) {
     str branch = "detached HEAD";
     if (!head.is_detached && head.ref != "") {
         branch = GIT_gitwrite.short_ref(head.ref);
