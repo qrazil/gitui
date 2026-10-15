@@ -864,10 +864,21 @@ pub Diff diff_lines_indent(List<bytes> lines_a, List<bytes> lines_b) {
     return diff_lines_with(lines_a, lines_b, true);
 }
 
+/// `diff_lines_indent` for text compared under whitespace flags: `keys_a` /
+/// `keys_b` are the lines as compared (whitespace normalised), `lines_a` /
+/// `lines_b` the lines as written, which the indent heuristic scores.
+pub Diff diff_lines_indent_keyed(List<bytes> lines_a, List<bytes> lines_b, List<bytes> keys_a, List<bytes> keys_b) {
+    return diff_lines_keyed(lines_a, lines_b, keys_a, keys_b, true);
+}
+
 Diff diff_lines_with(List<bytes> lines_a, List<bytes> lines_b, bool should_use_indent) {
+    return diff_lines_keyed(lines_a, lines_b, lines_a, lines_b, should_use_indent);
+}
+
+Diff diff_lines_keyed(List<bytes> lines_a, List<bytes> lines_b, List<bytes> keys_a, List<bytes> keys_b, bool should_use_indent) {
     int size_a = lines_a.size();
     int size_b = lines_b.size();
-    Classes classes = classify(lines_a, lines_b);
+    Classes classes = classify(keys_a, keys_b);
     List<bool> flags_a = [false; size_a];
     List<bool> flags_b = [false; size_b];
     int lim = min_of(size_a, size_b);

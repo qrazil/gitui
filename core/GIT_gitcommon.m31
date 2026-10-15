@@ -742,3 +742,77 @@ pub int compare(str a, str b) {
     }
     return 1;
 }
+
+// --- abbreviations --------------------------------------------------------------------------
+
+// How many objects the packs of the repository hold, from their index
+// files' fanout tables (`repo_approximate_object_count` counts these only).
+int packed_object_count(str gitdir) {
+    str objects = fs.join(GIT_repository.common(gitdir), "objects/pack");
+    int total = 0;
+    match (fs.listdir(objects)) {
+        case Ok(List<str> names): {
+            for (str name in names) {
+                if (!name.ends_with(".idx")) {
+                    continue;
+                }
+                match (io.open(fs.join(objects, name))) {
+                    case Ok(io.File file): {
+                        match (file.read(1032)) {
+                            case Ok(bytes head): {
+                                if (head.size() >= 1032 && head[0] == 255 && head[1] == 't' && head[2] == 'O' && head[3] == 'c') {
+                                    int at = 8 + 255 * 4;
+                                    total = total + (head[at] << 24 | head[at + 1] << 16 | head[at + 2] << 8 | head[at + 3]);
+                                }
+                            }
+                            case Err(_): {
+                            }
+                        }
+                    }
+                    case Err(_): {
+                    }
+                }
+            }
+        }
+        case Err(_): {
+        }
+    }
+    return total;
+}
+
+/// The abbreviation length git starts from: `core.abbrev` when it is a
+/// number, 40 for `no`, else what the packed object count asks for (never
+/// below 7).
+pub int default_abbrev(Ctx ctx) {
+    match (cfg(ctx, "core", "", "abbrev")) {
+        case Some(str value): {
+            str lower = value.to_lower();
+            if (lower == "no" || lower == "false") {
+                return 40;
+            }
+            match (value.parse_int()) {
+                case Some(int n): {
+                    if (n >= 4) {
+                        return n;
+                    }
+                }
+                case None: {
+                }
+            }
+        }
+        case None: {
+        }
+    }
+    int count = packed_object_count(ctx.gitdir);
+    int msb = 0;
+    int v = count;
+    while (v > 1) {
+        v = v / 2;
+        msb = msb + 1;
+    }
+    int len = (msb + 1 + 1) / 2;
+    if (len < 7) {
+        len = 7;
+    }
+    return len;
+}

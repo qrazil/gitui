@@ -25,6 +25,9 @@ import core.GIT_object;
 import core.GIT_index;
 import core.GIT_gitcommon;
 import core.GIT_gitstatus;
+import core.GIT_utf8width;
+import tui.core.TUI_style;
+import tui.core.TUI_syntax;
 import diff.GIT_xdiff;
 import diff.GIT_hunks;
 
@@ -37,6 +40,9 @@ pub type Side {
     pub int mode;
     pub str id;
     pub str wt;
+    // false for a work-tree file whose id git has not computed (the raw
+    // format then prints zeros)
+    pub bool is_known = true;
 }
 
 /// The absent side of a pair.
@@ -79,10 +85,20 @@ pub type DOpts {
     pub bool is_reverse = false;
     pub bool is_text = false;
     pub bool is_full_index = false;
+    // colour the code of added and removed lines by syntax (a terminal only)
+    pub bool is_syntax = false;
+    pub bool is_dark = true;
+    // --diff-filter: letters to keep, letters to drop
+    pub str filter = "";
+    pub str filter_not = "";
     pub int abbrev = 7;
-    pub int stat_width = 0;
-    pub int stat_name_width = 0;
-    pub int stat_graph_width = 0;
+    // -1: the terminal's width (or the config), 0: git's 80
+    pub int stat_width = -1;
+    pub int stat_name_width = -1;
+    pub int stat_graph_width = -1;
+    pub int stat_count = 0;
+    pub int stat_name_width_default = 0;
+    pub int stat_graph_width_default = 0;
     // bytes of graph prefix in front of each output line (`log --graph`)
     pub int prefix_len = 0;
     pub str src_prefix = "a/";
@@ -462,11 +478,18 @@ Option<Side> worktree_side(str full, Side indexed, bool is_filemode, Option<GIT_
                 }
             }
             if (is_same_stat) {
-                return Option<Side>.Some(Side(mode, indexed.id, full));
+                if (mode == indexed.mode) {
+                    return Option<Side>.Some(Side(mode, indexed.id, ""));
+                }
+                Side moved = Side(mode, indexed.id, full);
+                moved.is_known = false;
+                return Option<Side>.Some(moved);
             }
             match (io.read_bytes(full)) {
                 case Ok(bytes data): {
-                    return Option<Side>.Some(Side(mode, GIT_object.blob_id_like(indexed.id, data), full));
+                    Side changed = Side(mode, GIT_object.blob_id_like(indexed.id, data), full);
+                    changed.is_known = false;
+                    return Option<Side>.Some(changed);
                 }
                 case Err(_): {
                     return Option<Side>.None;
@@ -550,6 +573,8 @@ pub List<Item> tree_vs_worktree(str gitdir, str root, str tree, Map<str, Side> e
                 case None: {
                     if (in_tree) {
                         out.push(Item("D", path, path, one, nothing()));
+                    } else {
+                        out.push(Item("A", path, path, nothing(), indexed));
                     }
                     continue;
                 }
@@ -645,6 +670,10 @@ pub List<Item> detect_renames(str gitdir, List<Item> items, int minimum) {
     }
     if (dsts.size() == 0 || srcs.size() == 0) {
         return items;
+    }
+    // looking for exact matches computes the id of every added file
+    for (int d in dsts) {
+        items[d].new.is_known = true;
     }
     // dst index in `dsts` -> src index in `srcs`, and the score
     Map<int, int> pair_src = {};
@@ -842,6 +871,8 @@ pub type Loaded {
     pub List<diff.Op> ops = [];
     pub int added = 0;
     pub int deleted = 0;
+    // the syntax highlighter's language for the path, "" for none
+    pub str language = "";
 }
 
 int ws_class(int c) {
@@ -884,10 +915,58 @@ bytes normalize_line(bytes line, int mode) {
     return out;
 }
 
-pub List<diff.Op> make_ops(bytes old, bytes new, int ws) {
+// git's `trim_common_tail`: with no context lines the identical tail of both
+// files is cut off in blocks of 1024 bytes before diffing, which keeps a
+// change from sliding into it
+int common_tail_trim(bytes a, bytes b) {
+    int block = 1024;
+    int trimmed = 0;
+    int smaller = a.size();
+    if (b.size() < smaller) {
+        smaller = b.size();
+    }
+    while (block + trimmed <= smaller) {
+        bool is_same = true;
+        for (int k in 0 .. block) {
+            if (a[a.size() - trimmed - block + k] != b[b.size() - trimmed - block + k]) {
+                is_same = false;
+                break;
+            }
+        }
+        if (!is_same) {
+            break;
+        }
+        trimmed = trimmed + block;
+    }
+    if (trimmed == 0) {
+        return 0;
+    }
+    // recover up to and including the first newline of the trimmed region
+    int recovered = 0;
+    int start = a.size() - trimmed;
+    while (recovered < trimmed) {
+        int c = a[start + recovered];
+        recovered = recovered + 1;
+        if (c == '\n') {
+            break;
+        }
+    }
+    return trimmed - recovered;
+}
+
+pub List<diff.Op> make_ops(bytes old_full, bytes new_full, int ws, int context) {
+    bytes old = old_full;
+    bytes new = new_full;
+    if (context == 0) {
+        int cut = common_tail_trim(old_full, new_full);
+        if (cut > 0) {
+            old = old_full.substr(0, old_full.size() - cut);
+            new = new_full.substr(0, new_full.size() - cut);
+        }
+    }
     List<bytes> lines_a = GIT_xdiff.split_lines(old);
     List<bytes> lines_b = GIT_xdiff.split_lines(new);
-    GIT_xdiff.Diff changes = GIT_xdiff.diff_lines_indent(lines_a, lines_b);
+    GIT_xdiff.Diff changes = GIT_xdiff.Diff([], [], [], []);
     if (ws > 0) {
         List<bytes> norm_a = [];
         List<bytes> norm_b = [];
@@ -897,7 +976,9 @@ pub List<diff.Op> make_ops(bytes old, bytes new, int ws) {
         for (bytes line in lines_b) {
             norm_b.push(normalize_line(line, ws));
         }
-        changes = GIT_xdiff.diff_lines_indent(norm_a, norm_b);
+        changes = GIT_xdiff.diff_lines_indent_keyed(lines_a, lines_b, norm_a, norm_b);
+    } else {
+        changes = GIT_xdiff.diff_lines_indent(lines_a, lines_b);
     }
     List<diff.Op> out = [];
     int size_a = lines_a.size();
@@ -939,7 +1020,7 @@ pub Loaded load(str gitdir, Item item, DOpts opts, bool want_ops) {
     if (!want_ops) {
         // counts only
     }
-    loaded.ops = make_ops(loaded.old, loaded.new, opts.ws);
+    loaded.ops = make_ops(loaded.old, loaded.new, opts.ws, opts.context);
     for (diff.Op op in loaded.ops) {
         match (op.kind) {
             case Add: {
@@ -985,14 +1066,56 @@ bool is_blank_line(bytes line) {
     return true;
 }
 
-int trailing_blank_count(List<bytes> lines) {
-    int n = 0;
-    int i = lines.size() - 1;
-    while (i >= 0 && is_blank_line(lines[i])) {
-        n = n + 1;
-        i = i - 1;
+// git's `count_trailing_blank`: blank lines at the end of a buffer
+int count_trailing_blank(bytes data) {
+    int size = data.size();
+    if (size == 0) {
+        return 0;
     }
-    return n;
+    int ptr = size - 1;
+    if (data[ptr] == '\n') {
+        ptr = ptr - 1;
+    }
+    int count = 0;
+    while (0 < ptr) {
+        int prev_eol = ptr;
+        while (0 <= prev_eol) {
+            if (data[prev_eol] == '\n') {
+                break;
+            }
+            prev_eol = prev_eol - 1;
+        }
+        bool is_blank = true;
+        for (int k in prev_eol + 1 .. ptr + 1) {
+            if (!is_ws_byte(data[k])) {
+                is_blank = false;
+                break;
+            }
+        }
+        if (!is_blank) {
+            break;
+        }
+        count = count + 1;
+        ptr = prev_eol - 1;
+    }
+    return count;
+}
+
+// git's `count_lines`
+int count_lines(bytes data) {
+    int count = 0;
+    for (int c in data) {
+        if (c == '\n') {
+            count = count + 1;
+        }
+    }
+    if (data.size() == 0) {
+        return 0;
+    }
+    if (data[data.size() - 1] != '\n') {
+        count = count + 1;
+    }
+    return count;
 }
 
 // git's `ws_check_emit` for an added line without its newline: the text in
@@ -1058,11 +1181,13 @@ bool ends_with_nl(bytes line) {
     return line.size() > 0 && line[line.size() - 1] == '\n';
 }
 
-// git's default funcname: the nearest line above that starts with a letter,
-// `_` or `$`, cut to 80 bytes, trailing blanks dropped.
-bytes func_name(List<bytes> old_lines, int before) {
-    int index = before - 1;
-    while (index >= 0) {
+// git's `get_func_line` with the default funcname rule: from line `start`
+// back to (not including) `limit`, the nearest line that starts with a
+// letter, `_` or `$`, cut to 80 bytes with its trailing blanks dropped.
+// Returns false when there is none.
+bool func_search(List<bytes> old_lines, int start, int limit, bytes found) {
+    int index = start;
+    while (index != limit && index >= 0 && index < old_lines.size()) {
         bytes line = old_lines[index];
         if (line.size() > 0) {
             int first = line[0];
@@ -1075,12 +1200,14 @@ bytes func_name(List<bytes> old_lines, int before) {
                 while (length > 0 && is_ws_byte(line[length - 1])) {
                     length = length - 1;
                 }
-                return line.substr(0, length);
+                found.clear();
+                found.extend(line.substr(0, length));
+                return true;
             }
         }
         index = index - 1;
     }
-    return [];
+    return false;
 }
 
 str range_text(int before, int count) {
@@ -1101,7 +1228,7 @@ pub bytes hunks_bytes(Loaded loaded, DOpts opts) {
     Pal pal = opts.pal;
     List<int> old_before = [0; ops.size() + 1];
     List<int> new_before = [0; ops.size() + 1];
-    List<bytes> old_lines = [];
+    List<bytes> old_lines = GIT_xdiff.split_lines(loaded.old);
     for (int i in 0 .. ops.size()) {
         old_before[i + 1] = old_before[i];
         new_before[i + 1] = new_before[i];
@@ -1109,34 +1236,38 @@ pub bytes hunks_bytes(Loaded loaded, DOpts opts) {
             case Keep: {
                 old_before[i + 1] = old_before[i] + 1;
                 new_before[i + 1] = new_before[i] + 1;
-                old_lines.push(ops[i].line);
             }
             case Remove: {
                 old_before[i + 1] = old_before[i] + 1;
-                old_lines.push(ops[i].line);
             }
             case Add: {
                 new_before[i + 1] = new_before[i] + 1;
             }
         }
     }
-    // trailing blank lines added at the end of the file (a whitespace error)
-    int blank_at_eof = 0;
+    // trailing blank lines added at the end of the file (a whitespace error):
+    // git's `check_blank_at_eof`, both images
+    int blank_pre = 0;
+    int blank_post = 0;
     if (pal.is_on && pal.whitespace != "") {
-        List<bytes> lines_old = GIT_xdiff.split_lines(loaded.old);
-        List<bytes> lines_new = GIT_xdiff.split_lines(loaded.new);
-        int l1 = trailing_blank_count(lines_old);
-        int l2 = trailing_blank_count(lines_new);
+        int l1 = count_trailing_blank(loaded.old);
+        int l2 = count_trailing_blank(loaded.new);
         if (l2 > l1) {
-            blank_at_eof = (lines_new.size() - l2) + 1;
+            blank_pre = (count_lines(loaded.old) - l1) + 1;
+            blank_post = (count_lines(loaded.new) - l2) + 1;
         }
     }
     int context = opts.context;
+    int func_limit = -1;
+    bytes func = [];
     for (GIT_hunks.Span span in GIT_hunks.spans(ops, context: context)) {
         int old_count = old_before[span.end] - old_before[span.start];
         int new_count = new_before[span.end] - new_before[span.start];
         str head = "@@ -" + range_text(old_before[span.start], old_count) + " +" + range_text(new_before[span.start], new_count) + " @@";
-        bytes func = func_name(old_lines, old_before[span.start]);
+        // the function line is searched back to the previous hunk's start;
+        // when nothing is found the previous hunk's line is printed again
+        func_search(old_lines, old_before[span.start] - 1, func_limit, func);
+        func_limit = old_before[span.start] - 1;
         if (pal.is_on) {
             out.extend((pal.frag + head).to_bytes());
             if (func.size() > 0) {
@@ -1154,16 +1285,102 @@ pub bytes hunks_bytes(Loaded loaded, DOpts opts) {
             }
         }
         out.push('\n');
-        int lno_new = new_before[span.start];
+        // the line numbers the hunk header announces
+        int lno_pre = old_before[span.start];
+        if (old_count > 0) {
+            lno_pre = lno_pre + 1;
+        }
+        int lno_post = new_before[span.start];
+        if (new_count > 0) {
+            lno_post = lno_post + 1;
+        }
+        int syn_old = 0;
+        int syn_new = 0;
+        bool is_syntax = opts.is_syntax && pal.is_on && loaded.language != "";
         for (int i in span.start .. span.end) {
             diff.Op op = ops[i];
             bytes text = strip_nl(op.line);
             bool has_nl = ends_with_nl(op.line);
+            // syntax colours: classify the code of every line of the hunk
+            // so the carried state is right, paint the added and removed
+            str painted = "";
+            bool is_painted = false;
+            bool is_add_line = false;
+            if (is_syntax) {
+                bytes code_bytes = text;
+                bool has_cr = code_bytes.size() > 0 && code_bytes[code_bytes.size() - 1] == '\r';
+                if (has_cr) {
+                    code_bytes = code_bytes.substr(0, code_bytes.size() - 1);
+                }
+                match (code_bytes.utf8()) {
+                    case Some(str code): {
+                        match (op.kind) {
+                            case Keep: {
+                                TUI_syntax.Tokens tokens = TUI_syntax.classify(loaded.language, code, syn_new);
+                                if (syn_old != syn_new) {
+                                    syn_old = TUI_syntax.classify(loaded.language, code, syn_old).state;
+                                } else {
+                                    syn_old = tokens.state;
+                                }
+                                syn_new = tokens.state;
+                            }
+                            case Remove: {
+                                TUI_syntax.Tokens tokens = TUI_syntax.classify(loaded.language, code, syn_old);
+                                syn_old = tokens.state;
+                                painted = syntax_runs(code, tokens.classes, pal.old, pal.reset, opts.is_dark);
+                                is_painted = true;
+                                is_add_line = false;
+                            }
+                            case Add: {
+                                TUI_syntax.Tokens tokens = TUI_syntax.classify(loaded.language, code, syn_new);
+                                syn_new = tokens.state;
+                                // the trailing whitespace stays an error colour
+                                int keep = code.size();
+                                while (keep > 0 && is_ws_byte(code.byte_at(keep - 1))) {
+                                    keep = keep - 1;
+                                }
+                                if (pal.whitespace == "" || keep == code.size()) {
+                                    painted = syntax_runs(code, tokens.classes, pal.new, pal.reset, opts.is_dark);
+                                } else {
+                                    painted = syntax_runs(code.substr(0, keep), tokens.classes, pal.new, pal.reset, opts.is_dark) + pal.whitespace + code.substr(keep, code.size()) + pal.reset;
+                                }
+                                is_painted = true;
+                                is_add_line = true;
+                            }
+                        }
+                    }
+                    case None: {
+                    }
+                }
+                if (is_painted) {
+                    str sign_color = pal.old;
+                    str sign = "-";
+                    if (is_add_line) {
+                        sign_color = pal.new;
+                        sign = "+";
+                    }
+                    out.extend((sign_color + sign + pal.reset + painted).to_bytes());
+                    if (has_cr) {
+                        out.push('\r');
+                    }
+                    out.push('\n');
+                    if (is_add_line) {
+                        lno_post = lno_post + 1;
+                    } else {
+                        lno_pre = lno_pre + 1;
+                    }
+                    if (!has_nl) {
+                        out.extend((pal.context + "\\ No newline at end of file" + pal.reset + "\n").to_bytes());
+                    }
+                    continue;
+                }
+            }
             // a CR before the newline is handled apart on removed and
             // context lines
             match (op.kind) {
                 case Keep: {
-                    lno_new = lno_new + 1;
+                    lno_pre = lno_pre + 1;
+                    lno_post = lno_post + 1;
                     if (pal.is_on) {
                         emit_plain(out, ' ', text, pal.context, pal.reset);
                     } else {
@@ -1173,6 +1390,7 @@ pub bytes hunks_bytes(Loaded loaded, DOpts opts) {
                     }
                 }
                 case Remove: {
+                    lno_pre = lno_pre + 1;
                     if (pal.is_on) {
                         emit_plain(out, '-', text, pal.old, pal.reset);
                     } else {
@@ -1182,14 +1400,14 @@ pub bytes hunks_bytes(Loaded loaded, DOpts opts) {
                     }
                 }
                 case Add: {
-                    lno_new = lno_new + 1;
+                    lno_post = lno_post + 1;
                     if (!pal.is_on) {
                         out.push('+');
                         out.extend(text);
                         out.push('\n');
                     } else if (pal.whitespace == "") {
                         emit_plain(out, '+', text, pal.new, pal.reset);
-                    } else if (blank_at_eof > 0 && lno_new >= blank_at_eof) {
+                    } else if (blank_pre > 0 && blank_post > 0 && blank_pre <= lno_pre && blank_post <= lno_post && is_blank_line(op.line)) {
                         // the whole line is the error, sign included
                         out.extend(pal.whitespace.to_bytes());
                         out.push('+');
@@ -1297,25 +1515,11 @@ pub bytes patch_bytes(str gitdir, Item item, DOpts opts) {
     Pal pal = opts.pal;
     str src = opts.src_prefix;
     str dst = opts.dst_prefix;
-    Item it = item;
     if (opts.is_reverse) {
-        it = Item(item.status, item.old_path, item.path, item.new, item.old);
-        if (item.status == "A") {
-            it.status = "D";
-        } else if (item.status == "D") {
-            it.status = "A";
-        }
-        it.score = item.score;
-        it.path = item.old_path;
-        it.old_path = item.path;
-        if (item.status == "R") {
-            it.path = item.old_path;
-            it.old_path = item.path;
-        } else {
-            it.path = item.path;
-            it.old_path = item.path;
-        }
+        src = opts.dst_prefix;
+        dst = opts.src_prefix;
     }
+    Item it = item;
     if (it.status == "U") {
         out.extend(("* Unmerged path " + it.path + "\n").to_bytes());
         return out;
@@ -1343,16 +1547,23 @@ pub bytes patch_bytes(str gitdir, Item item, DOpts opts) {
         meta_line(out, "old mode " + octal6(it.old.mode), pal);
         meta_line(out, "new mode " + octal6(it.new.mode), pal);
     }
-    if (it.status == "R") {
+    if (it.status == "R" || it.status == "C") {
+        str word = "rename";
+        if (it.status == "C") {
+            word = "copy";
+        }
         meta_line(out, "similarity index " + (it.score * 100 / 60000).to_str() + "%", pal);
-        meta_line(out, "rename from " + quoted(it.old_path), pal);
-        meta_line(out, "rename to " + quoted(it.path), pal);
+        meta_line(out, word + " from " + quoted(it.old_path), pal);
+        meta_line(out, word + " to " + quoted(it.path), pal);
     }
     bool has_content_change = it.old.id != it.new.id;
     if (!has_content_change) {
         return out;
     }
     Loaded loaded = load(gitdir, it, opts, true);
+    if (opts.is_syntax) {
+        loaded.language = TUI_syntax.language_of(it.path, "");
+    }
     int width = abbrev_of(opts, false);
     str index_line = "index " + abbrev_id(gitdir, it.old.id, width) + ".." + abbrev_id(gitdir, it.new.id, width);
     if (it.old.mode == it.new.mode) {
@@ -1410,6 +1621,7 @@ type StatFile {
     int new_size = 0;
     bool is_unmerged = false;
     bool is_renamed = false;
+    str from_name = "";
 }
 
 str rename_name(str a, str b) {
@@ -1517,16 +1729,22 @@ pub str summary_line(int files, int insertions, int deletions) {
     return out + "\n";
 }
 
+/// The per-file counts of a diff, as `compute_diffstat` makes them.
 List<StatFile> stat_files(str gitdir, List<Item> items, DOpts opts) {
     List<StatFile> out = [];
     for (Item item in items) {
+        // a pair with nothing different is not part of a stat
+        if (item.status != "R" && item.status != "C" && item.status != "U" && item.old.id == item.new.id && item.old.mode == item.new.mode) {
+            continue;
+        }
         StatFile file = StatFile(item.path, quoted(item.path));
         if (item.status == "D") {
             file.name = item.old_path;
             file.print = quoted(item.old_path);
         }
-        if (item.status == "R") {
+        if (item.status == "R" || item.status == "C") {
             file.is_renamed = true;
+            file.from_name = item.old_path;
             file.print = rename_name(item.old_path, item.path);
         }
         if (item.status == "U") {
@@ -1535,27 +1753,35 @@ List<StatFile> stat_files(str gitdir, List<Item> items, DOpts opts) {
             continue;
         }
         Item it = item;
-        if (item.status == "T") {
-            it = item;
-        }
-        if (it.old.id != it.new.id) {
-            Loaded loaded = load(gitdir, it, opts, true);
-            if (loaded.is_binary) {
-                file.is_binary = true;
-                file.old_size = loaded.old.size();
-                file.new_size = loaded.new.size();
-            } else {
-                file.added = loaded.added;
-                file.deleted = loaded.deleted;
+        if (item.old.id != it.new.id || item.old.mode != item.new.mode) {
+            if (item.status == "T") {
+                // a type change is a deletion and an addition: both counted
+                Loaded gone = load(gitdir, Item("D", item.path, item.path, item.old, nothing()), opts, true);
+                Loaded came = load(gitdir, Item("A", item.path, item.path, nothing(), item.new), opts, true);
+                file.added = gone.added + came.added;
+                file.deleted = gone.deleted + came.deleted;
+                file.is_binary = gone.is_binary || came.is_binary;
+                if (file.is_binary) {
+                    file.old_size = gone.old.size();
+                    file.new_size = came.new.size();
+                    file.added = 0;
+                    file.deleted = 0;
+                }
+            } else if (item.old.id != item.new.id) {
+                Loaded loaded = load(gitdir, it, opts, true);
+                if (loaded.is_binary) {
+                    file.is_binary = true;
+                    file.old_size = loaded.old.size();
+                    file.new_size = loaded.new.size();
+                } else {
+                    file.added = loaded.added;
+                    file.deleted = loaded.deleted;
+                }
+                if (item.status == "M" && !file.is_binary && file.added == 0 && file.deleted == 0 && item.old.mode == item.new.mode) {
+                    // whitespace-only changes under -w: nothing to show
+                    continue;
+                }
             }
-        }
-        if (opts.is_reverse) {
-            int swap = file.added;
-            file.added = file.deleted;
-            file.deleted = swap;
-            int size_swap = file.old_size;
-            file.old_size = file.new_size;
-            file.new_size = size_swap;
         }
         out.push(file);
     }
@@ -1566,64 +1792,82 @@ List<StatFile> stat_files(str gitdir, List<Item> items, DOpts opts) {
 pub bytes stat_bytes(str gitdir, List<Item> items, DOpts opts) {
     List<StatFile> files = stat_files(gitdir, items, opts);
     bytes out = [];
-    if (files.size() == 0) {
+    int nr = files.size();
+    if (nr == 0) {
         return out;
     }
     Pal pal = opts.pal;
+    int count = nr;
+    if (opts.stat_count > 0) {
+        count = opts.stat_count;
+    }
     int max_len = 0;
     int max_change = 0;
-    int total_add = 0;
-    int total_del = 0;
     int number_width = 0;
     int bin_width = 0;
-    int count = 0;
-    for (StatFile file in files) {
-        int name_len = file.print.size();
+    int shown = 0;
+    for (int i in 0 .. nr) {
+        if (i >= count) {
+            break;
+        }
+        StatFile file = files[i];
+        shown = shown + 1;
+        int change = file.added + file.deleted;
+        int name_len = GIT_utf8width.str_width(file.print);
         if (max_len < name_len) {
             max_len = name_len;
         }
-        count = count + 1;
         if (file.is_unmerged) {
+            if (bin_width < 8) {
+                bin_width = 8;
+            }
             continue;
         }
         if (file.is_binary) {
-            int w = 14 + decimal_width(file.old_size) + decimal_width(file.new_size);
-            if (w > bin_width) {
+            int w = 14 + decimal_width(file.new_size) + decimal_width(file.old_size);
+            if (bin_width < w) {
                 bin_width = w;
             }
             number_width = 3;
             continue;
         }
-        int change = file.added + file.deleted;
-        total_add = total_add + file.added;
-        total_del = total_del + file.deleted;
         if (max_change < change) {
             max_change = change;
         }
     }
+    count = shown;
     int width = 0;
-    if (opts.stat_width > 0) {
+    if (opts.stat_width == -1) {
+        width = GIT_gitcommon.columns() - opts.prefix_len;
+    } else if (opts.stat_width > 0) {
         width = opts.stat_width;
     } else {
-        width = GIT_gitcommon.columns() - opts.prefix_len;
+        width = 80;
     }
     if (decimal_width(max_change) > number_width) {
         number_width = decimal_width(max_change);
     }
+    int name_cfg = opts.stat_name_width;
     int graph_cfg = opts.stat_graph_width;
+    if (name_cfg == -1) {
+        name_cfg = opts.stat_name_width_default;
+    }
+    if (graph_cfg == -1) {
+        graph_cfg = opts.stat_graph_width_default;
+    }
     if (width < 16 + 6 + number_width) {
         width = 16 + 6 + number_width;
     }
-    int graph_width = max_change;
-    if (max_change + 4 <= bin_width) {
-        graph_width = bin_width - 4;
+    int graph_width = bin_width - 4;
+    if (max_change + 4 > bin_width) {
+        graph_width = max_change;
     }
-    if (graph_cfg > 0 && graph_cfg < graph_width) {
+    if (graph_cfg != 0 && graph_cfg < graph_width) {
         graph_width = graph_cfg;
     }
     int name_width = max_len;
-    if (opts.stat_name_width > 0 && opts.stat_name_width < max_len) {
-        name_width = opts.stat_name_width;
+    if (name_cfg > 0 && name_cfg < max_len) {
+        name_width = name_cfg;
     }
     if (name_width + number_width + 6 + graph_width > width) {
         if (graph_width > width * 3 / 8 - number_width - 6) {
@@ -1632,7 +1876,7 @@ pub bytes stat_bytes(str gitdir, List<Item> items, DOpts opts) {
                 graph_width = 6;
             }
         }
-        if (graph_cfg > 0 && graph_width > graph_cfg) {
+        if (graph_cfg != 0 && graph_width > graph_cfg) {
             graph_width = graph_cfg;
         }
         if (name_width > width - number_width - 6 - graph_width) {
@@ -1641,15 +1885,21 @@ pub bytes stat_bytes(str gitdir, List<Item> items, DOpts opts) {
             graph_width = width - number_width - 6 - name_width;
         }
     }
-    for (StatFile file in files) {
+    for (int i in 0 .. count) {
+        StatFile file = files[i];
         str prefix = "";
         str name = file.print;
         int len = name_width;
-        int name_len = name.size();
+        int name_len = GIT_utf8width.str_width(name);
         if (name_width < name_len) {
             prefix = "...";
             len = len - 3;
-            name = name.substr(name_len - len, name_len);
+            // advance by (name_len - len) bytes, then to the next slash
+            int skip_bytes = name_len - len;
+            if (skip_bytes > name.size()) {
+                skip_bytes = name.size();
+            }
+            name = byte_tail(name, skip_bytes);
             match (name.index_of("/")) {
                 case Some(int slash): {
                     name = name.substr(slash, name.size());
@@ -1658,23 +1908,29 @@ pub bytes stat_bytes(str gitdir, List<Item> items, DOpts opts) {
                 }
             }
         }
-        if (file.is_unmerged) {
-            out.extend((" " + prefix + name + GIT_gitcommon.pad_left("", len - name.size(), " ") + " | Unmerged\n").to_bytes());
-            continue;
+        int padding = len - GIT_utf8width.str_width(name);
+        if (padding < 0) {
+            padding = 0;
         }
-        str padded = name + " ".repeat(len - name.size());
-        if (len < name.size()) {
-            padded = name;
-        }
+        str padded = name + " ".repeat(padding);
         if (file.is_binary) {
-            str line = " " + prefix + padded + " | " + GIT_gitcommon.pad_left("Bin", number_width, " ") + " ";
+            str line = " " + prefix + padded + " | " + GIT_gitcommon.pad_left("Bin", number_width, " ");
+            if (file.new_size == 0 && file.old_size == 0) {
+                out.extend((line + "\n").to_bytes());
+                continue;
+            }
             str old_text = file.old_size.to_str();
             str new_text = file.new_size.to_str();
             if (pal.is_on) {
-                line = line + pal.old + old_text + pal.reset + " -> " + pal.new + new_text + pal.reset + " bytes\n";
+                line = line + " " + pal.old + old_text + pal.reset + " -> " + pal.new + new_text + pal.reset + " bytes\n";
             } else {
-                line = line + old_text + " -> " + new_text + " bytes\n";
+                line = line + " " + old_text + " -> " + new_text + " bytes\n";
             }
+            out.extend(line.to_bytes());
+            continue;
+        }
+        if (file.is_unmerged) {
+            str line = " " + prefix + padded + " | " + GIT_gitcommon.pad_left("Unmerged\n", number_width, " ");
             out.extend(line.to_bytes());
             continue;
         }
@@ -1693,17 +1949,51 @@ pub bytes stat_bytes(str gitdir, List<Item> items, DOpts opts) {
                 add = total - del;
             }
         }
-        str line = " " + prefix + padded + " |";
         int changes = file.added + file.deleted;
-        line = line + " " + GIT_gitcommon.pad_left(changes.to_str(), number_width, " ");
+        str line = " " + prefix + padded + " | " + GIT_gitcommon.pad_left(changes.to_str(), number_width, " ");
         if (changes > 0) {
             line = line + " ";
         }
         line = line + graph_run("+", add, pal.new, pal.reset) + graph_run("-", del, pal.old, pal.reset) + "\n";
         out.extend(line.to_bytes());
     }
-    out.extend(summary_line(count, total_add, total_del).to_bytes());
+    int total_files = nr;
+    int adds = 0;
+    int dels = 0;
+    bool is_extra_shown = false;
+    for (int i in 0 .. nr) {
+        StatFile file = files[i];
+        if (file.is_unmerged) {
+            total_files = total_files - 1;
+            continue;
+        }
+        if (!file.is_binary) {
+            adds = adds + file.added;
+            dels = dels + file.deleted;
+        }
+        if (i < count) {
+            continue;
+        }
+        if (!is_extra_shown) {
+            out.extend(" ...\n".to_bytes());
+        }
+        is_extra_shown = true;
+    }
+    out.extend(summary_line(total_files, adds, dels).to_bytes());
     return out;
+}
+
+// `text` without its first `n` bytes, moved forward to a character boundary
+str byte_tail(str text, int n) {
+    int from = n;
+    bytes raw = text.to_bytes();
+    if (from > raw.size()) {
+        from = raw.size();
+    }
+    while (from < raw.size() && raw[from] & 0xc0 == 0x80) {
+        from = from + 1;
+    }
+    return text.substr(from, text.size());
 }
 
 /// `--shortstat`.
@@ -1712,13 +2002,18 @@ pub bytes shortstat_bytes(str gitdir, List<Item> items, DOpts opts) {
     if (files.size() == 0) {
         return [];
     }
+    int total_files = files.size();
     int add = 0;
     int del = 0;
     for (StatFile file in files) {
-        add = add + file.added;
-        del = del + file.deleted;
+        if (file.is_unmerged) {
+            total_files = total_files - 1;
+        } else if (!file.is_binary) {
+            add = add + file.added;
+            del = del + file.deleted;
+        }
     }
-    return summary_line(files.size(), add, del).to_bytes();
+    return summary_line(total_files, add, del).to_bytes();
 }
 
 /// `--numstat`.
@@ -1733,23 +2028,16 @@ pub bytes numstat_bytes(str gitdir, List<Item> items, DOpts opts) {
         if (opts.is_nul) {
             out.extend(counts.to_bytes());
             if (file.is_renamed) {
-                int index = 0;
-                for (int i in 0 .. items.size()) {
-                    if (items[i].path == file.name && items[i].status == "R") {
-                        index = i;
-                    }
-                }
                 out.push(0);
-                out.extend(items[index].old_path.to_bytes());
-                out.push(0);
-                out.extend(file.name.to_bytes());
-                out.push(0);
-            } else {
-                out.extend(file.name.to_bytes());
+                out.extend(file.from_name.to_bytes());
                 out.push(0);
             }
-        } else {
+            out.extend(file.name.to_bytes());
+            out.push(0);
+        } else if (file.is_renamed) {
             out.extend((counts + file.print + "\n").to_bytes());
+        } else {
+            out.extend((counts + quoted(file.name) + "\n").to_bytes());
         }
     }
     return out;
@@ -1758,8 +2046,8 @@ pub bytes numstat_bytes(str gitdir, List<Item> items, DOpts opts) {
 // --- name-only, name-status, raw, summary ---------------------------------------------------
 
 str status_text(Item item) {
-    if (item.status == "R") {
-        return "R" + GIT_gitcommon.pad_left((item.score * 100 / 60000).to_str(), 3, "0");
+    if (item.status == "R" || item.status == "C") {
+        return item.status + GIT_gitcommon.pad_left((item.score * 100 / 60000).to_str(), 3, "0");
     }
     return item.status;
 }
@@ -1793,13 +2081,13 @@ pub bytes name_status_bytes(List<Item> items, DOpts opts) {
         if (opts.is_nul) {
             out.extend(status_text(item).to_bytes());
             out.push(0);
-            if (item.status == "R") {
+            if (item.status == "R" || item.status == "C") {
                 out.extend(item.old_path.to_bytes());
                 out.push(0);
             }
             out.extend(shown.to_bytes());
             out.push(0);
-        } else if (item.status == "R") {
+        } else if (item.status == "R" || item.status == "C") {
             out.extend((status_text(item) + "\t" + quoted(item.old_path) + "\t" + quoted(item.path) + "\n").to_bytes());
         } else {
             out.extend((status_text(item) + "\t" + quoted(shown) + "\n").to_bytes());
@@ -1814,8 +2102,15 @@ pub bytes raw_bytes(str gitdir, List<Item> items, DOpts opts) {
     bytes out = [];
     for (Item item in items) {
         int width = abbrev_of(opts, false);
+        // ids of work-tree files are not computed by the raw format
         str old_id = abbrev_id(gitdir, item.old.id, width);
+        if (!item.old.is_known) {
+            old_id = abbrev_id(gitdir, "", width);
+        }
         str new_id = abbrev_id(gitdir, item.new.id, width);
+        if (!item.new.is_known) {
+            new_id = abbrev_id(gitdir, "", width);
+        }
         str shown = item.path;
         if (item.status == "D") {
             shown = item.old_path;
@@ -1824,13 +2119,13 @@ pub bytes raw_bytes(str gitdir, List<Item> items, DOpts opts) {
         if (opts.is_nul) {
             out.extend(head.to_bytes());
             out.push(0);
-            if (item.status == "R") {
+            if (item.status == "R" || item.status == "C") {
                 out.extend(item.old_path.to_bytes());
                 out.push(0);
             }
             out.extend(shown.to_bytes());
             out.push(0);
-        } else if (item.status == "R") {
+        } else if (item.status == "R" || item.status == "C") {
             out.extend((head + "\t" + quoted(item.old_path) + "\t" + quoted(item.path) + "\n").to_bytes());
         } else {
             out.extend((head + "\t" + quoted(shown) + "\n").to_bytes());
@@ -1859,8 +2154,12 @@ pub bytes summary_bytes(List<Item> items) {
             out.extend((" create mode " + octal6(item.new.mode) + " " + quoted(item.path) + "\n").to_bytes());
         } else if (item.status == "D") {
             out.extend((" delete mode " + octal6(item.old.mode) + " " + quoted(item.old_path) + "\n").to_bytes());
-        } else if (item.status == "R") {
-            out.extend((" rename " + rename_name(item.old_path, item.path) + " (" + (item.score * 100 / 60000).to_str() + "%)\n").to_bytes());
+        } else if (item.status == "R" || item.status == "C") {
+            str word = " rename ";
+            if (item.status == "C") {
+                word = " copy ";
+            }
+            out.extend((word + rename_name(item.old_path, item.path) + " (" + (item.score * 100 / 60000).to_str() + "%)\n").to_bytes());
             if (item.old.mode != item.new.mode) {
                 out.extend((" mode change " + octal6(item.old.mode) + " => " + octal6(item.new.mode) + "\n").to_bytes());
             }
@@ -1880,7 +2179,7 @@ pub bool has_changes(str gitdir, List<Item> items, DOpts opts) {
         if (item.old.id == item.new.id && item.old.mode == item.new.mode && item.status != "R") {
             continue;
         }
-        if (opts.ws == 0 || item.old.id == "" || item.new.id == "" || item.old.mode != item.new.mode || item.status == "R") {
+        if (opts.ws == 0 || item.old.id == "" || item.new.id == "" || item.old.mode != item.new.mode || item.status == "R" || item.status == "C") {
             return true;
         }
         Loaded loaded = load(gitdir, item, opts, true);
@@ -2044,4 +2343,232 @@ pub str unique_abbrev(str gitdir, str id, int min) {
         length = length + 1;
     }
     return id.substr(0, length);
+}
+
+/// `--diff-filter`: keep the pairs whose status is selected (`*` keeps all
+/// or none).
+pub List<Item> apply_filter(List<Item> items, DOpts opts) {
+    if (opts.filter == "" && opts.filter_not == "") {
+        return items;
+    }
+    str keep = opts.filter;
+    if (opts.filter_not != "") {
+        if (keep == "") {
+            keep = "ACDMRTUXB";
+        }
+        str kept = "";
+        for (int c in keep.chars()) {
+            str one = str.from_chars([c]);
+            if (!opts.filter_not.contains(one)) {
+                kept = kept + one;
+            }
+        }
+        keep = kept;
+    }
+    if (keep == "") {
+        return items;
+    }
+    List<Item> out = [];
+    bool is_found = false;
+    for (Item item in items) {
+        if (keep.contains(item.status)) {
+            out.push(item);
+            is_found = true;
+        }
+    }
+    if (keep.contains("*")) {
+        if (is_found) {
+            return items;
+        }
+        return [];
+    }
+    return out;
+}
+
+/// `-R`: the pairs seen the other way round (before rename detection).
+pub List<Item> reverse_items(List<Item> items) {
+    List<Item> out = [];
+    for (Item item in items) {
+        Item swapped = Item(item.status, item.path, item.path, item.new, item.old);
+        if (item.status == "A") {
+            swapped.status = "D";
+        } else if (item.status == "D") {
+            swapped.status = "A";
+        }
+        out.push(swapped);
+    }
+    return out;
+}
+
+// the SGR parameters of a token class
+str class_sgr(int class_value, bool is_dark) {
+    TUI_style.Style style = TUI_syntax.class_style(class_value, is_dark);
+    str codes = "";
+    if ((style.attrs & TUI_style.BOLD) != 0) {
+        codes = "1";
+    }
+    match (style.foreground) {
+        case Indexed(int n): {
+            str fg = "";
+            if (n < 8) {
+                fg = (30 + n).to_str();
+            } else if (n < 16) {
+                fg = (90 + n - 8).to_str();
+            } else {
+                fg = "38;5;" + n.to_str();
+            }
+            if (codes != "") {
+                codes = codes + ";";
+            }
+            codes = codes + fg;
+        }
+        case Default: {
+        }
+        case Rgb(int r, int g, int b): {
+            if (codes != "") {
+                codes = codes + ";";
+            }
+            codes = codes + "38;2;" + r.to_str() + ";" + g.to_str() + ";" + b.to_str();
+        }
+    }
+    return codes;
+}
+
+// `code` coloured by token class: unclassified runs in `base`, the others in
+// the class colour; a run never splits a UTF-8 sequence
+str syntax_runs(str code, List<int> classes, str base, str reset, bool is_dark) {
+    str out = "";
+    int size = code.size();
+    int start = 0;
+    while (start < size) {
+        int class_value = 0;
+        if (start < classes.size()) {
+            class_value = classes[start];
+        }
+        int stop = start + 1;
+        while (stop < size) {
+            int other = 0;
+            if (stop < classes.size()) {
+                other = classes[stop];
+            }
+            int b = code.byte_at(stop);
+            bool is_continuation = b >= 128 && b < 192;
+            if (other != class_value && !is_continuation) {
+                break;
+            }
+            stop = stop + 1;
+        }
+        str piece = code.substr(start, stop);
+        if (class_value == 0) {
+            if (base != "") {
+                out = out + base + piece + reset;
+            } else {
+                out = out + piece;
+            }
+        } else {
+            str sgr = class_sgr(class_value, is_dark);
+            if (sgr == "") {
+                out = out + piece;
+            } else {
+                out = out + "\x1b[" + sgr + "m" + piece + reset;
+            }
+        }
+        start = stop;
+    }
+    return out;
+}
+
+// --- --follow: renames and copies of one destination ---------------------------------------------
+
+/// `try_to_follow_renames`: where the added file `added` came from. git runs
+/// its rename detection with `find_copies_harder`, so every file of the
+/// parent tree is a candidate source: a file that no longer exists makes a
+/// rename (R), one that still does a copy (C). Exact matches win, preferring
+/// a vanished source and the same base name; otherwise the most similar of
+/// the best four, vanished sources first. `gone` are the paths of the parent
+/// tree that are not in the new one.
+pub Option<Item> follow_source(str gitdir, str parent_tree, Item added, List<str> gone, int minimum) {
+    Map<str, Side> sources = tree_sides(gitdir, parent_tree, "", []);
+    List<str> paths = [];
+    for (str path in sources.keys()) {
+        paths.push(path);
+    }
+    paths.sort();
+    // exact
+    int best = -1;
+    int best_score = -1;
+    for (int k in 0 .. paths.size()) {
+        Side src = sources.get(paths[k]).or(nothing());
+        if (src.id != added.new.id) {
+            continue;
+        }
+        if (!is_regular(src.mode) || !is_regular(added.new.mode)) {
+            if (src.mode != added.new.mode) {
+                continue;
+            }
+        }
+        int score = 0;
+        if (gone.contains(paths[k])) {
+            score = 1;
+        }
+        score = score + same_base(paths[k], added.path);
+        if (score > best_score) {
+            best = k;
+            best_score = score;
+            if (score == 2) {
+                break;
+            }
+        }
+    }
+    if (best >= 0) {
+        Side src = sources.get(paths[best]).or(nothing());
+        return Option<Item>.Some(make_follow_item(paths[best], src, added, 60000, gone.contains(paths[best])));
+    }
+    if (!is_regular(added.new.mode)) {
+        return Option<Item>.None;
+    }
+    bytes dst_data = content_of(gitdir, added.new);
+    Map<int, int> dst_spans = GIT_gitstatus.span_counts(dst_data);
+    List<Candidate> candidates = [];
+    for (int k in 0 .. paths.size()) {
+        Side src = sources.get(paths[k]).or(nothing());
+        if (!is_regular(src.mode)) {
+            continue;
+        }
+        bytes data = content_of(gitdir, src);
+        int score = estimate(GIT_gitstatus.span_counts(data), data.size(), dst_spans, dst_data.size(), minimum);
+        candidates.push(Candidate(score, same_base(paths[k], added.path), 0, k));
+    }
+    candidates.sort();
+    // the best four, in score order
+    int limit = candidates.size();
+    if (limit > 4) {
+        limit = 4;
+    }
+    // first pass: a source that vanished; second: any
+    for (int pass in 0 .. 2) {
+        for (int c in 0 .. limit) {
+            Candidate cand = candidates[c];
+            if (cand.score < minimum) {
+                break;
+            }
+            bool is_gone = gone.contains(paths[cand.src]);
+            if (pass == 0 && !is_gone) {
+                continue;
+            }
+            Side src = sources.get(paths[cand.src]).or(nothing());
+            return Option<Item>.Some(make_follow_item(paths[cand.src], src, added, cand.score, is_gone));
+        }
+    }
+    return Option<Item>.None;
+}
+
+Item make_follow_item(str source_path, Side src, Item added, int score, bool is_gone) {
+    str status = "C";
+    if (is_gone) {
+        status = "R";
+    }
+    Item item = Item(status, added.path, source_path, src, added.new);
+    item.score = score;
+    return item;
 }

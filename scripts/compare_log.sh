@@ -45,6 +45,13 @@ forms() {
     compare "$l" "$r" log
     compare "$l" "$r" log --oneline
     compare "$l" "$r" log --oneline --decorate
+    compare "$l" "$r" log --pretty=oneline
+    compare "$l" "$r" log --pretty=oneline --abbrev-commit
+    compare "$l" "$r" log --oneline --no-abbrev-commit
+    compare "$l" "$r" log --oneline --abbrev=10
+    compare "$l" "$r" log --format=short
+    compare "$l" "$r" log --pretty=med
+    compare "$l" "$r" log --no-walk --oneline --all
     compare "$l" "$r" log --decorate=full
     compare "$l" "$r" log --pretty=short
     compare "$l" "$r" log --pretty=full

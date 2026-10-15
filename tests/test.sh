@@ -306,6 +306,18 @@ if build git; then
     fi
 fi
 
+# --- `1git log`, `show` and `diff` in git's spelling, against real git ---------
+
+if build git; then
+    for look in log show diff; do
+        if out=$(bash "scripts/compare_$look.sh" "$WORK/git" "$WORK/look-fixtures-$look" 2>&1); then
+            note "git $look: ${out## }"
+        else
+            bad "git $look" "$out"
+        fi
+    done
+fi
+
 # --- the write path: .git/index, loose objects, refs, status -------------------
 #
 # `test_write.sh` shares this script's shell, `$WORK`, `$LANGC`, `build`,

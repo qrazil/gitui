@@ -13,6 +13,7 @@ import core.GIT_revparse;
 import core.GIT_graph;
 import core.GIT_gitcommon;
 import core.GIT_gitstatus;
+import ui.GIT_ui_highlight;
 import diff.GIT_gitdiff;
 
 /// A diff option that `diff`, `log` and `show` share. `args` is the
@@ -43,21 +44,33 @@ pub int parse_diff_option(GIT_gitdiff.DOpts opts, List<str> args, int index, Set
                 opts.stat_name_width = parts[1].parse_int().or(0);
             }
             if (parts.size() > 2) {
-                opts.stat_graph_width = parts[2].parse_int().or(0);
+                opts.stat_count = parts[2].parse_int().or(0);
             }
         }
         return 1;
     }
     if (arg.starts_with("--stat-width=")) {
+        opts.is_stat = true;
+        settings.is_format_given = true;
         opts.stat_width = arg.substr(13, arg.size()).parse_int().or(0);
         return 1;
     }
     if (arg.starts_with("--stat-name-width=")) {
+        opts.is_stat = true;
+        settings.is_format_given = true;
         opts.stat_name_width = arg.substr(18, arg.size()).parse_int().or(0);
         return 1;
     }
     if (arg.starts_with("--stat-graph-width=")) {
+        opts.is_stat = true;
+        settings.is_format_given = true;
         opts.stat_graph_width = arg.substr(19, arg.size()).parse_int().or(0);
+        return 1;
+    }
+    if (arg.starts_with("--stat-count=")) {
+        opts.is_stat = true;
+        settings.is_format_given = true;
+        opts.stat_count = arg.substr(13, arg.size()).parse_int().or(0);
         return 1;
     }
     if (arg == "--numstat") {
@@ -199,7 +212,22 @@ pub int parse_diff_option(GIT_gitdiff.DOpts opts, List<str> args, int index, Set
     if (arg == "--no-ext-diff" || arg == "--ext-diff" || arg == "--no-textconv" || arg == "--textconv" || arg == "--minimal" || arg == "--patience" || arg == "--histogram" || arg == "--indent-heuristic" || arg == "--no-indent-heuristic" || arg == "--no-color-moved" || arg == "--ita-visible-in-index") {
         return 1;
     }
-    if (arg == "--word-diff" || arg.starts_with("--word-diff=") || arg.starts_with("--color-words") || arg.starts_with("-G") || arg.starts_with("--diff-filter")) {
+    if (arg.starts_with("--diff-filter=")) {
+        for (int c in arg.substr(14, arg.size()).chars()) {
+            str one = str.from_chars([c]);
+            if (c >= 'a' && c <= 'z') {
+                opts.filter_not = opts.filter_not + one.to_upper();
+            } else if (c >= 'A' && c <= 'Z' || c == '*') {
+                opts.filter = opts.filter + one;
+            }
+            if (!"ACDMRTUXB*".contains(one.to_upper())) {
+                io.eprint("error: unknown change class '" + one + "' in --diff-filter=" + arg.substr(14, arg.size()));
+                return -1;
+            }
+        }
+        return 1;
+    }
+    if (arg == "--word-diff" || arg.starts_with("--word-diff=") || arg.starts_with("--color-words") || arg.starts_with("-G")) {
         io.eprint("error: unsupported option: " + arg);
         return -1;
     }
@@ -269,6 +297,11 @@ pub GIT_gitdiff.DOpts finish_options(GIT_gitcommon.Ctx ctx, GIT_gitdiff.DOpts op
     bool is_color = GIT_gitcommon.use_color(ctx, "diff", settings.color);
     opts.is_color = is_color;
     opts.pal = GIT_gitdiff.palette(ctx, is_color);
+    // syntax colours only on a terminal with colour on; a pipe gets git's bytes
+    if (is_color && GIT_gitcommon.is_tty() && GIT_ui_highlight.is_enabled(ctx.gitdir)) {
+        opts.is_syntax = true;
+        opts.is_dark = GIT_ui_highlight.is_dark_terminal();
+    }
     return opts;
 }
 
@@ -294,21 +327,9 @@ pub void config_defaults(GIT_gitcommon.Ctx ctx, GIT_gitdiff.DOpts opts) {
         case None: {
         }
     }
-    match (GIT_gitcommon.cfg(ctx, "core", "", "abbrev")) {
-        case Some(str value): {
-            match (value.parse_int()) {
-                case Some(int n): {
-                    if (n >= 4) {
-                        opts.abbrev = n;
-                    }
-                }
-                case None: {
-                }
-            }
-        }
-        case None: {
-        }
-    }
+    opts.stat_name_width_default = GIT_gitcommon.cfg_int(ctx, "diff", "", "statnamewidth", 0);
+    opts.stat_graph_width_default = GIT_gitcommon.cfg_int(ctx, "diff", "", "statgraphwidth", 0);
+    opts.abbrev = GIT_gitcommon.default_abbrev(ctx);
 }
 
 /// The tree of HEAD, "" when HEAD is unborn.
@@ -336,10 +357,14 @@ str tree_of_rev(str gitdir, str spec, bool is_known) {
 
 /// Finish a list of items the way git's `diffcore_std` does: renames.
 pub List<GIT_gitdiff.Item> finish_items(str gitdir, List<GIT_gitdiff.Item> items, GIT_gitdiff.DOpts opts) {
-    if (opts.is_renames) {
-        return GIT_gitdiff.detect_renames(gitdir, items, opts.rename_score);
+    List<GIT_gitdiff.Item> seen = items;
+    if (opts.is_reverse) {
+        seen = GIT_gitdiff.reverse_items(items);
     }
-    return items;
+    if (opts.is_renames) {
+        return GIT_gitdiff.detect_renames(gitdir, seen, opts.rename_score);
+    }
+    return seen;
 }
 
 str usage_text() {
@@ -448,6 +473,9 @@ pub int run(str start, List<str> overrides, List<str> argv) {
             items = finish_items(gitdir, items, opts);
         } else {
             items = GIT_gitdiff.index_vs_worktree(gitdir, ctx.root, entries, specs, is_filemode, index_cache(gitdir));
+            if (opts.is_reverse) {
+                items = GIT_gitdiff.reverse_items(items);
+            }
         }
         for (str path in unmerged) {
             if (GIT_gitcommon.spec_match(specs, path)) {
@@ -536,6 +564,7 @@ pub int run(str start, List<str> overrides, List<str> argv) {
             items = finish_items(gitdir, items, opts);
         }
     }
+    items = GIT_gitdiff.apply_filter(items, opts);
     GIT_gitcommon.Out out = GIT_gitcommon.Out();
     bool has = false;
     if (opts.is_exit_code) {

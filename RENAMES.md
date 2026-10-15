@@ -1,3 +1,25 @@
+# gitui 0.12.0: `1git log`, `show` and `diff` in git's spelling
+
+Version 0.12.0, from master d94a9e1 (0.11.0). No module was renamed or
+removed; six modules were added: `core/GIT_gitlog.m31` (`log` and `show`),
+`core/GIT_gitgraph.m31` (`--graph`), `core/GIT_gitdiffcmd.m31` (`diff`),
+`core/GIT_gitcommon.m31` (what the three share), `core/GIT_utf8width.m31`
+(git's display-width tables) and `diff/GIT_gitdiff.m31` (the diff engine).
+`1git` reads git's grammar for `log`, `show` and `diff` as it does for
+`status`: `1git log --graph --oneline`, not `1git -log`; the existing
+`-log`-style commands are unchanged. Every form is compared byte for byte
+against real git by `scripts/compare_log.sh`, `compare_show.sh` and
+`compare_diff.sh` (run by `tests/test.sh`), on fixtures that
+`scripts/fixtures_look.sh` builds; `docs/GIT-COMPAT.md` lists the forms that
+are not implemented and where the output differs. In `core/GIT_gitstatus.m31`
+eleven helpers became `pub` (`parse_color`, `color_mode`, `bool_value`,
+`normalize`, `relative_to`, `quote`, `has_wildcard`, `in_spec`,
+`span_counts`, `similarity`, `find_root` and friends); `diff/GIT_xdiff.m31`
+gained `diff_lines_indent_keyed` (the indent heuristic over lines compared
+under `-w` / `-b`). On a terminal, `1git diff`, `log -p` and `show` colour the
+code of added and removed lines by token class (the `syntax` library, as the
+diff view does); piped output is git's bytes. Nothing to migrate.
+
 # gitui 0.11.0: `1git status` in git's spelling
 
 Version 0.11.0, from master 1e4e669 (0.10.0). No module was renamed or

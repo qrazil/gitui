@@ -36,7 +36,7 @@ import all of them.
 | `diff/` | content work: xdiff, udiff, diff3, hunks, patch, blame, file log, merge, sequencer (cherry-pick, revert), rebase and its todo, stash, undo |
 | `net/` | remotes and transports: remote URLs, wire protocol, smart-HTTP fetch and push, ssh transport, pull |
 | `ui/` | the interactive client: `GIT_client` (the top), and every `GIT_ui_*` layer and overlay |
-| root | `git.m31` (command line client: `1git status` in git's grammar, `-log`-style plumbing), `gitui.m31` (interactive client), `deps`, `deps.lock` |
+| root | `git.m31` (command line client: `1git status`, `log`, `show` and `diff` in git's grammar, `-log`-style plumbing), `gitui.m31` (interactive client), `deps`, `deps.lock` |
 
 Two placements are by import graph, not by name: `GIT_client` is in `ui/` (it imports
 every `GIT_ui_*` module), and `GIT_watch` is in `core/` (it imports only ignore and
@@ -54,6 +54,11 @@ bash tests/test.sh <repo> [<repo>…]   # those, and each repository named
 bash scripts/build.sh git.m31         # the command line client -> ./1git
 ./1git status -sb                     # git's own spelling: same bytes as `git status -sb`
 ./1git -C ../other status --porcelain=v2 -b
+./1git log --graph --oneline --decorate --all   # git's grammar, git's bytes
+./1git log -p --stat -3 -- core/              # history simplified to the paths
+./1git log --follow --name-status -- git.m31  # renames and copies followed
+./1git show HEAD~2 --stat                     # commits, tags, trees, blobs, rev:path
+./1git diff --cached -w                       # also: A B, A..B, A...B, --stat, --name-status, -U<n>
 ./1git -log --max 5                   # the older `-word` grammar, unchanged
 
 bash scripts/build.sh                 # gitui.m31 -> ./mgit   (-o name to rename)
@@ -114,6 +119,11 @@ bash scripts/build.sh                 # gitui.m31 -> ./mgit   (-o name to rename
 | `tests/pty_e2e.py`, `tests/pty_blame_undo.py` | drive `mgit` under a real pty against disposable fixtures, real `git` as the oracle (the second file: blame, history, undo, tags, ahead/behind, `push -u`, auto-refresh) |
 | `scripts/compare.sh` | every command beside the real `git`, compared octet for octet |
 | `scripts/compare_status.sh` | `1git status` beside the real `git status` on disposable fixtures: ~20 forms each, bytes and exit status |
+| `scripts/compare_log.sh`, `compare_show.sh`, `compare_diff.sh` | `1git log`, `show` and `diff` beside the real git on the fixtures of `scripts/fixtures_look.sh` (13 histories, 8 work-tree states): ~1500 forms each, bytes and exit status |
+| `core/GIT_gitlog.m31` | `log` and `show`: revision.c's walk (list, `limit_list`, TREESAME simplification, parent rewriting, topological order, `--follow`), log-tree.c's header / message / diff assembly, pretty.c's formats and placeholders, decorations, date parsing for `--since` / `--until` |
+| `core/GIT_gitgraph.m31` | `log --graph`: graph.c's state machine (padding, pre-commit, commit, post-merge and collapsing rows, octopus merges, colours) |
+| `diff/GIT_gitdiff.m31` | `diff`'s engine: tree / index / work-tree comparisons, rename detection (exact, basename, similarity; copies for `--follow`), the patch with git's headers, hunks, colour and whitespace highlighting, `--stat` / `--numstat` / `--shortstat` / `--name-only` / `--name-status` / `--raw` / `--summary`, syntax colours on a terminal |
+| `core/GIT_gitdiffcmd.m31`, `core/GIT_gitcommon.m31`, `core/GIT_utf8width.m31` | the `diff` command line; what the three commands share (config and `-c`, colour, dates in every `--date=` style, pathspecs, abbreviation length, a buffered stdout); git's `utf8_width` tables |
 | `GIT_merge.m31` | `git merge` with conflicts: `start` (fast-forward, no-ff, ff-only, already up to date, unrelated histories), `merge_trees`/`merge_with_base` (per-path three-way merge, stages 1/2/3, rename-free like `merge.renames=false`), a virtual merge base when there are several (criss-cross, like git's recursive/ort), `continue_merge`, `abort_merge`, `mark_resolved` and `take_side` for the resolution view; writes MERGE_HEAD/MERGE_MSG/MERGE_MODE/ORIG_HEAD and reflogs as git does |
 | `GIT_ui_merge.m31`, `GIT_ui_merge_model.m31` | the merge layer: the `m` menu and branch picker, the abort prompt, the conflict-resolution view, the "Unmerged paths" outline section and the MERGING banner (the model is pure and unit-testable) |
 | `GIT_sequencer.m31` | `git cherry-pick` and `git revert` with git's own on-disk state: `expand` (`A..B`, tags followed), `start`, `continue_sequence`, `skip`, `abort`, `quit`, over `GIT_merge.merge_with_base`; writes CHERRY_PICK_HEAD / REVERT_HEAD, MERGE_MSG, AUTO_MERGE, `.git/sequencer/{head,abort-safety,todo,opts}` and the reflog lines git writes, so either tool can finish what the other started. Also exports the per-step pieces (`apply_step`, `finish_step`, `read_todo`/`write_todo`, `read_options`/`write_options`, `reset_to`, `clear_step_state`) for a rebase driver that keeps its own state directory |

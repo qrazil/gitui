@@ -104,8 +104,6 @@ type Walk {
     // `revs->commits`
     List<str> list = [];
     str follow_path = "";
-    // --follow: the diff of the commit for the followed path, by commit
-    Map<str, List<GIT_gitdiff.Item>> follow_items = {};
     GIT_gitdiff.DOpts dopts = GIT_gitdiff.DOpts();
     bool is_limited = false;
     Option<Matcher> author_m = Option<Matcher>.None;
@@ -224,7 +222,7 @@ bool Walk.differs(str tree_a, str tree_b) {
 }
 
 bool Walk.is_prune() {
-    return specs.size() > 0;
+    return specs.size() > 0 && !opts.is_follow;
 }
 
 // `try_to_simplify_commit`
@@ -237,15 +235,6 @@ void Walk.try_to_simplify(str id) {
     if (plist.size() == 0) {
         if (!differs("", c.tree)) {
             set_flag(id, F_TREESAME);
-        } else if (follow_path != "") {
-            Option<GIT_object.Entry> here = GIT_pathtree.entry_at(gitdir, c.tree, follow_path);
-            match (here) {
-                case Some(GIT_object.Entry now): {
-                    follow_items.set(id, [GIT_gitdiff.Item("A", follow_path, follow_path, GIT_gitdiff.nothing(), GIT_gitdiff.Side(now.mode, now.id, ""))]);
-                }
-                case None: {
-                }
-            }
         }
         return;
     }
@@ -265,12 +254,7 @@ void Walk.try_to_simplify(str id) {
             continue;
         }
         GIT_object.Commit p = commit(parent);
-        bool is_changed = false;
-        if (follow_path != "" && nth == 0) {
-            is_changed = follow_compare(id, c, p);
-        } else {
-            is_changed = differs(p.tree, c.tree);
-        }
+        bool is_changed = differs(p.tree, c.tree);
         if (!is_changed) {
             if (!is_relevant(parent)) {
                 nth = nth + 1;
@@ -298,59 +282,37 @@ void Walk.try_to_simplify(str id) {
     }
 }
 
-// --follow: compare the followed path; when it is new here, look for the
-// file it was renamed from and continue under that name. Records the pair
-// that describes the commit.
-bool Walk.follow_compare(str id, GIT_object.Commit c, GIT_object.Commit parent) {
-    str path = follow_path;
-    Option<GIT_object.Entry> in_parent = GIT_pathtree.entry_at(gitdir, parent.tree, path);
-    Option<GIT_object.Entry> in_commit = GIT_pathtree.entry_at(gitdir, c.tree, path);
-    List<GIT_gitdiff.Item> items = [];
-    match (in_commit) {
-        case None: {
-            match (in_parent) {
-                case None: {
-                    return false;
-                }
-                case Some(GIT_object.Entry gone): {
-                    items.push(GIT_gitdiff.Item("D", path, path, GIT_gitdiff.Side(gone.mode, gone.id, ""), GIT_gitdiff.nothing()));
-                    follow_items.set(id, items);
-                    return true;
-                }
+// --follow: the diff of one commit for the followed path. A path that
+// appears here may have been renamed from another; git then looks at the
+// whole change for a rename to it and carries on under the old name
+// (`try_to_follow_renames`). The name is state of the walk, in output order.
+List<GIT_gitdiff.Item> Walk.follow_diff(GIT_object.Commit c, List<str> plist) {
+    List<GIT_gitdiff.Item> none = [];
+    str parent_tree = "";
+    if (plist.size() == 1) {
+        parent_tree = commit(plist[0]).tree;
+    }
+    List<GIT_gitcommon.Spec> only = [GIT_gitcommon.Spec(follow_path)];
+    List<GIT_gitdiff.Item> items = GIT_gitdiff.tree_vs_tree(gitdir, parent_tree, c.tree, only);
+    if (plist.size() == 1 && items.size() == 1 && items[0].status == "A" && (items[0].new.mode >> 12) == 0o10) {
+        List<GIT_gitcommon.Spec> everything = [];
+        List<GIT_gitdiff.Item> all = GIT_gitdiff.tree_vs_tree(gitdir, parent_tree, c.tree, everything);
+        List<str> gone = [];
+        for (GIT_gitdiff.Item item in all) {
+            if (item.status == "D") {
+                gone.push(item.path);
             }
         }
-        case Some(GIT_object.Entry now): {
-            match (in_parent) {
-                case Some(GIT_object.Entry before): {
-                    if (before.id == now.id && before.mode == now.mode) {
-                        return false;
-                    }
-                    items.push(GIT_gitdiff.Item("M", path, path, GIT_gitdiff.Side(before.mode, before.id, ""), GIT_gitdiff.Side(now.mode, now.id, "")));
-                    follow_items.set(id, items);
-                    return true;
-                }
-                case None: {
-                    List<GIT_gitcommon.Spec> none = [];
-                    List<GIT_gitdiff.Item> all = GIT_gitdiff.tree_vs_tree(gitdir, parent.tree, c.tree, none);
-                    all = GIT_gitdiff.detect_renames(gitdir, all, dopts.rename_score);
-                    for (GIT_gitdiff.Item item in all) {
-                        if (item.path == path) {
-                            items.push(item);
-                            follow_items.set(id, items);
-                            if (item.status == "R") {
-                                follow_path = item.old_path;
-                                specs = [GIT_gitcommon.Spec(item.old_path)];
-                            }
-                            return true;
-                        }
-                    }
-                    items.push(GIT_gitdiff.Item("A", path, path, GIT_gitdiff.nothing(), GIT_gitdiff.Side(now.mode, now.id, "")));
-                    follow_items.set(id, items);
-                    return true;
-                }
+        match (GIT_gitdiff.follow_source(gitdir, parent_tree, items[0], gone, dopts.rename_score)) {
+            case Some(GIT_gitdiff.Item found): {
+                follow_path = found.old_path;
+                return [found];
+            }
+            case None: {
             }
         }
     }
+    return items;
 }
 
 // `process_parents`: add the parents of `id` to the list
@@ -2324,7 +2286,7 @@ void Emitter.show_log(str id, GIT_object.Commit commit, List<str> parents) {
     graph_show_commit();
     if (!is_user) {
         str hash = id;
-        if (opts.is_abbrev_commit || is_oneline) {
+        if (opts.is_abbrev_commit) {
             hash = f.abbrev_id(id);
         }
         str label = hash;
@@ -2675,10 +2637,7 @@ pub int run(str start, List<str> overrides, List<str> argv, bool is_show) {
     if (GIT_gitcommon.cfg_bool(ctx, "log", "", "abbrevcommit", false)) {
         opts.is_abbrev_commit = true;
     }
-    opts.abbrev = GIT_gitcommon.cfg_int(ctx, "core", "", "abbrev", 7);
-    if (opts.abbrev < 4) {
-        opts.abbrev = 7;
-    }
+    opts.abbrev = dopts.abbrev;
     bool is_after_dashes = false;
     bool is_negated = false;
     List<str> words = [];
@@ -2755,13 +2714,9 @@ pub int run(str start, List<str> overrides, List<str> argv, bool is_show) {
             continue;
         }
         if (arg.starts_with("--format=")) {
-            str value = arg.substr(9, arg.size());
-            if (value.starts_with("format:") || value.starts_with("tformat:")) {
-                apply_pretty(opts, value);
-            } else {
-                opts.format = "user";
-                opts.user_format = value;
-                opts.is_terminator = true;
+            if (!apply_pretty(opts, arg.substr(9, arg.size()))) {
+                io.eprint("fatal: invalid --pretty format: " + arg.substr(9, arg.size()));
+                return 128;
             }
             i = i + 1;
             continue;
@@ -3014,7 +2969,7 @@ pub int run(str start, List<str> overrides, List<str> argv, bool is_show) {
             i = i + 1;
             continue;
         }
-        if (arg == "--root" || arg == "--no-color-moved" || arg == "--no-show-signature" || arg == "--default" || arg == "--full-history" || arg == "--dense" || arg == "--no-notes" || arg == "--no-mailmap" || arg == "--no-use-mailmap") {
+        if (arg == "--root" || arg == "--no-color-moved" || arg == "--no-show-signature" || arg == "--default" || arg == "--dense" || arg == "--no-notes" || arg == "--no-mailmap" || arg == "--no-use-mailmap") {
             i = i + 1;
             continue;
         }
@@ -3025,6 +2980,10 @@ pub int run(str start, List<str> overrides, List<str> argv, bool is_show) {
         if (used > 0) {
             i = i + used;
             continue;
+        }
+        if (arg == "--full-history" || arg == "--simplify-merges" || arg == "--ancestry-path" || arg == "--sparse" || arg == "--simplify-by-decoration" || arg == "--source" || arg == "--left-right" || arg == "--cherry-pick" || arg == "--cherry-mark" || arg == "--boundary" || arg == "--children" || arg == "--parents" || arg == "--reflog" || arg == "-g" || arg == "--walk-reflogs" || arg.starts_with("-L") || arg == "--show-signature") {
+            io.eprint("error: unsupported option: " + arg);
+            return 129;
         }
         if (arg == "-m" || arg == "-c" || arg == "--cc" || arg == "--dd" || arg.starts_with("--diff-merges")) {
             io.eprint("error: unsupported option: " + arg + " (merge diffs are not implemented)");
@@ -3039,6 +2998,10 @@ pub int run(str start, List<str> overrides, List<str> argv, bool is_show) {
         return 128;
     }
     str gitdir = ctx.gitdir;
+    if (opts.is_graph && (is_show || opts.is_no_walk)) {
+        io.eprint("fatal: options '--no-walk' and '--graph' cannot be used together");
+        return 128;
+    }
     if (opts.is_graph && opts.is_reverse) {
         io.eprint("fatal: options '--reverse' and '--graph' cannot be used together");
         return 128;
@@ -3083,10 +3046,6 @@ pub int run(str start, List<str> overrides, List<str> argv, bool is_show) {
     }
     dopts = GIT_gitdiffcmd.finish_options(ctx, dopts, settings, is_show);
     bool is_color = dopts.is_color;
-    // log's --stat is 80 columns wide, show's follows the terminal
-    if (is_show && dopts.stat_width == 0) {
-        dopts.stat_width = -1;
-    }
     GIT_gitcommon.Out out = GIT_gitcommon.Out();
     List<GIT_gitcommon.Spec> specs = GIT_gitcommon.parse_specs(opts.paths, ctx.prefix);
     if (is_show) {
@@ -3239,7 +3198,7 @@ pub int run(str start, List<str> overrides, List<str> argv, bool is_show) {
         }
     }
     Emitter emitter = make_emitter(ctx, opts, dopts, out, is_color, decorate_exclude);
-    bool is_needs_diff = DOpts_any(dopts) || opts.pickaxe != "" || opts.is_follow;
+    bool is_needs_diff = DOpts_any(dopts) || opts.pickaxe != "" || opts.is_follow || dopts.filter != "" || dopts.filter_not != "";
     int max_count = opts.max_count;
     int skip = opts.skip;
     List<str> collected = [];
@@ -3295,13 +3254,13 @@ pub int run(str start, List<str> overrides, List<str> argv, bool is_show) {
 bool log_tree_commit(Walk walk, Emitter emitter, str id, bool is_needs_diff, List<GIT_gitcommon.Spec> specs, GIT_gitdiff.DOpts dopts) {
     GIT_object.Commit commit = walk.commit(id);
     List<str> parents = walk.parents_of(id);
-    bool is_always_show_header = walk.opts.pickaxe == "" && !walk.opts.is_follow;
+    bool is_always_show_header = walk.opts.pickaxe == "" && !walk.opts.is_follow && dopts.filter == "" && dopts.filter_not == "";
     bool is_shown = false;
     if (is_needs_diff) {
         List<GIT_gitdiff.Item> items = [];
         bool is_wanted = true;
-        if (walk.follow_items.contains(id) && walk.opts.is_follow) {
-            items = walk.follow_items.get(id).or([]);
+        if (walk.opts.is_follow && parents.size() <= 1) {
+            items = walk.follow_diff(commit, parents);
         } else if (parents.size() > 1 && walk.is_no_walk) {
             // a merge under `show`: the header, a blank line and, for the stat
             // formats, the stat against the first parent; combined patches of
@@ -3318,8 +3277,7 @@ bool log_tree_commit(Walk walk, Emitter emitter, str id, bool is_needs_diff, Lis
             stat_only.is_name_only = false;
             stat_only.is_name_status = false;
             stat_only.is_raw = false;
-            stat_only.is_summary = false;
-            if (stat_only.is_stat || stat_only.is_numstat || stat_only.is_shortstat) {
+            if (stat_only.is_stat || stat_only.is_numstat || stat_only.is_shortstat || stat_only.is_summary) {
                 str first_tree = walk.commit(parents[0]).tree;
                 List<GIT_gitdiff.Item> stat_items = GIT_gitdiff.tree_vs_tree(walk.gitdir, first_tree, commit.tree, specs);
                 if (dopts.is_renames) {
@@ -3341,6 +3299,9 @@ bool log_tree_commit(Walk walk, Emitter emitter, str id, bool is_needs_diff, Lis
                 parent_tree = walk.commit(parents[0]).tree;
             }
             items = GIT_gitdiff.tree_vs_tree(walk.gitdir, parent_tree, commit.tree, specs);
+            if (dopts.is_reverse) {
+                items = GIT_gitdiff.reverse_items(items);
+            }
             if (dopts.is_renames) {
                 items = GIT_gitdiff.detect_renames(walk.gitdir, items, dopts.rename_score);
             }
@@ -3358,6 +3319,7 @@ bool log_tree_commit(Walk walk, Emitter emitter, str id, bool is_needs_diff, Lis
             items = kept;
         }
         if (is_wanted) {
+            items = GIT_gitdiff.apply_filter(items, dopts);
             is_shown = emitter.diff_flush(id, commit, parents, items);
         }
     }
@@ -3465,7 +3427,7 @@ int show_objects(GIT_gitcommon.Ctx ctx, LOpts opts, GIT_gitdiff.DOpts dopts, Lis
                                         }
                                         out.put(ident_bytes(tagger));
                                         out.text("\n");
-                                        if (fmt == "medium" || fmt == "user") {
+                                        if (fmt == "medium") {
                                             out.text("Date:   " + GIT_gitcommon.format_date(tagger.when, tagger.offset, opts.date_style) + "\n");
                                         } else if (fmt == "fuller") {
                                             out.text("TaggerDate: " + GIT_gitcommon.format_date(tagger.when, tagger.offset, opts.date_style) + "\n");
@@ -3479,7 +3441,6 @@ int show_objects(GIT_gitcommon.Ctx ctx, LOpts opts, GIT_gitdiff.DOpts dopts, Lis
                             out.put(tag.message);
                             emitter.is_shown_one = true;
                             id = tag.object;
-                            label = tag.object;
                             is_going = true;
                         }
                         case Commit(GIT_object.Commit commit): {
