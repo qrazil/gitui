@@ -1,0 +1,776 @@
+// `1git rebase`: git's grammar and git's bytes over `GIT_rebase`, the library
+// the TUI uses (the merge backend, `-i` through the editor). See
+// docs/GIT-COMPAT.md for what differs.
+
+import io;
+import os;
+import fs;
+import core.GIT_object;
+import core.GIT_refs;
+import core.GIT_status;
+import core.GIT_revparse;
+import core.GIT_gitbranch;
+import core.GIT_graph;
+import core.GIT_gitcommon;
+import core.GIT_gitcommit;
+import core.GIT_gitdiffcmd;
+import core.GIT_gitlog;
+import core.GIT_gitstatus;
+import core.GIT_gitstore;
+import core.GIT_gitwrite;
+import diff.GIT_gitdiff;
+import diff.GIT_merge;
+import diff.GIT_rebase;
+import diff.GIT_rebase_todo;
+import diff.GIT_sequencer;
+
+str usage_text() {
+    return "usage: git rebase [-i] [options] [--exec <cmd>] [--onto <newbase> | --keep-base] [<upstream> [<branch>]]\n   or: git rebase [-i] [options] [--exec <cmd>] [--onto <newbase>] --root [<branch>]\n   or: git rebase --continue | --abort | --skip | --edit-todo";
+}
+
+/// The editor of the todo list: `GIT_SEQUENCE_EDITOR`, `sequence.editor`, then
+/// the commit editor.
+str sequence_editor(GIT_gitcommon.Ctx ctx) {
+    str value = os.env("GIT_SEQUENCE_EDITOR").or("");
+    if (value != "") {
+        return value;
+    }
+    match (GIT_gitcommon.cfg(ctx, "sequence", "", "editor")) {
+        case Some(str configured): {
+            if (configured != "") {
+                return configured;
+            }
+        }
+        case None: {
+        }
+    }
+    return GIT_gitwrite.editor_command(ctx);
+}
+
+bool run_command_on(GIT_gitcommon.Ctx ctx, str editor, str file) {
+    if (editor == ":") {
+        return true;
+    }
+    List<str> argv = ["sh", "-c", "cd \"$0\" && " + editor + " \"$1\"", ctx.root, file];
+    match (os.run(argv)) {
+        case Ok(os.ExitStatus status): {
+            return status.is_success();
+        }
+        case Err(_): {
+            return false;
+        }
+    }
+}
+
+/// The commit message editor of reword and squash.
+pub type MessageEditor {
+    pub GIT_gitcommon.Ctx ctx;
+    pub bool is_failed = false;
+}
+
+pub Option<str> MessageEditor.edit(str purpose, str text) {
+    str path = fs.join(ctx.gitdir, "COMMIT_EDITMSG");
+    match (io.write(path, text)) {
+        case Ok: {
+        }
+        case Err(_): {
+            is_failed = true;
+            return Option<str>.None;
+        }
+    }
+    if (!GIT_gitwrite.run_editor(ctx, path)) {
+        is_failed = true;
+        return Option<str>.None;
+    }
+    match (io.read(path)) {
+        case Ok(str body): {
+            return Option<str>.Some(body);
+        }
+        case Err(_): {
+            is_failed = true;
+            return Option<str>.None;
+        }
+    }
+}
+
+/// What a stop says to the person (standard output), as git's sequencer does.
+void say_stop(GIT_gitcommon.Ctx ctx, GIT_rebase.Report report) {
+    GIT_gitstore.Store store = GIT_gitstore.open(ctx.gitdir);
+    str short_id = "";
+    if (report.stopped != "") {
+        short_id = store.unique_abbrev(report.stopped, 7);
+    }
+    if (report.ending.eq(GIT_rebase.Ending.Edit)) {
+        io.eprint("Stopped at " + short_id + "... " + report.command);
+        io.eprint("You can amend the commit now, with");
+        io.eprint("");
+        io.eprint("  git commit --amend ");
+        io.eprint("");
+        io.eprint("Once you are satisfied with your changes, run");
+        io.eprint("");
+        io.eprint("  git rebase --continue");
+    } else if (report.ending.eq(GIT_rebase.Ending.Break)) {
+        io.eprint("Stopped at " + store.unique_abbrev(report.stopped, 7) + "... " + report.command);
+    } else if (report.ending.eq(GIT_rebase.Ending.Conflicts)) {
+        io.eprint("error: could not apply " + short_id + "... " + report.command);
+        io.eprint("hint: Resolve all conflicts manually, mark them as resolved with");
+        io.eprint("hint: \"git add/rm <conflicted_files>\", then run \"git rebase --continue\".");
+        io.eprint("hint: You can instead skip this commit: run \"git rebase --skip\".");
+        io.eprint("hint: To abort and get back to the state before \"git rebase\", run \"git rebase --abort\".");
+        io.eprint("Could not apply " + short_id + "... " + report.command);
+    } else if (report.ending.eq(GIT_rebase.Ending.Empty)) {
+        io.eprint("The previous cherry-pick is now empty, possibly due to conflict resolution.");
+        io.eprint("If you wish to commit it anyway, use:");
+        io.eprint("");
+        io.eprint("    git commit --allow-empty");
+        io.eprint("");
+        io.eprint("Otherwise, please use 'git rebase --skip'");
+        io.eprint("Could not apply " + short_id + "... " + report.command);
+    } else if (report.ending.eq(GIT_rebase.Ending.ExecFailed)) {
+        if (report.output != "") {
+            GIT_gitwrite.put_bytes(report.output.to_bytes());
+        }
+        io.eprint("warning: execution failed: " + report.command);
+        io.eprint("You can fix the problem, and then run");
+        io.eprint("");
+        io.eprint("  git rebase --continue");
+        io.eprint("");
+    } else if (report.ending.eq(GIT_rebase.Ending.ExecDirty)) {
+        io.eprint("warning: execution succeeded: " + report.command);
+        io.eprint("but left changes to the index and/or the working tree.");
+        io.eprint("Commit or stash your changes, and then run");
+        io.eprint("");
+        io.eprint("  git rebase --continue");
+        io.eprint("");
+    }
+}
+
+int finish(GIT_gitcommon.Ctx ctx, GIT_rebase.Report report, str head_name, bool is_quiet) {
+    bool is_stop = report.ending.eq(GIT_rebase.Ending.Conflicts) || report.ending.eq(GIT_rebase.Ending.Empty);
+    for (str line in report.messages) {
+        if (line.starts_with("@@commit ")) {
+            print_made_commit(ctx, line.substr(9, line.size()), true);
+        } else if (line.starts_with("warning:") || line == "Applied autostash.") {
+            io.eprint(line);
+        } else if (line.starts_with("Auto-merging ") && !is_conflicting(line.substr(13, line.size()), report.messages)) {
+            // a clean pick says nothing in git's rebase; a stop names its conflicts
+        } else {
+            GIT_gitwrite.say(line);
+        }
+    }
+    if (is_stop && report.stopped != "") {
+        write_patch(ctx, report);
+    }
+    if (report.ending.eq(GIT_rebase.Ending.Finished)) {
+        if (!is_quiet) {
+            if (head_name == "" || head_name == "detached HEAD") {
+                io.eprint("Successfully rebased and updated detached HEAD.");
+            } else {
+                io.eprint("Successfully rebased and updated " + head_name + ".");
+            }
+        }
+        return 0;
+    }
+    if (report.ending.eq(GIT_rebase.Ending.UpToDate)) {
+        return 0;
+    }
+    if (report.ending.eq(GIT_rebase.Ending.Message)) {
+        io.eprint("error: there was a problem with the editor 'vi'.");
+        io.eprint("hint: Please supply the message using either -m or -F option.");
+        return 1;
+    }
+    say_stop(ctx, report);
+    if (report.ending.eq(GIT_rebase.Ending.Edit) || report.ending.eq(GIT_rebase.Ending.Break)) {
+        return 0;
+    }
+    return 1;
+}
+
+/// The summary `git commit` prints for a commit it made during the rebase.
+void print_made_commit(GIT_gitcommon.Ctx ctx, str id, bool is_date_shown) {
+    match (GIT_merge.read_commit(ctx.gitdir, id)) {
+        case Ok(GIT_object.Commit made): {
+            GIT_gitstore.Store store = GIT_gitstore.open(ctx.gitdir);
+            GIT_gitwrite.HeadInfo shown = GIT_gitwrite.read_head(ctx.gitdir);
+            shown.is_detached = true;
+            shown.ref = "";
+            GIT_gitcommit.print_summary(ctx, store, shown, id, made, "", is_date_shown, made.committer);
+        }
+        case Err(_): {
+        }
+    }
+}
+
+/// `rebase-merge/patch`: the diff of the commit a stop is about, as git leaves
+/// it for a person to look at.
+void write_patch(GIT_gitcommon.Ctx ctx, GIT_rebase.Report report) {
+    if (report.ending.eq(GIT_rebase.Ending.ExecFailed) || report.ending.eq(GIT_rebase.Ending.ExecDirty) || report.ending.eq(GIT_rebase.Ending.Message)) {
+        return;
+    }
+    GIT_gitstore.Store store = GIT_gitstore.open(ctx.gitdir);
+    match (GIT_merge.read_commit(ctx.gitdir, report.stopped)) {
+        case Ok(GIT_object.Commit commit): {
+            str old_tree = "";
+            if (commit.parents.size() > 0) {
+                old_tree = GIT_gitwrite.tree_of_commit(store, commit.parents[0]);
+            }
+            GIT_gitdiff.DOpts dopts = GIT_gitdiff.DOpts();
+            dopts.is_patch = true;
+            dopts.is_renames = true;
+            List<GIT_gitdiff.Item> items = GIT_gitdiff.tree_vs_tree(store, old_tree, commit.tree, []);
+            items = GIT_gitdiffcmd.finish_items(store, items, dopts);
+            bytes text = GIT_gitdiff.render(store, items, dopts);
+            match (io.write_bytes(fs.join(GIT_rebase.state_directory(ctx.gitdir), "patch"), text)) {
+                case Ok: {
+                }
+                case Err(_): {
+                }
+            }
+        }
+        case Err(_): {
+        }
+    }
+}
+
+int report_error(GIT_sequencer.Error error) {
+    io.eprint("error: " + error.to_str());
+    return 1;
+}
+
+pub int run_rebase(str start, List<str> overrides, List<str> argv) {
+    GIT_gitcommon.Opened opened = GIT_gitcommon.open(start, overrides);
+    if (!opened.ok) {
+        return 128;
+    }
+    GIT_gitcommon.Ctx ctx = opened.ctx;
+    GIT_gitwrite.Opts opts = GIT_gitwrite.parse_opts(argv, ["-i --interactive", "--onto=", "--root", "--autosquash", "--autostash", "--keep-base", "-x --exec=", "--continue", "--abort", "--skip", "--quit", "--edit-todo", "--show-current-patch", "-q --quiet", "-v --verbose", "-f --force-rebase --no-ff", "--verify", "-r --rebase-merges=?", "--empty=", "--update-refs", "-s --strategy=", "-X --strategy-option=", "-S --gpg-sign=?", "--fork-point", "--reapply-cherry-picks", "--keep-empty", "--allow-empty-message", "--rerere-autoupdate", "--signoff", "--committer-date-is-author-date", "--ignore-date", "-n --no-stat", "--stat", "--reschedule-failed-exec", "--exec-on-fail"]);
+    int bad = GIT_gitwrite.check_opts(opts, usage_text());
+    if (bad >= 0) {
+        return bad;
+    }
+    List<str> unsupported = ["rebase-merges", "empty", "update-refs", "strategy", "strategy-option", "gpg-sign", "signoff", "committer-date-is-author-date", "ignore-date", "rerere-autoupdate", "reapply-cherry-picks", "fork-point"];
+    for (str name in unsupported) {
+        if (opts.has(name)) {
+            io.eprint("error: option '" + name + "' of rebase is not in 1git (see docs/GIT-COMPAT.md)");
+            return 129;
+        }
+    }
+    if (ctx.is_bare) {
+        return GIT_gitcommon.fatal("this operation must be run in a work tree");
+    }
+    bool is_quiet = opts.flag("quiet");
+    MessageEditor editor = MessageEditor(ctx);
+    List<str> words = opts.paths();
+    int modes = 0;
+    List<str> mode_names = ["continue", "abort", "skip", "quit", "edit-todo", "show-current-patch"];
+    for (str name in mode_names) {
+        if (opts.flag(name)) {
+            modes = modes + 1;
+        }
+    }
+    if (modes > 1) {
+        io.eprint(usage_text());
+        return 129;
+    }
+    if (modes == 1) {
+        return run_mode(ctx, start, overrides, opts, editor, is_quiet);
+    }
+    if (GIT_rebase.is_in_progress(ctx.gitdir)) {
+        io.eprint("fatal: It seems that there is already a rebase-merge directory, and");
+        io.eprint("I wonder if you are in the middle of another rebase.  If that is the");
+        io.eprint("case, please try");
+        io.eprint("\tgit rebase (--continue | --abort | --skip)");
+        io.eprint("If that is not the case, please");
+        io.eprint("\trm -fr \".git/rebase-merge\"");
+        io.eprint("and run me again.  I am stopping in case you still have something");
+        io.eprint("valuable there.");
+        return 128;
+    }
+    bool is_root = opts.flag("root");
+    str upstream = "";
+    str branch = "";
+    str switched_from = "";
+    if (is_root) {
+        if (words.size() > 1) {
+            io.eprint(usage_text());
+            return 129;
+        }
+        if (words.size() == 1) {
+            branch = words[0];
+        }
+    } else {
+        if (words.size() > 2) {
+            io.eprint(usage_text());
+            return 129;
+        }
+        if (words.size() >= 1) {
+            upstream = words[0];
+        }
+        if (words.size() == 2) {
+            branch = words[1];
+        }
+        if (upstream == "") {
+            match (GIT_revparse.commit_id(ctx.gitdir, "@{upstream}")) {
+                case Ok(_): {
+                    upstream = upstream_name(ctx);
+                }
+                case Err(_): {
+                    GIT_gitwrite.HeadInfo here = GIT_gitwrite.read_head(ctx.gitdir);
+                    GIT_gitwrite.say("There is no tracking information for the current branch.");
+                    GIT_gitwrite.say("Please specify which branch you want to rebase against.");
+                    GIT_gitwrite.say("See git-rebase(1) for details.");
+                    GIT_gitwrite.say("");
+                    GIT_gitwrite.say("    git rebase '<branch>'");
+                    GIT_gitwrite.say("");
+                    if (!here.is_detached) {
+                        GIT_gitwrite.say("If you wish to set tracking information for this branch you can do so with:");
+                        GIT_gitwrite.say("");
+                        GIT_gitwrite.say("    git branch --set-upstream-to=<remote>/<branch> " + GIT_gitwrite.short_ref(here.ref));
+                        GIT_gitwrite.say("");
+                    }
+                    return 1;
+                }
+            }
+        }
+    }
+    if (branch != "") {
+        // `git rebase <upstream> <branch>` checks the branch out first
+        GIT_gitwrite.HeadInfo before_switch = GIT_gitwrite.read_head(ctx.gitdir);
+        switched_from = before_switch.id;
+        int status = GIT_gitbranch.run_switch(start, overrides, ["-q", branch]);
+        if (status != 0) {
+            return status;
+        }
+        // git's own checkout of the branch leaves no log line of its own
+        drop_last_head_log_line(ctx.gitdir);
+    }
+    bool is_interactive = opts.flag("interactive");
+    List<str> execs = opts.all("exec");
+    if (execs.size() > 0) {
+        is_interactive = true;
+    }
+    bool is_autosquash = false;
+    if (opts.has("autosquash")) {
+        is_autosquash = opts.flag("autosquash");
+    } else if (is_interactive) {
+        is_autosquash = GIT_rebase.is_autosquash_default(ctx.gitdir);
+    }
+    bool is_autostash = GIT_rebase.is_autostash_default(ctx.gitdir);
+    if (opts.has("autostash")) {
+        is_autostash = opts.flag("autostash");
+    }
+    GIT_rebase.PlanOpts popts = GIT_rebase.PlanOpts();
+    popts.upstream = upstream;
+    popts.onto = opts.value("onto", "");
+    popts.is_root = is_root;
+    popts.should_keep_base = opts.flag("keep-base");
+    popts.is_interactive = is_interactive || (is_autosquash && opts.has("autosquash"));
+    popts.should_autosquash = is_autosquash && (is_interactive || opts.has("autosquash"));
+    GIT_rebase.Plan plan = failed_plan();
+    match (GIT_rebase.plan(ctx.gitdir, popts)) {
+        case Ok(GIT_rebase.Plan found): {
+            plan = found;
+        }
+        case Err(GIT_sequencer.Error error): {
+            io.eprint("fatal: " + error.to_str());
+            return 128;
+        }
+    }
+    if (plan.is_up_to_date && !is_interactive) {
+        str what = "Current branch " + GIT_gitwrite.short_ref(plan.head_name) + " is up to date";
+        if (plan.head_name == "detached HEAD") {
+            what = "HEAD is up to date";
+        }
+        if (opts.flag("force-rebase")) {
+            GIT_gitwrite.say(what + ", rebase forced.");
+            plan.is_up_to_date = false;
+        } else {
+            GIT_gitwrite.say(what + ".");
+            GIT_gitwrite.rm_quiet(fs.join(ctx.gitdir, "AUTO_MERGE"));
+            return 0;
+        }
+    }
+    List<GIT_rebase_todo.Command> todo = plan.commands;
+    List<str> extra_names = [];
+    List<str> extra_texts = [];
+    if (execs.size() > 0) {
+        List<GIT_rebase_todo.Command> with_exec = [];
+        for (GIT_rebase_todo.Command command in todo) {
+            with_exec.push(command);
+            for (str text in execs) {
+                with_exec.push(GIT_rebase_todo.Command(GIT_rebase_todo.Verb.Exec, "", text));
+            }
+        }
+        todo = with_exec;
+    }
+    if (opts.flag("interactive")) {
+        // the todo list through the sequence editor
+        GIT_gitstore.Store store = GIT_gitstore.open(ctx.gitdir);
+        str range = store.unique_abbrev(plan.upstream, 7) + ".." + store.unique_abbrev(plan.orig_head, 7);
+        if (plan.is_root) {
+            range = store.unique_abbrev(plan.orig_head, 7);
+        }
+        str onto = plan.onto;
+        if (onto != "") {
+            onto = store.unique_abbrev(onto, 7);
+        }
+        str text = GIT_rebase_todo.editor_text(ctx.gitdir, todo, range, onto);
+        str path = fs.join(ctx.gitdir, "rebase-merge");
+        match (fs.makedirs(path)) {
+            case Ok: {
+            }
+            case Err(_): {
+                return GIT_gitcommon.fatal("could not create " + path);
+            }
+        }
+        str file = fs.join(path, "git-rebase-todo");
+        match (io.write(file, text)) {
+            case Ok: {
+            }
+            case Err(_): {
+                return GIT_gitcommon.fatal("could not write " + file);
+            }
+        }
+        bool is_edited = run_command_on(ctx, sequence_editor(ctx), file);
+        str edited = "";
+        match (io.read(file)) {
+            case Ok(str body): {
+                edited = body;
+            }
+            case Err(_): {
+                is_edited = false;
+            }
+        }
+        match (fs.listdir(path)) {
+            case Ok(List<str> names): {
+                for (str name in names) {
+                    // what the editor left next to the list (`sed -i.bak`) stays in git's state
+                    if (name != "git-rebase-todo") {
+                        match (io.read(fs.join(path, name))) {
+                            case Ok(str body): {
+                                extra_names.push(name);
+                                extra_texts.push(body);
+                            }
+                            case Err(_): {
+                            }
+                        }
+                    }
+                    GIT_gitwrite.rm_quiet(fs.join(path, name));
+                }
+            }
+            case Err(_): {
+            }
+        }
+        match (fs.rmdir(path)) {
+            case Ok: {
+            }
+            case Err(_): {
+            }
+        }
+        if (!is_edited) {
+            io.eprint("error: there was a problem with the editor 'vi'.");
+            return 1;
+        }
+        match (GIT_rebase_todo.parse(ctx.gitdir, edited)) {
+            case Ok(List<GIT_rebase_todo.Command> parsed): {
+                todo = parsed;
+            }
+            case Err(GIT_sequencer.Error error): {
+                io.eprint("error: " + error.to_str());
+                return 1;
+            }
+        }
+        if (todo.size() == 0) {
+            io.eprint("error: nothing to do");
+            return 1;
+        }
+    }
+    int status = begin(ctx, plan, todo, is_interactive, is_autostash, opts, editor, is_quiet);
+    if (switched_from != "") {
+        // the checkout of the branch left no line of its own: the start line
+        // says HEAD came from where it was before
+        rewrite_start_line(ctx.gitdir, switched_from);
+    }
+    if (GIT_rebase.is_in_progress(ctx.gitdir)) {
+        for (int i in 0 .. extra_names.size()) {
+            match (io.write(fs.join(GIT_rebase.state_directory(ctx.gitdir), extra_names[i]), extra_texts[i])) {
+                case Ok: {
+                }
+                case Err(_): {
+                }
+            }
+        }
+    }
+    return status;
+}
+
+GIT_rebase.Plan failed_plan() {
+    return GIT_rebase.Plan("", "", "", "", "", false, [], [], false);
+}
+
+int begin(GIT_gitcommon.Ctx ctx, GIT_rebase.Plan plan, List<GIT_rebase_todo.Command> todo, bool is_interactive, bool is_autostash, GIT_gitwrite.Opts opts, MessageEditor editor, bool is_quiet) {
+    GIT_rebase.StartOpts sopts = GIT_rebase.StartOpts();
+    sopts.is_interactive = is_interactive;
+    sopts.should_autostash = is_autostash;
+    sopts.should_replay_all = opts.flag("force-rebase");
+    match (GIT_rebase.start(ctx.gitdir, ctx.root, plan, todo, sopts, editor)) {
+        case Ok(GIT_rebase.Report report): {
+            return finish(ctx, report, plan.head_name, is_quiet);
+        }
+        case Err(GIT_sequencer.Error error): {
+            return report_error(error);
+        }
+    }
+}
+
+int run_mode(GIT_gitcommon.Ctx ctx, str start, List<str> overrides, GIT_gitwrite.Opts opts, MessageEditor editor, bool is_quiet) {
+    if (opts.flag("show-current-patch")) {
+        if (!GIT_rebase.is_in_progress(ctx.gitdir)) {
+            io.eprint("fatal: No rebase in progress?");
+            return 128;
+        }
+        return GIT_gitlog.run(start, overrides, ["REBASE_HEAD"], true);
+    }
+    if (!GIT_rebase.is_in_progress(ctx.gitdir)) {
+        io.eprint("fatal: No rebase in progress?");
+        return 128;
+    }
+    str head_name = "";
+    match (GIT_rebase.state(ctx.gitdir)) {
+        case Some(GIT_rebase.State state): {
+            head_name = state.head_name;
+        }
+        case None: {
+        }
+    }
+    if (opts.flag("continue")) {
+        GIT_gitwrite.HeadInfo before = GIT_gitwrite.read_head(ctx.gitdir);
+        bool has_staged = false;
+        match (GIT_merge.status_of(ctx.gitdir, ctx.root)) {
+            case Ok(GIT_status.Status found): {
+                has_staged = found.staged.size() > 0;
+            }
+            case Err(_): {
+            }
+        }
+        match (GIT_rebase.continue_rebase(ctx.gitdir, ctx.root, Option<str>.None, editor)) {
+            case Ok(GIT_rebase.Report report): {
+                if (has_staged) {
+                    print_continued_commit(ctx, before.id);
+                }
+                return finish(ctx, report, head_name, is_quiet);
+            }
+            case Err(GIT_sequencer.Error error): {
+                return report_continue_error(ctx, error);
+            }
+        }
+    }
+    if (opts.flag("skip")) {
+        match (GIT_rebase.skip(ctx.gitdir, ctx.root, editor)) {
+            case Ok(GIT_rebase.Report report): {
+                return finish(ctx, report, head_name, is_quiet);
+            }
+            case Err(GIT_sequencer.Error error): {
+                return report_error(error);
+            }
+        }
+    }
+    if (opts.flag("abort")) {
+        match (GIT_rebase.abort(ctx.gitdir, ctx.root)) {
+            case Ok(List<str> notes): {
+                for (str line in notes) {
+                    GIT_gitwrite.say(line);
+                }
+                return 0;
+            }
+            case Err(GIT_sequencer.Error error): {
+                return report_error(error);
+            }
+        }
+    }
+    if (opts.flag("quit")) {
+        match (GIT_rebase.quit(ctx.gitdir, ctx.root)) {
+            case Ok(List<str> notes): {
+                for (str line in notes) {
+                    GIT_gitwrite.say(line);
+                }
+                return 0;
+            }
+            case Err(GIT_sequencer.Error error): {
+                return report_error(error);
+            }
+        }
+    }
+    // --edit-todo
+    str file = fs.join(GIT_rebase.state_directory(ctx.gitdir), "git-rebase-todo");
+    str text = GIT_rebase.todo_text(ctx.gitdir);
+    match (io.write(file, text)) {
+        case Ok: {
+        }
+        case Err(_): {
+            return GIT_gitcommon.fatal("could not write " + file);
+        }
+    }
+    if (!run_command_on(ctx, sequence_editor(ctx), file)) {
+        io.eprint("error: there was a problem with the editor 'vi'.");
+        return 1;
+    }
+    str edited = "";
+    match (io.read(file)) {
+        case Ok(str body): {
+            edited = body;
+        }
+        case Err(_): {
+            return 1;
+        }
+    }
+    match (GIT_rebase.edit_todo(ctx.gitdir, edited)) {
+        case Ok(_): {
+            return 0;
+        }
+        case Err(GIT_sequencer.Error error): {
+            return report_error(error);
+        }
+    }
+}
+
+int report_continue_error(GIT_gitcommon.Ctx ctx, GIT_sequencer.Error error) {
+    if (error.to_str() == GIT_sequencer.Error.UnmergedPaths.to_str()) {
+        GIT_gitwrite.IdxLoaded loaded = GIT_gitwrite.read_idx(ctx.gitdir);
+        if (loaded.ok) {
+            for (str path in loaded.idx.conflicted_paths()) {
+                GIT_gitwrite.say(path + ": needs merge");
+            }
+        }
+        GIT_gitwrite.say("You must edit all merge conflicts and then");
+        GIT_gitwrite.say("mark them as resolved using git add");
+        return 1;
+    }
+    io.eprint("error: " + error.to_str());
+    return 1;
+}
+
+/// The first commit made since `old_head` is the one `--continue` committed
+/// (`git commit`'s own summary); the picks after it say nothing.
+void print_continued_commit(GIT_gitcommon.Ctx ctx, str old_head) {
+    GIT_gitwrite.HeadInfo now = GIT_gitwrite.read_head(ctx.gitdir);
+    if (!now.is_born || now.id == old_head || old_head == "") {
+        return;
+    }
+    match (GIT_graph.rev_list(ctx.gitdir, [now.id], [old_head])) {
+        case Ok(List<str> ids): {
+            if (ids.size() == 0) {
+                return;
+            }
+            str first = ids[ids.size() - 1];
+            match (GIT_merge.read_commit(ctx.gitdir, first)) {
+                case Ok(GIT_object.Commit made): {
+                    GIT_gitstore.Store store = GIT_gitstore.open(ctx.gitdir);
+                    GIT_gitwrite.HeadInfo shown = now;
+                    shown.is_detached = true;
+                    shown.ref = "";
+                    GIT_gitcommit.print_summary(ctx, store, shown, first, made, "", false, made.committer);
+                }
+                case Err(_): {
+                }
+            }
+        }
+        case Err(_): {
+        }
+    }
+}
+
+/// The configured upstream of the current branch as a full ref name, which
+/// is what git writes in the reflog (`rebase (start): checkout refs/heads/x`).
+str upstream_name(GIT_gitcommon.Ctx ctx) {
+    GIT_gitwrite.HeadInfo here = GIT_gitwrite.read_head(ctx.gitdir);
+    if (here.is_detached || here.ref == "") {
+        return "@{upstream}";
+    }
+    str branch = GIT_gitwrite.short_ref(here.ref);
+    str remote = GIT_gitcommon.cfg(ctx, "branch", branch, "remote").or("");
+    str merge = GIT_gitcommon.cfg(ctx, "branch", branch, "merge").or("");
+    if (merge == "") {
+        return "@{upstream}";
+    }
+    if (remote == ".") {
+        return merge;
+    }
+    if (merge.starts_with("refs/heads/")) {
+        return "refs/remotes/" + remote + "/" + merge.substr(11, merge.size());
+    }
+    return "@{upstream}";
+}
+
+void drop_last_head_log_line(str gitdir) {
+    str path = fs.join(gitdir, "logs/HEAD");
+    match (io.read(path)) {
+        case Ok(str body): {
+            List<str> lines = body.split("\n");
+            // the file ends with a newline: the last element is empty
+            if (lines.size() >= 2) {
+                lines.pop();
+                lines.pop();
+                str kept = lines.join("\n");
+                if (kept != "") {
+                    kept = kept + "\n";
+                }
+                match (io.write(path, kept)) {
+                    case Ok: {
+                    }
+                    case Err(_): {
+                    }
+                }
+            }
+        }
+        case Err(_): {
+        }
+    }
+}
+
+/// Is there a `CONFLICT (...): Merge conflict in <path>` line for the path?
+bool is_conflicting(str path, List<str> lines) {
+    for (str line in lines) {
+        if (line.starts_with("CONFLICT (") && line.ends_with("Merge conflict in " + path)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+void rewrite_start_line(str gitdir, str old_id) {
+    str path = fs.join(gitdir, "logs/HEAD");
+    match (io.read(path)) {
+        case Ok(str body): {
+            List<str> lines = body.split("\n");
+            int at = -1;
+            for (int i in 0 .. lines.size()) {
+                if (lines[i].contains("\trebase (start): checkout ")) {
+                    at = i;
+                }
+            }
+            if (at < 0) {
+                return;
+            }
+            int space = -1;
+            for (int i in 0 .. lines[at].size()) {
+                if (lines[at].byte_at(i) == ' ') {
+                    space = i;
+                    break;
+                }
+            }
+            if (space < 0) {
+                return;
+            }
+            lines[at] = old_id + lines[at].substr(space, lines[at].size());
+            match (io.write(path, lines.join("\n"))) {
+                case Ok: {
+                }
+                case Err(_): {
+                }
+            }
+        }
+        case Err(_): {
+        }
+    }
+}
