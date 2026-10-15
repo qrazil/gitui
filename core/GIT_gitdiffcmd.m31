@@ -1,0 +1,683 @@
+// `1git diff`: the command line of `git diff` over `GIT_gitdiff`. Working
+// tree against the index, `--staged`, a revision against the work tree or the
+// index, `A B`, `A..B`, `A...B`, pathspecs, and every format the engine
+// writes. See docs/GIT-COMPAT.md for what differs from git.
+
+import io;
+import os;
+import fs;
+import core.GIT_object;
+import core.GIT_refs;
+import core.GIT_index;
+import core.GIT_revparse;
+import core.GIT_graph;
+import core.GIT_gitcommon;
+import core.GIT_gitstatus;
+import diff.GIT_gitdiff;
+
+/// A diff option that `diff`, `log` and `show` share. `args` is the
+/// command's own words and `index` the one being looked at; returns how many
+/// words it used (0: not a diff option, -1: an error was printed).
+pub int parse_diff_option(GIT_gitdiff.DOpts opts, List<str> args, int index, Settings settings) {
+    str arg = args[index];
+    if (arg == "-p" || arg == "-u" || arg == "--patch") {
+        opts.is_patch = true;
+        settings.is_format_given = true;
+        return 1;
+    }
+    if (arg == "-s" || arg == "--no-patch") {
+        opts.is_patch = false;
+        settings.is_format_given = true;
+        settings.is_silent = true;
+        return 1;
+    }
+    if (arg == "--stat" || arg.starts_with("--stat=")) {
+        opts.is_stat = true;
+        settings.is_format_given = true;
+        if (arg.starts_with("--stat=")) {
+            List<str> parts = arg.substr(7, arg.size()).split(",");
+            if (parts.size() > 0 && parts[0] != "") {
+                opts.stat_width = parts[0].parse_int().or(0);
+            }
+            if (parts.size() > 1) {
+                opts.stat_name_width = parts[1].parse_int().or(0);
+            }
+            if (parts.size() > 2) {
+                opts.stat_graph_width = parts[2].parse_int().or(0);
+            }
+        }
+        return 1;
+    }
+    if (arg.starts_with("--stat-width=")) {
+        opts.stat_width = arg.substr(13, arg.size()).parse_int().or(0);
+        return 1;
+    }
+    if (arg.starts_with("--stat-name-width=")) {
+        opts.stat_name_width = arg.substr(18, arg.size()).parse_int().or(0);
+        return 1;
+    }
+    if (arg.starts_with("--stat-graph-width=")) {
+        opts.stat_graph_width = arg.substr(19, arg.size()).parse_int().or(0);
+        return 1;
+    }
+    if (arg == "--numstat") {
+        opts.is_numstat = true;
+        settings.is_format_given = true;
+        return 1;
+    }
+    if (arg == "--shortstat") {
+        opts.is_shortstat = true;
+        settings.is_format_given = true;
+        return 1;
+    }
+    if (arg == "--name-only") {
+        opts.is_name_only = true;
+        settings.is_format_given = true;
+        return 1;
+    }
+    if (arg == "--name-status") {
+        opts.is_name_status = true;
+        settings.is_format_given = true;
+        return 1;
+    }
+    if (arg == "--raw") {
+        opts.is_raw = true;
+        settings.is_format_given = true;
+        return 1;
+    }
+    if (arg == "--summary") {
+        opts.is_summary = true;
+        settings.is_format_given = true;
+        return 1;
+    }
+    if (arg == "-z") {
+        opts.is_nul = true;
+        return 1;
+    }
+    if (arg == "-w" || arg == "--ignore-all-space") {
+        opts.ws = 2;
+        return 1;
+    }
+    if (arg == "-b" || arg == "--ignore-space-change") {
+        if (opts.ws == 0) {
+            opts.ws = 1;
+        }
+        return 1;
+    }
+    if (arg.starts_with("-U") && arg.size() > 2 && arg.substr(2, arg.size()).parse_int().is_some()) {
+        opts.context = arg.substr(2, arg.size()).parse_int().or(3);
+        settings.is_context_given = true;
+        return 1;
+    }
+    if (arg.starts_with("--unified=")) {
+        opts.context = arg.substr(10, arg.size()).parse_int().or(3);
+        settings.is_context_given = true;
+        return 1;
+    }
+    if (arg == "-U" && index + 1 < args.size()) {
+        opts.context = args[index + 1].parse_int().or(3);
+        settings.is_context_given = true;
+        return 2;
+    }
+    if (arg == "-M" || arg.starts_with("-M") || arg == "--find-renames" || arg.starts_with("--find-renames=")) {
+        opts.is_renames = true;
+        str value = "";
+        if (arg.starts_with("--find-renames=")) {
+            value = arg.substr(15, arg.size());
+        } else if (arg.starts_with("-M")) {
+            value = arg.substr(2, arg.size());
+        }
+        if (value != "") {
+            opts.rename_score = rename_score(value);
+        }
+        return 1;
+    }
+    if (arg == "--no-renames") {
+        opts.is_renames = false;
+        return 1;
+    }
+    if (arg == "--renames") {
+        opts.is_renames = true;
+        return 1;
+    }
+    if (arg == "-R") {
+        opts.is_reverse = true;
+        return 1;
+    }
+    if (arg == "-a" || arg == "--text") {
+        opts.is_text = true;
+        return 1;
+    }
+    if (arg == "--full-index") {
+        opts.is_full_index = true;
+        return 1;
+    }
+    if (arg == "--abbrev") {
+        return 1;
+    }
+    if (arg.starts_with("--abbrev=")) {
+        opts.abbrev = arg.substr(9, arg.size()).parse_int().or(7);
+        if (opts.abbrev < 4) {
+            opts.abbrev = 4;
+        }
+        return 1;
+    }
+    if (arg == "--exit-code") {
+        opts.is_exit_code = true;
+        return 1;
+    }
+    if (arg == "--quiet") {
+        opts.is_quiet = true;
+        opts.is_exit_code = true;
+        return 1;
+    }
+    if (arg == "--no-prefix") {
+        opts.src_prefix = "";
+        opts.dst_prefix = "";
+        return 1;
+    }
+    if (arg.starts_with("--src-prefix=")) {
+        opts.src_prefix = arg.substr(13, arg.size());
+        return 1;
+    }
+    if (arg.starts_with("--dst-prefix=")) {
+        opts.dst_prefix = arg.substr(13, arg.size());
+        return 1;
+    }
+    if (arg == "--color") {
+        settings.color = "always";
+        return 1;
+    }
+    if (arg.starts_with("--color=")) {
+        settings.color = GIT_gitcommon.color_flag(arg.substr(8, arg.size()));
+        return 1;
+    }
+    if (arg == "--no-color") {
+        settings.color = "never";
+        return 1;
+    }
+    if (arg == "--no-ext-diff" || arg == "--ext-diff" || arg == "--no-textconv" || arg == "--textconv" || arg == "--minimal" || arg == "--patience" || arg == "--histogram" || arg == "--indent-heuristic" || arg == "--no-indent-heuristic" || arg == "--no-color-moved" || arg == "--ita-visible-in-index") {
+        return 1;
+    }
+    if (arg == "--word-diff" || arg.starts_with("--word-diff=") || arg.starts_with("--color-words") || arg.starts_with("-G") || arg.starts_with("--diff-filter")) {
+        io.eprint("error: unsupported option: " + arg);
+        return -1;
+    }
+    return 0;
+}
+
+/// Facts about the options given that are not part of `DOpts`.
+pub type Settings {
+    pub bool is_format_given = false;
+    pub bool is_silent = false;
+    pub bool is_context_given = false;
+    // "" none, else always / never / auto
+    pub str color = "";
+}
+
+/// `-M<n>`: a digit string, with or without `%`, as a score out of 60000.
+int rename_score(str value) {
+    str digits = value;
+    bool is_percent = false;
+    if (digits.ends_with("%")) {
+        digits = digits.substr(0, digits.size() - 1);
+        is_percent = true;
+    }
+    int number = digits.parse_int().or(50);
+    int scale = 1;
+    for (int i in 0 .. digits.size()) {
+        scale = scale * 10;
+    }
+    if (is_percent) {
+        scale = 100;
+    }
+    return number * 60000 / scale;
+}
+
+/// The options with config defaults applied: `diff.renames`, `color.diff`,
+/// `core.abbrev`, `diff.context`, and the format defaults.
+pub GIT_gitdiff.DOpts finish_options(GIT_gitcommon.Ctx ctx, GIT_gitdiff.DOpts opts, Settings settings, bool is_patch_default) {
+    if (!settings.is_format_given && is_patch_default) {
+        opts.is_patch = true;
+    }
+    if (opts.is_quiet) {
+        opts.is_patch = false;
+        opts.is_stat = false;
+        opts.is_numstat = false;
+        opts.is_shortstat = false;
+        opts.is_name_only = false;
+        opts.is_name_status = false;
+        opts.is_raw = false;
+        opts.is_summary = false;
+    }
+    match (GIT_gitcommon.cfg(ctx, "diff", "", "renames")) {
+        case Some(str value): {
+            // an explicit command-line flag is applied after this by the
+            // caller order: config first
+            str lower = value.to_lower();
+            if (lower == "false" || lower == "no" || lower == "off" || lower == "0") {
+                if (!settings.is_context_given) {
+                }
+            }
+        }
+        case None: {
+        }
+    }
+    if (!settings.is_context_given) {
+        opts.context = GIT_gitcommon.cfg_int(ctx, "diff", "", "context", 3);
+    }
+    bool is_color = GIT_gitcommon.use_color(ctx, "diff", settings.color);
+    opts.is_color = is_color;
+    opts.pal = GIT_gitdiff.palette(ctx, is_color);
+    return opts;
+}
+
+/// Apply `diff.renames` before the command line.
+pub void config_defaults(GIT_gitcommon.Ctx ctx, GIT_gitdiff.DOpts opts) {
+    match (GIT_gitcommon.cfg(ctx, "diff", "", "renames")) {
+        case Some(str value): {
+            str lower = value.to_lower();
+            if (lower == "false" || lower == "no" || lower == "off" || lower == "0") {
+                opts.is_renames = false;
+            }
+        }
+        case None: {
+        }
+    }
+    match (GIT_gitcommon.cfg(ctx, "diff", "", "noprefix")) {
+        case Some(str value): {
+            if (GIT_gitstatus.bool_value(value, false)) {
+                opts.src_prefix = "";
+                opts.dst_prefix = "";
+            }
+        }
+        case None: {
+        }
+    }
+    match (GIT_gitcommon.cfg(ctx, "core", "", "abbrev")) {
+        case Some(str value): {
+            match (value.parse_int()) {
+                case Some(int n): {
+                    if (n >= 4) {
+                        opts.abbrev = n;
+                    }
+                }
+                case None: {
+                }
+            }
+        }
+        case None: {
+        }
+    }
+}
+
+/// The tree of HEAD, "" when HEAD is unborn.
+pub str head_tree(str gitdir) {
+    match (GIT_revparse.tree_id(gitdir, "HEAD")) {
+        case Ok(str id): {
+            return id;
+        }
+        case Err(_): {
+            return "";
+        }
+    }
+}
+
+str tree_of_rev(str gitdir, str spec, bool is_known) {
+    match (GIT_revparse.tree_id(gitdir, spec)) {
+        case Ok(str id): {
+            return id;
+        }
+        case Err(_): {
+            return "";
+        }
+    }
+}
+
+/// Finish a list of items the way git's `diffcore_std` does: renames.
+pub List<GIT_gitdiff.Item> finish_items(str gitdir, List<GIT_gitdiff.Item> items, GIT_gitdiff.DOpts opts) {
+    if (opts.is_renames) {
+        return GIT_gitdiff.detect_renames(gitdir, items, opts.rename_score);
+    }
+    return items;
+}
+
+str usage_text() {
+    return "usage: git diff [<options>] [<commit>] [--] [<path>...]\n   or: git diff [<options>] --cached [<commit>] [--] [<path>...]\n   or: git diff [<options>] <commit> [<commit>...] <commit> [--] [<path>...]\n   or: git diff [<options>] <commit>...<commit> [--] [<path>...]\n   or: git diff [<options>] <blob> <blob>\n";
+}
+
+/// `git diff`. `start` is the directory it runs in, `overrides` the `-c`
+/// pairs, `argv` what followed the word `diff`.
+pub int run(str start, List<str> overrides, List<str> argv) {
+    GIT_gitcommon.Opened opened = GIT_gitcommon.open(start, overrides);
+    if (!opened.ok) {
+        return 128;
+    }
+    GIT_gitcommon.Ctx ctx = opened.ctx;
+    GIT_gitdiff.DOpts opts = GIT_gitdiff.DOpts();
+    config_defaults(ctx, opts);
+    Settings settings = Settings();
+    bool is_cached = false;
+    List<str> words = [];
+    List<str> paths = [];
+    bool is_after_dashes = false;
+    int i = 0;
+    while (i < argv.size()) {
+        str arg = argv[i];
+        if (is_after_dashes) {
+            paths.push(arg);
+            i = i + 1;
+            continue;
+        }
+        if (arg == "--") {
+            is_after_dashes = true;
+            i = i + 1;
+            continue;
+        }
+        if (arg == "--cached" || arg == "--staged") {
+            is_cached = true;
+            i = i + 1;
+            continue;
+        }
+        if (arg.starts_with("-") && arg != "-") {
+            int used = parse_diff_option(opts, argv, i, settings);
+            if (used < 0) {
+                return 129;
+            }
+            if (used == 0) {
+                if (arg == "--no-index" || arg == "--relative" || arg.starts_with("--relative=")) {
+                    io.eprint("error: unsupported option: " + arg);
+                    return 129;
+                }
+                io.eprint("error: invalid option: " + arg);
+                io.eprint(usage_text());
+                return 129;
+            }
+            i = i + used;
+            continue;
+        }
+        words.push(arg);
+        i = i + 1;
+    }
+    opts = finish_options(ctx, opts, settings, true);
+    str gitdir = ctx.gitdir;
+    // revisions and paths: without `--`, a word that is not a revision must
+    // be a path in the work tree
+    List<str> revs = [];
+    bool is_range_done = false;
+    for (str word in words) {
+        if (is_after_dashes || (revs.size() < 2 && !is_range_done && is_revision(gitdir, word))) {
+            revs.push(word);
+            continue;
+        }
+        if (is_after_dashes) {
+            paths.push(word);
+            continue;
+        }
+        str full = fs.join(ctx.root, GIT_gitstatus.normalize(join_prefix(ctx.prefix, word)));
+        if (fs.is_present(full) || fs.is_link(full)) {
+            paths.push(word);
+            continue;
+        }
+        // a deleted path that the index or HEAD still knows
+        if (is_known_path(ctx, GIT_gitstatus.normalize(join_prefix(ctx.prefix, word)))) {
+            paths.push(word);
+            continue;
+        }
+        io.eprint("fatal: ambiguous argument '" + word + "': unknown revision or path not in the working tree.");
+        io.eprint("Use '--' to separate paths from revisions, like this:");
+        io.eprint("'git <command> [<revision>...] -- [<file>...]'");
+        return 128;
+    }
+    List<GIT_gitcommon.Spec> specs = GIT_gitcommon.parse_specs(paths, ctx.prefix);
+    List<GIT_gitdiff.Item> items = [];
+    bool is_filemode = GIT_gitcommon.cfg_bool(ctx, "core", "", "filemode", true);
+    if (revs.size() == 0) {
+        List<str> unmerged = [];
+        Map<str, GIT_gitdiff.Side> entries = GIT_gitdiff.index_sides(gitdir, unmerged);
+        if (is_cached) {
+            str tree = head_tree(gitdir);
+            Map<str, GIT_gitdiff.Side> head = GIT_gitdiff.tree_sides(gitdir, tree, "", specs);
+            Map<str, GIT_gitdiff.Side> filtered = {};
+            for (str path in entries.keys()) {
+                if (GIT_gitcommon.spec_match(specs, path)) {
+                    filtered.set(path, entries.get(path).or(GIT_gitdiff.nothing()));
+                }
+            }
+            items = GIT_gitdiff.maps_diff(head, filtered, unmerged);
+            items = finish_items(gitdir, items, opts);
+        } else {
+            items = GIT_gitdiff.index_vs_worktree(gitdir, ctx.root, entries, specs, is_filemode, index_cache(gitdir));
+        }
+        for (str path in unmerged) {
+            if (GIT_gitcommon.spec_match(specs, path)) {
+                items.push(GIT_gitdiff.Item("U", path, path, GIT_gitdiff.nothing(), GIT_gitdiff.nothing()));
+            }
+        }
+        items = sorted_items(items);
+    } else {
+        str first = revs[0];
+        str left = "";
+        str right = "";
+        bool has_right = false;
+        if (revs.size() == 1) {
+            match (split_range(first)) {
+                case Some(List<str> parts): {
+                    left = parts[0];
+                    right = parts[1];
+                    if (left == "") {
+                        left = "HEAD";
+                    }
+                    if (right == "") {
+                        right = "HEAD";
+                    }
+                    if (parts.size() == 3) {
+                        // A...B: the merge base to B
+                        match (merge_base(gitdir, left, right)) {
+                            case Some(str base): {
+                                left = base;
+                            }
+                            case None: {
+                                io.eprint("fatal: " + first + ": no merge base");
+                                return 128;
+                            }
+                        }
+                    }
+                    has_right = true;
+                }
+                case None: {
+                    left = first;
+                }
+            }
+        } else {
+            left = first;
+            right = revs[1];
+            has_right = true;
+        }
+        str left_tree = "";
+        match (GIT_revparse.tree_id(gitdir, left)) {
+            case Ok(str id): {
+                left_tree = id;
+            }
+            case Err(GIT_revparse.Error error): {
+                io.eprint("fatal: " + left + ": " + error.to_str());
+                return 128;
+            }
+        }
+        if (has_right) {
+            str right_tree = "";
+            match (GIT_revparse.tree_id(gitdir, right)) {
+                case Ok(str id): {
+                    right_tree = id;
+                }
+                case Err(GIT_revparse.Error error): {
+                    io.eprint("fatal: " + right + ": " + error.to_str());
+                    return 128;
+                }
+            }
+            items = GIT_gitdiff.tree_vs_tree(gitdir, left_tree, right_tree, specs);
+            items = finish_items(gitdir, items, opts);
+        } else if (is_cached) {
+            List<str> unmerged = [];
+            Map<str, GIT_gitdiff.Side> entries = GIT_gitdiff.index_sides(gitdir, unmerged);
+            Map<str, GIT_gitdiff.Side> filtered = {};
+            for (str path in entries.keys()) {
+                if (GIT_gitcommon.spec_match(specs, path)) {
+                    filtered.set(path, entries.get(path).or(GIT_gitdiff.nothing()));
+                }
+            }
+            Map<str, GIT_gitdiff.Side> from = GIT_gitdiff.tree_sides(gitdir, left_tree, "", specs);
+            items = GIT_gitdiff.maps_diff(from, filtered, unmerged);
+            items = finish_items(gitdir, items, opts);
+        } else {
+            List<str> unmerged = [];
+            Map<str, GIT_gitdiff.Side> entries = GIT_gitdiff.index_sides(gitdir, unmerged);
+            items = GIT_gitdiff.tree_vs_worktree(gitdir, ctx.root, left_tree, entries, specs, is_filemode, index_cache(gitdir));
+            items = finish_items(gitdir, items, opts);
+        }
+    }
+    GIT_gitcommon.Out out = GIT_gitcommon.Out();
+    bool has = false;
+    if (opts.is_exit_code) {
+        has = GIT_gitdiff.has_changes(gitdir, items, opts);
+    }
+    if (!opts.is_quiet) {
+        out.put(GIT_gitdiff.render(gitdir, items, opts));
+    }
+    out.flush();
+    if (opts.is_exit_code && has) {
+        return 1;
+    }
+    return 0;
+}
+
+pub List<GIT_gitdiff.Item> sorted_items(List<GIT_gitdiff.Item> items) {
+    List<str> keys = [];
+    Map<str, GIT_gitdiff.Item> by = {};
+    for (GIT_gitdiff.Item item in items) {
+        str key = item.path + "\x00" + item.status;
+        keys.push(key);
+        by.set(key, item);
+    }
+    keys.sort();
+    List<GIT_gitdiff.Item> out = [];
+    for (str key in keys) {
+        out.push(by.get(key).or(GIT_gitdiff.Item("M", "", "", GIT_gitdiff.nothing(), GIT_gitdiff.nothing())));
+    }
+    return out;
+}
+
+/// Index entries by path, for the stat shortcut.
+pub Map<str, GIT_index.Entry> index_cache(str gitdir) {
+    Map<str, GIT_index.Entry> out = {};
+    match (GIT_index.read(gitdir)) {
+        case Ok(GIT_index.Index index): {
+            for (GIT_index.Entry entry in index.entries) {
+                if (entry.stage == 0) {
+                    match (entry.path.utf8()) {
+                        case Some(str path): {
+                            out.set(path, entry);
+                        }
+                        case None: {
+                        }
+                    }
+                }
+            }
+        }
+        case Err(_): {
+        }
+    }
+    return out;
+}
+
+str join_prefix(str prefix, str word) {
+    if (prefix == "") {
+        return word;
+    }
+    return prefix + "/" + word;
+}
+
+pub bool is_known_path(GIT_gitcommon.Ctx ctx, str path) {
+    List<str> unmerged = [];
+    Map<str, GIT_gitdiff.Side> entries = GIT_gitdiff.index_sides(ctx.gitdir, unmerged);
+    if (entries.contains(path)) {
+        return true;
+    }
+    for (str known in entries.keys()) {
+        if (known.starts_with(path + "/")) {
+            return true;
+        }
+    }
+    GIT_gitcommon.Spec spec = GIT_gitcommon.Spec(path);
+    Map<str, GIT_gitdiff.Side> head = GIT_gitdiff.tree_sides(ctx.gitdir, head_tree(ctx.gitdir), "", [spec]);
+    return head.size() > 0;
+}
+
+bool is_revision(str gitdir, str word) {
+    match (split_range(word)) {
+        case Some(List<str> parts): {
+            return true;
+        }
+        case None: {
+        }
+    }
+    match (GIT_revparse.object_id(gitdir, word)) {
+        case Ok(_): {
+            return true;
+        }
+        case Err(_): {
+            return false;
+        }
+    }
+}
+
+/// `A..B` as ["A", "B"], `A...B` as ["A", "B", "..."]; None otherwise.
+pub Option<List<str>> split_range(str word) {
+    match (word.index_of("...")) {
+        case Some(int at): {
+            return Option<List<str>>.Some([word.substr(0, at), word.substr(at + 3, word.size()), "..."]);
+        }
+        case None: {
+        }
+    }
+    match (word.index_of("..")) {
+        case Some(int at): {
+            return Option<List<str>>.Some([word.substr(0, at), word.substr(at + 2, word.size())]);
+        }
+        case None: {
+            return Option<List<str>>.None;
+        }
+    }
+}
+
+Option<str> merge_base(str gitdir, str a, str b) {
+    str id_a = "";
+    str id_b = "";
+    match (GIT_revparse.commit_id(gitdir, a)) {
+        case Ok(str id): {
+            id_a = id;
+        }
+        case Err(_): {
+            return Option<str>.None;
+        }
+    }
+    match (GIT_revparse.commit_id(gitdir, b)) {
+        case Ok(str id): {
+            id_b = id;
+        }
+        case Err(_): {
+            return Option<str>.None;
+        }
+    }
+    match (GIT_graph.merge_bases(gitdir, id_a, id_b)) {
+        case Ok(List<str> bases): {
+            if (bases.size() == 0) {
+                return Option<str>.None;
+            }
+            return Option<str>.Some(bases[0]);
+        }
+        case Err(_): {
+            return Option<str>.None;
+        }
+    }
+}

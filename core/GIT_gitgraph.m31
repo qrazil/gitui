@@ -1,0 +1,583 @@
+// The ASCII history graph of `git log --graph`: git's `graph.c`, a state
+// machine fed one commit at a time that answers with the next line of graph
+// to print (the commit's own `*` row, padding rows, and the rows that merge
+// and collapse branch lines). The names follow graph.c so the two can be read
+// side by side.
+//
+//   Graph g = GIT_gitgraph.open(is_color);
+//   g.update(commit_id, interesting_parents)   the next commit to be shown
+//   g.next_line()                              the graph part of the next line
+//   g.is_commit_finished()                     back at the padding state
+//   g.padding_line()                           `graph_padding_line`
+//
+// The caller (`GIT_gitlog`) weaves these lines with the commit's text the way
+// `log-tree.c` does, and supplies the parents that "will be printed in the
+// graph output" (`graph_is_interesting`).
+
+// the colours of `column_colors_ansi`; the last entry (reset) is the "no
+// colour" index
+const Array<str> COLORS = ["\x1b[31m", "\x1b[32m", "\x1b[33m", "\x1b[34m", "\x1b[35m", "\x1b[36m", "\x1b[1;31m", "\x1b[1;32m", "\x1b[1;33m", "\x1b[1;34m", "\x1b[1;35m", "\x1b[1;36m", "\x1b[m"];
+const int COLOR_MAX = 12;
+const int PADDING = 0;
+const int SKIP = 1;
+const int PRE_COMMIT = 2;
+const int COMMIT = 3;
+const int POST_MERGE = 4;
+const int COLLAPSING = 5;
+
+pub type Graph {
+    pub bool is_color = false;
+    pub str commit = "";
+    pub bool has_commit = false;
+    pub List<str> parents = [];
+    pub int num_parents = 0;
+    pub int width = 0;
+    pub int expansion_row = 0;
+    pub int state = 0;
+    pub int prev_state = 0;
+    pub int commit_index = 0;
+    pub int prev_commit_index = 0;
+    pub int merge_layout = 0;
+    pub int edges_added = 0;
+    pub int prev_edges_added = 0;
+    pub List<str> columns = [];
+    pub List<int> column_colors = [];
+    pub List<str> new_columns = [];
+    pub List<int> new_column_colors = [];
+    pub List<int> mapping = [];
+    pub List<int> old_mapping = [];
+    pub int mapping_size = 0;
+    pub int default_color = 11;
+    // did the last `next_line` print the commit's own row
+    pub bool is_commit_line = false;
+}
+
+int Graph.current_color() {
+    if (!is_color) {
+        return COLOR_MAX;
+    }
+    return default_color;
+}
+
+int Graph.find_commit_color(str id) {
+    for (int i in 0 .. columns.size()) {
+        if (columns[i] == id) {
+            return column_colors[i];
+        }
+    }
+    return current_color();
+}
+
+int Graph.find_new_column(str id) {
+    for (int i in 0 .. new_columns.size()) {
+        if (new_columns[i] == id) {
+            return i;
+        }
+    }
+    return -1;
+}
+
+void Graph.ensure_capacity(int num_columns) {
+    while (mapping.size() < 2 * num_columns + 8) {
+        mapping.push(-1);
+    }
+    while (old_mapping.size() < 2 * num_columns + 8) {
+        old_mapping.push(-1);
+    }
+}
+
+int Graph.num_dashed_parents() {
+    return num_parents + merge_layout - 3;
+}
+
+int Graph.num_expansion_rows() {
+    return num_dashed_parents() * 2;
+}
+
+bool Graph.needs_pre_commit_line() {
+    return num_parents >= 3 && commit_index < columns.size() - 1 && expansion_row < num_expansion_rows();
+}
+
+void Graph.insert_into_new_columns(str id, int idx) {
+    int i = find_new_column(id);
+    if (i < 0) {
+        i = new_columns.size();
+        new_columns.push(id);
+        new_column_colors.push(find_commit_color(id));
+    }
+    int mapping_idx = 0;
+    if (num_parents > 1 && idx > -1 && merge_layout == -1) {
+        int dist = idx - i;
+        int shift = 1;
+        if (dist > 1) {
+            shift = 2 * dist - 3;
+        }
+        if (dist > 0) {
+            merge_layout = 0;
+        } else {
+            merge_layout = 1;
+        }
+        edges_added = num_parents + merge_layout - 2;
+        mapping_idx = width + (merge_layout - 1) * shift;
+        width = width + 2 * merge_layout;
+    } else if (edges_added > 0 && width >= 2 && i == mapping[width - 2]) {
+        mapping_idx = width - 2;
+        edges_added = -1;
+    } else {
+        mapping_idx = width;
+        width = width + 2;
+    }
+    ensure_capacity(mapping_idx / 2 + 2);
+    mapping[mapping_idx] = i;
+}
+
+void Graph.update_columns() {
+    List<str> swap_commits = columns;
+    columns = new_columns;
+    new_columns = swap_commits;
+    List<int> swap_colors = column_colors;
+    column_colors = new_column_colors;
+    new_column_colors = swap_colors;
+    new_columns = [];
+    new_column_colors = [];
+    int n = columns.size();
+    int max_new = n + num_parents;
+    ensure_capacity(max_new + 1);
+    mapping_size = 2 * max_new;
+    for (int i in 0 .. mapping_size) {
+        mapping[i] = -1;
+    }
+    width = 0;
+    prev_edges_added = edges_added;
+    edges_added = 0;
+    bool is_seen = false;
+    bool is_in_columns = true;
+    for (int i in 0 .. n + 1) {
+        str col_commit = "";
+        if (i == n) {
+            if (is_seen) {
+                break;
+            }
+            is_in_columns = false;
+            col_commit = commit;
+        } else {
+            col_commit = columns[i];
+        }
+        if (col_commit == commit) {
+            is_seen = true;
+            commit_index = i;
+            merge_layout = -1;
+            for (str parent in parents) {
+                if (num_parents > 1 || !is_in_columns) {
+                    default_color = (default_color + 1) % COLOR_MAX;
+                }
+                insert_into_new_columns(parent, i);
+            }
+            if (num_parents == 0) {
+                width = width + 2;
+            }
+        } else {
+            insert_into_new_columns(col_commit, -1);
+        }
+    }
+    while (mapping_size > 1 && mapping[mapping_size - 1] < 0) {
+        mapping_size = mapping_size - 1;
+    }
+}
+
+/// The next commit is `id`; `parent_ids` are its parents that will be
+/// printed in the graph.
+pub void Graph.update(str id, List<str> parent_ids) {
+    commit = id;
+    has_commit = true;
+    parents = parent_ids;
+    num_parents = parent_ids.size();
+    prev_commit_index = commit_index;
+    update_columns();
+    expansion_row = 0;
+    if (state != PADDING) {
+        state = SKIP;
+    } else if (needs_pre_commit_line()) {
+        state = PRE_COMMIT;
+    } else {
+        state = COMMIT;
+    }
+}
+
+pub bool Graph.is_commit_finished() {
+    return state == PADDING;
+}
+
+void Graph.update_state(int next) {
+    prev_state = state;
+    state = next;
+}
+
+bool Graph.is_mapping_correct() {
+    for (int i in 0 .. mapping_size) {
+        int target = mapping[i];
+        if (target < 0) {
+            continue;
+        }
+        if (target == i / 2) {
+            continue;
+        }
+        return false;
+    }
+    return true;
+}
+
+void Graph.pad_horizontally(Line line) {
+    if (line.width < width) {
+        line.chars(" ", width - line.width);
+    }
+}
+
+void Graph.output_padding_line(Line line) {
+    for (int i in 0 .. new_columns.size()) {
+        line.column(this, new_column_colors[i], "|");
+        line.ch(" ");
+    }
+}
+
+void Graph.output_skip_line(Line line) {
+    line.word("...");
+    if (needs_pre_commit_line()) {
+        update_state(PRE_COMMIT);
+    } else {
+        update_state(COMMIT);
+    }
+}
+
+void Graph.output_pre_commit_line(Line line) {
+    bool is_seen = false;
+    for (int i in 0 .. columns.size()) {
+        int color = column_colors[i];
+        if (columns[i] == commit) {
+            is_seen = true;
+            line.column(this, color, "|");
+            line.chars(" ", expansion_row);
+        } else if (is_seen && expansion_row == 0) {
+            if (prev_state == POST_MERGE && prev_commit_index < i) {
+                line.column(this, color, "\\");
+            } else {
+                line.column(this, color, "|");
+            }
+        } else if (is_seen && expansion_row > 0) {
+            line.column(this, color, "\\");
+        } else {
+            line.column(this, color, "|");
+        }
+        line.ch(" ");
+    }
+    expansion_row = expansion_row + 1;
+    if (!needs_pre_commit_line()) {
+        update_state(COMMIT);
+    }
+}
+
+void Graph.draw_octopus_merge(Line line) {
+    int dashed = num_dashed_parents();
+    for (int i in 0 .. dashed) {
+        int j = mapping[(commit_index + i + 2) * 2];
+        int color = COLOR_MAX;
+        if (j >= 0 && j < new_column_colors.size()) {
+            color = new_column_colors[j];
+        }
+        line.column(this, color, "-");
+        if (i == dashed - 1) {
+            line.column(this, color, ".");
+        } else {
+            line.column(this, color, "-");
+        }
+    }
+}
+
+void Graph.output_commit_line(Line line) {
+    bool is_seen = false;
+    int n = columns.size();
+    for (int i in 0 .. n + 1) {
+        str col_commit = "";
+        int color = COLOR_MAX;
+        if (i == n) {
+            if (is_seen) {
+                break;
+            }
+            col_commit = commit;
+        } else {
+            col_commit = columns[i];
+            color = column_colors[i];
+        }
+        if (col_commit == commit) {
+            is_seen = true;
+            line.word("*");
+            if (num_parents > 2) {
+                draw_octopus_merge(line);
+            }
+        } else if (is_seen && edges_added > 1) {
+            line.column(this, color, "\\");
+        } else if (is_seen && edges_added == 1) {
+            if (prev_state == POST_MERGE && prev_edges_added > 0 && prev_commit_index < i) {
+                line.column(this, color, "\\");
+            } else {
+                line.column(this, color, "|");
+            }
+        } else if (prev_state == COLLAPSING && 2 * i + 1 < old_mapping.size() && old_mapping[2 * i + 1] == i && 2 * i < mapping.size() && mapping[2 * i] < i) {
+            line.column(this, color, "/");
+        } else {
+            line.column(this, color, "|");
+        }
+        line.ch(" ");
+    }
+    if (num_parents > 1) {
+        update_state(POST_MERGE);
+    } else if (is_mapping_correct()) {
+        update_state(PADDING);
+    } else {
+        update_state(COLLAPSING);
+    }
+}
+
+void Graph.output_post_merge_line(Line line) {
+    bool is_seen = false;
+    int n = columns.size();
+    int parent_col_color = COLOR_MAX;
+    bool has_parent_col = false;
+    str first_parent = "";
+    if (parents.size() > 0) {
+        first_parent = parents[0];
+    }
+    for (int i in 0 .. n + 1) {
+        str col_commit = "";
+        int color = COLOR_MAX;
+        if (i == n) {
+            if (is_seen) {
+                break;
+            }
+            col_commit = commit;
+        } else {
+            col_commit = columns[i];
+            color = column_colors[i];
+        }
+        if (col_commit == commit) {
+            int idx = merge_layout;
+            is_seen = true;
+            for (int j in 0 .. num_parents) {
+                int par_column = find_new_column(parents[j]);
+                str c = "/";
+                if (idx == 1) {
+                    c = "|";
+                } else if (idx == 2) {
+                    c = "\\";
+                }
+                int par_color = COLOR_MAX;
+                if (par_column >= 0) {
+                    par_color = new_column_colors[par_column];
+                }
+                line.column(this, par_color, c);
+                if (idx == 2) {
+                    if (edges_added > 0 || j < num_parents - 1) {
+                        line.ch(" ");
+                    }
+                } else {
+                    idx = idx + 1;
+                }
+            }
+            if (edges_added == 0) {
+                line.ch(" ");
+            }
+        } else if (is_seen) {
+            if (edges_added > 0) {
+                line.column(this, color, "\\");
+            } else {
+                line.column(this, color, "|");
+            }
+            line.ch(" ");
+        } else {
+            line.column(this, color, "|");
+            if (merge_layout != 0 || i != commit_index - 1) {
+                if (has_parent_col) {
+                    line.column(this, parent_col_color, "_");
+                } else {
+                    line.ch(" ");
+                }
+            }
+        }
+        if (col_commit == first_parent) {
+            parent_col_color = color;
+            has_parent_col = true;
+        }
+    }
+    if (is_mapping_correct()) {
+        update_state(PADDING);
+    } else {
+        update_state(COLLAPSING);
+    }
+}
+
+void Graph.output_collapsing_line(Line line) {
+    List<int> swap = mapping;
+    mapping = old_mapping;
+    old_mapping = swap;
+    for (int i in 0 .. mapping_size) {
+        mapping[i] = -1;
+    }
+    bool is_used_horizontal = false;
+    int horizontal_edge = -1;
+    int horizontal_edge_target = -1;
+    for (int i in 0 .. mapping_size) {
+        int target = old_mapping[i];
+        if (target < 0) {
+            continue;
+        }
+        if (target * 2 == i) {
+            mapping[i] = target;
+        } else if (i >= 1 && mapping[i - 1] < 0) {
+            mapping[i - 1] = target;
+            if (horizontal_edge == -1) {
+                horizontal_edge = i;
+                horizontal_edge_target = target;
+                int j = target * 2 + 3;
+                while (j < i - 2) {
+                    mapping[j] = target;
+                    j = j + 2;
+                }
+            }
+        } else if (i >= 1 && mapping[i - 1] == target) {
+            // shares the branch line to its left
+        } else {
+            if (i >= 2) {
+                mapping[i - 2] = target;
+            }
+            if (horizontal_edge == -1) {
+                horizontal_edge_target = target;
+                horizontal_edge = i - 1;
+                int j = target * 2 + 3;
+                while (j < i - 2) {
+                    mapping[j] = target;
+                    j = j + 2;
+                }
+            }
+        }
+    }
+    for (int i in 0 .. mapping_size) {
+        old_mapping[i] = mapping[i];
+    }
+    if (mapping_size > 0 && mapping[mapping_size - 1] < 0) {
+        mapping_size = mapping_size - 1;
+    }
+    for (int i in 0 .. mapping_size) {
+        int target = mapping[i];
+        if (target < 0) {
+            line.ch(" ");
+        } else if (target * 2 == i) {
+            line.column(this, new_column_colors[target], "|");
+        } else if (target == horizontal_edge_target && i != horizontal_edge - 1) {
+            if (i != target * 2 + 3) {
+                mapping[i] = -1;
+            }
+            is_used_horizontal = true;
+            line.column(this, new_column_colors[target], "_");
+        } else {
+            if (is_used_horizontal && i < horizontal_edge) {
+                mapping[i] = -1;
+            }
+            line.column(this, new_column_colors[target], "/");
+        }
+    }
+    if (is_mapping_correct()) {
+        update_state(PADDING);
+    }
+}
+
+/// The graph part of the next output line; `is_commit_line` says whether it
+/// was the commit's own row.
+pub str Graph.next_line() {
+    is_commit_line = false;
+    if (!has_commit) {
+        return "";
+    }
+    Line line = Line();
+    if (state == PADDING) {
+        output_padding_line(line);
+    } else if (state == SKIP) {
+        output_skip_line(line);
+    } else if (state == PRE_COMMIT) {
+        output_pre_commit_line(line);
+    } else if (state == COMMIT) {
+        output_commit_line(line);
+        is_commit_line = true;
+    } else if (state == POST_MERGE) {
+        output_post_merge_line(line);
+    } else {
+        output_collapsing_line(line);
+    }
+    pad_horizontally(line);
+    return line.text;
+}
+
+/// `graph_padding_line`: a padding row that leaves the state alone when the
+/// commit's own row has not been printed yet.
+pub str Graph.padding_line() {
+    if (state != COMMIT) {
+        return next_line();
+    }
+    Line line = Line();
+    for (int i in 0 .. columns.size()) {
+        line.column(this, column_colors[i], "|");
+        if (columns[i] == commit && num_parents > 2) {
+            line.chars(" ", (num_parents - 2) * 2);
+        } else {
+            line.ch(" ");
+        }
+    }
+    pad_horizontally(line);
+    prev_state = PADDING;
+    return line.text;
+}
+
+pub Graph open(bool is_color) {
+    Graph graph = Graph();
+    graph.is_color = is_color;
+    graph.mapping = [-1; 64];
+    graph.old_mapping = [-1; 64];
+    return graph;
+}
+
+// --- one line being built --------------------------------------------------------------
+
+type Line {
+    str text = "";
+    int width = 0;
+}
+
+void Line.ch(str c) {
+    text = text + c;
+    width = width + 1;
+}
+
+void Line.chars(str c, int n) {
+    if (n > 0) {
+        text = text + c.repeat(n);
+        width = width + n;
+    }
+}
+
+void Line.word(str s) {
+    text = text + s;
+    width = width + s.size();
+}
+
+// a column's character in the column's colour
+void Line.column(Graph graph, int color, str c) {
+    if (graph.is_color && color < COLOR_MAX) {
+        text = text + COLORS[color] + c + COLORS[COLOR_MAX];
+    } else {
+        text = text + c;
+    }
+    width = width + 1;
+}
+
+// --- columns and mapping ------------------------------------------------------------------
+
+// --- the rows ----------------------------------------------------------------------------

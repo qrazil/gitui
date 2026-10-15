@@ -1,0 +1,2047 @@
+// `git diff`'s engine, in git's own bytes: which paths differ between two
+// trees, a tree and the index, the index and the work tree, or a tree and the
+// work tree; rename detection (exact, then similarity at 50%); and every
+// output format `diff`, `log` and `show` print -- the patch, `--stat`,
+// `--numstat`, `--shortstat`, `--name-only`, `--name-status`, `--raw`,
+// `--summary`.
+//
+// `GIT_xdiff` makes the line script; the headers, the `@@` lines, the colour
+// and the whitespace highlighting, the stat graph and its width arithmetic
+// are git's `diff.c` as written, because a test diffs the bytes.
+//
+// What is left out, and listed in docs/GIT-COMPAT.md: a work-tree symlink
+// cannot be read (the stdlib has no `readlink`), so a symlink is treated as
+// unchanged against the index; `.gitattributes` (diff drivers, `-diff`,
+// textconv, eol conversion) and `core.autocrlf` are not consulted; submodules
+// are shown by their commit id only; unmerged paths print as `* Unmerged
+// path` instead of a combined diff; copies (`-C`) and break (`-B`) are not
+// detected.
+
+import io;
+import os;
+import fs;
+import text.diff;
+import core.GIT_object;
+import core.GIT_index;
+import core.GIT_gitcommon;
+import core.GIT_gitstatus;
+import diff.GIT_xdiff;
+import diff.GIT_hunks;
+
+// --- the things compared ------------------------------------------------------------
+
+/// One side of a pair: a mode and an object id. `wt` is the absolute path of
+/// a work-tree file when the content is there and not in the object store.
+/// An absent side has id "" and mode 0.
+pub type Side {
+    pub int mode;
+    pub str id;
+    pub str wt;
+}
+
+/// The absent side of a pair.
+pub Side nothing() {
+    return Side(0, "", "");
+}
+
+/// One changed path. `status` is `A`, `D`, `M`, `R` or `T` (the type of file
+/// changed), `U` for an unmerged path.
+pub type Item {
+    pub str status;
+    // the name in the new side (or the only name)
+    pub str path;
+    // the name in the old side (the rename's source), else `path`
+    pub str old_path;
+    pub Side old;
+    pub Side new;
+    // 0 .. 60000, for a rename
+    pub int score = 0;
+}
+
+pub type DOpts {
+    pub bool is_patch = false;
+    pub bool is_stat = false;
+    pub bool is_numstat = false;
+    pub bool is_shortstat = false;
+    pub bool is_name_only = false;
+    pub bool is_name_status = false;
+    pub bool is_raw = false;
+    pub bool is_summary = false;
+    pub bool is_nul = false;
+    pub int context = 3;
+    // 0 nothing, 1 -b, 2 -w
+    pub int ws = 0;
+    pub bool is_renames = true;
+    pub int rename_score = 30000;
+    pub bool is_color = false;
+    pub bool is_quiet = false;
+    pub bool is_exit_code = false;
+    pub bool is_reverse = false;
+    pub bool is_text = false;
+    pub bool is_full_index = false;
+    pub int abbrev = 7;
+    pub int stat_width = 0;
+    pub int stat_name_width = 0;
+    pub int stat_graph_width = 0;
+    // bytes of graph prefix in front of each output line (`log --graph`)
+    pub int prefix_len = 0;
+    pub str src_prefix = "a/";
+    pub str dst_prefix = "b/";
+    // the palette; empty codes when colour is off
+    pub Pal pal = Pal();
+}
+
+/// The colours of `color.diff.*`, "" when off.
+pub type Pal {
+    pub str meta = "";
+    pub str frag = "";
+    pub str func = "";
+    pub str context = "";
+    pub str old = "";
+    pub str new = "";
+    pub str commit = "";
+    pub str whitespace = "";
+    pub str reset = "";
+    pub bool is_on = false;
+}
+
+/// The palette for `color.diff.<slot>` with git's defaults, or the empty
+/// palette when colour is off.
+pub Pal palette(GIT_gitcommon.Ctx ctx, bool is_on) {
+    Pal pal = Pal();
+    if (!is_on) {
+        return pal;
+    }
+    pal.is_on = true;
+    pal.reset = "\x1b[m";
+    pal.meta = GIT_gitcommon.slot_color(ctx, "diff", "meta", "\x1b[1m");
+    pal.frag = GIT_gitcommon.slot_color(ctx, "diff", "frag", "\x1b[36m");
+    pal.func = GIT_gitcommon.slot_color(ctx, "diff", "func", "");
+    pal.context = GIT_gitcommon.slot_color(ctx, "diff", "context", "");
+    pal.old = GIT_gitcommon.slot_color(ctx, "diff", "old", "\x1b[31m");
+    pal.new = GIT_gitcommon.slot_color(ctx, "diff", "new", "\x1b[32m");
+    pal.commit = GIT_gitcommon.slot_color(ctx, "diff", "commit", "\x1b[33m");
+    pal.whitespace = GIT_gitcommon.slot_color(ctx, "diff", "whitespace", "\x1b[41m");
+    return pal;
+}
+
+// --- reading content ------------------------------------------------------------------
+
+bool is_gitlink(int mode) {
+    return mode >> 12 == 0o16;
+}
+
+bool is_symlink(int mode) {
+    return mode >> 12 == 0o12;
+}
+
+/// What `side` holds, as git diffs it: a blob's bytes, a work-tree file's
+/// bytes, or `Subproject commit <id>\n` for a submodule.
+pub bytes content_of(str gitdir, Side side) {
+    if (side.id == "" && side.wt == "") {
+        return [];
+    }
+    if (is_gitlink(side.mode)) {
+        return ("Subproject commit " + side.id + "\n").to_bytes();
+    }
+    if (side.wt != "") {
+        match (io.read_bytes(side.wt)) {
+            case Ok(bytes data): {
+                return data;
+            }
+            case Err(_): {
+                return [];
+            }
+        }
+    }
+    return GIT_gitstatus.blob_of(gitdir, side.id);
+}
+
+// --- tree against tree -----------------------------------------------------------------
+
+// Could a path below the directory `dir` match a pathspec?
+bool dir_may_match(List<GIT_gitcommon.Spec> specs, str dir) {
+    if (specs.size() == 0) {
+        return true;
+    }
+    bool has_positive = false;
+    for (GIT_gitcommon.Spec spec in specs) {
+        if (spec.is_exclude) {
+            continue;
+        }
+        has_positive = true;
+        if (spec.pattern == "" || spec.is_glob) {
+            return true;
+        }
+        if (spec.pattern == dir || spec.pattern.starts_with(dir + "/") || dir.starts_with(spec.pattern + "/")) {
+            return true;
+        }
+    }
+    return !has_positive;
+}
+
+List<GIT_object.Entry> tree_entries(str gitdir, str id) {
+    if (id == "") {
+        return [];
+    }
+    match (GIT_object.read(gitdir, id)) {
+        case Ok(GIT_object.Object object): {
+            match (object.body) {
+                case Tree(List<GIT_object.Entry> entries): {
+                    return entries;
+                }
+                case Blob: {
+                    return [];
+                }
+                case Commit: {
+                    return [];
+                }
+                case Tag: {
+                    return [];
+                }
+            }
+        }
+        case Err(_): {
+            return [];
+        }
+    }
+}
+
+str entry_key(GIT_object.Entry entry) {
+    str name = entry.name.utf8().or("");
+    if (entry.is_tree()) {
+        return name + "/";
+    }
+    return name;
+}
+
+void walk_trees(str gitdir, str old_tree, str new_tree, str base, List<GIT_gitcommon.Spec> specs, List<Item> out) {
+    List<GIT_object.Entry> old_entries = tree_entries(gitdir, old_tree);
+    List<GIT_object.Entry> new_entries = tree_entries(gitdir, new_tree);
+    int i = 0;
+    int j = 0;
+    while (i < old_entries.size() || j < new_entries.size()) {
+        GIT_object.Entry old_entry = GIT_object.Entry(0, [], "");
+        GIT_object.Entry new_entry = GIT_object.Entry(0, [], "");
+        bool has_old = false;
+        bool has_new = false;
+        if (i < old_entries.size()) {
+            old_entry = old_entries[i];
+            has_old = true;
+        }
+        if (j < new_entries.size()) {
+            new_entry = new_entries[j];
+            has_new = true;
+        }
+        if (has_old && has_new) {
+            str key_old = entry_key(old_entry);
+            str key_new = entry_key(new_entry);
+            int order = GIT_gitcommon.compare(key_old, key_new);
+            if (order < 0) {
+                has_new = false;
+            } else if (order > 0) {
+                has_old = false;
+            }
+        }
+        if (has_old) {
+            i = i + 1;
+        }
+        if (has_new) {
+            j = j + 1;
+        }
+        GIT_object.Entry one = old_entry;
+        if (!has_old) {
+            one = new_entry;
+        }
+        match (one.name.utf8()) {
+            case None: {
+                continue;
+            }
+            case Some(str name): {
+                str full = name;
+                if (base != "") {
+                    full = base + "/" + name;
+                }
+                bool is_dir_old = has_old && old_entry.is_tree();
+                bool is_dir_new = has_new && new_entry.is_tree();
+                if (is_dir_old || is_dir_new) {
+                    if (has_old && has_new && is_dir_old && is_dir_new && old_entry.id == new_entry.id) {
+                        continue;
+                    }
+                    if (dir_may_match(specs, full)) {
+                        str sub_old = "";
+                        str sub_new = "";
+                        if (is_dir_old) {
+                            sub_old = old_entry.id;
+                        }
+                        if (is_dir_new) {
+                            sub_new = new_entry.id;
+                        }
+                        walk_trees(gitdir, sub_old, sub_new, full, specs, out);
+                    }
+                    // a file replaced by a directory (or the reverse) is
+                    // handled by the other half of the pair below
+                    if (has_old && has_new && is_dir_old != is_dir_new) {
+                        // unreachable: keys differ for a file and a directory
+                    }
+                    continue;
+                }
+                if (!GIT_gitcommon.spec_match(specs, full)) {
+                    continue;
+                }
+                if (has_old && has_new) {
+                    if (old_entry.id == new_entry.id && old_entry.mode == new_entry.mode) {
+                        continue;
+                    }
+                    Item item = Item("M", full, full, Side(old_entry.mode, old_entry.id, ""), Side(new_entry.mode, new_entry.id, ""));
+                    if ((old_entry.mode >> 12) != (new_entry.mode >> 12)) {
+                        item.status = "T";
+                    }
+                    out.push(item);
+                } else if (has_old) {
+                    out.push(Item("D", full, full, Side(old_entry.mode, old_entry.id, ""), nothing()));
+                } else {
+                    out.push(Item("A", full, full, nothing(), Side(new_entry.mode, new_entry.id, "")));
+                }
+            }
+        }
+    }
+}
+
+/// The paths that differ between two trees ("" is the empty tree), limited to
+/// `specs`, in path order.
+pub List<Item> tree_vs_tree(str gitdir, str old_tree, str new_tree, List<GIT_gitcommon.Spec> specs) {
+    List<Item> out = [];
+    if (old_tree == new_tree) {
+        return out;
+    }
+    walk_trees(gitdir, old_tree, new_tree, "", specs, out);
+    return out;
+}
+
+// --- the index -------------------------------------------------------------------------
+
+/// The stage-0 entries of the index as sides, by path; `unmerged` gets every
+/// path that has a conflict stage.
+pub Map<str, Side> index_sides(str gitdir, List<str> unmerged) {
+    Map<str, Side> out = {};
+    match (GIT_index.read(gitdir)) {
+        case Ok(GIT_index.Index index): {
+            for (GIT_index.Entry entry in index.entries) {
+                match (entry.path.utf8()) {
+                    case Some(str path): {
+                        if (entry.stage == 0) {
+                            out.set(path, Side(entry.mode, entry.id, ""));
+                        } else if (!unmerged.contains(path)) {
+                            unmerged.push(path);
+                        }
+                    }
+                    case None: {
+                    }
+                }
+            }
+        }
+        case Err(_): {
+        }
+    }
+    return out;
+}
+
+/// The flat map of a tree.
+pub Map<str, Side> tree_sides(str gitdir, str tree, str base, List<GIT_gitcommon.Spec> specs) {
+    Map<str, Side> out = {};
+    flat_into(gitdir, tree, base, specs, out);
+    return out;
+}
+
+void flat_into(str gitdir, str tree, str base, List<GIT_gitcommon.Spec> specs, Map<str, Side> out) {
+    for (GIT_object.Entry entry in tree_entries(gitdir, tree)) {
+        match (entry.name.utf8()) {
+            case None: {
+            }
+            case Some(str name): {
+                str full = name;
+                if (base != "") {
+                    full = base + "/" + name;
+                }
+                if (entry.is_tree()) {
+                    if (dir_may_match(specs, full)) {
+                        flat_into(gitdir, entry.id, full, specs, out);
+                    }
+                } else if (GIT_gitcommon.spec_match(specs, full)) {
+                    out.set(full, Side(entry.mode, entry.id, ""));
+                }
+            }
+        }
+    }
+}
+
+/// Two flat maps against each other, in path order.
+pub List<Item> maps_diff(Map<str, Side> old, Map<str, Side> new, List<str> skip) {
+    List<str> paths = [];
+    for (str path in new.keys()) {
+        paths.push(path);
+    }
+    for (str path in old.keys()) {
+        if (!new.contains(path)) {
+            paths.push(path);
+        }
+    }
+    paths.sort();
+    List<Item> out = [];
+    for (str path in paths) {
+        if (skip.contains(path)) {
+            continue;
+        }
+        bool has_old = old.contains(path);
+        bool has_new = new.contains(path);
+        Side one = old.get(path).or(nothing());
+        Side two = new.get(path).or(nothing());
+        if (has_old && has_new) {
+            if (one.id == two.id && one.mode == two.mode) {
+                continue;
+            }
+            Item item = Item("M", path, path, one, two);
+            if ((one.mode >> 12) != (two.mode >> 12)) {
+                item.status = "T";
+            }
+            out.push(item);
+        } else if (has_old) {
+            out.push(Item("D", path, path, one, nothing()));
+        } else {
+            out.push(Item("A", path, path, nothing(), two));
+        }
+    }
+    return out;
+}
+
+// --- the work tree ---------------------------------------------------------------------
+
+int wt_mode(fs.Stat stat) {
+    if (stat.mode & 0o111 != 0) {
+        return 0o100755;
+    }
+    return 0o100644;
+}
+
+/// The work-tree file for an index entry as a side, or `None` when there is
+/// nothing there (missing, or a directory). The id is the blob id of what is
+/// on disk, taken from the index entry when the stat data say nothing
+/// changed.
+Option<Side> worktree_side(str full, Side indexed, bool is_filemode, Option<GIT_index.Entry> cached) {
+    if (fs.is_link(full)) {
+        // v0.4.2's `fs` has no `readlink`: the target cannot be read, so a
+        // link in the work tree is taken to be what the index says
+        return Option<Side>.Some(indexed);
+    }
+    match (fs.stat(full)) {
+        case Err(_): {
+            return Option<Side>.None;
+        }
+        case Ok(fs.Stat stat): {
+            if (stat.is_directory()) {
+                return Option<Side>.None;
+            }
+            int mode = indexed.mode;
+            if (is_symlink(indexed.mode)) {
+                // the link became a file
+                mode = wt_mode(stat);
+            } else if (is_filemode) {
+                mode = wt_mode(stat);
+                if (GIT_gitstatus.canonical(mode) == GIT_gitstatus.canonical(indexed.mode)) {
+                    mode = indexed.mode;
+                }
+            }
+            bool is_same_stat = false;
+            match (cached) {
+                case Some(GIT_index.Entry entry): {
+                    int mtime = entry.mtime_s * 1_000_000_000 + entry.mtime_ns;
+                    is_same_stat = stat.size == entry.size && stat.mtime_ns == mtime && !is_symlink(indexed.mode);
+                }
+                case None: {
+                }
+            }
+            if (is_same_stat) {
+                return Option<Side>.Some(Side(mode, indexed.id, full));
+            }
+            match (io.read_bytes(full)) {
+                case Ok(bytes data): {
+                    return Option<Side>.Some(Side(mode, GIT_object.blob_id_like(indexed.id, data), full));
+                }
+                case Err(_): {
+                    return Option<Side>.None;
+                }
+            }
+        }
+    }
+}
+
+Item changed_item(str path, Side one, Side two) {
+    Item item = Item("M", path, path, one, two);
+    if ((one.mode >> 12) != (two.mode >> 12)) {
+        item.status = "T";
+    }
+    return item;
+}
+
+/// Index against the work tree: what `git diff` shows. `entries` is
+/// `index_sides`, `root` the work tree. Returns the items in path order.
+pub List<Item> index_vs_worktree(str gitdir, str root, Map<str, Side> entries, List<GIT_gitcommon.Spec> specs, bool is_filemode, Map<str, GIT_index.Entry> stat_cache) {
+    List<str> paths = [];
+    for (str path in entries.keys()) {
+        paths.push(path);
+    }
+    paths.sort();
+    List<Item> out = [];
+    for (str path in paths) {
+        if (!GIT_gitcommon.spec_match(specs, path)) {
+            continue;
+        }
+        Side one = entries.get(path).or(nothing());
+        if (is_gitlink(one.mode)) {
+            continue;
+        }
+        str full = fs.join(root, path);
+        match (worktree_side(full, one, is_filemode, stat_cache.get(path))) {
+            case None: {
+                out.push(Item("D", path, path, one, nothing()));
+            }
+            case Some(Side two): {
+                if (two.id != one.id || two.mode != one.mode) {
+                    out.push(changed_item(path, one, two));
+                }
+            }
+        }
+    }
+    return out;
+}
+
+/// A tree against the work tree (`git diff <rev>`): every path of the tree or
+/// the index, with the work-tree file as the new side.
+pub List<Item> tree_vs_worktree(str gitdir, str root, str tree, Map<str, Side> entries, List<GIT_gitcommon.Spec> specs, bool is_filemode, Map<str, GIT_index.Entry> stat_cache) {
+    Map<str, Side> from_tree = tree_sides(gitdir, tree, "", specs);
+    List<str> paths = [];
+    for (str path in from_tree.keys()) {
+        paths.push(path);
+    }
+    for (str path in entries.keys()) {
+        if (!from_tree.contains(path)) {
+            paths.push(path);
+        }
+    }
+    paths.sort();
+    List<Item> out = [];
+    for (str path in paths) {
+        if (!GIT_gitcommon.spec_match(specs, path)) {
+            continue;
+        }
+        bool in_tree = from_tree.contains(path);
+        bool in_index = entries.contains(path);
+        Side one = from_tree.get(path).or(nothing());
+        if (!in_index) {
+            // not tracked any more: the tree's file is a deletion
+            out.push(Item("D", path, path, one, nothing()));
+            continue;
+        }
+        Side indexed = entries.get(path).or(nothing());
+        Side two = indexed;
+        if (!is_gitlink(indexed.mode)) {
+            match (worktree_side(fs.join(root, path), indexed, is_filemode, stat_cache.get(path))) {
+                case None: {
+                    if (in_tree) {
+                        out.push(Item("D", path, path, one, nothing()));
+                    }
+                    continue;
+                }
+                case Some(Side found): {
+                    two = found;
+                }
+            }
+        }
+        if (!in_tree) {
+            out.push(Item("A", path, path, nothing(), two));
+        } else if (one.id != two.id || one.mode != two.mode) {
+            out.push(changed_item(path, one, two));
+        }
+    }
+    return out;
+}
+
+// --- rename detection ----------------------------------------------------------------------
+
+type Candidate {
+    int score;
+    int name_score;
+    int dst;
+    int src;
+}
+
+int Candidate.cmp(Candidate other) {
+    if (score != other.score) {
+        return other.score - score;
+    }
+    if (name_score != other.name_score) {
+        return other.name_score - name_score;
+    }
+    if (dst != other.dst) {
+        return dst - other.dst;
+    }
+    return src - other.src;
+}
+
+bool is_regular(int mode) {
+    return mode >> 12 == 0o10;
+}
+
+// git's `estimate_similarity` at `minimum`; 0 when below the quick bounds.
+int estimate(Map<int, int> a_spans, int a_size, Map<int, int> b_spans, int b_size, int minimum) {
+    int max_size = a_size;
+    int base_size = b_size;
+    if (b_size > a_size) {
+        max_size = b_size;
+        base_size = a_size;
+    }
+    if (max_size == 0 || base_size == 0) {
+        return 0;
+    }
+    int delta = max_size - base_size;
+    if (max_size * (60000 - minimum) < delta * 60000) {
+        return 0;
+    }
+    int copied = 0;
+    for (int hashed in a_spans.keys()) {
+        int mine = a_spans.get(hashed).or(0);
+        int theirs = b_spans.get(hashed).or(0);
+        if (theirs > 0) {
+            if (mine < theirs) {
+                copied = copied + mine;
+            } else {
+                copied = copied + theirs;
+            }
+        }
+    }
+    return copied * 60000 / max_size;
+}
+
+int same_base(str a, str b) {
+    if (GIT_gitstatus.basename(a) == GIT_gitstatus.basename(b)) {
+        return 1;
+    }
+    return 0;
+}
+
+/// git's `diffcore_rename` for `-M`: pair each added file with a deleted one.
+/// `items` is path-ordered; the result is too, with a rename standing where
+/// its destination was and its source's deletion gone.
+pub List<Item> detect_renames(str gitdir, List<Item> items, int minimum) {
+    List<int> dsts = [];
+    List<int> srcs = [];
+    for (int i in 0 .. items.size()) {
+        if (items[i].status == "A") {
+            dsts.push(i);
+        } else if (items[i].status == "D") {
+            srcs.push(i);
+        }
+    }
+    if (dsts.size() == 0 || srcs.size() == 0) {
+        return items;
+    }
+    // dst index in `dsts` -> src index in `srcs`, and the score
+    Map<int, int> pair_src = {};
+    Map<int, int> pair_score = {};
+    Map<int, bool> src_used = {};
+    // exact: same id (and, for non-regular files, same mode)
+    for (int d in 0 .. dsts.size()) {
+        Item dst = items[dsts[d]];
+        int best = -1;
+        int best_score = -1;
+        for (int s in 0 .. srcs.size()) {
+            if (src_used.contains(s)) {
+                continue;
+            }
+            Item src = items[srcs[s]];
+            if (src.old.id != dst.new.id) {
+                continue;
+            }
+            if (!is_regular(src.old.mode) || !is_regular(dst.new.mode)) {
+                if (src.old.mode != dst.new.mode) {
+                    continue;
+                }
+            }
+            int score = same_base(src.path, dst.path);
+            if (score > best_score) {
+                best = s;
+                best_score = score;
+                if (score == 1) {
+                    break;
+                }
+            }
+        }
+        if (best >= 0) {
+            pair_src.set(d, best);
+            pair_score.set(d, 60000);
+            src_used.set(best, true);
+        }
+    }
+    if (minimum < 60000) {
+        List<int> rest_dst = [];
+        for (int d in 0 .. dsts.size()) {
+            if (!pair_src.contains(d)) {
+                rest_dst.push(d);
+            }
+        }
+        List<int> rest_src = [];
+        for (int s in 0 .. srcs.size()) {
+            if (!src_used.contains(s)) {
+                rest_src.push(s);
+            }
+        }
+        if (rest_dst.size() > 0 && rest_src.size() > 0) {
+            List<Map<int, int>> spans_of_src = [];
+            List<int> size_of_src = [];
+            for (int s in rest_src) {
+                bytes data = content_of(gitdir, items[srcs[s]].old);
+                spans_of_src.push(GIT_gitstatus.span_counts(data));
+                size_of_src.push(data.size());
+            }
+            List<Map<int, int>> spans_of_dst = [];
+            List<int> size_of_dst = [];
+            for (int d in rest_dst) {
+                bytes data = content_of(gitdir, items[dsts[d]].new);
+                spans_of_dst.push(GIT_gitstatus.span_counts(data));
+                size_of_dst.push(data.size());
+            }
+            Map<int, bool> dst_taken = {};
+            Map<int, bool> src_taken = {};
+            // basename-guided: a source and a destination whose names are
+            // unique among the remaining ones and equal
+            Map<str, int> base_src = {};
+            Map<str, int> base_dst = {};
+            for (int k in 0 .. rest_src.size()) {
+                str base = GIT_gitstatus.basename(items[srcs[rest_src[k]]].path);
+                if (base_src.contains(base)) {
+                    base_src.set(base, -1);
+                } else {
+                    base_src.set(base, k);
+                }
+            }
+            for (int k in 0 .. rest_dst.size()) {
+                str base = GIT_gitstatus.basename(items[dsts[rest_dst[k]]].path);
+                if (!base_src.contains(base)) {
+                    continue;
+                }
+                if (base_dst.contains(base)) {
+                    base_dst.set(base, -1);
+                } else {
+                    base_dst.set(base, k);
+                }
+            }
+            for (int k in 0 .. rest_src.size()) {
+                str base = GIT_gitstatus.basename(items[srcs[rest_src[k]]].path);
+                int src_slot = base_src.get(base).or(-1);
+                int dst_slot = base_dst.get(base).or(-1);
+                if (src_slot < 0 || dst_slot < 0 || !base_dst.contains(base)) {
+                    continue;
+                }
+                if (src_taken.contains(src_slot) || dst_taken.contains(dst_slot)) {
+                    continue;
+                }
+                Item src = items[srcs[rest_src[src_slot]]];
+                Item dst = items[dsts[rest_dst[dst_slot]]];
+                if (!is_regular(src.old.mode) || !is_regular(dst.new.mode)) {
+                    continue;
+                }
+                int score = estimate(spans_of_src[src_slot], size_of_src[src_slot], spans_of_dst[dst_slot], size_of_dst[dst_slot], minimum);
+                if (score < minimum) {
+                    continue;
+                }
+                pair_src.set(rest_dst[dst_slot], rest_src[src_slot]);
+                pair_score.set(rest_dst[dst_slot], score);
+                src_taken.set(src_slot, true);
+                dst_taken.set(dst_slot, true);
+            }
+            // the matrix, if it is not too large
+            int count_dst = rest_dst.size() - dst_taken.size();
+            int count_src = rest_src.size() - src_taken.size();
+            int limit = 1000;
+            bool is_small = (count_dst <= limit || count_src <= limit) && count_dst * count_src <= limit * limit;
+            if (count_dst > 0 && count_src > 0 && is_small) {
+                List<Candidate> candidates = [];
+                for (int dk in 0 .. rest_dst.size()) {
+                    if (dst_taken.contains(dk)) {
+                        continue;
+                    }
+                    Item dst = items[dsts[rest_dst[dk]]];
+                    if (!is_regular(dst.new.mode)) {
+                        continue;
+                    }
+                    for (int sk in 0 .. rest_src.size()) {
+                        if (src_taken.contains(sk)) {
+                            continue;
+                        }
+                        Item src = items[srcs[rest_src[sk]]];
+                        if (!is_regular(src.old.mode)) {
+                            continue;
+                        }
+                        int score = estimate(spans_of_src[sk], size_of_src[sk], spans_of_dst[dk], size_of_dst[dk], minimum);
+                        if (score >= minimum) {
+                            candidates.push(Candidate(score, same_base(src.path, dst.path), dk, sk));
+                        }
+                    }
+                }
+                candidates.sort();
+                for (Candidate cand in candidates) {
+                    if (dst_taken.contains(cand.dst) || src_taken.contains(cand.src)) {
+                        continue;
+                    }
+                    dst_taken.set(cand.dst, true);
+                    src_taken.set(cand.src, true);
+                    pair_src.set(rest_dst[cand.dst], rest_src[cand.src]);
+                    pair_score.set(rest_dst[cand.dst], cand.score);
+                }
+            }
+        }
+    }
+    if (pair_src.size() == 0) {
+        return items;
+    }
+    Map<int, bool> drop = {};
+    Map<int, int> replace_by = {};
+    for (int d in pair_src.keys()) {
+        int s = pair_src.get(d).or(0);
+        drop.set(srcs[s], true);
+        replace_by.set(dsts[d], d);
+    }
+    List<Item> out = [];
+    for (int i in 0 .. items.size()) {
+        if (drop.contains(i)) {
+            continue;
+        }
+        if (replace_by.contains(i)) {
+            int d = replace_by.get(i).or(0);
+            Item src = items[srcs[pair_src.get(d).or(0)]];
+            Item dst = items[i];
+            Item renamed = Item("R", dst.path, src.path, src.old, dst.new);
+            renamed.score = pair_score.get(d).or(0);
+            out.push(renamed);
+        } else {
+            out.push(items[i]);
+        }
+    }
+    return out;
+}
+
+// --- one file's diff ----------------------------------------------------------------------
+
+/// A pair loaded: both contents, whether either is binary, and the line
+/// script with its counts.
+pub type Loaded {
+    pub bytes old;
+    pub bytes new;
+    pub bool is_binary = false;
+    pub List<diff.Op> ops = [];
+    pub int added = 0;
+    pub int deleted = 0;
+}
+
+int ws_class(int c) {
+    return c;
+}
+
+bool is_space_byte(int c) {
+    return c == ' ' || c == '\t' || c == '\n' || c == '\r' || c == 11 || c == 12;
+}
+
+// A line as xdiff compares it under -b (mode 1) or -w (mode 2).
+bytes normalize_line(bytes line, int mode) {
+    bytes out = [];
+    int n = line.size();
+    if (mode == 2) {
+        for (int c in line) {
+            if (!is_space_byte(c)) {
+                out.push(c);
+            }
+        }
+        return out;
+    }
+    int i = 0;
+    while (i < n) {
+        int c = line[i];
+        if (is_space_byte(c)) {
+            int j = i;
+            while (j < n && is_space_byte(line[j])) {
+                j = j + 1;
+            }
+            if (j < n) {
+                out.push(' ');
+            }
+            i = j;
+        } else {
+            out.push(c);
+            i = i + 1;
+        }
+    }
+    return out;
+}
+
+pub List<diff.Op> make_ops(bytes old, bytes new, int ws) {
+    List<bytes> lines_a = GIT_xdiff.split_lines(old);
+    List<bytes> lines_b = GIT_xdiff.split_lines(new);
+    GIT_xdiff.Diff changes = GIT_xdiff.diff_lines_indent(lines_a, lines_b);
+    if (ws > 0) {
+        List<bytes> norm_a = [];
+        List<bytes> norm_b = [];
+        for (bytes line in lines_a) {
+            norm_a.push(normalize_line(line, ws));
+        }
+        for (bytes line in lines_b) {
+            norm_b.push(normalize_line(line, ws));
+        }
+        changes = GIT_xdiff.diff_lines_indent(norm_a, norm_b);
+    }
+    List<diff.Op> out = [];
+    int size_a = lines_a.size();
+    int size_b = lines_b.size();
+    int ia = 0;
+    int ib = 0;
+    while (ia < size_a || ib < size_b) {
+        bool is_a = ia < size_a && changes.a_changed[ia];
+        bool is_b = ib < size_b && changes.b_changed[ib];
+        if (is_a || is_b) {
+            while (ia < size_a && changes.a_changed[ia]) {
+                out.push(diff.Op(diff.Kind.Remove, lines_a[ia]));
+                ia = ia + 1;
+            }
+            while (ib < size_b && changes.b_changed[ib]) {
+                out.push(diff.Op(diff.Kind.Add, lines_b[ib]));
+                ib = ib + 1;
+            }
+        } else {
+            // xdiff emits unchanged lines from the second file
+            out.push(diff.Op(diff.Kind.Keep, lines_b[ib]));
+            ia = ia + 1;
+            ib = ib + 1;
+        }
+    }
+    return out;
+}
+
+/// Load both sides of an item and diff them.
+pub Loaded load(str gitdir, Item item, DOpts opts, bool want_ops) {
+    Loaded loaded = Loaded(content_of(gitdir, item.old), content_of(gitdir, item.new));
+    if (!opts.is_text && (diff.is_binary(loaded.old) || diff.is_binary(loaded.new))) {
+        loaded.is_binary = true;
+        return loaded;
+    }
+    if (item.old.id == item.new.id) {
+        return loaded;
+    }
+    if (!want_ops) {
+        // counts only
+    }
+    loaded.ops = make_ops(loaded.old, loaded.new, opts.ws);
+    for (diff.Op op in loaded.ops) {
+        match (op.kind) {
+            case Add: {
+                loaded.added = loaded.added + 1;
+            }
+            case Remove: {
+                loaded.deleted = loaded.deleted + 1;
+            }
+            case Keep: {
+            }
+        }
+    }
+    return loaded;
+}
+
+// --- names -------------------------------------------------------------------------------
+
+str quoted(str name) {
+    return GIT_gitcommon.quote_path(name);
+}
+
+// `a/<path>` quoted as one name, as git writes it in `diff --git` and `---`.
+str prefixed(str prefix, str path) {
+    return quoted(prefix + path);
+}
+
+str octal6(int mode) {
+    return GIT_gitstatus.mode_text(mode);
+}
+
+// --- patch text --------------------------------------------------------------------------
+
+bool is_ws_byte(int c) {
+    return c == ' ' || c == '\t' || c == '\n' || c == '\r' || c == 11 || c == 12;
+}
+
+bool is_blank_line(bytes line) {
+    for (int c in line) {
+        if (!is_ws_byte(c)) {
+            return false;
+        }
+    }
+    return true;
+}
+
+int trailing_blank_count(List<bytes> lines) {
+    int n = 0;
+    int i = lines.size() - 1;
+    while (i >= 0 && is_blank_line(lines[i])) {
+        n = n + 1;
+        i = i - 1;
+    }
+    return n;
+}
+
+// git's `ws_check_emit` for an added line without its newline: the text in
+// `set`, whitespace errors (trailing blanks, spaces before a tab in the
+// indent) in the whitespace colour. Appends to `out`.
+void emit_checked(bytes out, bytes line, Pal pal) {
+    int len = line.size();
+    int trailing = -1;
+    int i = len - 1;
+    while (i >= 0) {
+        if (is_ws_byte(line[i])) {
+            trailing = i;
+            i = i - 1;
+        } else {
+            break;
+        }
+    }
+    if (trailing == -1) {
+        trailing = len;
+    }
+    int written = 0;
+    int k = 0;
+    while (k < trailing) {
+        if (line[k] == ' ') {
+            k = k + 1;
+            continue;
+        }
+        if (line[k] != '\t') {
+            break;
+        }
+        if (written < k) {
+            out.extend(pal.whitespace.to_bytes());
+            out.extend(line.substr(written, k));
+            out.extend(pal.reset.to_bytes());
+            out.push('\t');
+        } else {
+            out.extend(line.substr(written, k + 1));
+        }
+        written = k + 1;
+        k = k + 1;
+    }
+    if (trailing - written > 0) {
+        out.extend(pal.new.to_bytes());
+        out.extend(line.substr(written, trailing));
+        out.extend(pal.reset.to_bytes());
+    }
+    if (trailing != len) {
+        out.extend(pal.whitespace.to_bytes());
+        out.extend(line.substr(trailing, len));
+        out.extend(pal.reset.to_bytes());
+    }
+}
+
+// The line's bytes without a trailing "\n".
+bytes strip_nl(bytes line) {
+    if (line.size() > 0 && line[line.size() - 1] == '\n') {
+        return line.substr(0, line.size() - 1);
+    }
+    return line;
+}
+
+bool ends_with_nl(bytes line) {
+    return line.size() > 0 && line[line.size() - 1] == '\n';
+}
+
+// git's default funcname: the nearest line above that starts with a letter,
+// `_` or `$`, cut to 80 bytes, trailing blanks dropped.
+bytes func_name(List<bytes> old_lines, int before) {
+    int index = before - 1;
+    while (index >= 0) {
+        bytes line = old_lines[index];
+        if (line.size() > 0) {
+            int first = line[0];
+            bool is_alpha = (first >= 'a' && first <= 'z') || (first >= 'A' && first <= 'Z');
+            if (is_alpha || first == '_' || first == '$') {
+                int length = line.size();
+                if (length > 80) {
+                    length = 80;
+                }
+                while (length > 0 && is_ws_byte(line[length - 1])) {
+                    length = length - 1;
+                }
+                return line.substr(0, length);
+            }
+        }
+        index = index - 1;
+    }
+    return [];
+}
+
+str range_text(int before, int count) {
+    int start = before;
+    if (count > 0) {
+        start = before + 1;
+    }
+    if (count == 1) {
+        return start.to_str();
+    }
+    return start.to_str() + "," + count.to_str();
+}
+
+/// The hunks of a loaded pair, git's bytes, colour included.
+pub bytes hunks_bytes(Loaded loaded, DOpts opts) {
+    bytes out = [];
+    List<diff.Op> ops = loaded.ops;
+    Pal pal = opts.pal;
+    List<int> old_before = [0; ops.size() + 1];
+    List<int> new_before = [0; ops.size() + 1];
+    List<bytes> old_lines = [];
+    for (int i in 0 .. ops.size()) {
+        old_before[i + 1] = old_before[i];
+        new_before[i + 1] = new_before[i];
+        match (ops[i].kind) {
+            case Keep: {
+                old_before[i + 1] = old_before[i] + 1;
+                new_before[i + 1] = new_before[i] + 1;
+                old_lines.push(ops[i].line);
+            }
+            case Remove: {
+                old_before[i + 1] = old_before[i] + 1;
+                old_lines.push(ops[i].line);
+            }
+            case Add: {
+                new_before[i + 1] = new_before[i] + 1;
+            }
+        }
+    }
+    // trailing blank lines added at the end of the file (a whitespace error)
+    int blank_at_eof = 0;
+    if (pal.is_on && pal.whitespace != "") {
+        List<bytes> lines_old = GIT_xdiff.split_lines(loaded.old);
+        List<bytes> lines_new = GIT_xdiff.split_lines(loaded.new);
+        int l1 = trailing_blank_count(lines_old);
+        int l2 = trailing_blank_count(lines_new);
+        if (l2 > l1) {
+            blank_at_eof = (lines_new.size() - l2) + 1;
+        }
+    }
+    int context = opts.context;
+    for (GIT_hunks.Span span in GIT_hunks.spans(ops, context: context)) {
+        int old_count = old_before[span.end] - old_before[span.start];
+        int new_count = new_before[span.end] - new_before[span.start];
+        str head = "@@ -" + range_text(old_before[span.start], old_count) + " +" + range_text(new_before[span.start], new_count) + " @@";
+        bytes func = func_name(old_lines, old_before[span.start]);
+        if (pal.is_on) {
+            out.extend((pal.frag + head).to_bytes());
+            if (func.size() > 0) {
+                out.extend((pal.reset + pal.context + " " + pal.reset + pal.func).to_bytes());
+                out.extend(func);
+                out.extend(pal.reset.to_bytes());
+            } else {
+                out.extend(pal.reset.to_bytes());
+            }
+        } else {
+            out.extend(head.to_bytes());
+            if (func.size() > 0) {
+                out.push(' ');
+                out.extend(func);
+            }
+        }
+        out.push('\n');
+        int lno_new = new_before[span.start];
+        for (int i in span.start .. span.end) {
+            diff.Op op = ops[i];
+            bytes text = strip_nl(op.line);
+            bool has_nl = ends_with_nl(op.line);
+            // a CR before the newline is handled apart on removed and
+            // context lines
+            match (op.kind) {
+                case Keep: {
+                    lno_new = lno_new + 1;
+                    if (pal.is_on) {
+                        emit_plain(out, ' ', text, pal.context, pal.reset);
+                    } else {
+                        out.push(' ');
+                        out.extend(text);
+                        out.push('\n');
+                    }
+                }
+                case Remove: {
+                    if (pal.is_on) {
+                        emit_plain(out, '-', text, pal.old, pal.reset);
+                    } else {
+                        out.push('-');
+                        out.extend(text);
+                        out.push('\n');
+                    }
+                }
+                case Add: {
+                    lno_new = lno_new + 1;
+                    if (!pal.is_on) {
+                        out.push('+');
+                        out.extend(text);
+                        out.push('\n');
+                    } else if (pal.whitespace == "") {
+                        emit_plain(out, '+', text, pal.new, pal.reset);
+                    } else if (blank_at_eof > 0 && lno_new >= blank_at_eof) {
+                        // the whole line is the error, sign included
+                        out.extend(pal.whitespace.to_bytes());
+                        out.push('+');
+                        bytes body = text;
+                        bool is_cr = body.size() > 0 && body[body.size() - 1] == '\r';
+                        if (is_cr) {
+                            body = body.substr(0, body.size() - 1);
+                        }
+                        out.extend(body);
+                        out.extend(pal.reset.to_bytes());
+                        if (is_cr) {
+                            out.push('\r');
+                        }
+                        out.push('\n');
+                    } else {
+                        out.extend((pal.new + "+" + pal.reset).to_bytes());
+                        emit_checked(out, text, pal);
+                        out.push('\n');
+                    }
+                }
+            }
+            if (!has_nl) {
+                if (pal.is_on) {
+                    out.extend((pal.context + "\\ No newline at end of file" + pal.reset + "\n").to_bytes());
+                } else {
+                    out.extend("\\ No newline at end of file\n".to_bytes());
+                }
+            }
+        }
+    }
+    return out;
+}
+
+// emit_line_0 for a context or removed line: the sign, the colour, the text
+// without its CR, a reset, then the CR and the newline.
+void emit_plain(bytes out, int sign, bytes text, str color, str reset) {
+    bytes body = text;
+    bool is_cr = body.size() > 0 && body[body.size() - 1] == '\r';
+    if (is_cr) {
+        body = body.substr(0, body.size() - 1);
+    }
+    if (sign == ' ') {
+        // context: the colour is applied after the sign
+        out.push(' ');
+        out.extend(color.to_bytes());
+        out.extend(body);
+        out.extend(reset.to_bytes());
+    } else {
+        out.extend(color.to_bytes());
+        out.push(sign);
+        out.extend(body);
+        if (body.size() > 0 || color != "") {
+            out.extend(reset.to_bytes());
+        }
+    }
+    if (is_cr) {
+        out.push('\r');
+    }
+    out.push('\n');
+}
+
+// A header line in the meta colour.
+void meta_line(bytes out, str line, Pal pal) {
+    if (pal.is_on && pal.meta != "") {
+        out.extend((pal.meta + line + pal.reset + "\n").to_bytes());
+    } else {
+        out.extend((line + "\n").to_bytes());
+    }
+}
+
+// `--- name` / `+++ name`: a name with a space gets a tab after the colour
+// is reset
+void file_line(bytes out, str sign, str name, Pal pal) {
+    str tab = "";
+    if (name.contains(" ") && !name.starts_with("\"")) {
+        tab = "\t";
+    }
+    if (pal.is_on && pal.meta != "") {
+        out.extend((pal.meta + sign + " " + name + pal.reset + tab + "\n").to_bytes());
+    } else {
+        out.extend((sign + " " + name + tab + "\n").to_bytes());
+    }
+}
+
+int abbrev_of(DOpts opts, bool is_binary_full) {
+    if (opts.is_full_index) {
+        return 40;
+    }
+    return opts.abbrev;
+}
+
+str short_id(str id, int length) {
+    if (id == "") {
+        return "0".repeat(length);
+    }
+    if (length >= id.size()) {
+        return id;
+    }
+    return id.substr(0, length);
+}
+
+/// One item as a patch: header, then hunks or the binary notice.
+pub bytes patch_bytes(str gitdir, Item item, DOpts opts) {
+    bytes out = [];
+    Pal pal = opts.pal;
+    str src = opts.src_prefix;
+    str dst = opts.dst_prefix;
+    Item it = item;
+    if (opts.is_reverse) {
+        it = Item(item.status, item.old_path, item.path, item.new, item.old);
+        if (item.status == "A") {
+            it.status = "D";
+        } else if (item.status == "D") {
+            it.status = "A";
+        }
+        it.score = item.score;
+        it.path = item.old_path;
+        it.old_path = item.path;
+        if (item.status == "R") {
+            it.path = item.old_path;
+            it.old_path = item.path;
+        } else {
+            it.path = item.path;
+            it.old_path = item.path;
+        }
+    }
+    if (it.status == "U") {
+        out.extend(("* Unmerged path " + it.path + "\n").to_bytes());
+        return out;
+    }
+    str name_a = it.old_path;
+    str name_b = it.path;
+    bool is_added = it.status == "A";
+    bool is_removed = it.status == "D";
+    if (it.status == "T") {
+        // a typechange is a deletion followed by an addition
+        Item gone = Item("D", it.path, it.path, it.old, nothing());
+        Item came = Item("A", it.path, it.path, nothing(), it.new);
+        bytes first = patch_bytes(gitdir, gone, opts);
+        bytes second = patch_bytes(gitdir, came, opts);
+        out.extend(first);
+        out.extend(second);
+        return out;
+    }
+    meta_line(out, "diff --git " + prefixed(src, name_a) + " " + prefixed(dst, name_b), pal);
+    if (is_added) {
+        meta_line(out, "new file mode " + octal6(it.new.mode), pal);
+    } else if (is_removed) {
+        meta_line(out, "deleted file mode " + octal6(it.old.mode), pal);
+    } else if (it.old.mode != it.new.mode) {
+        meta_line(out, "old mode " + octal6(it.old.mode), pal);
+        meta_line(out, "new mode " + octal6(it.new.mode), pal);
+    }
+    if (it.status == "R") {
+        meta_line(out, "similarity index " + (it.score * 100 / 60000).to_str() + "%", pal);
+        meta_line(out, "rename from " + quoted(it.old_path), pal);
+        meta_line(out, "rename to " + quoted(it.path), pal);
+    }
+    bool has_content_change = it.old.id != it.new.id;
+    if (!has_content_change) {
+        return out;
+    }
+    Loaded loaded = load(gitdir, it, opts, true);
+    int width = abbrev_of(opts, false);
+    str index_line = "index " + abbrev_id(gitdir, it.old.id, width) + ".." + abbrev_id(gitdir, it.new.id, width);
+    if (it.old.mode == it.new.mode) {
+        index_line = index_line + " " + octal6(it.new.mode);
+    }
+    meta_line(out, index_line, pal);
+    if ((is_added && loaded.new.size() == 0) || (is_removed && loaded.old.size() == 0)) {
+        return out;
+    }
+    str from_name = prefixed(src, name_a);
+    str to_name = prefixed(dst, name_b);
+    if (is_added) {
+        from_name = "/dev/null";
+    }
+    if (is_removed) {
+        to_name = "/dev/null";
+    }
+    if (loaded.is_binary) {
+        out.extend(("Binary files " + from_name + " and " + to_name + " differ\n").to_bytes());
+        return out;
+    }
+    bytes body = hunks_bytes(loaded, opts);
+    if (body.size() == 0) {
+        // all changes ignored: git keeps the header only when it had to
+        // (a mode change or rename was already printed above); the index
+        // line goes with it
+        return remove_index_line(out, it);
+    }
+    file_line(out, "---", from_name, pal);
+    file_line(out, "+++", to_name, pal);
+    out.extend(body);
+    return out;
+}
+
+// When `-w` leaves nothing to show, git drops the `index` line too unless a
+// header line is otherwise present.
+bytes remove_index_line(bytes out, Item it) {
+    bool has_other = it.status == "A" || it.status == "D" || it.status == "R" || it.old.mode != it.new.mode;
+    if (has_other) {
+        return out;
+    }
+    return [];
+}
+
+// --- stat --------------------------------------------------------------------------------
+
+type StatFile {
+    str name;
+    // for a rename, the display form `a => b` in `print`
+    str print;
+    int added = 0;
+    int deleted = 0;
+    bool is_binary = false;
+    int old_size = 0;
+    int new_size = 0;
+    bool is_unmerged = false;
+    bool is_renamed = false;
+}
+
+str rename_name(str a, str b) {
+    if (GIT_gitcommon.needs_quote(a) || GIT_gitcommon.needs_quote(b)) {
+        return quoted(a) + " => " + quoted(b);
+    }
+    int len_a = a.size();
+    int len_b = b.size();
+    int pfx = 0;
+    int i = 0;
+    while (i < len_a && i < len_b && a.byte_at(i) == b.byte_at(i)) {
+        if (a.byte_at(i) == '/') {
+            pfx = i + 1;
+        }
+        i = i + 1;
+    }
+    int sfx = 0;
+    int adjust = 0;
+    if (pfx > 0) {
+        adjust = 1;
+    }
+    int oa = len_a;
+    int ob = len_b;
+    while (pfx - adjust <= oa && pfx - adjust <= ob && oa >= 0 && ob >= 0) {
+        int ca = 0;
+        int cb = 0;
+        if (oa < len_a) {
+            ca = a.byte_at(oa);
+        }
+        if (ob < len_b) {
+            cb = b.byte_at(ob);
+        }
+        if (ca != cb) {
+            break;
+        }
+        if (oa < len_a && ca == '/') {
+            sfx = len_a - oa;
+        }
+        oa = oa - 1;
+        ob = ob - 1;
+    }
+    int a_mid = len_a - pfx - sfx;
+    int b_mid = len_b - pfx - sfx;
+    if (a_mid < 0) {
+        a_mid = 0;
+    }
+    if (b_mid < 0) {
+        b_mid = 0;
+    }
+    str out = "";
+    if (pfx + sfx > 0) {
+        out = a.substr(0, pfx) + "{";
+    }
+    out = out + a.substr(pfx, pfx + a_mid) + " => " + b.substr(pfx, pfx + b_mid);
+    if (pfx + sfx > 0) {
+        out = out + "}" + a.substr(len_a - sfx, len_a);
+    }
+    return out;
+}
+
+int decimal_width(int n) {
+    int w = 1;
+    int v = n;
+    while (v >= 10) {
+        v = v / 10;
+        w = w + 1;
+    }
+    return w;
+}
+
+int scale_linear(int it, int width, int max_change) {
+    if (it == 0) {
+        return 0;
+    }
+    return 1 + (it * (width - 1) / max_change);
+}
+
+str plural_word(int n, str one, str many) {
+    if (n == 1) {
+        return one;
+    }
+    return many;
+}
+
+str graph_run(str ch, int n, str color, str reset) {
+    if (n <= 0) {
+        return "";
+    }
+    str text = ch.repeat(n);
+    if (color == "") {
+        return text;
+    }
+    return color + text + reset;
+}
+
+/// The summary line `N files changed, ...`.
+pub str summary_line(int files, int insertions, int deletions) {
+    str out = " " + files.to_str() + plural_word(files, " file changed", " files changed");
+    if (insertions > 0 || deletions == 0) {
+        out = out + ", " + insertions.to_str() + plural_word(insertions, " insertion(+)", " insertions(+)");
+    }
+    if (deletions > 0 || insertions == 0) {
+        out = out + ", " + deletions.to_str() + plural_word(deletions, " deletion(-)", " deletions(-)");
+    }
+    return out + "\n";
+}
+
+List<StatFile> stat_files(str gitdir, List<Item> items, DOpts opts) {
+    List<StatFile> out = [];
+    for (Item item in items) {
+        StatFile file = StatFile(item.path, quoted(item.path));
+        if (item.status == "D") {
+            file.name = item.old_path;
+            file.print = quoted(item.old_path);
+        }
+        if (item.status == "R") {
+            file.is_renamed = true;
+            file.print = rename_name(item.old_path, item.path);
+        }
+        if (item.status == "U") {
+            file.is_unmerged = true;
+            out.push(file);
+            continue;
+        }
+        Item it = item;
+        if (item.status == "T") {
+            it = item;
+        }
+        if (it.old.id != it.new.id) {
+            Loaded loaded = load(gitdir, it, opts, true);
+            if (loaded.is_binary) {
+                file.is_binary = true;
+                file.old_size = loaded.old.size();
+                file.new_size = loaded.new.size();
+            } else {
+                file.added = loaded.added;
+                file.deleted = loaded.deleted;
+            }
+        }
+        if (opts.is_reverse) {
+            int swap = file.added;
+            file.added = file.deleted;
+            file.deleted = swap;
+            int size_swap = file.old_size;
+            file.old_size = file.new_size;
+            file.new_size = size_swap;
+        }
+        out.push(file);
+    }
+    return out;
+}
+
+/// `--stat`, git's `show_stats`.
+pub bytes stat_bytes(str gitdir, List<Item> items, DOpts opts) {
+    List<StatFile> files = stat_files(gitdir, items, opts);
+    bytes out = [];
+    if (files.size() == 0) {
+        return out;
+    }
+    Pal pal = opts.pal;
+    int max_len = 0;
+    int max_change = 0;
+    int total_add = 0;
+    int total_del = 0;
+    int number_width = 0;
+    int bin_width = 0;
+    int count = 0;
+    for (StatFile file in files) {
+        int name_len = file.print.size();
+        if (max_len < name_len) {
+            max_len = name_len;
+        }
+        count = count + 1;
+        if (file.is_unmerged) {
+            continue;
+        }
+        if (file.is_binary) {
+            int w = 14 + decimal_width(file.old_size) + decimal_width(file.new_size);
+            if (w > bin_width) {
+                bin_width = w;
+            }
+            number_width = 3;
+            continue;
+        }
+        int change = file.added + file.deleted;
+        total_add = total_add + file.added;
+        total_del = total_del + file.deleted;
+        if (max_change < change) {
+            max_change = change;
+        }
+    }
+    int width = 0;
+    if (opts.stat_width > 0) {
+        width = opts.stat_width;
+    } else {
+        width = GIT_gitcommon.columns() - opts.prefix_len;
+    }
+    if (decimal_width(max_change) > number_width) {
+        number_width = decimal_width(max_change);
+    }
+    int graph_cfg = opts.stat_graph_width;
+    if (width < 16 + 6 + number_width) {
+        width = 16 + 6 + number_width;
+    }
+    int graph_width = max_change;
+    if (max_change + 4 <= bin_width) {
+        graph_width = bin_width - 4;
+    }
+    if (graph_cfg > 0 && graph_cfg < graph_width) {
+        graph_width = graph_cfg;
+    }
+    int name_width = max_len;
+    if (opts.stat_name_width > 0 && opts.stat_name_width < max_len) {
+        name_width = opts.stat_name_width;
+    }
+    if (name_width + number_width + 6 + graph_width > width) {
+        if (graph_width > width * 3 / 8 - number_width - 6) {
+            graph_width = width * 3 / 8 - number_width - 6;
+            if (graph_width < 6) {
+                graph_width = 6;
+            }
+        }
+        if (graph_cfg > 0 && graph_width > graph_cfg) {
+            graph_width = graph_cfg;
+        }
+        if (name_width > width - number_width - 6 - graph_width) {
+            name_width = width - number_width - 6 - graph_width;
+        } else {
+            graph_width = width - number_width - 6 - name_width;
+        }
+    }
+    for (StatFile file in files) {
+        str prefix = "";
+        str name = file.print;
+        int len = name_width;
+        int name_len = name.size();
+        if (name_width < name_len) {
+            prefix = "...";
+            len = len - 3;
+            name = name.substr(name_len - len, name_len);
+            match (name.index_of("/")) {
+                case Some(int slash): {
+                    name = name.substr(slash, name.size());
+                }
+                case None: {
+                }
+            }
+        }
+        if (file.is_unmerged) {
+            out.extend((" " + prefix + name + GIT_gitcommon.pad_left("", len - name.size(), " ") + " | Unmerged\n").to_bytes());
+            continue;
+        }
+        str padded = name + " ".repeat(len - name.size());
+        if (len < name.size()) {
+            padded = name;
+        }
+        if (file.is_binary) {
+            str line = " " + prefix + padded + " | " + GIT_gitcommon.pad_left("Bin", number_width, " ") + " ";
+            str old_text = file.old_size.to_str();
+            str new_text = file.new_size.to_str();
+            if (pal.is_on) {
+                line = line + pal.old + old_text + pal.reset + " -> " + pal.new + new_text + pal.reset + " bytes\n";
+            } else {
+                line = line + old_text + " -> " + new_text + " bytes\n";
+            }
+            out.extend(line.to_bytes());
+            continue;
+        }
+        int add = file.added;
+        int del = file.deleted;
+        if (graph_width <= max_change) {
+            int total = scale_linear(add + del, graph_width, max_change);
+            if (total < 2 && add > 0 && del > 0) {
+                total = 2;
+            }
+            if (add < del) {
+                add = scale_linear(add, graph_width, max_change);
+                del = total - add;
+            } else {
+                del = scale_linear(del, graph_width, max_change);
+                add = total - del;
+            }
+        }
+        str line = " " + prefix + padded + " |";
+        int changes = file.added + file.deleted;
+        line = line + " " + GIT_gitcommon.pad_left(changes.to_str(), number_width, " ");
+        if (changes > 0) {
+            line = line + " ";
+        }
+        line = line + graph_run("+", add, pal.new, pal.reset) + graph_run("-", del, pal.old, pal.reset) + "\n";
+        out.extend(line.to_bytes());
+    }
+    out.extend(summary_line(count, total_add, total_del).to_bytes());
+    return out;
+}
+
+/// `--shortstat`.
+pub bytes shortstat_bytes(str gitdir, List<Item> items, DOpts opts) {
+    List<StatFile> files = stat_files(gitdir, items, opts);
+    if (files.size() == 0) {
+        return [];
+    }
+    int add = 0;
+    int del = 0;
+    for (StatFile file in files) {
+        add = add + file.added;
+        del = del + file.deleted;
+    }
+    return summary_line(files.size(), add, del).to_bytes();
+}
+
+/// `--numstat`.
+pub bytes numstat_bytes(str gitdir, List<Item> items, DOpts opts) {
+    List<StatFile> files = stat_files(gitdir, items, opts);
+    bytes out = [];
+    for (StatFile file in files) {
+        str counts = file.added.to_str() + "\t" + file.deleted.to_str() + "\t";
+        if (file.is_binary) {
+            counts = "-\t-\t";
+        }
+        if (opts.is_nul) {
+            out.extend(counts.to_bytes());
+            if (file.is_renamed) {
+                int index = 0;
+                for (int i in 0 .. items.size()) {
+                    if (items[i].path == file.name && items[i].status == "R") {
+                        index = i;
+                    }
+                }
+                out.push(0);
+                out.extend(items[index].old_path.to_bytes());
+                out.push(0);
+                out.extend(file.name.to_bytes());
+                out.push(0);
+            } else {
+                out.extend(file.name.to_bytes());
+                out.push(0);
+            }
+        } else {
+            out.extend((counts + file.print + "\n").to_bytes());
+        }
+    }
+    return out;
+}
+
+// --- name-only, name-status, raw, summary ---------------------------------------------------
+
+str status_text(Item item) {
+    if (item.status == "R") {
+        return "R" + GIT_gitcommon.pad_left((item.score * 100 / 60000).to_str(), 3, "0");
+    }
+    return item.status;
+}
+
+/// `--name-only`.
+pub bytes name_only_bytes(List<Item> items, DOpts opts) {
+    bytes out = [];
+    for (Item item in items) {
+        str shown = item.path;
+        if (item.status == "D") {
+            shown = item.old_path;
+        }
+        if (opts.is_nul) {
+            out.extend(shown.to_bytes());
+            out.push(0);
+        } else {
+            out.extend((quoted(shown) + "\n").to_bytes());
+        }
+    }
+    return out;
+}
+
+/// `--name-status`.
+pub bytes name_status_bytes(List<Item> items, DOpts opts) {
+    bytes out = [];
+    for (Item item in items) {
+        str shown = item.path;
+        if (item.status == "D") {
+            shown = item.old_path;
+        }
+        if (opts.is_nul) {
+            out.extend(status_text(item).to_bytes());
+            out.push(0);
+            if (item.status == "R") {
+                out.extend(item.old_path.to_bytes());
+                out.push(0);
+            }
+            out.extend(shown.to_bytes());
+            out.push(0);
+        } else if (item.status == "R") {
+            out.extend((status_text(item) + "\t" + quoted(item.old_path) + "\t" + quoted(item.path) + "\n").to_bytes());
+        } else {
+            out.extend((status_text(item) + "\t" + quoted(shown) + "\n").to_bytes());
+        }
+    }
+    return out;
+}
+
+/// `--raw`: `:100644 100644 abc1234 def5678 M<TAB>path`, ids abbreviated
+/// without ellipses (git prints them only under GIT_PRINT_SHA1_ELLIPSIS).
+pub bytes raw_bytes(str gitdir, List<Item> items, DOpts opts) {
+    bytes out = [];
+    for (Item item in items) {
+        int width = abbrev_of(opts, false);
+        str old_id = abbrev_id(gitdir, item.old.id, width);
+        str new_id = abbrev_id(gitdir, item.new.id, width);
+        str shown = item.path;
+        if (item.status == "D") {
+            shown = item.old_path;
+        }
+        str head = ":" + octal6(item.old.mode) + " " + octal6(item.new.mode) + " " + old_id + " " + new_id + " " + status_text(item);
+        if (opts.is_nul) {
+            out.extend(head.to_bytes());
+            out.push(0);
+            if (item.status == "R") {
+                out.extend(item.old_path.to_bytes());
+                out.push(0);
+            }
+            out.extend(shown.to_bytes());
+            out.push(0);
+        } else if (item.status == "R") {
+            out.extend((head + "\t" + quoted(item.old_path) + "\t" + quoted(item.path) + "\n").to_bytes());
+        } else {
+            out.extend((head + "\t" + quoted(shown) + "\n").to_bytes());
+        }
+    }
+    return out;
+}
+
+// an object name abbreviated to `length` digits, unique in the repository;
+// the zero name stays zeroes
+str abbrev_id(str gitdir, str id, int length) {
+    if (id == "") {
+        return "0".repeat(length);
+    }
+    if (length >= id.size()) {
+        return id;
+    }
+    return unique_abbrev(gitdir, id, length);
+}
+
+/// `--summary`: create, delete, rename and mode-change lines.
+pub bytes summary_bytes(List<Item> items) {
+    bytes out = [];
+    for (Item item in items) {
+        if (item.status == "A") {
+            out.extend((" create mode " + octal6(item.new.mode) + " " + quoted(item.path) + "\n").to_bytes());
+        } else if (item.status == "D") {
+            out.extend((" delete mode " + octal6(item.old.mode) + " " + quoted(item.old_path) + "\n").to_bytes());
+        } else if (item.status == "R") {
+            out.extend((" rename " + rename_name(item.old_path, item.path) + " (" + (item.score * 100 / 60000).to_str() + "%)\n").to_bytes());
+            if (item.old.mode != item.new.mode) {
+                out.extend((" mode change " + octal6(item.old.mode) + " => " + octal6(item.new.mode) + "\n").to_bytes());
+            }
+        } else if ((item.status == "M" || item.status == "T") && item.old.mode != item.new.mode) {
+            out.extend((" mode change " + octal6(item.old.mode) + " => " + octal6(item.new.mode) + " " + quoted(item.path) + "\n").to_bytes());
+        }
+    }
+    return out;
+}
+
+// --- everything ------------------------------------------------------------------------------
+
+/// Is there output for `items` under `opts`, ignoring-whitespace aware: a
+/// change that `-w`/`-b` ignores is not a change.
+pub bool has_changes(str gitdir, List<Item> items, DOpts opts) {
+    for (Item item in items) {
+        if (item.old.id == item.new.id && item.old.mode == item.new.mode && item.status != "R") {
+            continue;
+        }
+        if (opts.ws == 0 || item.old.id == "" || item.new.id == "" || item.old.mode != item.new.mode || item.status == "R") {
+            return true;
+        }
+        Loaded loaded = load(gitdir, item, opts, true);
+        if (loaded.is_binary || loaded.added > 0 || loaded.deleted > 0) {
+            return true;
+        }
+    }
+    return false;
+}
+
+/// The whole output for a set of changes, in git's order: raw / name /
+/// numstat / stat / shortstat / summary, a blank line, then the patch.
+pub bytes render(str gitdir, List<Item> items, DOpts opts) {
+    bytes out = [];
+    if (items.size() == 0) {
+        return out;
+    }
+    if (opts.is_raw) {
+        out.extend(raw_bytes(gitdir, items, opts));
+    }
+    if (opts.is_name_only) {
+        out.extend(name_only_bytes(items, opts));
+    }
+    if (opts.is_name_status) {
+        out.extend(name_status_bytes(items, opts));
+    }
+    int separator = 0;
+    if (opts.is_numstat) {
+        out.extend(numstat_bytes(gitdir, items, opts));
+        separator = separator + 1;
+    }
+    if (opts.is_stat) {
+        out.extend(stat_bytes(gitdir, items, opts));
+        separator = separator + 1;
+    }
+    if (opts.is_shortstat) {
+        out.extend(shortstat_bytes(gitdir, items, opts));
+        separator = separator + 1;
+    }
+    if (opts.is_summary) {
+        bytes summary = summary_bytes(items);
+        if (summary.size() > 0) {
+            out.extend(summary);
+            separator = separator + 1;
+        }
+    }
+    if (opts.is_patch) {
+        if (separator > 0) {
+            out.push('\n');
+        }
+        for (Item item in items) {
+            out.extend(patch_bytes(gitdir, item, opts));
+        }
+    }
+    return out;
+}
+
+// --- support for log ---------------------------------------------------------------------------
+
+bool differs_walk(str gitdir, str old_tree, str new_tree, str base, List<GIT_gitcommon.Spec> specs) {
+    if (old_tree == new_tree) {
+        return false;
+    }
+    List<GIT_object.Entry> old_entries = tree_entries(gitdir, old_tree);
+    List<GIT_object.Entry> new_entries = tree_entries(gitdir, new_tree);
+    int i = 0;
+    int j = 0;
+    while (i < old_entries.size() || j < new_entries.size()) {
+        GIT_object.Entry old_entry = GIT_object.Entry(0, [], "");
+        GIT_object.Entry new_entry = GIT_object.Entry(0, [], "");
+        bool has_old = false;
+        bool has_new = false;
+        if (i < old_entries.size()) {
+            old_entry = old_entries[i];
+            has_old = true;
+        }
+        if (j < new_entries.size()) {
+            new_entry = new_entries[j];
+            has_new = true;
+        }
+        if (has_old && has_new) {
+            int order = GIT_gitcommon.compare(entry_key(old_entry), entry_key(new_entry));
+            if (order < 0) {
+                has_new = false;
+            } else if (order > 0) {
+                has_old = false;
+            }
+        }
+        if (has_old) {
+            i = i + 1;
+        }
+        if (has_new) {
+            j = j + 1;
+        }
+        GIT_object.Entry one = old_entry;
+        if (!has_old) {
+            one = new_entry;
+        }
+        match (one.name.utf8()) {
+            case None: {
+                continue;
+            }
+            case Some(str name): {
+                str full = name;
+                if (base != "") {
+                    full = base + "/" + name;
+                }
+                bool is_dir_old = has_old && old_entry.is_tree();
+                bool is_dir_new = has_new && new_entry.is_tree();
+                if (is_dir_old || is_dir_new) {
+                    if (has_old && has_new && is_dir_old && is_dir_new && old_entry.id == new_entry.id) {
+                        continue;
+                    }
+                    if (dir_may_match(specs, full)) {
+                        str sub_old = "";
+                        str sub_new = "";
+                        if (is_dir_old) {
+                            sub_old = old_entry.id;
+                        }
+                        if (is_dir_new) {
+                            sub_new = new_entry.id;
+                        }
+                        if (differs_walk(gitdir, sub_old, sub_new, full, specs)) {
+                            return true;
+                        }
+                    }
+                    continue;
+                }
+                if (!GIT_gitcommon.spec_match(specs, full)) {
+                    continue;
+                }
+                if (has_old && has_new) {
+                    if (old_entry.id != new_entry.id || old_entry.mode != new_entry.mode) {
+                        return true;
+                    }
+                } else {
+                    return true;
+                }
+            }
+        }
+    }
+    return false;
+}
+
+/// Do two trees ("" is the empty tree) differ anywhere under the pathspecs?
+pub bool trees_differ(str gitdir, str old_tree, str new_tree, List<GIT_gitcommon.Spec> specs) {
+    return differs_walk(gitdir, old_tree, new_tree, "", specs);
+}
+
+/// An abbreviated object name: at least `min` digits, more while the prefix
+/// is shared with another object.
+pub str unique_abbrev(str gitdir, str id, int min) {
+    int length = min;
+    if (length > id.size()) {
+        return id;
+    }
+    while (length < id.size()) {
+        if (GIT_object.matching(gitdir, id.substr(0, length)).size() <= 1) {
+            break;
+        }
+        length = length + 1;
+    }
+    return id.substr(0, length);
+}

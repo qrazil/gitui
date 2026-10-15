@@ -1,0 +1,744 @@
+// What `1git log`, `1git show` and `1git diff` share: opening the repository
+// the way `git -C dir` does, `-c name=value` and the config chain, colour
+// (the `--color` flag, `color.<command>`, `color.ui`, a terminal), git's
+// palette and the `color.diff.*` / `color.decorate.*` slots, dates in every
+// `--date=` style, pathspecs, C-style quoting, and a buffered writer for
+// standard output.
+//
+// Nothing here prints on its own except `fatal`; the commands build their
+// bytes and hand them to an `Out`.
+
+import io;
+import os;
+import fs;
+import date;
+import term;
+import core.GIT_config;
+import core.GIT_repository;
+import core.GIT_gitstatus;
+
+// --- output ------------------------------------------------------------------------
+
+/// Standard output, buffered. A closed pipe ends the program quietly, as it
+/// does git.
+pub type Out {
+    pub bytes buf = [];
+}
+
+pub void Out.put(bytes data) {
+    buf.extend(data);
+    if (buf.size() > 65536) {
+        flush();
+    }
+}
+
+pub void Out.text(str data) {
+    put(data.to_bytes());
+}
+
+pub void Out.flush() {
+    if (buf.size() == 0) {
+        return;
+    }
+    io.File out = io.stdout();
+    match (out.write(buf)) {
+        case Ok(_): {
+        }
+        case Err(_): {
+            os.exit(0);
+        }
+    }
+    buf.clear();
+}
+
+/// `fatal: <message>` on standard error; returns 128 so a caller can `return`
+/// it.
+pub int fatal(str message) {
+    io.eprint("fatal: " + message);
+    return 128;
+}
+
+// --- the repository ---------------------------------------------------------------
+
+/// Where a command runs: the repository, its work tree root, the directory
+/// below the root the command started in, and the configuration.
+pub type Ctx {
+    pub str gitdir;
+    pub str root;
+    // "" at the root, else `dir/sub`
+    pub str prefix;
+    pub List<str> overrides;
+    pub GIT_config.Config config;
+    pub bool is_bare = false;
+}
+
+/// The context for `start` (absolute); on failure the message was printed and
+/// `ok` is false.
+pub type Opened {
+    pub bool ok;
+    pub Ctx ctx;
+}
+
+pub Opened open(str start, List<str> overrides) {
+    str root = GIT_gitstatus.find_root(start);
+    str gitdir = "";
+    bool is_bare = false;
+    if (root != "") {
+        gitdir = GIT_repository.find(root);
+    } else {
+        // a bare repository or a directory inside a .git directory
+        gitdir = GIT_repository.find(start);
+        if (gitdir != "" && fs.is_file(fs.join(gitdir, "HEAD"))) {
+            is_bare = true;
+            root = gitdir;
+        } else {
+            gitdir = "";
+        }
+    }
+    if (gitdir == "") {
+        io.eprint("fatal: not a git repository (or any of the parent directories): .git");
+        return Opened(false, Ctx("", "", "", overrides, GIT_config.effective("")));
+    }
+    str prefix = "";
+    if (!is_bare && start != root) {
+        if (root == "/") {
+            prefix = start.substr(1, start.size());
+        } else if (start.starts_with(root + "/")) {
+            prefix = start.substr(root.size() + 1, start.size());
+        }
+    }
+    Ctx ctx = Ctx(gitdir, root, prefix, overrides, GIT_config.effective(gitdir));
+    ctx.is_bare = is_bare;
+    return Opened(true, ctx);
+}
+
+/// A configuration value: the `-c` overrides first (the last one wins), then
+/// the files. `section.subsection.key`; the subsection may be "".
+pub Option<str> cfg(Ctx ctx, str section, str subsection, str key) {
+    str wanted = section;
+    if (subsection != "") {
+        wanted = wanted + "." + subsection;
+    }
+    wanted = (wanted + "." + key).to_lower();
+    int count = ctx.overrides.size();
+    for (int i in 0 .. count) {
+        str entry = ctx.overrides[count - 1 - i];
+        match (entry.index_of("=")) {
+            case Some(int at): {
+                if (entry.substr(0, at).to_lower() == wanted) {
+                    return Option<str>.Some(entry.substr(at + 1, entry.size()));
+                }
+            }
+            case None: {
+                if (entry.to_lower() == wanted) {
+                    return Option<str>.Some("true");
+                }
+            }
+        }
+    }
+    return ctx.config.get(section, subsection, key);
+}
+
+pub bool cfg_bool(Ctx ctx, str section, str subsection, str key, bool fallback) {
+    match (cfg(ctx, section, subsection, key)) {
+        case Some(str value): {
+            return GIT_gitstatus.bool_value(value, fallback);
+        }
+        case None: {
+            return fallback;
+        }
+    }
+}
+
+pub int cfg_int(Ctx ctx, str section, str subsection, str key, int fallback) {
+    match (cfg(ctx, section, subsection, key)) {
+        case Some(str value): {
+            match (value.parse_int()) {
+                case Some(int n): {
+                    return n;
+                }
+                case None: {
+                    return fallback;
+                }
+            }
+        }
+        case None: {
+            return fallback;
+        }
+    }
+}
+
+// --- colour --------------------------------------------------------------------------
+
+/// Is colour on for `command` (`diff`, `log`, ...)? `flag` is what
+/// `--color[=when]` said ("" when it was not given): `always`, `never`,
+/// `auto`. Then `color.<command>`, then `color.ui`; an unset value is `auto`,
+/// which means "standard output is a terminal and TERM is not dumb".
+pub bool use_color(Ctx ctx, str command, str flag) {
+    str mode = flag;
+    if (mode == "") {
+        match (cfg(ctx, "color", "", command)) {
+            case Some(str value): {
+                mode = GIT_gitstatus.color_mode(value);
+            }
+            case None: {
+            }
+        }
+    }
+    if (mode == "") {
+        match (cfg(ctx, "color", "", "ui")) {
+            case Some(str value): {
+                mode = GIT_gitstatus.color_mode(value);
+            }
+            case None: {
+            }
+        }
+    }
+    if (mode == "always") {
+        return true;
+    }
+    if (mode == "never") {
+        return false;
+    }
+    return is_tty() && os.env("TERM").or("") != "dumb" && os.env("NO_COLOR").or("") == "";
+}
+
+pub bool is_tty() {
+    return term.is_terminal(1);
+}
+
+/// `--color[=when]` spelled as a flag value: "" for none, `always`, `never`,
+/// `auto`. A bare `--color` is `always`, as in git.
+pub str color_flag(str value) {
+    str lower = value.to_lower();
+    if (lower == "always" || lower == "true" || lower == "") {
+        return "always";
+    }
+    if (lower == "never" || lower == "false") {
+        return "never";
+    }
+    return "auto";
+}
+
+/// The escape sequence for the configured colour `color.<group>.<slot>`, or
+/// `fallback` (already an escape sequence, or "" for the plain colour).
+pub str slot_color(Ctx ctx, str group, str slot, str fallback) {
+    match (cfg(ctx, "color", group, slot)) {
+        case Some(str value): {
+            match (GIT_gitstatus.parse_color(value)) {
+                case Some(str code): {
+                    return code;
+                }
+                case None: {
+                    return fallback;
+                }
+            }
+        }
+        case None: {
+            return fallback;
+        }
+    }
+}
+
+/// `text` in `code`, git's way: the colour, the text, a reset; nothing when
+/// the colour is empty or the text is.
+pub str paint(str code, str text) {
+    if (code == "" || text == "") {
+        return text;
+    }
+    return code + text + "\x1b[m";
+}
+
+// --- dates -------------------------------------------------------------------------------
+
+const Array<str> WEEKDAY = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
+const Array<str> WEEKDAY_FULL = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"];
+const Array<str> MONTH = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+const Array<str> MONTH_FULL = ["January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"];
+
+pub str two(int number) {
+    if (number < 10) {
+        return "0" + number.to_str();
+    }
+    return number.to_str();
+}
+
+pub str pad_left(str text, int width, str fill) {
+    str out = text;
+    while (out.size() < width) {
+        out = fill + out;
+    }
+    return out;
+}
+
+/// `+0530` from minutes east of UTC, `%+05d` of the number as git prints it.
+pub str zone(int minutes) {
+    int absolute_minutes = minutes;
+    str sign = "+";
+    if (absolute_minutes < 0) {
+        sign = "-";
+        absolute_minutes = 0 - absolute_minutes;
+    }
+    return sign + two(absolute_minutes / 60) + two(absolute_minutes % 60);
+}
+
+/// The time "now" for relative dates: `GIT_TEST_DATE_NOW` (git's own test
+/// knob) or the clock.
+pub int now() {
+    match (os.env("GIT_TEST_DATE_NOW")) {
+        case Some(str value): {
+            match (value.parse_int()) {
+                case Some(int n): {
+                    return n;
+                }
+                case None: {
+                }
+            }
+        }
+        case None: {
+        }
+    }
+    return date.now();
+}
+
+str plural(int n, str one, str many) {
+    if (n == 1) {
+        return n.to_str() + " " + one;
+    }
+    return n.to_str() + " " + many;
+}
+
+/// git's `show_date_relative`.
+pub str relative(int when, int at) {
+    int diff = at - when;
+    if (diff < 0) {
+        return "in the future";
+    }
+    if (diff < 90) {
+        return plural(diff, "second ago", "seconds ago");
+    }
+    diff = (diff + 30) / 60;
+    if (diff < 90) {
+        return plural(diff, "minute ago", "minutes ago");
+    }
+    diff = (diff + 30) / 60;
+    if (diff < 36) {
+        return plural(diff, "hour ago", "hours ago");
+    }
+    diff = (diff + 12) / 24;
+    if (diff < 14) {
+        return plural(diff, "day ago", "days ago");
+    }
+    if (diff < 70) {
+        return plural((diff + 3) / 7, "week ago", "weeks ago");
+    }
+    if (diff < 365) {
+        return plural((diff + 15) / 30, "month ago", "months ago");
+    }
+    if (diff < 1825) {
+        int total_months = (diff * 12 * 2 + 365) / (365 * 2);
+        int years = total_months / 12;
+        int months = total_months % 12;
+        if (months > 0) {
+            return plural(years, "year", "years") + ", " + plural(months, "month ago", "months ago");
+        }
+        return plural(years, "year ago", "years ago");
+    }
+    return plural((diff + 183) / 365, "year ago", "years ago");
+}
+
+/// `when` (epoch seconds) with `offset` (minutes east) in `style`: `default`,
+/// `iso`, `iso-strict`, `rfc`, `short`, `raw`, `unix`, `relative`, or
+/// `format:<strftime>`.
+pub str format_date(int when, int offset, str style) {
+    if (style == "relative") {
+        return relative(when, now());
+    }
+    if (style == "unix") {
+        return when.to_str();
+    }
+    if (style == "raw") {
+        return when.to_str() + " " + zone(offset);
+    }
+    date.Civil c = date.civil(when + offset * 60);
+    if (style == "iso" || style == "iso8601") {
+        return c.year.to_str() + "-" + two(c.month) + "-" + two(c.day) + " " + two(c.hour) + ":" + two(c.minute) + ":" + two(c.second) + " " + zone(offset);
+    }
+    if (style == "iso-strict" || style == "iso8601-strict") {
+        str z = "Z";
+        if (offset != 0) {
+            int absolute_minutes = offset;
+            str sign = "+";
+            if (absolute_minutes < 0) {
+                sign = "-";
+                absolute_minutes = 0 - absolute_minutes;
+            }
+            z = sign + two(absolute_minutes / 60) + ":" + two(absolute_minutes % 60);
+        }
+        return c.year.to_str() + "-" + two(c.month) + "-" + two(c.day) + "T" + two(c.hour) + ":" + two(c.minute) + ":" + two(c.second) + z;
+    }
+    if (style == "rfc" || style == "rfc2822") {
+        return WEEKDAY[c.weekday] + ", " + c.day.to_str() + " " + MONTH[c.month - 1] + " " + c.year.to_str() + " " + two(c.hour) + ":" + two(c.minute) + ":" + two(c.second) + " " + zone(offset);
+    }
+    if (style == "short") {
+        return c.year.to_str() + "-" + two(c.month) + "-" + two(c.day);
+    }
+    if (style.starts_with("format:") || style.starts_with("format-local:")) {
+        str pattern = style.substr(style.index_of(":").or(0) + 1, style.size());
+        return strftime(pattern, c, when, offset);
+    }
+    return WEEKDAY[c.weekday] + " " + MONTH[c.month - 1] + " " + c.day.to_str() + " " + two(c.hour) + ":" + two(c.minute) + ":" + two(c.second) + " " + c.year.to_str() + " " + zone(offset);
+}
+
+/// Is `style` one this module formats?
+pub bool is_date_style(str style) {
+    if (style == "default" || style == "iso" || style == "iso8601" || style == "iso-strict" || style == "iso8601-strict" || style == "rfc" || style == "rfc2822" || style == "short" || style == "raw" || style == "unix" || style == "relative") {
+        return true;
+    }
+    return style.starts_with("format:") || style.starts_with("format-local:");
+}
+
+str strftime(str pattern, date.Civil c, int when, int offset) {
+    str out = "";
+    List<int> chars = pattern.chars();
+    int i = 0;
+    while (i < chars.size()) {
+        int ch = chars[i];
+        i = i + 1;
+        if (ch != '%' || i >= chars.size()) {
+            out = out + str.from_chars([ch]);
+            continue;
+        }
+        int spec = chars[i];
+        i = i + 1;
+        if (spec == 'Y') {
+            out = out + c.year.to_str();
+        } else if (spec == 'y') {
+            out = out + two(c.year % 100);
+        } else if (spec == 'C') {
+            out = out + two(c.year / 100);
+        } else if (spec == 'm') {
+            out = out + two(c.month);
+        } else if (spec == 'd') {
+            out = out + two(c.day);
+        } else if (spec == 'e') {
+            out = out + pad_left(c.day.to_str(), 2, " ");
+        } else if (spec == 'H') {
+            out = out + two(c.hour);
+        } else if (spec == 'I') {
+            int h = c.hour % 12;
+            if (h == 0) {
+                h = 12;
+            }
+            out = out + two(h);
+        } else if (spec == 'M') {
+            out = out + two(c.minute);
+        } else if (spec == 'S') {
+            out = out + two(c.second);
+        } else if (spec == 'p') {
+            if (c.hour < 12) {
+                out = out + "AM";
+            } else {
+                out = out + "PM";
+            }
+        } else if (spec == 'a') {
+            out = out + WEEKDAY[c.weekday];
+        } else if (spec == 'A') {
+            out = out + WEEKDAY_FULL[c.weekday];
+        } else if (spec == 'b' || spec == 'h') {
+            out = out + MONTH[c.month - 1];
+        } else if (spec == 'B') {
+            out = out + MONTH_FULL[c.month - 1];
+        } else if (spec == 'j') {
+            out = out + pad_left(c.yearday.to_str(), 3, "0");
+        } else if (spec == 'u') {
+            out = out + (c.weekday + 1).to_str();
+        } else if (spec == 'w') {
+            out = out + ((c.weekday + 1) % 7).to_str();
+        } else if (spec == 'z') {
+            out = out + zone(offset);
+        } else if (spec == 'Z') {
+            out = out + "";
+        } else if (spec == 's') {
+            out = out + when.to_str();
+        } else if (spec == 'n') {
+            out = out + "\n";
+        } else if (spec == 't') {
+            out = out + "\t";
+        } else if (spec == '%') {
+            out = out + "%";
+        } else if (spec == 'F') {
+            out = out + c.year.to_str() + "-" + two(c.month) + "-" + two(c.day);
+        } else if (spec == 'T') {
+            out = out + two(c.hour) + ":" + two(c.minute) + ":" + two(c.second);
+        } else if (spec == 'R') {
+            out = out + two(c.hour) + ":" + two(c.minute);
+        } else if (spec == 'D') {
+            out = out + two(c.month) + "/" + two(c.day) + "/" + two(c.year % 100);
+        } else if (spec == 'c') {
+            out = out + WEEKDAY[c.weekday] + " " + MONTH[c.month - 1] + " " + pad_left(c.day.to_str(), 2, " ") + " " + two(c.hour) + ":" + two(c.minute) + ":" + two(c.second) + " " + c.year.to_str();
+        } else if (spec == 'x') {
+            out = out + two(c.month) + "/" + two(c.day) + "/" + two(c.year % 100);
+        } else if (spec == 'X') {
+            out = out + two(c.hour) + ":" + two(c.minute) + ":" + two(c.second);
+        } else {
+            out = out + "%" + str.from_chars([spec]);
+        }
+    }
+    return out;
+}
+
+// --- quoting -----------------------------------------------------------------------------
+
+/// git's `quote_c_style` of a path (`core.quotePath` on): the name as it is,
+/// or in double quotes with C escapes and three-digit octal for every byte
+/// above 126 and below 32.
+pub str quote_path(str name) {
+    return GIT_gitstatus.quote(name, false);
+}
+
+/// Does `name` need quoting?
+pub bool needs_quote(str name) {
+    for (int b in name.to_bytes()) {
+        if (b < ' ' || b == '"' || b == '\\' || b >= 127) {
+            return true;
+        }
+    }
+    return false;
+}
+
+// --- pathspecs ---------------------------------------------------------------------------
+
+/// One pathspec, relative to the repository root.
+pub type Spec {
+    pub str pattern;
+    pub bool is_exclude = false;
+    pub bool is_glob = false;
+}
+
+/// Pathspecs as typed (relative to `prefix`) into root-relative ones.
+pub List<Spec> parse_specs(List<str> args, str prefix) {
+    List<Spec> out = [];
+    for (str arg in args) {
+        str text = arg;
+        bool is_exclude = false;
+        bool is_top = false;
+        bool is_literal = false;
+        if (text.starts_with(":(")) {
+            match (text.index_of(")")) {
+                case Some(int paren): {
+                    str magic = text.substr(2, paren);
+                    for (str word in magic.split(",")) {
+                        if (word == "exclude") {
+                            is_exclude = true;
+                        } else if (word == "top") {
+                            is_top = true;
+                        } else if (word == "literal") {
+                            is_literal = true;
+                        }
+                    }
+                    text = text.substr(paren + 1, text.size());
+                }
+                case None: {
+                }
+            }
+        } else if (text.starts_with(":!") || text.starts_with(":^")) {
+            is_exclude = true;
+            text = text.substr(2, text.size());
+        } else if (text.starts_with(":/")) {
+            is_top = true;
+            text = text.substr(2, text.size());
+        }
+        str joined = text;
+        if (prefix != "" && !is_top) {
+            joined = prefix + "/" + text;
+        }
+        str normal = GIT_gitstatus.normalize(joined);
+        while (normal.ends_with("/") && normal.size() > 1) {
+            normal = normal.substr(0, normal.size() - 1);
+        }
+        Spec spec = Spec(normal);
+        spec.is_exclude = is_exclude;
+        spec.is_glob = !is_literal && GIT_gitstatus.has_wildcard(normal);
+        out.push(spec);
+    }
+    return out;
+}
+
+/// fnmatch without FNM_PATHNAME: `*` crosses `/`.
+bool wild(List<int> pat, int p, List<int> text, int t) {
+    while (p < pat.size()) {
+        int c = pat[p];
+        if (c == '*') {
+            int k = t;
+            while (k <= text.size()) {
+                if (wild(pat, p + 1, text, k)) {
+                    return true;
+                }
+                k = k + 1;
+            }
+            return false;
+        }
+        if (t >= text.size()) {
+            return false;
+        }
+        if (c == '?') {
+            p = p + 1;
+            t = t + 1;
+            continue;
+        }
+        if (c == '[') {
+            int q = p + 1;
+            bool is_negated = false;
+            if (q < pat.size() && (pat[q] == '!' || pat[q] == '^')) {
+                is_negated = true;
+                q = q + 1;
+            }
+            bool is_hit = false;
+            bool is_first = true;
+            while (q < pat.size() && (pat[q] != ']' || is_first)) {
+                is_first = false;
+                int lo = pat[q];
+                int hi = lo;
+                if (q + 2 < pat.size() && pat[q + 1] == '-' && pat[q + 2] != ']') {
+                    hi = pat[q + 2];
+                    q = q + 2;
+                }
+                if (text[t] >= lo && text[t] <= hi) {
+                    is_hit = true;
+                }
+                q = q + 1;
+            }
+            if (q >= pat.size()) {
+                // no closing bracket: a literal [
+                if (text[t] != '[') {
+                    return false;
+                }
+                p = p + 1;
+                t = t + 1;
+                continue;
+            }
+            if (is_hit == is_negated) {
+                return false;
+            }
+            p = q + 1;
+            t = t + 1;
+            continue;
+        }
+        if (c == '\\' && p + 1 < pat.size()) {
+            p = p + 1;
+            c = pat[p];
+        }
+        if (text[t] != c) {
+            return false;
+        }
+        p = p + 1;
+        t = t + 1;
+    }
+    return t == text.size();
+}
+
+/// `fnmatch(pattern, text, 0)`.
+pub bool fnmatch(str pattern, str text) {
+    return wild(pattern.chars(), 0, text.chars(), 0);
+}
+
+bool spec_hits(Spec spec, str path) {
+    if (spec.pattern == "") {
+        return true;
+    }
+    if (spec.is_glob) {
+        if (fnmatch(spec.pattern, path)) {
+            return true;
+        }
+        // a glob that names a directory's name also takes what is below it
+        return false;
+    }
+    return path == spec.pattern || path.starts_with(spec.pattern + "/");
+}
+
+/// Does `path` pass the pathspecs: some positive spec (or none given) matches
+/// it and no exclusion does.
+pub bool spec_match(List<Spec> specs, str path) {
+    if (specs.size() == 0) {
+        return true;
+    }
+    bool has_positive = false;
+    bool is_hit = false;
+    for (Spec spec in specs) {
+        if (spec.is_exclude) {
+            continue;
+        }
+        has_positive = true;
+        if (spec_hits(spec, path)) {
+            is_hit = true;
+        }
+    }
+    if (has_positive && !is_hit) {
+        return false;
+    }
+    for (Spec spec in specs) {
+        if (spec.is_exclude && spec_hits(spec, path)) {
+            return false;
+        }
+    }
+    return true;
+}
+
+// --- terminal ----------------------------------------------------------------------------
+
+/// Columns for `--stat`: `COLUMNS`, the terminal's width, or 80.
+pub int columns() {
+    match (os.env("COLUMNS")) {
+        case Some(str value): {
+            match (value.parse_int()) {
+                case Some(int n): {
+                    if (n > 0) {
+                        return n;
+                    }
+                }
+                case None: {
+                }
+            }
+        }
+        case None: {
+        }
+    }
+    if (term.is_terminal(1)) {
+        match (term.size()) {
+            case Ok(term.Size size): {
+                if (size.columns > 0) {
+                    return size.columns;
+                }
+            }
+            case Err(_): {
+            }
+        }
+    }
+    return 80;
+}
+
+/// -1, 0 or 1: `a` against `b` by bytes (what `sort` does).
+pub int compare(str a, str b) {
+    int n = a.size();
+    if (b.size() < n) {
+        n = b.size();
+    }
+    for (int i in 0 .. n) {
+        int x = a.byte_at(i);
+        int y = b.byte_at(i);
+        if (x != y) {
+            if (x < y) {
+                return -1;
+            }
+            return 1;
+        }
+    }
+    if (a.size() == b.size()) {
+        return 0;
+    }
+    if (a.size() < b.size()) {
+        return -1;
+    }
+    return 1;
+}

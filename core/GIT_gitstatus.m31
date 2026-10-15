@@ -240,7 +240,7 @@ Option<str> color_part(str word, bool is_bg) {
 
 // git's colour value ("bold red", "#ff0000 ul", "12") as the escape sequence
 // it prints, "" for no colour at all, or None for a value git rejects.
-Option<str> parse_color(str value) {
+pub Option<str> parse_color(str value) {
     List<int> attrs = [];
     str fg = "";
     str bg = "";
@@ -319,7 +319,7 @@ Option<str> config_value(Opts opts, GIT_config.Config config, str section, str k
 }
 
 // git's boolean spellings; `fallback` for anything else.
-bool bool_value(str value, bool fallback) {
+pub bool bool_value(str value, bool fallback) {
     str lower = value.to_lower();
     if (lower == "true" || lower == "yes" || lower == "on" || lower == "1" || lower == "") {
         return true;
@@ -331,7 +331,7 @@ bool bool_value(str value, bool fallback) {
 }
 
 // "always" / "never" / "auto" for a colour setting's value.
-str color_mode(str value) {
+pub str color_mode(str value) {
     str lower = value.to_lower();
     if (lower == "always") {
         return "always";
@@ -416,7 +416,7 @@ str slot(Opts opts, GIT_config.Config config, str name, str fallback) {
 // --- paths -----------------------------------------------------------------------
 
 // `a/b/../c/./d` -> `a/c/d`; leading `/` kept.
-str normalize(str path) {
+pub str normalize(str path) {
     bool is_absolute = path.starts_with("/");
     List<str> out = [];
     for (str part in path.split("/")) {
@@ -440,7 +440,7 @@ str normalize(str path) {
 
 // git's `relative_path`: `path` (repository-relative) as seen from the
 // directory `prefix` (repository-relative, no trailing slash, "" at the root).
-str relative_to(str path, str prefix) {
+pub str relative_to(str path, str prefix) {
     if (prefix == "") {
         return path;
     }
@@ -464,7 +464,7 @@ str relative_to(str path, str prefix) {
 
 // git's `quote_c_style` (core.quotePath on), with `quote_space` for the
 // short and porcelain formats, which quote a name that has a space in it.
-str quote(str name, bool quote_space) {
+pub str quote(str name, bool quote_space) {
     bool is_needed = false;
     for (int byte_value in name.to_bytes()) {
         if (byte_value < ' ' || byte_value == '"' || byte_value == '\\' || byte_value >= 127) {
@@ -518,13 +518,13 @@ str quote(str name, bool quote_space) {
     }
 }
 
-bool has_wildcard(str spec) {
+pub bool has_wildcard(str spec) {
     return spec.contains("*") || spec.contains("?") || spec.contains("[");
 }
 
 // Does `path` (repository-relative) fall under any pathspec? `specs` are
 // repository-relative already; none means everything.
-bool in_spec(List<str> specs, str path) {
+pub bool in_spec(List<str> specs, str path) {
     if (specs.size() == 0) {
         return true;
     }
@@ -628,7 +628,7 @@ Result<str, GIT_status.Error> tree_of(str gitdir, str commit) {
     }
 }
 
-bool is_regular_mode(int mode) {
+pub bool is_regular_mode(int mode) {
     return mode >> 12 == 0o10;
 }
 
@@ -637,12 +637,12 @@ bool is_link_mode(int mode) {
 }
 
 // git's `S_ISREG` / `S_ISLNK` / gitlink family of a mode, for "typechange".
-int type_of(int mode) {
+pub int type_of(int mode) {
     return mode >> 12;
 }
 
 // Normalised mode, as the index records it: 100644, 100755, 120000, 160000.
-int canonical(int mode) {
+pub int canonical(int mode) {
     int kind = mode >> 12;
     if (kind == 0o10) {
         if (mode & 0o111 != 0) {
@@ -658,7 +658,7 @@ int canonical(int mode) {
 // git's `hash_chars` spans (diffcore-delta.c): the text is cut at newlines
 // or every 64 bytes, each span hashed, and a hash's weight is the bytes in
 // the spans that hash to it.
-Map<int, int> span_counts(bytes data) {
+pub Map<int, int> span_counts(bytes data) {
     Map<int, int> counts = {};
     bool is_text = true;
     int limit = data.size();
@@ -702,7 +702,7 @@ Map<int, int> span_counts(bytes data) {
 
 // git's similarity of a deleted blob and an added one, 0 .. 60000, or 0 when
 // it cannot reach the 50% threshold.
-int similarity(Map<int, int> source, int source_size, Map<int, int> target, int target_size) {
+pub int similarity(Map<int, int> source, int source_size, Map<int, int> target, int target_size) {
     int max_size = source_size;
     int base_size = target_size;
     if (target_size > source_size) {
@@ -731,7 +731,7 @@ int similarity(Map<int, int> source, int source_size, Map<int, int> target, int 
     return copied * 60000 / max_size;
 }
 
-str basename(str path) {
+pub str basename(str path) {
     match (path.index_of("/")) {
         case Some(_): {
             List<str> parts = path.split("/");
@@ -743,7 +743,7 @@ str basename(str path) {
     }
 }
 
-bytes blob_of(str gitdir, str id) {
+pub bytes blob_of(str gitdir, str id) {
     match (GIT_object.read(gitdir, id)) {
         case Ok(GIT_object.Object object): {
             return object.raw;
@@ -883,7 +883,7 @@ type Snapshot {
     int behind = 0;
 }
 
-str mode_text(int mode) {
+pub str mode_text(int mode) {
     if (mode == 0) {
         return "000000";
     }
@@ -2253,7 +2253,7 @@ pub str resolve_dir(str base, str dir) {
 }
 
 // The repository root above `start` (absolute), or "".
-str find_root(str start) {
+pub str find_root(str start) {
     str current = start;
     for (int i in 0 .. 256) {
         str inner = fs.join(current, ".git");

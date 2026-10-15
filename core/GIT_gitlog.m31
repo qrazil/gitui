@@ -1,0 +1,3516 @@
+// `1git log` and `1git show`: git's command lines and git's bytes.
+//
+// The walk is `revision.c` as written: a date-ordered list over the tips, the
+// uninteresting side marked and propagated, history simplification for
+// pathspecs (a commit TREESAME to a parent hands the walk to that parent
+// alone), parent rewriting for `--graph`, `--follow` for one path, and the
+// topological order `--graph` asks for. Printing is `log-tree.c` and
+// `pretty.c`: the formats (`oneline`, `short`, `medium`, `full`, `fuller` and
+// `--format=`), decorations, the diff below the message, and the graph woven
+// in line by line.
+//
+// Left out, and listed in docs/GIT-COMPAT.md: merge diffs (`-m`, `-c`, `--cc`;
+// a merge prints no diff under `log`, and `show` prints only its header),
+// `--word-diff`, `.mailmap`, notes, `--date=local`/`human`, `--since` words
+// beyond `N units ago`, `yesterday`, dates and timestamps, the pager.
+
+import io;
+import os;
+import fs;
+import date;
+import text.regex;
+import text.diff;
+import core.GIT_object;
+import core.GIT_refs;
+import core.GIT_revparse;
+import core.GIT_graph;
+import core.GIT_gitcommon;
+import core.GIT_gitstatus;
+import core.GIT_gitgraph;
+import core.GIT_gitdiffcmd;
+import core.GIT_pathtree;
+import core.GIT_utf8width;
+import diff.GIT_gitdiff;
+
+// --- options -------------------------------------------------------------------------------
+
+type LOpts {
+    List<str> paths = [];
+    bool has_dashes = false;
+    int max_count = -1;
+    int skip = 0;
+    // medium, oneline, short, full, fuller, raw, user
+    str format = "medium";
+    str user_format = "";
+    // `tformat:` (a terminator after each) rather than `format:` (separator)
+    bool is_terminator = false;
+    bool is_abbrev_commit = false;
+    int abbrev = 7;
+    bool is_graph = false;
+    // "" auto, short, full, no
+    str decorate = "";
+    str date_style = "default";
+    bool has_since = false;
+    int since = 0;
+    bool has_until = false;
+    int until = 0;
+    List<str> authors = [];
+    List<str> committers = [];
+    List<str> greps = [];
+    bool is_invert = false;
+    bool is_icase = false;
+    // 0 basic, 1 extended, 2 fixed
+    int regex_kind = 0;
+    bool is_all_match = false;
+    str pickaxe = "";
+    bool is_all = false;
+    bool is_branches = false;
+    bool is_tags = false;
+    bool is_remotes = false;
+    bool is_first_parent = false;
+    int min_parents = 0;
+    int max_parents = -1;
+    bool is_reverse = false;
+    bool is_topo = false;
+    bool is_follow = false;
+    bool is_no_walk = false;
+    // the revision words in order, `^x` already negated; `--not` applied
+    List<str> rev_words = [];
+    List<bool> rev_negated = [];
+}
+
+// --- the walk ------------------------------------------------------------------------------
+
+const int F_SEEN = 1;
+const int F_UNINTERESTING = 2;
+const int F_ADDED = 4;
+const int F_TREESAME = 8;
+const int F_SHOWN = 16;
+
+// what a path-limited history needs per commit when following one file
+type FollowStep {
+    List<GIT_gitdiff.Item> items = [];
+}
+
+type Walk {
+    str gitdir;
+    LOpts opts;
+    List<GIT_gitcommon.Spec> specs;
+    Map<str, GIT_object.Commit> commits = {};
+    // git's `commit->parents`: set when a commit is parsed, and replaced by
+    // history simplification
+    Map<str, List<str>> parents = {};
+    Map<str, int> flags = {};
+    // `revs->commits`
+    List<str> list = [];
+    str follow_path = "";
+    // --follow: the diff of the commit for the followed path, by commit
+    Map<str, List<GIT_gitdiff.Item>> follow_items = {};
+    GIT_gitdiff.DOpts dopts = GIT_gitdiff.DOpts();
+    bool is_limited = false;
+    Option<Matcher> author_m = Option<Matcher>.None;
+    Option<Matcher> committer_m = Option<Matcher>.None;
+    Option<Matcher> grep_m = Option<Matcher>.None;
+    bool is_want_ancestry = false;
+    // `show`: the commit alone, without its parents
+    bool is_no_walk = false;
+}
+
+bool Walk.parse(str id) {
+    if (parents.contains(id)) {
+        return true;
+    }
+    match (GIT_object.read(gitdir, id)) {
+        case Ok(GIT_object.Object object): {
+            match (object.body) {
+                case Commit(GIT_object.Commit commit): {
+                    commits.set(id, commit);
+                    parents.set(id, commit.parents);
+                    return true;
+                }
+                case Blob: {
+                }
+                case Tree: {
+                }
+                case Tag: {
+                }
+            }
+        }
+        case Err(_): {
+        }
+    }
+    return false;
+}
+
+GIT_object.Commit Walk.commit(str id) {
+    match (commits.get(id)) {
+        case Some(GIT_object.Commit known): {
+            return known;
+        }
+        case None: {
+        }
+    }
+    parse(id);
+    return commits.get(id).or(empty_commit());
+}
+
+int Walk.date_of(str id) {
+    return commit(id).committer.when;
+}
+
+int Walk.flag(str id) {
+    return flags.get(id).or(0);
+}
+
+bool Walk.has(str id, int bit) {
+    return flag(id) & bit != 0;
+}
+
+void Walk.set_flag(str id, int bit) {
+    flags.set(id, flag(id) | bit);
+}
+
+void Walk.clear_flag(str id, int bit) {
+    flags.set(id, flag(id) & ~bit);
+}
+
+List<str> Walk.parents_of(str id) {
+    return parents.get(id).or([]);
+}
+
+// `commit_list_insert_by_date`
+void Walk.insert_by_date(str id) {
+    int when = date_of(id);
+    int index = 0;
+    while (index < list.size() && date_of(list[index]) >= when) {
+        index = index + 1;
+    }
+    list.insert(index, id);
+}
+
+// `mark_parents_uninteresting`
+void Walk.mark_parents_uninteresting(str id) {
+    List<str> pending = [];
+    for (str p in parents_of(id)) {
+        mark_one_parent_uninteresting(p, pending);
+    }
+    while (pending.size() > 0) {
+        str next = pending.pop();
+        mark_one_parent_uninteresting(next, pending);
+    }
+}
+
+void Walk.mark_one_parent_uninteresting(str id, List<str> pending) {
+    if (has(id, F_UNINTERESTING)) {
+        return;
+    }
+    set_flag(id, F_UNINTERESTING);
+    for (str p in parents_of(id)) {
+        pending.push(p);
+    }
+}
+
+// `relevant_commit`
+bool Walk.is_relevant(str id) {
+    return !has(id, F_UNINTERESTING);
+}
+
+// are the trees different anywhere under the pathspecs
+bool Walk.differs(str tree_a, str tree_b) {
+    if (tree_a == tree_b) {
+        return false;
+    }
+    return GIT_gitdiff.trees_differ(gitdir, tree_a, tree_b, specs);
+}
+
+bool Walk.is_prune() {
+    return specs.size() > 0;
+}
+
+// `try_to_simplify_commit`
+void Walk.try_to_simplify(str id) {
+    if (!is_prune()) {
+        return;
+    }
+    GIT_object.Commit c = commit(id);
+    List<str> plist = parents_of(id);
+    if (plist.size() == 0) {
+        if (!differs("", c.tree)) {
+            set_flag(id, F_TREESAME);
+        } else if (follow_path != "") {
+            Option<GIT_object.Entry> here = GIT_pathtree.entry_at(gitdir, c.tree, follow_path);
+            match (here) {
+                case Some(GIT_object.Entry now): {
+                    follow_items.set(id, [GIT_gitdiff.Item("A", follow_path, follow_path, GIT_gitdiff.nothing(), GIT_gitdiff.Side(now.mode, now.id, ""))]);
+                }
+                case None: {
+                }
+            }
+        }
+        return;
+    }
+    bool has_relevant_change = false;
+    bool has_irrelevant_change = false;
+    int relevant_parents = 0;
+    int nth = 0;
+    for (str parent in plist) {
+        if (is_relevant(parent)) {
+            relevant_parents = relevant_parents + 1;
+        }
+        if (nth == 1 && opts.is_first_parent) {
+            break;
+        }
+        if (!parse(parent)) {
+            nth = nth + 1;
+            continue;
+        }
+        GIT_object.Commit p = commit(parent);
+        bool is_changed = false;
+        if (follow_path != "" && nth == 0) {
+            is_changed = follow_compare(id, c, p);
+        } else {
+            is_changed = differs(p.tree, c.tree);
+        }
+        if (!is_changed) {
+            if (!is_relevant(parent)) {
+                nth = nth + 1;
+                continue;
+            }
+            parents.set(id, [parent]);
+            set_flag(id, F_TREESAME);
+            return;
+        }
+        if (is_relevant(parent)) {
+            has_relevant_change = true;
+        } else {
+            has_irrelevant_change = true;
+        }
+        nth = nth + 1;
+    }
+    bool is_same = false;
+    if (relevant_parents > 0) {
+        is_same = !has_relevant_change;
+    } else {
+        is_same = !has_irrelevant_change;
+    }
+    if (is_same) {
+        set_flag(id, F_TREESAME);
+    }
+}
+
+// --follow: compare the followed path; when it is new here, look for the
+// file it was renamed from and continue under that name. Records the pair
+// that describes the commit.
+bool Walk.follow_compare(str id, GIT_object.Commit c, GIT_object.Commit parent) {
+    str path = follow_path;
+    Option<GIT_object.Entry> in_parent = GIT_pathtree.entry_at(gitdir, parent.tree, path);
+    Option<GIT_object.Entry> in_commit = GIT_pathtree.entry_at(gitdir, c.tree, path);
+    List<GIT_gitdiff.Item> items = [];
+    match (in_commit) {
+        case None: {
+            match (in_parent) {
+                case None: {
+                    return false;
+                }
+                case Some(GIT_object.Entry gone): {
+                    items.push(GIT_gitdiff.Item("D", path, path, GIT_gitdiff.Side(gone.mode, gone.id, ""), GIT_gitdiff.nothing()));
+                    follow_items.set(id, items);
+                    return true;
+                }
+            }
+        }
+        case Some(GIT_object.Entry now): {
+            match (in_parent) {
+                case Some(GIT_object.Entry before): {
+                    if (before.id == now.id && before.mode == now.mode) {
+                        return false;
+                    }
+                    items.push(GIT_gitdiff.Item("M", path, path, GIT_gitdiff.Side(before.mode, before.id, ""), GIT_gitdiff.Side(now.mode, now.id, "")));
+                    follow_items.set(id, items);
+                    return true;
+                }
+                case None: {
+                    List<GIT_gitcommon.Spec> none = [];
+                    List<GIT_gitdiff.Item> all = GIT_gitdiff.tree_vs_tree(gitdir, parent.tree, c.tree, none);
+                    all = GIT_gitdiff.detect_renames(gitdir, all, dopts.rename_score);
+                    for (GIT_gitdiff.Item item in all) {
+                        if (item.path == path) {
+                            items.push(item);
+                            follow_items.set(id, items);
+                            if (item.status == "R") {
+                                follow_path = item.old_path;
+                                specs = [GIT_gitcommon.Spec(item.old_path)];
+                            }
+                            return true;
+                        }
+                    }
+                    items.push(GIT_gitdiff.Item("A", path, path, GIT_gitdiff.nothing(), GIT_gitdiff.Side(now.mode, now.id, "")));
+                    follow_items.set(id, items);
+                    return true;
+                }
+            }
+        }
+    }
+}
+
+// `process_parents`: add the parents of `id` to the list
+void Walk.process_parents(str id, bool is_into_list) {
+    if (has(id, F_ADDED)) {
+        return;
+    }
+    set_flag(id, F_ADDED);
+    if (has(id, F_UNINTERESTING)) {
+        for (str p in parents_of(id)) {
+            set_flag(p, F_UNINTERESTING);
+            if (!parse(p)) {
+                continue;
+            }
+            if (parents_of(p).size() > 0) {
+                mark_parents_uninteresting(p);
+            }
+            if (has(p, F_SEEN)) {
+                continue;
+            }
+            set_flag(p, F_SEEN);
+            if (is_into_list) {
+                insert_by_date(p);
+            }
+        }
+        return;
+    }
+    try_to_simplify(id);
+    if (is_no_walk) {
+        return;
+    }
+    for (str p in parents_of(id)) {
+        parse(p);
+        if (!has(p, F_SEEN)) {
+            set_flag(p, F_SEEN);
+            if (is_into_list) {
+                insert_by_date(p);
+            }
+        }
+        if (opts.is_first_parent) {
+            break;
+        }
+    }
+}
+
+bool Walk.everybody_uninteresting() {
+    for (str id in list) {
+        if (!has(id, F_UNINTERESTING)) {
+            return false;
+        }
+    }
+    return true;
+}
+
+/// `limit_list`: the whole list of interesting commits, newest first.
+List<str> Walk.limit_list() {
+    int slop = 5;
+    int last_date = -1;
+    bool has_date = false;
+    List<str> out = [];
+    while (list.size() > 0) {
+        str id = list.remove_at(0);
+        if (opts.has_since && date_of(id) < opts.since) {
+            set_flag(id, F_UNINTERESTING);
+        }
+        process_parents(id, true);
+        if (has(id, F_UNINTERESTING)) {
+            mark_parents_uninteresting(id);
+            // still_interesting
+            if (list.size() == 0) {
+                slop = 0;
+            } else if (has_date && last_date <= date_of(list[0])) {
+                slop = 5;
+            } else if (!everybody_uninteresting()) {
+                slop = 5;
+            } else {
+                slop = slop - 1;
+            }
+            if (slop > 0) {
+                continue;
+            }
+            break;
+        }
+        if (opts.has_until && date_of(id) > opts.until) {
+            continue;
+        }
+        last_date = date_of(id);
+        has_date = true;
+        out.push(id);
+    }
+    return out;
+}
+
+/// git's `sort_in_topological_order` for `--topo-order` (graph order): the
+/// list's tips are shown in the order given, a commit only after all its
+/// children, a parent popped after the last pushed.
+List<str> Walk.topo_sort(List<str> items) {
+    Map<str, int> indegree = {};
+    for (str id in items) {
+        indegree.set(id, 1);
+    }
+    for (str id in items) {
+        for (str parent in parents_of(id)) {
+            if (indegree.contains(parent)) {
+                int degree = indegree.get(parent).or(0);
+                if (degree > 0) {
+                    indegree.set(parent, degree + 1);
+                }
+            }
+        }
+    }
+    List<str> stack = [];
+    for (str id in items) {
+        if (indegree.get(id).or(0) == 1) {
+            stack.push(id);
+        }
+    }
+    stack.reverse();
+    List<str> out = [];
+    while (stack.size() > 0) {
+        str id = stack.pop();
+        for (str parent in parents_of(id)) {
+            if (!indegree.contains(parent)) {
+                continue;
+            }
+            int degree = indegree.get(parent).or(0);
+            if (degree == 0) {
+                continue;
+            }
+            degree = degree - 1;
+            indegree.set(parent, degree);
+            if (degree == 1) {
+                stack.push(parent);
+            }
+        }
+        indegree.set(id, 0);
+        out.push(id);
+    }
+    return out;
+}
+
+bool Walk.is_header_ok(str id) {
+    GIT_object.Commit c = commit(id);
+    bool is_ok = true;
+    match (author_m) {
+        case Some(Matcher matcher): {
+            List<str> lines = [ident_text(c.author)];
+            if (!matcher.matches_lines(lines, false)) {
+                is_ok = false;
+            }
+        }
+        case None: {
+        }
+    }
+    match (committer_m) {
+        case Some(Matcher matcher): {
+            List<str> lines = [ident_text(c.committer)];
+            if (!matcher.matches_lines(lines, false)) {
+                is_ok = false;
+            }
+        }
+        case None: {
+        }
+    }
+    return is_ok;
+}
+
+// `commit_match`
+bool Walk.commit_match(str id) {
+    if (!is_header_ok(id)) {
+        return false;
+    }
+    match (grep_m) {
+        case Some(Matcher matcher): {
+            List<str> lines = text_lines(commit(id).message);
+            bool is_hit = matcher.matches_lines(lines, opts.is_all_match);
+            if (opts.is_invert) {
+                return !is_hit;
+            }
+            return is_hit;
+        }
+        case None: {
+            return true;
+        }
+    }
+}
+
+/// `get_commit_action() == commit_show`
+bool Walk.is_show(str id) {
+    if (has(id, F_SHOWN)) {
+        return false;
+    }
+    if (has(id, F_UNINTERESTING)) {
+        return false;
+    }
+    if (!parse(id)) {
+        return false;
+    }
+    if (opts.has_until && date_of(id) > opts.until) {
+        return false;
+    }
+    if (opts.min_parents > 0 || opts.max_parents >= 0) {
+        int n = parents_of(id).size();
+        if (n < opts.min_parents || (opts.max_parents >= 0 && n > opts.max_parents)) {
+            return false;
+        }
+    }
+    if (!commit_match(id)) {
+        return false;
+    }
+    if (is_prune() && has(id, F_TREESAME)) {
+        if (!is_want_ancestry) {
+            return false;
+        }
+        int n = 0;
+        for (str p in parents_of(id)) {
+            if (is_relevant(p)) {
+                n = n + 1;
+                if (n >= 2) {
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+    return true;
+}
+
+// `rewrite_one`: a parent that was TREESAME is replaced by its own parent
+// until a commit that is shown (or the end) is found
+void Walk.rewrite_parents(str id) {
+    List<str> out = [];
+    for (str parent in parents_of(id)) {
+        str current = parent;
+        bool is_dropped = false;
+        for (int step in 0 .. 1000000) {
+            if (!is_limited) {
+                process_parents(current, false);
+            }
+            if (has(current, F_UNINTERESTING)) {
+                break;
+            }
+            if (!has(current, F_TREESAME)) {
+                break;
+            }
+            List<str> next = parents_of(current);
+            if (next.size() == 0) {
+                is_dropped = true;
+                break;
+            }
+            // one_relevant_parent
+            str chosen = "";
+            if (opts.is_first_parent || next.size() == 1) {
+                chosen = next[0];
+            } else {
+                int relevant = 0;
+                for (str candidate in next) {
+                    if (is_relevant(candidate)) {
+                        relevant = relevant + 1;
+                        chosen = candidate;
+                    }
+                }
+                if (relevant != 1) {
+                    chosen = "";
+                }
+            }
+            if (chosen == "") {
+                break;
+            }
+            current = chosen;
+        }
+        if (is_dropped) {
+            continue;
+        }
+        if (!out.contains(current)) {
+            out.push(current);
+        }
+    }
+    parents.set(id, out);
+}
+
+/// `simplify_commit`
+bool Walk.simplify_commit(str id) {
+    bool is_ok = is_show(id);
+    if (is_ok && is_prune() && is_want_ancestry) {
+        rewrite_parents(id);
+    }
+    return is_ok;
+}
+
+/// The parents the graph draws for `id`: `first_interesting_parent` and
+/// `next_interesting_parent`.
+List<str> Walk.graph_parents(str id) {
+    List<str> out = [];
+    for (str p in parents_of(id)) {
+        if (is_show(p)) {
+            out.push(p);
+            if (opts.is_first_parent) {
+                break;
+            }
+        } else if (opts.is_first_parent) {
+            // only the first parent is interesting; if it is not, none is
+            break;
+        }
+    }
+    return out;
+}
+
+// `get_revision_1`: the next commit to be shown, "" at the end
+str Walk.next_commit() {
+    while (list.size() > 0) {
+        str id = list.remove_at(0);
+        if (!is_limited) {
+            if (opts.has_since && date_of(id) < opts.since) {
+                continue;
+            }
+            process_parents(id, true);
+        }
+        if (simplify_commit(id)) {
+            return id;
+        }
+    }
+    return "";
+}
+
+GIT_object.Commit empty_commit() {
+    GIT_object.Ident nobody = GIT_object.Ident([], [], 0, 0, "+0000");
+    return GIT_object.Commit("", [], nobody, nobody, [], []);
+}
+
+// --- topological order ---------------------------------------------------------------------
+
+// --- what is shown ---------------------------------------------------------------------------
+
+// --- decorations ---------------------------------------------------------------------------------
+
+type Deco {
+    // 0 head, 1 local branch, 2 remote, 3 tag, 4 stash
+    int kind;
+    // the full ref name (`HEAD` for HEAD)
+    str name;
+}
+
+type Decorations {
+    // commit id -> decorations in the order git prints them
+    Map<str, List<Deco>> by_commit = {};
+    // the full ref name HEAD points at, "" when detached
+    str head_ref = "";
+    bool is_full = false;
+}
+
+// `add_ref_decoration` over every ref in the default namespaces, then HEAD:
+// each commit's list is the reverse of insertion, so HEAD comes first
+Decorations load_decorations(str gitdir, bool is_full, List<str> exclude_patterns) {
+    Decorations out = Decorations();
+    out.is_full = is_full;
+    List<Deco> inserted = [];
+    List<str> commit_of = [];
+    match (GIT_refs.all(gitdir)) {
+        case Ok(List<GIT_refs.Ref> refs): {
+            for (GIT_refs.Ref ref in refs) {
+                int kind = -1;
+                if (ref.name.starts_with("refs/heads/")) {
+                    kind = 1;
+                } else if (ref.name.starts_with("refs/remotes/")) {
+                    kind = 2;
+                } else if (ref.name.starts_with("refs/tags/")) {
+                    kind = 3;
+                } else if (ref.name == "refs/stash") {
+                    kind = 4;
+                }
+                if (kind < 0) {
+                    continue;
+                }
+                bool is_excluded = false;
+                for (str pattern in exclude_patterns) {
+                    if (ref.name == pattern || ref.name.starts_with(pattern + "/") || GIT_gitcommon.fnmatch(pattern, ref.name)) {
+                        is_excluded = true;
+                    }
+                }
+                if (is_excluded) {
+                    continue;
+                }
+                // the decoration of an annotated tag lands on what it peels to
+                str target = peel(gitdir, ref.id);
+                inserted.push(Deco(kind, ref.name));
+                commit_of.push(target);
+            }
+        }
+        case Err(_): {
+        }
+    }
+    match (GIT_refs.head(gitdir)) {
+        case Ok(GIT_refs.Head head): {
+            match (head) {
+                case Detached(str id): {
+                    inserted.push(Deco(0, "HEAD"));
+                    commit_of.push(id);
+                }
+                case Born(str name, str id): {
+                    inserted.push(Deco(0, "HEAD"));
+                    commit_of.push(id);
+                    out.head_ref = name;
+                }
+                case Unborn(_): {
+                }
+            }
+        }
+        case Err(_): {
+        }
+    }
+    for (int k in 0 .. inserted.size()) {
+        int index = inserted.size() - 1 - k;
+        str id = commit_of[index];
+        List<Deco> list = out.by_commit.get(id).or([]);
+        list.push(inserted[index]);
+        out.by_commit.set(id, list);
+    }
+    return out;
+}
+
+// follow tag objects to what they name
+str peel(str gitdir, str id) {
+    str current = id;
+    for (int i in 0 .. 8) {
+        match (GIT_object.read(gitdir, current)) {
+            case Ok(GIT_object.Object object): {
+                match (object.body) {
+                    case Tag(GIT_object.Tag tag): {
+                        current = tag.object;
+                    }
+                    case Commit(_): {
+                        return current;
+                    }
+                    case Blob: {
+                        return current;
+                    }
+                    case Tree: {
+                        return current;
+                    }
+                }
+            }
+            case Err(_): {
+                return current;
+            }
+        }
+    }
+    return current;
+}
+
+/// The colours the commit line and decorations use.
+type Palette {
+    bool is_on = false;
+    str commit = "\x1b[33m";
+    str reset = "\x1b[m";
+    str head = "\x1b[1;36m";
+    str branch = "\x1b[1;32m";
+    str remote = "\x1b[1;31m";
+    str tag = "\x1b[1;33m";
+    str stash = "\x1b[1;35m";
+    // `color.diff.meta`-style values for the tag header
+}
+
+str Palette.of_kind(int kind) {
+    if (kind == 0) {
+        return head;
+    }
+    if (kind == 1) {
+        return branch;
+    }
+    if (kind == 2) {
+        return remote;
+    }
+    if (kind == 3) {
+        return tag;
+    }
+    if (kind == 4) {
+        return stash;
+    }
+    return reset;
+}
+
+Palette make_palette(GIT_gitcommon.Ctx ctx, bool is_on) {
+    Palette pal = Palette();
+    if (!is_on) {
+        pal.commit = "";
+        pal.reset = "";
+        pal.head = "";
+        pal.branch = "";
+        pal.remote = "";
+        pal.tag = "";
+        pal.stash = "";
+        return pal;
+    }
+    pal.is_on = true;
+    pal.commit = GIT_gitcommon.slot_color(ctx, "diff", "commit", pal.commit);
+    pal.head = GIT_gitcommon.slot_color(ctx, "decorate", "HEAD", pal.head);
+    pal.branch = GIT_gitcommon.slot_color(ctx, "decorate", "branch", pal.branch);
+    pal.remote = GIT_gitcommon.slot_color(ctx, "decorate", "remoteBranch", pal.remote);
+    pal.tag = GIT_gitcommon.slot_color(ctx, "decorate", "tag", pal.tag);
+    pal.stash = GIT_gitcommon.slot_color(ctx, "decorate", "stash", pal.stash);
+    return pal;
+}
+
+// `prettify_refname`
+str pretty_ref(str name) {
+    if (name.starts_with("refs/heads/")) {
+        return name.substr(11, name.size());
+    }
+    if (name.starts_with("refs/tags/")) {
+        return name.substr(10, name.size());
+    }
+    if (name.starts_with("refs/remotes/")) {
+        return name.substr(13, name.size());
+    }
+    return name;
+}
+
+// `format_decorations`: ` (HEAD -> main, tag: v1)`, or with `wrap` false the
+// same without the parentheses
+str decoration_text(Decorations decos, str id, Palette pal, bool is_color, bool wrap) {
+    List<Deco> list = decos.by_commit.get(id).or([]);
+    if (list.size() == 0) {
+        return "";
+    }
+    str color_commit = "";
+    str color_reset = "";
+    if (is_color) {
+        color_commit = pal.commit;
+        color_reset = pal.reset;
+    }
+    // current_pointed_by_HEAD
+    int current = -1;
+    bool has_head = false;
+    for (Deco deco in list) {
+        if (deco.kind == 0) {
+            has_head = true;
+        }
+    }
+    if (has_head && decos.head_ref != "") {
+        for (int i in 0 .. list.size()) {
+            if (list[i].kind == 1 && list[i].name == decos.head_ref) {
+                current = i;
+            }
+        }
+    }
+    str prefix = "";
+    str suffix = "";
+    if (wrap) {
+        prefix = " (";
+        suffix = ")";
+    }
+    str separator = ", ";
+    str out = "";
+    for (int i in 0 .. list.size()) {
+        if (i == current) {
+            continue;
+        }
+        Deco deco = list[i];
+        str color = "";
+        if (is_color) {
+            color = pal.of_kind(deco.kind);
+        }
+        if (prefix != "") {
+            out = out + color_commit + prefix + color_reset;
+        }
+        if (deco.kind == 3) {
+            out = out + color + "tag: " + color_reset;
+        }
+        str shown = deco.name;
+        if (!decos.is_full) {
+            shown = pretty_ref(deco.name);
+        }
+        out = out + color + shown + color_reset;
+        if (current >= 0 && deco.kind == 0) {
+            str cur_color = "";
+            if (is_color) {
+                cur_color = pal.of_kind(1);
+            }
+            str cur_name = list[current].name;
+            if (!decos.is_full) {
+                cur_name = pretty_ref(cur_name);
+            }
+            out = out + color_commit + " -> " + color_reset + cur_color + cur_name + color_reset;
+        }
+        prefix = separator;
+    }
+    if (suffix != "") {
+        out = out + color_commit + suffix + color_reset;
+    }
+    return out;
+}
+
+// --- pretty printing ---------------------------------------------------------------------------
+
+bool is_blank_octet(int c) {
+    return c == ' ' || c == '\t' || c == '\n' || c == '\r' || c == 11 || c == 12;
+}
+
+// the message split into lines, each kept with its terminator
+List<bytes> raw_lines(bytes message) {
+    List<bytes> out = [];
+    int position = 0;
+    int length = message.size();
+    while (position < length) {
+        int end = position;
+        while (end < length && message[end] != '\n') {
+            end = end + 1;
+        }
+        if (end < length) {
+            end = end + 1;
+        }
+        out.push(message.substr(position, end));
+        position = end;
+    }
+    return out;
+}
+
+// the message split into lines without terminators
+List<bytes> message_lines(bytes message) {
+    List<bytes> out = [];
+    for (bytes line in raw_lines(message)) {
+        if (line.size() > 0 && line[line.size() - 1] == '\n') {
+            out.push(line.substr(0, line.size() - 1));
+        } else {
+            out.push(line);
+        }
+    }
+    return out;
+}
+
+// `is_blank_line`: the length with trailing whitespace dropped
+int trimmed_length(bytes line) {
+    int n = line.size();
+    while (n > 0 && is_blank_octet(line[n - 1])) {
+        n = n - 1;
+    }
+    return n;
+}
+
+bool line_blank(bytes line) {
+    return trimmed_length(line) == 0;
+}
+
+// index of the first line that is not blank (`skip_blank_lines`)
+int skip_blank(List<bytes> lines, int from) {
+    int i = from;
+    while (i < lines.size() && line_blank(lines[i])) {
+        i = i + 1;
+    }
+    return i;
+}
+
+// `format_subject`: lines up to the first blank one, joined by `separator`,
+// each cut of its trailing whitespace; returns the index after the paragraph
+int subject_into(bytes out, List<bytes> lines, int from, str separator) {
+    int i = from;
+    bool is_first = true;
+    while (i < lines.size()) {
+        bytes line = lines[i];
+        int n = trimmed_length(line);
+        if (n == 0) {
+            break;
+        }
+        if (!is_first) {
+            out.extend(separator.to_bytes());
+        }
+        out.extend(line.substr(0, n));
+        is_first = false;
+        i = i + 1;
+    }
+    return i;
+}
+
+bytes subject_of(bytes message) {
+    List<bytes> lines = raw_lines(message);
+    bytes out = [];
+    int start = skip_blank(lines, 0);
+    subject_into(out, lines, start, " ");
+    return out;
+}
+
+// the body: what follows the subject paragraph and the blank lines after it
+bytes body_of(bytes message) {
+    List<bytes> lines = raw_lines(message);
+    int i = skip_blank(lines, 0);
+    bytes scratch = [];
+    i = subject_into(scratch, lines, i, " ");
+    i = skip_blank(lines, i);
+    bytes out = [];
+    while (i < lines.size()) {
+        out.extend(lines[i]);
+        i = i + 1;
+    }
+    return out;
+}
+
+// git's `pp_remainder` at an indent of 4 over the message from line `from`:
+// every line cut of its trailing whitespace and indented, tabs expanded to
+// eight columns; leading blank lines dropped, a blank line stops `short`.
+bytes remainder(List<bytes> lines, int from, int indent, bool is_short, bool is_expand) {
+    bytes out = [];
+    bool is_first = true;
+    for (int i in from .. lines.size()) {
+        bytes line = lines[i];
+        int n = trimmed_length(line);
+        if (n == 0) {
+            if (is_first) {
+                continue;
+            }
+            if (is_short) {
+                break;
+            }
+        }
+        is_first = false;
+        out.extend(" ".repeat(indent).to_bytes());
+        if (is_expand) {
+            out.extend(expand_tabs(line.substr(0, n)));
+        } else {
+            out.extend(line.substr(0, n));
+        }
+        out.push('\n');
+    }
+    return out;
+}
+
+// `strbuf_add_tabexpand` at width 8: a tab becomes spaces up to the next
+// multiple of eight counted from the last tab; a segment with a control
+// character gives up on the rest of the line
+bytes expand_tabs(bytes line) {
+    bytes out = [];
+    int start = 0;
+    int n = line.size();
+    while (true) {
+        int tab = -1;
+        for (int i in start .. n) {
+            if (line[i] == '\t') {
+                tab = i;
+                break;
+            }
+        }
+        if (tab < 0) {
+            break;
+        }
+        bytes segment = line.substr(start, tab);
+        int width = -1;
+        match (segment.utf8()) {
+            case Some(str text): {
+                width = GIT_utf8width.strict_width(text);
+            }
+            case None: {
+            }
+        }
+        if (width < 0) {
+            break;
+        }
+        out.extend(segment);
+        out.extend(" ".repeat(8 - width % 8).to_bytes());
+        start = tab + 1;
+    }
+    out.extend(line.substr(start, n));
+    return out;
+}
+
+bytes rtrim_octets(bytes data) {
+    int length = data.size();
+    while (length > 0 && is_blank_octet(data[length - 1])) {
+        length = length - 1;
+    }
+    return data.substr(0, length);
+}
+
+str ident_text(GIT_object.Ident who) {
+    return who.name.utf8().or("") + " <" + who.email.utf8().or("") + ">";
+}
+
+bytes ident_bytes(GIT_object.Ident who) {
+    bytes out = [];
+    out.extend(who.name);
+    out.extend(" <".to_bytes());
+    out.extend(who.email);
+    out.push('>');
+    return out;
+}
+
+/// What formatting a commit needs besides the commit itself.
+type Ctxf {
+    str gitdir;
+    LOpts opts;
+    Decorations decos;
+    Palette pal = Palette();
+    bool is_color = false;
+    int abbrev = 7;
+    // `%C(auto)` was seen in the current format
+    bool is_auto_color = false;
+}
+
+str Ctxf.abbrev_id(str id) {
+    if (abbrev <= 0 || abbrev >= id.size()) {
+        return id;
+    }
+    return GIT_gitdiff.unique_abbrev(gitdir, id, abbrev);
+}
+
+str Ctxf.date_text(GIT_object.Ident who, str style) {
+    return GIT_gitcommon.format_date(who.when, who.offset, style);
+}
+
+// `pretty_print_commit` for the built-in formats: the header lines, a blank
+// line, the indented message; ends with a newline except for `oneline`
+bytes Ctxf.builtin(str id, GIT_object.Commit commit, List<str> parents) {
+    bytes out = [];
+    str fmt = opts.format;
+    List<bytes> lines = raw_lines(commit.message);
+    if (fmt == "oneline") {
+        int start = skip_blank(lines, 0);
+        subject_into(out, lines, start, " ");
+        return out;
+    }
+    if (fmt == "raw") {
+        match (GIT_object.read(gitdir, id)) {
+            case Ok(GIT_object.Object object): {
+                int end = object.raw.size();
+                match (object.raw.index_of("\n\n".to_bytes())) {
+                    case Some(int at): {
+                        end = at + 1;
+                    }
+                    case None: {
+                    }
+                }
+                out.extend(object.raw.substr(0, end));
+            }
+            case Err(_): {
+            }
+        }
+    } else {
+        if (parents.size() > 1) {
+            str line = "Merge:";
+            for (str parent in parents) {
+                line = line + " " + abbrev_id(parent);
+            }
+            out.extend((line + "\n").to_bytes());
+        }
+        if (fmt == "fuller") {
+            out.extend("Author:     ".to_bytes());
+            out.extend(ident_bytes(commit.author));
+            out.extend(("\nAuthorDate: " + date_text(commit.author, opts.date_style) + "\n").to_bytes());
+            out.extend("Commit:     ".to_bytes());
+            out.extend(ident_bytes(commit.committer));
+            out.extend(("\nCommitDate: " + date_text(commit.committer, opts.date_style) + "\n").to_bytes());
+        } else if (fmt == "full") {
+            out.extend("Author: ".to_bytes());
+            out.extend(ident_bytes(commit.author));
+            out.extend("\nCommit: ".to_bytes());
+            out.extend(ident_bytes(commit.committer));
+            out.push('\n');
+        } else if (fmt == "short") {
+            out.extend("Author: ".to_bytes());
+            out.extend(ident_bytes(commit.author));
+            out.push('\n');
+        } else {
+            out.extend("Author: ".to_bytes());
+            out.extend(ident_bytes(commit.author));
+            out.extend(("\nDate:   " + date_text(commit.author, opts.date_style) + "\n").to_bytes());
+        }
+    }
+    out.push('\n');
+    int start = skip_blank(lines, 0);
+    out.extend(remainder(lines, start, 4, fmt == "short", fmt == "medium" || fmt == "full" || fmt == "fuller"));
+    bytes trimmed = rtrim_octets(out);
+    trimmed.push('\n');
+    return trimmed;
+}
+
+ColorResult Ctxf.parse_color(List<int> chars, int i) {
+    // chars[i] == 'C'
+    ColorResult out = ColorResult();
+    int n = chars.size();
+    if (i + 1 < n && chars[i + 1] == '(') {
+        int j = i + 2;
+        str spec = "";
+        while (j < n && chars[j] != ')') {
+            spec = spec + str.from_chars([chars[j]]);
+            j = j + 1;
+        }
+        if (j >= n) {
+            return out;
+        }
+        out.consumed = j - i + 1;
+        str body = spec;
+        bool is_always = false;
+        if (body.starts_with("auto,")) {
+            body = body.substr(5, body.size());
+        } else if (body.starts_with("always,")) {
+            body = body.substr(7, body.size());
+            is_always = true;
+        }
+        if (!is_color && !is_always) {
+            return out;
+        }
+        match (GIT_gitstatus.parse_color(body)) {
+            case Some(str code): {
+                out.text = code.to_bytes();
+            }
+            case None: {
+                out.is_ok = false;
+            }
+        }
+        return out;
+    }
+    List<str> names = ["red", "green", "blue", "reset"];
+    List<str> codes = ["\x1b[31m", "\x1b[32m", "\x1b[34m", "\x1b[m"];
+    for (int k in 0 .. names.size()) {
+        str name = names[k];
+        bool is_match = true;
+        for (int m in 0 .. name.size()) {
+            if (i + 1 + m >= n || chars[i + 1 + m] != name.byte_at(m)) {
+                is_match = false;
+            }
+        }
+        if (is_match) {
+            out.consumed = name.size() + 1;
+            if (is_color) {
+                out.text = codes[k].to_bytes();
+            }
+            return out;
+        }
+    }
+    return out;
+}
+
+// the text for one placeholder starting at `chars[i]` (after the `%`);
+// returns the number of characters consumed, 0 when it is not a placeholder
+int Ctxf.placeholder(str id, GIT_object.Commit commit, List<str> parents, List<int> chars, int i, bytes out) {
+    int c = chars[i];
+    int n = chars.size();
+    if (c == 'n') {
+        out.push('\n');
+        return 1;
+    }
+    if (c == 'x' && i + 2 < n && hex_value(chars[i + 1]) >= 0 && hex_value(chars[i + 2]) >= 0) {
+        out.push(hex_value(chars[i + 1]) * 16 + hex_value(chars[i + 2]));
+        return 3;
+    }
+    if (c == 'H' || c == 'h') {
+        str text = id;
+        if (c == 'h') {
+            text = abbrev_id(id);
+        }
+        if (is_auto_color) {
+            out.extend(pal.commit.to_bytes());
+            out.extend(text.to_bytes());
+            out.extend(pal.reset.to_bytes());
+        } else {
+            out.extend(text.to_bytes());
+        }
+        return 1;
+    }
+    if (c == 'T') {
+        out.extend(commit.tree.to_bytes());
+        return 1;
+    }
+    if (c == 't') {
+        out.extend(abbrev_id(commit.tree).to_bytes());
+        return 1;
+    }
+    if (c == 'P') {
+        out.extend(parents.join(" ").to_bytes());
+        return 1;
+    }
+    if (c == 'p') {
+        List<str> short = [];
+        for (str parent in parents) {
+            short.push(abbrev_id(parent));
+        }
+        out.extend(short.join(" ").to_bytes());
+        return 1;
+    }
+    if (c == 'm') {
+        out.push('>');
+        return 1;
+    }
+    if (c == 'd' || c == 'D') {
+        bool use_color = is_auto_color;
+        out.extend(decoration_text(decos, id, pal, use_color, c == 'd').to_bytes());
+        return 1;
+    }
+    if ((c == 'a' || c == 'c') && i + 1 < n) {
+        GIT_object.Ident who = commit.author;
+        if (c == 'c') {
+            who = commit.committer;
+        }
+        int k = chars[i + 1];
+        if (k == 'n' || k == 'N') {
+            out.extend(who.name);
+        } else if (k == 'e' || k == 'E') {
+            out.extend(who.email);
+        } else if (k == 'l' || k == 'L') {
+            out.extend(email_local(who.email));
+        } else if (k == 'd') {
+            out.extend(date_text(who, opts.date_style).to_bytes());
+        } else if (k == 'D') {
+            out.extend(date_text(who, "rfc2822").to_bytes());
+        } else if (k == 'r') {
+            out.extend(date_text(who, "relative").to_bytes());
+        } else if (k == 't') {
+            out.extend(who.when.to_str().to_bytes());
+        } else if (k == 'i') {
+            out.extend(date_text(who, "iso").to_bytes());
+        } else if (k == 'I') {
+            out.extend(date_text(who, "iso-strict").to_bytes());
+        } else if (k == 's') {
+            out.extend(date_text(who, "short").to_bytes());
+        } else {
+            return 0;
+        }
+        return 2;
+    }
+    if (c == 's') {
+        out.extend(subject_of(commit.message));
+        return 1;
+    }
+    if (c == 'f') {
+        out.extend(sanitized(subject_of(commit.message)));
+        return 1;
+    }
+    if (c == 'b') {
+        out.extend(body_of(commit.message));
+        return 1;
+    }
+    if (c == 'B') {
+        out.extend(commit.message);
+        return 1;
+    }
+    if (c == 'e') {
+        return 1;
+    }
+    if (c == 'G' && i + 1 < n) {
+        int k = chars[i + 1];
+        if (k == '?') {
+            out.push('N');
+            return 2;
+        }
+        if (k == 'G' || k == 'S' || k == 'K' || k == 'F' || k == 'P') {
+            return 2;
+        }
+        if (k == 'T') {
+            out.extend("undefined".to_bytes());
+            return 2;
+        }
+        return 0;
+    }
+    return 0;
+}
+
+/// Expand a `--format=` string for one commit (`repo_format_commit_message`).
+Result<bytes, str> Ctxf.expand(str id, GIT_object.Commit commit, List<str> parents, str format) {
+    bytes out = [];
+    List<int> chars = format.chars();
+    int n = chars.size();
+    int i = 0;
+    Padding pad = Padding();
+    is_auto_color = false;
+    while (i < n) {
+        int c = chars[i];
+        if (c != '%') {
+            // copy up to the next `%`
+            int j = i;
+            while (j < n && chars[j] != '%') {
+                j = j + 1;
+            }
+            out.extend(str.from_chars(chars.slice(i, j)).to_bytes());
+            i = j;
+            continue;
+        }
+        i = i + 1;
+        if (i >= n) {
+            out.push('%');
+            break;
+        }
+        if (chars[i] == '%') {
+            out.push('%');
+            i = i + 1;
+            continue;
+        }
+        // one placeholder: `%` then optional magic then the item
+        int start = i;
+        int magic = 0;
+        if (chars[i] == '-' || chars[i] == '+' || chars[i] == ' ') {
+            magic = chars[i];
+            i = i + 1;
+            if (i < n && chars[i] == 'w') {
+                out.push('%');
+                i = start;
+                continue;
+            }
+        }
+        if (i >= n) {
+            out.push('%');
+            i = start;
+            continue;
+        }
+        int before = out.size();
+        int consumed = 0;
+        int ch = chars[i];
+        if (ch == '<' || ch == '>') {
+            Padding next = Padding();
+            int used = parse_padding(chars, i, next);
+            if (used == 0) {
+                out.push('%');
+                i = start;
+                continue;
+            }
+            pad = next;
+            consumed = used;
+            i = i + consumed;
+            if (magic != 0) {
+                // the magic applies to nothing here
+            }
+            continue;
+        }
+        if (ch == 'C' && i + 6 < n + 0 && str.from_chars(chars.slice(i, i + 7)) == "C(auto)") {
+            is_auto_color = is_color;
+            if (is_auto_color && out.size() > 0) {
+                out.extend(pal.reset.to_bytes());
+            }
+            i = i + 7;
+            continue;
+        }
+        if (ch == 'C') {
+            ColorResult color = parse_color(chars, i);
+            if (color.consumed == 0) {
+                out.push('%');
+                i = start;
+                continue;
+            }
+            if (!color.is_ok) {
+                return Result<bytes, str>.Err("unable to parse --pretty format");
+            }
+            // a `C(auto)` is handled as its own placeholder
+            out.extend(color.text);
+            i = i + color.consumed;
+            is_auto_color = false;
+            if (magic != 0) {
+                bool is_changed = out.size() != before;
+                apply_magic(out, before, magic, is_changed);
+            }
+            continue;
+        }
+        if (ch == 'C' || ch == 'w') {
+            out.push('%');
+            i = start;
+            continue;
+        }
+        bytes piece = [];
+        int used = placeholder(id, commit, parents, chars, i, piece);
+        if (used == 0) {
+            out.push('%');
+            i = start;
+            continue;
+        }
+        i = i + used;
+        if (pad.kind > 0) {
+            piece = apply_padding(out, piece, pad);
+            pad = Padding();
+        }
+        out.extend(piece);
+        if (magic != 0) {
+            bool is_changed = out.size() != before;
+            apply_magic(out, before, magic, is_changed);
+        }
+    }
+    return Result<bytes, str>.Ok(out);
+}
+
+// --- user formats --------------------------------------------------------------------------------
+
+int hex_value(int c) {
+    if (c >= '0' && c <= '9') {
+        return c - '0';
+    }
+    if (c >= 'a' && c <= 'f') {
+        return c - 'a' + 10;
+    }
+    if (c >= 'A' && c <= 'F') {
+        return c - 'A' + 10;
+    }
+    return -1;
+}
+
+// the local part of an address
+bytes email_local(bytes email) {
+    for (int i in 0 .. email.size()) {
+        if (email[i] == '@') {
+            return email.substr(0, i);
+        }
+    }
+    return email;
+}
+
+// `format_sanitized_subject`
+bytes sanitized(bytes subject) {
+    bytes out = [];
+    int space = 2;
+    int i = 0;
+    int n = subject.size();
+    while (i < n) {
+        int c = subject[i];
+        bool is_title = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '.' || c == '_';
+        if (is_title) {
+            if (space == 1) {
+                out.push('-');
+            }
+            space = 0;
+            out.push(c);
+            if (c == '.') {
+                while (i + 1 < n && subject[i + 1] == '.') {
+                    i = i + 1;
+                }
+            }
+        } else {
+            space = space | 1;
+        }
+        i = i + 1;
+    }
+    while (out.size() > 0 && (out[out.size() - 1] == '.' || out[out.size() - 1] == '-')) {
+        out.pop();
+    }
+    return out;
+}
+
+int char_count(bytes data) {
+    int n = 0;
+    for (int c in data) {
+        if (c & 0xc0 != 0x80) {
+            n = n + 1;
+        }
+    }
+    return n;
+}
+
+// the display width of some bytes (undecodable text counts its bytes)
+int display_width(bytes data) {
+    match (data.utf8()) {
+        case Some(str text): {
+            return GIT_utf8width.str_width(text);
+        }
+        case None: {
+            return data.size();
+        }
+    }
+}
+
+// the first `cols` display columns of `data`
+bytes take_columns(bytes data, int cols) {
+    match (data.utf8()) {
+        case Some(str text): {
+            List<int> keep = [];
+            int used = 0;
+            for (int ch in text.chars()) {
+                int w = GIT_utf8width.width_of(ch);
+                if (w < 0) {
+                    w = 0;
+                }
+                if (used + w > cols) {
+                    break;
+                }
+                used = used + w;
+                keep.push(ch);
+            }
+            return str.from_chars(keep).to_bytes();
+        }
+        case None: {
+            int keep = cols;
+            if (data.size() < keep) {
+                keep = data.size();
+            }
+            return data.substr(0, keep);
+        }
+    }
+}
+
+// everything from display column `col` on
+bytes drop_columns(bytes data, int col) {
+    match (data.utf8()) {
+        case Some(str text): {
+            List<int> keep = [];
+            int used = 0;
+            bool is_dropping = true;
+            for (int ch in text.chars()) {
+                int w = GIT_utf8width.width_of(ch);
+                if (w < 0) {
+                    w = 0;
+                }
+                if (is_dropping && used >= col) {
+                    is_dropping = false;
+                }
+                if (!is_dropping) {
+                    keep.push(ch);
+                }
+                used = used + w;
+            }
+            return str.from_chars(keep).to_bytes();
+        }
+        case None: {
+            int from = col;
+            if (data.size() < from) {
+                from = data.size();
+            }
+            return data.substr(from, data.size());
+        }
+    }
+}
+
+// `strbuf_utf8_replace(sb, pos, len, "..")`: columns [pos, pos+len) become `..`
+bytes utf8_replace(bytes data, int pos, int len, str with) {
+    bytes out = take_columns(data, pos);
+    out.extend(with.to_bytes());
+    out.extend(drop_columns(data, pos + len));
+    return out;
+}
+
+// `%C(...)`, `%Cred` and friends: the text to emit and the characters
+// consumed (after the `C`), or consumed 0 for a literal
+type ColorResult {
+    int consumed = 0;
+    bytes text = [];
+    bool is_ok = true;
+}
+
+// the pending padding of `%<(..)` and `%>(..)`
+type Padding {
+    // 0 none, 1 `<` (pad right), 2 `>` (pad left), 3 `><` (both),
+    // 4 `>>` (pad left, stealing from the text before)
+    int kind = 0;
+    int width = 0;
+    // pad to a column (`%<|(N)`)
+    bool is_column = false;
+    // 0 none, 1 trunc, 2 ltrunc, 3 mtrunc
+    int trunc = 0;
+}
+
+// `parse_padding_placeholder`: how many characters of `%<(..)` etc. starting at
+// chars[i] are consumed, 0 if malformed; fills `pad`
+int parse_padding(List<int> chars, int i, Padding pad) {
+    int n = chars.size();
+    int j = i;
+    int kind = 0;
+    if (chars[j] == '<') {
+        kind = 1;
+        j = j + 1;
+    } else if (chars[j] == '>') {
+        j = j + 1;
+        if (j < n && chars[j] == '<') {
+            kind = 3;
+            j = j + 1;
+        } else if (j < n && chars[j] == '>') {
+            kind = 4;
+            j = j + 1;
+        } else {
+            kind = 2;
+        }
+    } else {
+        return 0;
+    }
+    bool is_column = false;
+    if (j < n && chars[j] == '|') {
+        is_column = true;
+        j = j + 1;
+    }
+    if (j >= n || chars[j] != '(') {
+        return 0;
+    }
+    int k = j + 1;
+    str digits = "";
+    while (k < n && chars[k] != ',' && chars[k] != ')') {
+        digits = digits + str.from_chars([chars[k]]);
+        k = k + 1;
+    }
+    if (k >= n || digits == "") {
+        return 0;
+    }
+    int width = 0;
+    match (digits.parse_int()) {
+        case Some(int w): {
+            width = w;
+        }
+        case None: {
+            return 0;
+        }
+    }
+    if (width == 0) {
+        return 0;
+    }
+    if (width < 0) {
+        if (is_column) {
+            width = width + GIT_gitcommon.columns();
+        }
+        if (width < 0) {
+            return 0;
+        }
+    }
+    int trunc = 0;
+    if (chars[k] == ',') {
+        int m = k + 1;
+        str word = "";
+        while (m < n && chars[m] != ')') {
+            word = word + str.from_chars([chars[m]]);
+            m = m + 1;
+        }
+        if (m >= n || word == "") {
+            return 0;
+        }
+        if (word == "trunc") {
+            trunc = 1;
+        } else if (word == "ltrunc") {
+            trunc = 2;
+        } else if (word == "mtrunc") {
+            trunc = 3;
+        } else {
+            return 0;
+        }
+        k = m;
+    }
+    pad.kind = kind;
+    pad.is_column = is_column;
+    pad.width = width;
+    pad.trunc = trunc;
+    return k - i + 1;
+}
+
+// the `-`, `+` and space modifiers: after the item was appended at `before`
+void apply_magic(bytes out, int before, int magic, bool is_changed) {
+    if (!is_changed) {
+        if (magic == '-') {
+            while (out.size() > 0 && out[out.size() - 1] == '\n') {
+                out.pop();
+            }
+        }
+        return;
+    }
+    bytes tail = out.substr(before, out.size());
+    out.truncate(before);
+    if (magic == '+') {
+        out.push('\n');
+    } else if (magic == ' ') {
+        out.push(' ');
+    }
+    out.extend(tail);
+}
+
+// `format_and_pad_commit`: pad or truncate `piece` per `pad`, given the
+// text emitted so far (for `>>` and column padding)
+bytes apply_padding(bytes out, bytes piece, Padding pad) {
+    int padding = pad.width;
+    if (pad.is_column) {
+        // pad to a column from the start of the current line
+        int line_start = 0;
+        for (int k in 0 .. out.size()) {
+            if (out[k] == '\n') {
+                line_start = k + 1;
+            }
+        }
+        int occupied = display_width(out.substr(line_start, out.size()));
+        padding = pad.width - occupied;
+    }
+    int len = display_width(piece);
+    bytes body = piece;
+    if (pad.kind == 4) {
+        // steal spaces from the text before
+        while (len > padding && out.size() > 0 && out[out.size() - 1] == ' ') {
+            out.pop();
+            padding = padding + 1;
+        }
+    }
+    if (len > padding) {
+        if (pad.trunc == 1) {
+            body = utf8_replace(body, padding - 2, len - (padding - 2), "..");
+        } else if (pad.trunc == 2) {
+            body = utf8_replace(body, 0, len - (padding - 2), "..");
+        } else if (pad.trunc == 3) {
+            body = utf8_replace(body, padding / 2 - 1, len - (padding - 2), "..");
+        }
+        return body;
+    }
+    int fill = padding - len;
+    bytes padded = [];
+    if (pad.kind == 1) {
+        padded.extend(body);
+        padded.extend(" ".repeat(fill).to_bytes());
+    } else if (pad.kind == 3) {
+        int left = fill / 2;
+        padded.extend(" ".repeat(left).to_bytes());
+        padded.extend(body);
+        padded.extend(" ".repeat(fill - left).to_bytes());
+    } else {
+        padded.extend(" ".repeat(fill).to_bytes());
+        padded.extend(body);
+    }
+    return padded;
+}
+
+// --- dates given on the command line ------------------------------------------------------------------
+
+int unit_seconds(str word) {
+    str w = word;
+    if (w.ends_with("s")) {
+        w = w.substr(0, w.size() - 1);
+    }
+    if (w == "second" || w == "sec") {
+        return 1;
+    }
+    if (w == "minute" || w == "min") {
+        return 60;
+    }
+    if (w == "hour") {
+        return 3600;
+    }
+    if (w == "day") {
+        return 86400;
+    }
+    if (w == "week") {
+        return 7 * 86400;
+    }
+    return 0;
+}
+
+// `YYYY-MM-DD` possibly followed by a time and a zone
+Option<int> parse_iso_date(str text, int at) {
+    str s = text.trim();
+    if (s.size() < 10 || s.byte_at(4) != '-' || s.byte_at(7) != '-') {
+        return Option<int>.None;
+    }
+    int year = s.substr(0, 4).parse_int().or(-1);
+    int month = s.substr(5, 7).parse_int().or(-1);
+    int day = s.substr(8, 10).parse_int().or(-1);
+    if (year < 0 || month < 1 || month > 12 || day < 1 || day > 31) {
+        return Option<int>.None;
+    }
+    date.Civil now_civil = date.civil(at);
+    int hour = now_civil.hour;
+    int minute = now_civil.minute;
+    int second = now_civil.second;
+    int offset = 0;
+    str rest = s.substr(10, s.size());
+    if (rest.starts_with("T") || rest.starts_with(" ")) {
+        rest = rest.substr(1, rest.size()).trim();
+        if (rest.size() >= 5 && rest.byte_at(2) == ':') {
+            hour = rest.substr(0, 2).parse_int().or(0);
+            minute = rest.substr(3, 5).parse_int().or(0);
+            second = 0;
+            rest = rest.substr(5, rest.size());
+            if (rest.starts_with(":") && rest.size() >= 3) {
+                second = rest.substr(1, 3).parse_int().or(0);
+                rest = rest.substr(3, rest.size());
+            }
+            rest = rest.trim();
+            if (rest.starts_with("+") || rest.starts_with("-")) {
+                int sign = 1;
+                if (rest.starts_with("-")) {
+                    sign = -1;
+                }
+                str digits = rest.substr(1, rest.size()).trim();
+                if (digits.size() >= 4) {
+                    int hh = digits.substr(0, 2).parse_int().or(0);
+                    int mm = digits.substr(2, 4).parse_int().or(0);
+                    offset = sign * (hh * 60 + mm) * 60;
+                }
+            }
+        }
+    }
+    match (date.epoch(year, month, day, hour: hour, minute: minute, second: second)) {
+        case Ok(int t): {
+            return Option<int>.Some(t - offset);
+        }
+        case Err(_): {
+            return Option<int>.None;
+        }
+    }
+}
+
+/// The subset of git's `approxidate` the walk options need.
+Option<int> approx_date(str text, int at) {
+    str s = text.trim();
+    if (s == "") {
+        return Option<int>.None;
+    }
+    str digits = s;
+    if (digits.starts_with("@")) {
+        digits = digits.substr(1, digits.size());
+    }
+    match (digits.parse_int()) {
+        case Some(int n): {
+            if (s.starts_with("@") || digits.size() >= 9) {
+                return Option<int>.Some(n);
+            }
+        }
+        case None: {
+        }
+    }
+    match (parse_iso_date(s, at)) {
+        case Some(int t): {
+            return Option<int>.Some(t);
+        }
+        case None: {
+        }
+    }
+    if (s == "now") {
+        return Option<int>.Some(at);
+    }
+    if (s == "yesterday") {
+        return Option<int>.Some(at - 86400);
+    }
+    if (s == "today" || s == "midnight") {
+        date.Civil c = date.civil(at);
+        return Option<int>.Some(at - c.hour * 3600 - c.minute * 60 - c.second);
+    }
+    // N unit ago [, N unit ago ...]
+    List<str> words = str_replace_commas(s).split(" ");
+    List<str> clean = [];
+    for (str w in words) {
+        if (w != "") {
+            clean.push(w);
+        }
+    }
+    if (clean.size() >= 3 && clean[clean.size() - 1] == "ago") {
+        int t = at;
+        int i = 0;
+        while (i + 1 < clean.size() - 0) {
+            match (clean[i].parse_int()) {
+                case Some(int amount): {
+                    str unit = clean[i + 1];
+                    int sec = unit_seconds(unit);
+                    if (sec > 0) {
+                        t = t - amount * sec;
+                    } else {
+                        str u = unit;
+                        if (u.ends_with("s")) {
+                            u = u.substr(0, u.size() - 1);
+                        }
+                        if (u == "month" || u == "year") {
+                            date.Civil c = date.civil(t);
+                            int months = amount;
+                            if (u == "year") {
+                                months = amount * 12;
+                            }
+                            int total = c.year * 12 + (c.month - 1) - months;
+                            int ny = total / 12;
+                            int nm = total % 12 + 1;
+                            int nd = c.day;
+                            match (date.epoch(ny, nm, nd, hour: c.hour, minute: c.minute, second: c.second)) {
+                                case Ok(int moved): {
+                                    t = moved;
+                                }
+                                case Err(_): {
+                                    t = t - months * 30 * 86400;
+                                }
+                            }
+                        } else {
+                            return Option<int>.None;
+                        }
+                    }
+                    i = i + 2;
+                }
+                case None: {
+                    i = i + 1;
+                }
+            }
+        }
+        return Option<int>.Some(t);
+    }
+    return Option<int>.None;
+}
+
+str str_replace_commas(str s) {
+    return s.split(",").join(" ");
+}
+
+// --- filters ---------------------------------------------------------------------------------------
+
+// A BRE pattern as the engine's regex syntax: `\(` `\)` `\{` `\}` `\|` `\+`
+// `\?` are the operators and the bare characters are literal.
+str bre_to_pattern(str pattern) {
+    str out = "";
+    List<int> chars = pattern.chars();
+    int i = 0;
+    while (i < chars.size()) {
+        int c = chars[i];
+        if (c == '\\' && i + 1 < chars.size()) {
+            int d = chars[i + 1];
+            if (d == '(' || d == ')' || d == '{' || d == '}' || d == '|' || d == '+' || d == '?') {
+                out = out + str.from_chars([d]);
+            } else {
+                out = out + "\\" + str.from_chars([d]);
+            }
+            i = i + 2;
+            continue;
+        }
+        if (c == '(' || c == ')' || c == '{' || c == '}' || c == '|' || c == '+' || c == '?') {
+            out = out + "\\" + str.from_chars([c]);
+        } else {
+            out = out + str.from_chars([c]);
+        }
+        i = i + 1;
+    }
+    return out;
+}
+
+str fixed_to_pattern(str pattern) {
+    str out = "";
+    for (int c in pattern.chars()) {
+        if (c == '.' || c == '*' || c == '+' || c == '?' || c == '(' || c == ')' || c == '[' || c == ']' || c == '{' || c == '}' || c == '|' || c == '^' || c == '$' || c == '\\') {
+            out = out + "\\";
+        }
+        out = out + str.from_chars([c]);
+    }
+    return out;
+}
+
+// lower-case the pattern's literal text, leaving escapes (`\W`) alone
+str lower_pattern(str pattern) {
+    str out = "";
+    List<int> chars = pattern.chars();
+    int i = 0;
+    while (i < chars.size()) {
+        int c = chars[i];
+        if (c == '\\' && i + 1 < chars.size()) {
+            out = out + "\\" + str.from_chars([chars[i + 1]]);
+            i = i + 2;
+            continue;
+        }
+        if (c >= 'A' && c <= 'Z') {
+            c = c + 32;
+        }
+        out = out + str.from_chars([c]);
+        i = i + 1;
+    }
+    return out;
+}
+
+type Matcher {
+    List<regex.Regex> regexes = [];
+    bool is_icase = false;
+}
+
+bool Matcher.hits(int index, str line) {
+    str text = line;
+    if (is_icase) {
+        text = line.to_lower();
+    }
+    return regexes[index].is_match(text);
+}
+
+// does any pattern (or, with `all`, every pattern) match some line
+bool Matcher.matches_lines(List<str> lines, bool is_all) {
+    if (regexes.size() == 0) {
+        return true;
+    }
+    for (int r in 0 .. regexes.size()) {
+        bool is_found = false;
+        for (str line in lines) {
+            if (hits(r, line)) {
+                is_found = true;
+                break;
+            }
+        }
+        if (is_all && !is_found) {
+            return false;
+        }
+        if (!is_all && is_found) {
+            return true;
+        }
+    }
+    return is_all;
+}
+
+Option<Matcher> make_matcher(List<str> patterns, int kind, bool is_icase) {
+    Matcher matcher = Matcher();
+    matcher.is_icase = is_icase;
+    for (str pattern in patterns) {
+        str source = pattern;
+        if (kind == 0) {
+            source = bre_to_pattern(pattern);
+        } else if (kind == 2) {
+            source = fixed_to_pattern(pattern);
+        }
+        if (is_icase) {
+            source = lower_pattern(source);
+        }
+        match (regex.compile(source)) {
+            case Ok(regex.Regex compiled): {
+                matcher.regexes.push(compiled);
+            }
+            case Err(_): {
+                io.eprint("fatal: command line, '" + pattern + "': Invalid regular expression");
+                return Option<Matcher>.None;
+            }
+        }
+    }
+    return Option<Matcher>.Some(matcher);
+}
+
+List<str> text_lines(bytes data) {
+    List<str> out = [];
+    for (bytes line in message_lines(data)) {
+        match (line.utf8()) {
+            case Some(str text): {
+                out.push(text);
+            }
+            case None: {
+            }
+        }
+    }
+    return out;
+}
+
+// occurrences of `needle` in `data`, not overlapping
+int count_of(bytes data, bytes needle) {
+    if (needle.size() == 0) {
+        return 0;
+    }
+    int count = 0;
+    int i = 0;
+    int n = data.size();
+    int m = needle.size();
+    while (i + m <= n) {
+        bool is_here = true;
+        for (int k in 0 .. m) {
+            if (data[i + k] != needle[k]) {
+                is_here = false;
+                break;
+            }
+        }
+        if (is_here) {
+            count = count + 1;
+            i = i + m;
+        } else {
+            i = i + 1;
+        }
+    }
+    return count;
+}
+
+// --- selecting what is shown -----------------------------------------------------------------------
+
+// --- the output ------------------------------------------------------------------------------------
+
+type Emitter {
+    GIT_gitcommon.Out out;
+    LOpts opts;
+    Ctxf f;
+    GIT_gitgraph.Graph graph;
+    GIT_gitdiff.DOpts dopts;
+    bool has_graph = false;
+    bool is_shown_one = false;
+    bool is_missing_newline = false;
+    bool is_use_terminator = false;
+    bool is_empty_format = false;
+    // the line terminator: '\n', or NUL with -z
+    str term = "\n";
+}
+
+// graph_show_commit
+void Emitter.graph_show_commit() {
+    if (!has_graph) {
+        return;
+    }
+    bool is_shown = false;
+    if (graph.is_commit_finished()) {
+        out.text(graph.padding_line());
+        is_shown = true;
+    }
+    while (!is_shown && !graph.is_commit_finished()) {
+        str line = graph.next_line();
+        out.text(line);
+        if (graph.is_commit_line) {
+            is_shown = true;
+        } else {
+            out.text("\n");
+        }
+    }
+}
+
+// graph_show_oneline
+void Emitter.graph_show_oneline() {
+    if (!has_graph) {
+        return;
+    }
+    out.text(graph.next_line());
+}
+
+// graph_show_padding
+void Emitter.graph_show_padding() {
+    if (!has_graph) {
+        return;
+    }
+    out.text(graph.padding_line());
+}
+
+// graph_show_remainder
+void Emitter.graph_show_remainder() {
+    if (!has_graph || graph.is_commit_finished()) {
+        return;
+    }
+    bool is_done = false;
+    while (!is_done) {
+        out.text(graph.next_line());
+        if (graph.is_commit_finished()) {
+            is_done = true;
+        } else {
+            out.text("\n");
+        }
+    }
+}
+
+// graph_show_strbuf: the text with a graph row after every line that is
+// followed by more text
+void Emitter.show_strbuf(bytes text) {
+    if (!has_graph) {
+        out.put(text);
+        return;
+    }
+    int position = 0;
+    int length = text.size();
+    while (position < length) {
+        int end = position;
+        while (end < length && text[end] != '\n') {
+            end = end + 1;
+        }
+        int next = end;
+        if (end < length) {
+            next = end + 1;
+        }
+        out.put(text.substr(position, next));
+        if (next < length) {
+            graph_show_oneline();
+        }
+        position = next;
+    }
+}
+
+// graph_show_commit_msg
+void Emitter.show_commit_msg(bytes text) {
+    show_strbuf(text);
+    if (!has_graph) {
+        return;
+    }
+    bool is_terminated = text.size() > 0 && text[text.size() - 1] == '\n';
+    if (!graph.is_commit_finished()) {
+        if (!is_terminated) {
+            out.text("\n");
+        }
+        graph_show_remainder();
+        if (is_terminated) {
+            out.text("\n");
+        }
+    }
+}
+
+/// `show_log`: the separator, the commit line, and the formatted message.
+void Emitter.show_log(str id, GIT_object.Commit commit, List<str> parents) {
+    bool is_user = opts.format == "user";
+    bool is_oneline = opts.format == "oneline";
+    if (is_shown_one && !is_use_terminator) {
+        if (term == "\n" && !is_missing_newline) {
+            graph_show_padding();
+        }
+        out.text(term);
+    }
+    is_shown_one = true;
+    graph_show_commit();
+    if (!is_user) {
+        str hash = id;
+        if (opts.is_abbrev_commit || is_oneline) {
+            hash = f.abbrev_id(id);
+        }
+        str label = hash;
+        if (!is_oneline) {
+            label = "commit " + hash;
+        }
+        if (f.is_color) {
+            out.text(f.pal.commit + label + f.pal.reset);
+        } else {
+            out.text(label);
+        }
+        bool is_decorate = opts.decorate == "short" || opts.decorate == "full";
+        if (is_decorate) {
+            out.text(decoration_text(f.decos, id, f.pal, f.is_color, true));
+        }
+        if (is_oneline) {
+            out.text(" ");
+        } else {
+            out.text("\n");
+            graph_show_oneline();
+        }
+    }
+    bytes msg = [];
+    if (is_user) {
+        match (f.expand(id, commit, parents, opts.user_format)) {
+            case Ok(bytes text): {
+                msg = text;
+            }
+            case Err(str message): {
+                out.flush();
+                io.eprint("fatal: " + message);
+                os.exit(128);
+            }
+        }
+    } else {
+        msg = f.builtin(id, commit, parents);
+    }
+    is_missing_newline = msg.size() == 0 || msg[msg.size() - 1] != '\n';
+    show_commit_msg(msg);
+    if (is_use_terminator && !is_empty_format) {
+        if (!is_missing_newline) {
+            graph_show_padding();
+        }
+        out.text(term);
+    }
+}
+
+// the diff output with the graph's padding row before each line
+void Emitter.diff_put(bytes data) {
+    if (!has_graph) {
+        out.put(data);
+        return;
+    }
+    int position = 0;
+    int length = data.size();
+    while (position < length) {
+        int end = position;
+        while (end < length && data[end] != '\n') {
+            end = end + 1;
+        }
+        int next = end;
+        if (end < length) {
+            next = end + 1;
+        }
+        out.text(graph.padding_line());
+        out.put(data.substr(position, next));
+        position = next;
+    }
+}
+
+/// `log_tree_diff_flush` after the log header: returns false (and prints
+/// nothing) when there is no diff to show.
+bool Emitter.diff_flush(str id, GIT_object.Commit commit, List<str> parents, List<GIT_gitdiff.Item> items) {
+    if (items.size() == 0) {
+        return false;
+    }
+    show_log(id, commit, parents);
+    bool is_oneline = opts.format == "oneline";
+    if (DOpts_any(dopts) && !is_oneline && !is_empty_format) {
+        str dashes = "";
+        if (dopts.is_stat && dopts.is_patch) {
+            dashes = "---";
+        }
+        if (has_graph) {
+            out.text(graph.padding_line());
+        }
+        out.text(dashes + "\n");
+    }
+    if (has_graph) {
+        // the stat width loses the graph's prefix when it follows the terminal
+        dopts.prefix_len = graph.padding_line().size();
+    }
+    bytes diff_bytes = GIT_gitdiff.render(f.gitdir, items, dopts);
+    diff_put(diff_bytes);
+    return true;
+}
+
+bool DOpts_any(GIT_gitdiff.DOpts d) {
+    return d.is_patch || d.is_stat || d.is_numstat || d.is_shortstat || d.is_name_only || d.is_name_status || d.is_raw || d.is_summary;
+}
+
+// --- the command lines ---------------------------------------------------------------------------------
+
+// `get_commit_format`; false for a name git would refuse
+bool apply_pretty(LOpts opts, str value) {
+    str v = value;
+    opts.is_terminator = false;
+    if (v.starts_with("format:")) {
+        opts.format = "user";
+        opts.user_format = v.substr(7, v.size());
+        return true;
+    }
+    if (v == "" || v.starts_with("tformat:") || v.contains("%")) {
+        opts.format = "user";
+        opts.is_terminator = true;
+        if (v.starts_with("tformat:")) {
+            opts.user_format = v.substr(8, v.size());
+        } else {
+            opts.user_format = v;
+        }
+        return true;
+    }
+    // a name, or an unambiguous start of one: the shortest match wins
+    List<str> names = ["raw", "medium", "short", "email", "mboxrd", "fuller", "full", "oneline", "reference"];
+    str found = "";
+    for (str name in names) {
+        if (name.starts_with(v.to_lower())) {
+            if (found == "" || name.size() < found.size()) {
+                found = name;
+            }
+        }
+    }
+    if (found == "" || found == "email" || found == "mboxrd") {
+        return false;
+    }
+    if (found == "oneline") {
+        opts.format = "oneline";
+        opts.is_terminator = true;
+        return true;
+    }
+    if (found == "reference") {
+        opts.format = "user";
+        opts.user_format = "%C(auto)%h (%s, %ad)";
+        opts.is_terminator = true;
+        opts.date_style = "short";
+        return true;
+    }
+    opts.format = found;
+    return true;
+}
+
+str join_prefix(str prefix, str word) {
+    if (prefix == "") {
+        return word;
+    }
+    return prefix + "/" + word;
+}
+
+bool is_commit(str gitdir, str id) {
+    match (GIT_object.read(gitdir, id)) {
+        case Ok(GIT_object.Object object): {
+            match (object.body) {
+                case Commit(_): {
+                    return true;
+                }
+                case Blob: {
+                    return false;
+                }
+                case Tree: {
+                    return false;
+                }
+                case Tag: {
+                    return false;
+                }
+            }
+        }
+        case Err(_): {
+            return false;
+        }
+    }
+}
+
+str current_branch(str gitdir) {
+    match (GIT_refs.head(gitdir)) {
+        case Ok(GIT_refs.Head head): {
+            match (head) {
+                case Unborn(str name): {
+                    if (name.starts_with("refs/heads/")) {
+                        return name.substr(11, name.size());
+                    }
+                    return name;
+                }
+                case Born(_, _): {
+                    return "HEAD";
+                }
+                case Detached(_): {
+                    return "HEAD";
+                }
+            }
+        }
+        case Err(_): {
+            return "HEAD";
+        }
+    }
+}
+
+bool is_revision_word(str gitdir, str word) {
+    match (GIT_gitdiffcmd.split_range(word)) {
+        case Some(_): {
+            return true;
+        }
+        case None: {
+        }
+    }
+    str bare = word;
+    if (bare.starts_with("^")) {
+        bare = bare.substr(1, bare.size());
+    }
+    match (GIT_revparse.object_id(gitdir, bare)) {
+        case Ok(_): {
+            return true;
+        }
+        case Err(_): {
+            return false;
+        }
+    }
+}
+
+// one revision on the command line
+type Pending {
+    str id;
+    bool is_negated;
+}
+
+/// The commits a revision word names, in git's order: `A..B` is ^A then B,
+/// `A...B` is A, B then the merge bases excluded.
+Result<List<Pending>, str> expand_word(str gitdir, str word, bool is_neg) {
+    List<Pending> out = [];
+    str spec = word;
+    bool negate = is_neg;
+    if (spec.starts_with("^")) {
+        negate = !negate;
+        spec = spec.substr(1, spec.size());
+    }
+    match (GIT_revparse.rev_range(gitdir, spec)) {
+        case Ok(GIT_revparse.Revs revs): {
+            bool is_symmetric = spec.contains("...");
+            if (is_symmetric) {
+                for (str id in revs.include) {
+                    out.push(Pending(id, negate));
+                }
+                for (str id in revs.exclude) {
+                    out.push(Pending(id, !negate));
+                }
+            } else {
+                for (str id in revs.exclude) {
+                    out.push(Pending(id, !negate));
+                }
+                for (str id in revs.include) {
+                    out.push(Pending(id, negate));
+                }
+            }
+            return Result<List<Pending>, str>.Ok(out);
+        }
+        case Err(GIT_revparse.Error error): {
+            return Result<List<Pending>, str>.Err(error.to_str());
+        }
+    }
+}
+
+Emitter make_emitter(GIT_gitcommon.Ctx ctx, LOpts opts, GIT_gitdiff.DOpts dopts, GIT_gitcommon.Out out, bool is_color, List<str> decorate_exclude) {
+    Ctxf f = Ctxf(ctx.gitdir, opts, Decorations());
+    f.pal = make_palette(ctx, is_color);
+    f.is_color = is_color;
+    f.abbrev = opts.abbrev;
+    // decorations are loaded when asked for or when the format wants them
+    bool is_style = opts.decorate == "short" || opts.decorate == "full";
+    if (opts.decorate == "" && GIT_gitcommon.is_tty()) {
+        is_style = true;
+        opts.decorate = "short";
+    }
+    bool is_format_wants = opts.format == "user" && (opts.user_format.contains("%d") || opts.user_format.contains("%D") || opts.user_format.contains("% d") || opts.user_format.contains("%+d") || opts.user_format.contains("%-d") || opts.user_format.contains("% D") || opts.user_format.contains("%+D") || opts.user_format.contains("%-D"));
+    if (opts.format == "user") {
+        // a user format shows decorations only through %d and %D
+        opts.decorate = "no";
+        if (is_format_wants) {
+            f.decos = load_decorations(ctx.gitdir, false, decorate_exclude);
+        }
+    } else if (is_style) {
+        f.decos = load_decorations(ctx.gitdir, opts.decorate == "full", decorate_exclude);
+    }
+    Emitter emitter = Emitter(out, opts, f, GIT_gitgraph.open(is_color), dopts);
+    emitter.has_graph = opts.is_graph;
+    emitter.is_use_terminator = opts.format == "oneline" || (opts.format == "user" && opts.is_terminator);
+    emitter.is_empty_format = opts.format == "user" && opts.user_format == "";
+    if (dopts.is_nul) {
+        emitter.term = "\x00";
+    }
+    return emitter;
+}
+
+/// `git log` (is_show false) and `git show` (true).
+pub int run(str start, List<str> overrides, List<str> argv, bool is_show) {
+    GIT_gitcommon.Opened opened = GIT_gitcommon.open(start, overrides);
+    if (!opened.ok) {
+        return 128;
+    }
+    GIT_gitcommon.Ctx ctx = opened.ctx;
+    LOpts opts = LOpts();
+    GIT_gitdiff.DOpts dopts = GIT_gitdiff.DOpts();
+    GIT_gitdiffcmd.config_defaults(ctx, dopts);
+    GIT_gitdiffcmd.Settings settings = GIT_gitdiffcmd.Settings();
+    List<str> decorate_exclude = [];
+    // configuration
+    match (GIT_gitcommon.cfg(ctx, "log", "", "date")) {
+        case Some(str value): {
+            opts.date_style = value;
+        }
+        case None: {
+        }
+    }
+    match (GIT_gitcommon.cfg(ctx, "log", "", "decorate")) {
+        case Some(str value): {
+            str lower = value.to_lower();
+            if (lower == "short" || lower == "full" || lower == "no") {
+                opts.decorate = lower;
+            } else if (lower == "auto") {
+                opts.decorate = "";
+            } else if (GIT_gitstatus.bool_value(value, false)) {
+                opts.decorate = "short";
+            } else {
+                opts.decorate = "no";
+            }
+        }
+        case None: {
+        }
+    }
+    match (GIT_gitcommon.cfg(ctx, "format", "", "pretty")) {
+        case Some(str value): {
+            if (!apply_pretty(opts, value)) {
+                io.eprint("fatal: invalid --pretty format: " + value);
+                return 128;
+            }
+        }
+        case None: {
+        }
+    }
+    if (GIT_gitcommon.cfg_bool(ctx, "log", "", "abbrevcommit", false)) {
+        opts.is_abbrev_commit = true;
+    }
+    opts.abbrev = GIT_gitcommon.cfg_int(ctx, "core", "", "abbrev", 7);
+    if (opts.abbrev < 4) {
+        opts.abbrev = 7;
+    }
+    bool is_after_dashes = false;
+    bool is_negated = false;
+    List<str> words = [];
+    List<bool> word_neg = [];
+    int i = 0;
+    while (i < argv.size()) {
+        str arg = argv[i];
+        if (is_after_dashes) {
+            opts.paths.push(arg);
+            i = i + 1;
+            continue;
+        }
+        if (arg == "--") {
+            is_after_dashes = true;
+            opts.has_dashes = true;
+            i = i + 1;
+            continue;
+        }
+        if (!arg.starts_with("-") || arg == "-") {
+            words.push(arg);
+            word_neg.push(is_negated);
+            i = i + 1;
+            continue;
+        }
+        if (arg == "--not") {
+            is_negated = !is_negated;
+            i = i + 1;
+            continue;
+        }
+        // -<N>
+        if (arg.size() > 1 && arg.substr(1, arg.size()).parse_int().is_some()) {
+            opts.max_count = arg.substr(1, arg.size()).parse_int().or(-1);
+            i = i + 1;
+            continue;
+        }
+        if (arg == "-n" && i + 1 < argv.size()) {
+            opts.max_count = argv[i + 1].parse_int().or(-1);
+            i = i + 2;
+            continue;
+        }
+        if (arg.starts_with("-n") && arg.size() > 2 && arg.substr(2, arg.size()).parse_int().is_some()) {
+            opts.max_count = arg.substr(2, arg.size()).parse_int().or(-1);
+            i = i + 1;
+            continue;
+        }
+        if (arg.starts_with("--max-count=")) {
+            opts.max_count = arg.substr(12, arg.size()).parse_int().or(-1);
+            i = i + 1;
+            continue;
+        }
+        if (arg.starts_with("--skip=")) {
+            opts.skip = arg.substr(7, arg.size()).parse_int().or(0);
+            i = i + 1;
+            continue;
+        }
+        if (arg == "--oneline") {
+            opts.format = "oneline";
+            opts.is_terminator = true;
+            opts.is_abbrev_commit = true;
+            i = i + 1;
+            continue;
+        }
+        if (arg == "--pretty" || arg == "--format") {
+            apply_pretty(opts, "medium");
+            i = i + 1;
+            continue;
+        }
+        if (arg.starts_with("--pretty=")) {
+            if (!apply_pretty(opts, arg.substr(9, arg.size()))) {
+                io.eprint("fatal: invalid --pretty format: " + arg.substr(9, arg.size()));
+                return 128;
+            }
+            i = i + 1;
+            continue;
+        }
+        if (arg.starts_with("--format=")) {
+            str value = arg.substr(9, arg.size());
+            if (value.starts_with("format:") || value.starts_with("tformat:")) {
+                apply_pretty(opts, value);
+            } else {
+                opts.format = "user";
+                opts.user_format = value;
+                opts.is_terminator = true;
+            }
+            i = i + 1;
+            continue;
+        }
+        if (arg == "--abbrev-commit") {
+            opts.is_abbrev_commit = true;
+            i = i + 1;
+            continue;
+        }
+        if (arg == "--no-abbrev-commit") {
+            opts.is_abbrev_commit = false;
+            i = i + 1;
+            continue;
+        }
+        if (arg == "--abbrev") {
+            i = i + 1;
+            continue;
+        }
+        if (arg.starts_with("--abbrev=")) {
+            opts.abbrev = arg.substr(9, arg.size()).parse_int().or(7);
+            if (opts.abbrev < 4) {
+                opts.abbrev = 4;
+            }
+            dopts.abbrev = opts.abbrev;
+            i = i + 1;
+            continue;
+        }
+        if (arg == "--no-abbrev") {
+            opts.abbrev = 40;
+            dopts.abbrev = 40;
+            i = i + 1;
+            continue;
+        }
+        if (arg == "--graph") {
+            opts.is_graph = true;
+            opts.is_topo = true;
+            i = i + 1;
+            continue;
+        }
+        if (arg == "--decorate") {
+            opts.decorate = "short";
+            i = i + 1;
+            continue;
+        }
+        if (arg.starts_with("--decorate=")) {
+            str value = arg.substr(11, arg.size());
+            if (value == "short" || value == "full" || value == "no") {
+                opts.decorate = value;
+            } else if (value == "auto") {
+                opts.decorate = "";
+            } else {
+                io.eprint("fatal: invalid --decorate option: " + value);
+                return 128;
+            }
+            i = i + 1;
+            continue;
+        }
+        if (arg == "--no-decorate") {
+            opts.decorate = "no";
+            i = i + 1;
+            continue;
+        }
+        if (arg.starts_with("--decorate-refs-exclude=")) {
+            decorate_exclude.push(arg.substr(24, arg.size()));
+            i = i + 1;
+            continue;
+        }
+        if (arg.starts_with("--date=")) {
+            str value = arg.substr(7, arg.size());
+            if (!GIT_gitcommon.is_date_style(value) && value != "local" && value != "default-local" && value != "auto:default") {
+                io.eprint("fatal: unknown date format " + value);
+                return 128;
+            }
+            opts.date_style = value;
+            if (value == "local" || value == "default-local" || value == "auto:default") {
+                opts.date_style = "default";
+            }
+            i = i + 1;
+            continue;
+        }
+        if (arg.starts_with("--since=") || arg.starts_with("--after=") || arg == "--since" || arg == "--after") {
+            str value = "";
+            if (arg.contains("=")) {
+                value = arg.substr(arg.index_of("=").or(0) + 1, arg.size());
+                i = i + 1;
+            } else if (i + 1 < argv.size()) {
+                value = argv[i + 1];
+                i = i + 2;
+            }
+            match (approx_date(value, GIT_gitcommon.now())) {
+                case Some(int t): {
+                    opts.has_since = true;
+                    opts.since = t;
+                }
+                case None: {
+                    io.eprint("fatal: invalid date format: " + value);
+                    return 128;
+                }
+            }
+            continue;
+        }
+        if (arg.starts_with("--until=") || arg.starts_with("--before=") || arg == "--until" || arg == "--before") {
+            str value = "";
+            if (arg.contains("=")) {
+                value = arg.substr(arg.index_of("=").or(0) + 1, arg.size());
+                i = i + 1;
+            } else if (i + 1 < argv.size()) {
+                value = argv[i + 1];
+                i = i + 2;
+            }
+            match (approx_date(value, GIT_gitcommon.now())) {
+                case Some(int t): {
+                    opts.has_until = true;
+                    opts.until = t;
+                }
+                case None: {
+                    io.eprint("fatal: invalid date format: " + value);
+                    return 128;
+                }
+            }
+            continue;
+        }
+        if (arg.starts_with("--author=")) {
+            opts.authors.push(arg.substr(9, arg.size()));
+            i = i + 1;
+            continue;
+        }
+        if (arg == "--author" && i + 1 < argv.size()) {
+            opts.authors.push(argv[i + 1]);
+            i = i + 2;
+            continue;
+        }
+        if (arg.starts_with("--committer=")) {
+            opts.committers.push(arg.substr(12, arg.size()));
+            i = i + 1;
+            continue;
+        }
+        if (arg.starts_with("--grep=")) {
+            opts.greps.push(arg.substr(7, arg.size()));
+            i = i + 1;
+            continue;
+        }
+        if (arg == "--grep" && i + 1 < argv.size()) {
+            opts.greps.push(argv[i + 1]);
+            i = i + 2;
+            continue;
+        }
+        if (arg == "-i" || arg == "--regexp-ignore-case") {
+            opts.is_icase = true;
+            i = i + 1;
+            continue;
+        }
+        if (arg == "--invert-grep") {
+            opts.is_invert = true;
+            i = i + 1;
+            continue;
+        }
+        if (arg == "-E" || arg == "--extended-regexp") {
+            opts.regex_kind = 1;
+            i = i + 1;
+            continue;
+        }
+        if (arg == "-F" || arg == "--fixed-strings") {
+            opts.regex_kind = 2;
+            i = i + 1;
+            continue;
+        }
+        if (arg == "--basic-regexp") {
+            opts.regex_kind = 0;
+            i = i + 1;
+            continue;
+        }
+        if (arg == "--all-match") {
+            opts.is_all_match = true;
+            i = i + 1;
+            continue;
+        }
+        if (arg.starts_with("-S") && arg.size() > 2) {
+            opts.pickaxe = arg.substr(2, arg.size());
+            i = i + 1;
+            continue;
+        }
+        if (arg == "-S" && i + 1 < argv.size()) {
+            opts.pickaxe = argv[i + 1];
+            i = i + 2;
+            continue;
+        }
+        if (arg == "--all") {
+            opts.is_all = true;
+            i = i + 1;
+            continue;
+        }
+        if (arg == "--branches") {
+            opts.is_branches = true;
+            i = i + 1;
+            continue;
+        }
+        if (arg == "--tags") {
+            opts.is_tags = true;
+            i = i + 1;
+            continue;
+        }
+        if (arg == "--remotes") {
+            opts.is_remotes = true;
+            i = i + 1;
+            continue;
+        }
+        if (arg == "--first-parent") {
+            opts.is_first_parent = true;
+            i = i + 1;
+            continue;
+        }
+        if (arg == "--no-merges") {
+            opts.max_parents = 1;
+            i = i + 1;
+            continue;
+        }
+        if (arg == "--merges") {
+            opts.min_parents = 2;
+            i = i + 1;
+            continue;
+        }
+        if (arg.starts_with("--min-parents=")) {
+            opts.min_parents = arg.substr(14, arg.size()).parse_int().or(0);
+            i = i + 1;
+            continue;
+        }
+        if (arg.starts_with("--max-parents=")) {
+            opts.max_parents = arg.substr(14, arg.size()).parse_int().or(-1);
+            i = i + 1;
+            continue;
+        }
+        if (arg == "--reverse") {
+            opts.is_reverse = true;
+            i = i + 1;
+            continue;
+        }
+        if (arg == "--topo-order" || arg == "--date-order" || arg == "--author-date-order") {
+            opts.is_topo = true;
+            i = i + 1;
+            continue;
+        }
+        if (arg == "--no-walk" || arg == "--no-walk=sorted" || arg == "--no-walk=unsorted") {
+            opts.is_no_walk = true;
+            i = i + 1;
+            continue;
+        }
+        if (arg == "--follow") {
+            opts.is_follow = true;
+            i = i + 1;
+            continue;
+        }
+        if (arg == "--root" || arg == "--no-color-moved" || arg == "--no-show-signature" || arg == "--default" || arg == "--full-history" || arg == "--dense" || arg == "--no-notes" || arg == "--no-mailmap" || arg == "--no-use-mailmap") {
+            i = i + 1;
+            continue;
+        }
+        int used = GIT_gitdiffcmd.parse_diff_option(dopts, argv, i, settings);
+        if (used < 0) {
+            return 129;
+        }
+        if (used > 0) {
+            i = i + used;
+            continue;
+        }
+        if (arg == "-m" || arg == "-c" || arg == "--cc" || arg == "--dd" || arg.starts_with("--diff-merges")) {
+            io.eprint("error: unsupported option: " + arg + " (merge diffs are not implemented)");
+            return 129;
+        }
+        if (arg == "--quiet" || arg == "-q") {
+            settings.is_silent = true;
+            i = i + 1;
+            continue;
+        }
+        io.eprint("fatal: unrecognized argument: " + arg);
+        return 128;
+    }
+    str gitdir = ctx.gitdir;
+    if (opts.is_graph && opts.is_reverse) {
+        io.eprint("fatal: options '--reverse' and '--graph' cannot be used together");
+        return 128;
+    }
+    // revisions and paths: without `--`, the first word that is not a
+    // revision must be a path, and the rest are paths
+    List<str> rev_words = [];
+    List<bool> rev_neg = [];
+    bool is_in_paths = false;
+    for (int w in 0 .. words.size()) {
+        str word = words[w];
+        if (is_in_paths) {
+            opts.paths.push(word);
+            continue;
+        }
+        if (opts.has_dashes || is_revision_word(gitdir, word)) {
+            rev_words.push(word);
+            rev_neg.push(word_neg[w]);
+            continue;
+        }
+        str full = fs.join(ctx.root, GIT_gitstatus.normalize(join_prefix(ctx.prefix, word)));
+        if (fs.is_present(full) || fs.is_link(full) || GIT_gitdiffcmd.is_known_path(ctx, GIT_gitstatus.normalize(join_prefix(ctx.prefix, word)))) {
+            is_in_paths = true;
+            opts.paths.push(word);
+            continue;
+        }
+        io.eprint("fatal: ambiguous argument '" + word + "': unknown revision or path not in the working tree.");
+        io.eprint("Use '--' to separate paths from revisions, like this:");
+        io.eprint("'git <command> [<revision>...] -- [<file>...]'");
+        return 128;
+    }
+    if (settings.is_silent) {
+        dopts.is_patch = false;
+        dopts.is_stat = false;
+        dopts.is_numstat = false;
+        dopts.is_shortstat = false;
+        dopts.is_name_only = false;
+        dopts.is_name_status = false;
+        dopts.is_raw = false;
+        dopts.is_summary = false;
+        settings.is_format_given = true;
+    }
+    dopts = GIT_gitdiffcmd.finish_options(ctx, dopts, settings, is_show);
+    bool is_color = dopts.is_color;
+    // log's --stat is 80 columns wide, show's follows the terminal
+    if (is_show && dopts.stat_width == 0) {
+        dopts.stat_width = -1;
+    }
+    GIT_gitcommon.Out out = GIT_gitcommon.Out();
+    List<GIT_gitcommon.Spec> specs = GIT_gitcommon.parse_specs(opts.paths, ctx.prefix);
+    if (is_show) {
+        if (rev_words.size() == 0) {
+            rev_words.push("HEAD");
+            rev_neg.push(false);
+        }
+        return show_objects(ctx, opts, dopts, rev_words, rev_neg, specs, is_color, out, decorate_exclude);
+    }
+    // the tips, in command-line order
+    List<Pending> pending = [];
+    for (int w in 0 .. rev_words.size()) {
+        match (expand_word(gitdir, rev_words[w], rev_neg[w])) {
+            case Ok(List<Pending> found): {
+                for (Pending one in found) {
+                    pending.push(one);
+                }
+            }
+            case Err(str message): {
+                io.eprint("fatal: ambiguous argument '" + rev_words[w] + "': unknown revision or path not in the working tree.");
+                io.eprint("Use '--' to separate paths from revisions, like this:");
+                io.eprint("'git <command> [<revision>...] -- [<file>...]'");
+                return 128;
+            }
+        }
+    }
+    bool is_pseudo = opts.is_all || opts.is_branches || opts.is_tags || opts.is_remotes;
+    if (is_pseudo) {
+        match (GIT_refs.all(gitdir)) {
+            case Ok(List<GIT_refs.Ref> refs): {
+                for (GIT_refs.Ref ref in refs) {
+                    bool is_take = false;
+                    if (opts.is_all) {
+                        is_take = ref.name.starts_with("refs/");
+                    }
+                    if (opts.is_branches && ref.name.starts_with("refs/heads/")) {
+                        is_take = true;
+                    }
+                    if (opts.is_tags && ref.name.starts_with("refs/tags/")) {
+                        is_take = true;
+                    }
+                    if (opts.is_remotes && ref.name.starts_with("refs/remotes/")) {
+                        is_take = true;
+                    }
+                    if (!is_take) {
+                        continue;
+                    }
+                    str target = peel(gitdir, ref.id);
+                    if (is_commit(gitdir, target)) {
+                        pending.push(Pending(target, false));
+                    }
+                }
+            }
+            case Err(_): {
+            }
+        }
+        if (opts.is_all) {
+            match (GIT_refs.head(gitdir)) {
+                case Ok(GIT_refs.Head head): {
+                    match (head) {
+                        case Detached(str id): {
+                            pending.push(Pending(id, false));
+                        }
+                        case Born(_, str id): {
+                            pending.push(Pending(id, false));
+                        }
+                        case Unborn(_): {
+                        }
+                    }
+                }
+                case Err(_): {
+                }
+            }
+        }
+    }
+    if (pending.size() == 0 && !is_pseudo) {
+        match (GIT_revparse.commit_id(gitdir, "HEAD")) {
+            case Ok(str id): {
+                pending.push(Pending(id, false));
+            }
+            case Err(_): {
+                io.eprint("fatal: your current branch '" + current_branch(gitdir) + "' does not have any commits yet");
+                return 128;
+            }
+        }
+    }
+    if (opts.is_follow && specs.size() != 1) {
+        io.eprint("fatal: --follow requires exactly one pathspec");
+        return 128;
+    }
+    Walk walk = Walk(gitdir, opts, specs);
+    walk.dopts = dopts;
+    walk.is_want_ancestry = opts.is_graph;
+    walk.is_no_walk = opts.is_no_walk;
+    if (opts.is_follow) {
+        walk.follow_path = specs[0].pattern;
+    }
+    if (opts.authors.size() > 0) {
+        walk.author_m = make_matcher(opts.authors, opts.regex_kind, opts.is_icase);
+        if (walk.author_m.is_none()) {
+            return 128;
+        }
+    }
+    if (opts.committers.size() > 0) {
+        walk.committer_m = make_matcher(opts.committers, opts.regex_kind, opts.is_icase);
+        if (walk.committer_m.is_none()) {
+            return 128;
+        }
+    }
+    if (opts.greps.size() > 0) {
+        walk.grep_m = make_matcher(opts.greps, opts.regex_kind, opts.is_icase);
+        if (walk.grep_m.is_none()) {
+            return 128;
+        }
+    }
+    // prepare_revision_walk
+    walk.is_limited = opts.is_topo;
+    for (Pending one in pending) {
+        if (!walk.parse(one.id)) {
+            io.eprint("fatal: bad object " + one.id);
+            return 128;
+        }
+        if (one.is_negated) {
+            walk.set_flag(one.id, F_UNINTERESTING);
+            walk.mark_parents_uninteresting(one.id);
+            walk.is_limited = true;
+        }
+    }
+    for (Pending one in pending) {
+        if (!walk.has(one.id, F_SEEN)) {
+            walk.set_flag(one.id, F_SEEN);
+            walk.list.push(one.id);
+        }
+    }
+    // a stable sort by committer date, newest first
+    List<str> ordered = [];
+    for (str id in walk.list) {
+        int when = walk.date_of(id);
+        int at = 0;
+        while (at < ordered.size() && walk.date_of(ordered[at]) >= when) {
+            at = at + 1;
+        }
+        ordered.insert(at, id);
+    }
+    walk.list = ordered;
+    if (walk.is_limited) {
+        walk.list = walk.limit_list();
+        if (opts.is_topo) {
+            walk.list = walk.topo_sort(walk.list);
+        }
+    }
+    Emitter emitter = make_emitter(ctx, opts, dopts, out, is_color, decorate_exclude);
+    bool is_needs_diff = DOpts_any(dopts) || opts.pickaxe != "" || opts.is_follow;
+    int max_count = opts.max_count;
+    int skip = opts.skip;
+    List<str> collected = [];
+    bool is_done = false;
+    while (!is_done) {
+        // get_revision_internal
+        if (max_count == 0) {
+            break;
+        }
+        str next = "";
+        int pulls = skip + 1;
+        while (pulls > 0) {
+            next = walk.next_commit();
+            if (next == "") {
+                break;
+            }
+            pulls = pulls - 1;
+            if (pulls > 0) {
+                skip = skip - 1;
+            }
+        }
+        if (next == "") {
+            break;
+        }
+        skip = 0;
+        if (max_count > 0) {
+            max_count = max_count - 1;
+        }
+        walk.set_flag(next, F_SHOWN);
+        if (opts.is_reverse) {
+            collected.push(next);
+            continue;
+        }
+        if (emitter.has_graph) {
+            emitter.graph.update(next, walk.graph_parents(next));
+        }
+        bool is_shown = log_tree_commit(walk, emitter, next, is_needs_diff, specs, dopts);
+        if (!is_shown && max_count >= 0) {
+            max_count = max_count + 1;
+        }
+    }
+    if (opts.is_reverse) {
+        collected.reverse();
+        for (str next in collected) {
+            log_tree_commit(walk, emitter, next, is_needs_diff, specs, dopts);
+        }
+    }
+    out.flush();
+    return 0;
+}
+
+/// `log_tree_commit`: print one commit; returns whether anything was shown.
+bool log_tree_commit(Walk walk, Emitter emitter, str id, bool is_needs_diff, List<GIT_gitcommon.Spec> specs, GIT_gitdiff.DOpts dopts) {
+    GIT_object.Commit commit = walk.commit(id);
+    List<str> parents = walk.parents_of(id);
+    bool is_always_show_header = walk.opts.pickaxe == "" && !walk.opts.is_follow;
+    bool is_shown = false;
+    if (is_needs_diff) {
+        List<GIT_gitdiff.Item> items = [];
+        bool is_wanted = true;
+        if (walk.follow_items.contains(id) && walk.opts.is_follow) {
+            items = walk.follow_items.get(id).or([]);
+        } else if (parents.size() > 1 && walk.is_no_walk) {
+            // a merge under `show`: the header, a blank line and, for the stat
+            // formats, the stat against the first parent; combined patches of
+            // paths every parent differs on are not implemented
+            emitter.show_log(id, commit, parents);
+            if (DOpts_any(dopts) && !emitter.is_empty_format) {
+                if (emitter.has_graph) {
+                    emitter.out.text(emitter.graph.padding_line());
+                }
+                emitter.out.text(emitter.term);
+            }
+            GIT_gitdiff.DOpts stat_only = clone(dopts);
+            stat_only.is_patch = false;
+            stat_only.is_name_only = false;
+            stat_only.is_name_status = false;
+            stat_only.is_raw = false;
+            stat_only.is_summary = false;
+            if (stat_only.is_stat || stat_only.is_numstat || stat_only.is_shortstat) {
+                str first_tree = walk.commit(parents[0]).tree;
+                List<GIT_gitdiff.Item> stat_items = GIT_gitdiff.tree_vs_tree(walk.gitdir, first_tree, commit.tree, specs);
+                if (dopts.is_renames) {
+                    stat_items = GIT_gitdiff.detect_renames(walk.gitdir, stat_items, dopts.rename_score);
+                }
+                if (stat_items.size() > 0) {
+                    if (emitter.has_graph) {
+                        stat_only.prefix_len = emitter.graph.padding_line().size();
+                    }
+                    emitter.diff_put(GIT_gitdiff.render(walk.gitdir, stat_items, stat_only));
+                }
+            }
+            return true;
+        } else if (parents.size() > 1) {
+            is_wanted = false;
+        } else {
+            str parent_tree = "";
+            if (parents.size() == 1) {
+                parent_tree = walk.commit(parents[0]).tree;
+            }
+            items = GIT_gitdiff.tree_vs_tree(walk.gitdir, parent_tree, commit.tree, specs);
+            if (dopts.is_renames) {
+                items = GIT_gitdiff.detect_renames(walk.gitdir, items, dopts.rename_score);
+            }
+        }
+        if (is_wanted && walk.opts.pickaxe != "") {
+            List<GIT_gitdiff.Item> kept = [];
+            bytes needle = walk.opts.pickaxe.to_bytes();
+            for (GIT_gitdiff.Item item in items) {
+                bytes before = GIT_gitdiff.content_of(walk.gitdir, item.old);
+                bytes after = GIT_gitdiff.content_of(walk.gitdir, item.new);
+                if (count_of(before, needle) != count_of(after, needle)) {
+                    kept.push(item);
+                }
+            }
+            items = kept;
+        }
+        if (is_wanted) {
+            is_shown = emitter.diff_flush(id, commit, parents, items);
+        }
+    }
+    if (!is_shown && is_always_show_header) {
+        emitter.show_log(id, commit, parents);
+        is_shown = true;
+    }
+    return is_shown;
+}
+
+// --- show -----------------------------------------------------------------------------------------------
+
+/// `git show`: each object in turn, as `cmd_show` does: a blob as it is, a
+/// tag with what it points at, a tree as a listing, a commit as `log` shows
+/// one commit.
+int show_objects(GIT_gitcommon.Ctx ctx, LOpts opts, GIT_gitdiff.DOpts dopts, List<str> words, List<bool> negs, List<GIT_gitcommon.Spec> specs, bool is_color, GIT_gitcommon.Out out, List<str> decorate_exclude) {
+    str gitdir = ctx.gitdir;
+    Emitter emitter = make_emitter(ctx, opts, dopts, out, is_color, decorate_exclude);
+    int status = 0;
+    for (int w in 0 .. words.size()) {
+        str word = words[w];
+        match (GIT_gitdiffcmd.split_range(word)) {
+            case Some(_): {
+                io.eprint("fatal: show of a revision range is not implemented: " + word);
+                out.flush();
+                return 128;
+            }
+            case None: {
+            }
+        }
+        if (word.starts_with("^")) {
+            io.eprint("fatal: show of a negated revision is not implemented: " + word);
+            out.flush();
+            return 128;
+        }
+        str id = "";
+        match (GIT_revparse.object_id(gitdir, word)) {
+            case Ok(str found): {
+                id = found;
+            }
+            case Err(GIT_revparse.Error error): {
+                out.flush();
+                io.eprint("fatal: ambiguous argument '" + word + "': unknown revision or path not in the working tree.");
+                io.eprint("Use '--' to separate paths from revisions, like this:");
+                io.eprint("'git <command> [<revision>...] -- [<file>...]'");
+                return 128;
+            }
+        }
+        str label = word;
+        bool is_going = true;
+        int guard = 0;
+        while (is_going && guard < 50) {
+            guard = guard + 1;
+            is_going = false;
+            match (GIT_object.read(gitdir, id)) {
+                case Err(GIT_object.Error error): {
+                    out.flush();
+                    io.eprint("error: could not read object " + id);
+                    return 1;
+                }
+                case Ok(GIT_object.Object object): {
+                    match (object.body) {
+                        case Blob: {
+                            out.put(object.raw);
+                        }
+                        case Tree(List<GIT_object.Entry> entries): {
+                            if (emitter.is_shown_one) {
+                                out.text("\n");
+                            }
+                            if (is_color) {
+                                out.text(emitter.f.pal.commit + "tree " + label + emitter.f.pal.reset + "\n\n");
+                            } else {
+                                out.text("tree " + label + "\n\n");
+                            }
+                            for (GIT_object.Entry entry in entries) {
+                                bytes line = [];
+                                line.extend(entry.name);
+                                if (entry.is_tree()) {
+                                    line.push('/');
+                                }
+                                line.push('\n');
+                                out.put(line);
+                            }
+                            emitter.is_shown_one = true;
+                        }
+                        case Tag(GIT_object.Tag tag): {
+                            if (emitter.is_shown_one) {
+                                out.text("\n");
+                            }
+                            str name = tag.name.utf8().or("");
+                            if (is_color) {
+                                out.text(emitter.f.pal.commit + "tag " + name + emitter.f.pal.reset + "\n");
+                            } else {
+                                out.text("tag " + name + "\n");
+                            }
+                            // the tagger, then everything after the header
+                            match (tag.tagger) {
+                                case Some(GIT_object.Ident tagger): {
+                                    str fmt = opts.format;
+                                    if (fmt != "oneline") {
+                                        if (fmt == "fuller") {
+                                            out.text("Tagger:     ");
+                                        } else {
+                                            out.text("Tagger: ");
+                                        }
+                                        out.put(ident_bytes(tagger));
+                                        out.text("\n");
+                                        if (fmt == "medium" || fmt == "user") {
+                                            out.text("Date:   " + GIT_gitcommon.format_date(tagger.when, tagger.offset, opts.date_style) + "\n");
+                                        } else if (fmt == "fuller") {
+                                            out.text("TaggerDate: " + GIT_gitcommon.format_date(tagger.when, tagger.offset, opts.date_style) + "\n");
+                                        }
+                                    }
+                                }
+                                case None: {
+                                }
+                            }
+                            out.text("\n");
+                            out.put(tag.message);
+                            emitter.is_shown_one = true;
+                            id = tag.object;
+                            label = tag.object;
+                            is_going = true;
+                        }
+                        case Commit(GIT_object.Commit commit): {
+                            Walk walk = Walk(gitdir, opts, specs);
+                            walk.dopts = dopts;
+                            walk.is_no_walk = true;
+                            walk.is_want_ancestry = opts.is_graph;
+                            walk.parse(id);
+                            walk.set_flag(id, F_SEEN);
+                            walk.list = [id];
+                            bool is_diff = DOpts_any(dopts);
+                            str next = walk.next_commit();
+                            if (next != "") {
+                                walk.set_flag(next, F_SHOWN);
+                                if (emitter.has_graph) {
+                                    emitter.graph.update(next, walk.graph_parents(next));
+                                }
+                                log_tree_commit_show(walk, emitter, next, is_diff, specs, dopts, true);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    out.flush();
+    return status;
+}
+
+// `log_tree_commit` for `show`, which always shows the header and always
+// diffs a non-merge commit (the root too)
+bool log_tree_commit_show(Walk walk, Emitter emitter, str id, bool is_diff, List<GIT_gitcommon.Spec> specs, GIT_gitdiff.DOpts dopts, bool is_always) {
+    return log_tree_commit(walk, emitter, id, is_diff, specs, dopts);
+}

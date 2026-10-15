@@ -58,6 +58,8 @@ import core.GIT_repository;
 import core.GIT_revparse;
 import core.GIT_log;
 import core.GIT_gitstatus;
+import core.GIT_gitdiffcmd;
+import core.GIT_gitlog;
 
 args.Parser parser = args.Parser("1git", summary: "read-only git plumbing over loose objects");
 parser.value("git-dir", help: "the repository's git directory", placeholder: "DIR");
@@ -124,6 +126,12 @@ int git_spelling(List<str> argv) {
     }
     if (argv[index] == "status") {
         return GIT_gitstatus.run(cwd, overrides, argv.slice(index + 1, argv.size()));
+    }
+    if (argv[index] == "log" || argv[index] == "show") {
+        return GIT_gitlog.run(cwd, overrides, argv.slice(index + 1, argv.size()), argv[index] == "show");
+    }
+    if (argv[index] == "diff") {
+        return GIT_gitdiffcmd.run(cwd, overrides, argv.slice(index + 1, argv.size()));
     }
     return -1;
 }
