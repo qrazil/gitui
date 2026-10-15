@@ -545,8 +545,26 @@ pub IdxLoaded read_idx(str gitdir) {
     return IdxLoaded(true, idx);
 }
 
+/// The index as it is written: an entry whose file was modified in the
+/// last second or so is "racily clean" -- a later edit of the same size
+/// within the same clock tick would look unchanged to a stat comparison --
+/// so git writes it with a size of 0, which makes the next reader look at
+/// the content. Entries not touched that recently are kept as they are.
+List<GIT_index.Entry> smudged(Idx idx) {
+    int now = date.now();
+    List<GIT_index.Entry> out = [];
+    for (GIT_index.Entry entry in idx.list()) {
+        if (entry.stage == 0 && entry.mtime_s >= now - 1 && entry.size > 0 && !entry.is_gitlink()) {
+            out.push(GIT_index.Entry(entry.ctime_s, entry.ctime_ns, entry.mtime_s, entry.mtime_ns, entry.dev, entry.ino, entry.mode, entry.uid, entry.gid, 0, entry.id, entry.stage, entry.is_assume_valid, entry.path));
+        } else {
+            out.push(entry);
+        }
+    }
+    return out;
+}
+
 pub bool write_idx(str gitdir, Idx idx) {
-    match (GIT_index.write(gitdir, GIT_index.Index(idx.list()))) {
+    match (GIT_index.write(gitdir, GIT_index.Index(smudged(idx)))) {
         case Ok(_): {
             return true;
         }

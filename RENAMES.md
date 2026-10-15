@@ -1,8 +1,8 @@
-# gitui 0.15.0: symlinks in the work tree, combined diffs
+# gitui 0.15.0: symlinks in the work tree, combined diffs, patch mode
 
 Version 0.15.0, from master c5185f7 (0.13.0). The build now needs m31
 v0.4.5 (`.github/workflows/*.yml` pin `M31_REF: v0.4.5`): its `fs` has
-`readlink`. No module was renamed or removed and no module was added.
+`readlink`. No module was renamed or removed; two modules were added (`diff/GIT_combine.m31`, `core/GIT_gitaddp.m31`).
 A symlink in the work tree is read by target: `status`, `diff`, `show`,
 `add` (new and retargeted links, `-A`, `-u`), `commit -a`, `rm`, `restore`,
 `reset` and `checkout` treat it as git does, and the library status
@@ -13,7 +13,12 @@ link too. Merges have a combined diff: `diff/GIT_combine.m31` is new
 `--dd`, `--diff-merges=`, `--first-parent` and `log.diffMerges`; `git diff`
 of a conflicted merge prints `diff --cc` for a path with both sides. In
 `diff/GIT_gitdiff.m31` a few helpers became `pub`, and `DOpts` gained
-`merge_mode`, `is_merges_patch` and `abbrev_default`. Nothing to migrate.
+`merge_mode`, `is_merges_patch` and `abbrev_default`. `core/GIT_gitaddp.m31`
+is new: `add -p`, `reset -p`, `restore -p` and `checkout -p` (git's prompts and
+keys, the dialogue read from standard input); `GIT_gitwrite.write_idx` now
+writes a size of 0 for an entry whose file changed in the last second (git's
+racy-clean rule), so a same-size edit is not missed by the next `status`.
+Nothing to migrate.
 `docs/GIT-COMPAT.md` lists what differs.
 
 # gitui 0.13.0: `1git` change commands in git's spelling

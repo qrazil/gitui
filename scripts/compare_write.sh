@@ -4,7 +4,7 @@
 #
 #   bash scripts/compare_write.sh <1git-binary> [workdir] [group...]
 #
-# groups: add rm mv restore reset commit switch checkout branch tag gerrit misc
+# groups: add rm mv restore reset commit switch checkout branch tag gerrit misc patch
 #         (default: all)
 #
 # A case is a fixture (built twice from the same script with fixed identities
@@ -31,7 +31,7 @@ mkdir -p "$WORK"
 WORK=$(cd "$WORK" && pwd)
 shift
 shift || true
-GROUPS_WANTED=${*:-add rm mv restore reset commit switch checkout branch tag gerrit misc}
+GROUPS_WANTED=${*:-add rm mv restore reset commit switch checkout branch tag gerrit misc patch}
 
 # shellcheck source=fixtures_look.sh
 . "$HERE/fixtures_look.sh"
@@ -162,6 +162,35 @@ fx_links() {
     g add -A
     commit_at "retarget"
     g switch -q main
+}
+
+# files with several hunks (some splittable), a short one, a mode change, a
+# deletion, a file without a final newline
+fx_hunks() {
+    new_repo "$1"
+    local i
+    (echo "int func_a(void)"; for i in $(seq 1 40); do echo "  line $i"; done) > s.c
+    for i in $(seq 1 30); do echo "line $i"; done > f.txt
+    printf 'one\ntwo\n' > g.txt
+    printf 'alpha\nbeta' > noeol.txt
+    printf 'run\n' > run.sh
+    printf 'gone\n' > del.txt
+    mkdir sub
+    printf 'x\ny\nz\n' > sub/in.txt
+    g add -A
+    commit_at "base"
+    g switch -q -c other
+    printf 'one\nTWO\n' > g.txt
+    printf 'line 1\n' > f.txt
+    g commit -qam "other"
+    g switch -q main
+    sed -i 's/^  line 3$/  line 3 X/; s/^  line 8$/  line 8 X/; s/^  line 9$/  line 9 X/; s/^  line 33$/  line 33 X/; s/^  line 38$/  line 38 X/' s.c
+    sed -i 's/^line 3$/line 3 X/; s/^line 4$/line 4 X/; s/^line 15$/line 15 X/; s/^line 28$/line 28 X/' f.txt
+    printf 'one\nTWO\nthree\n' > g.txt
+    printf 'alpha\nBETA' > noeol.txt
+    chmod +x run.sh
+    rm del.txt
+    printf 'x\nY\nz\n' > sub/in.txt
 }
 
 # a cherry-pick stopped on a conflict
@@ -795,6 +824,68 @@ if wanted tag; then
     case_ "tag: create in an empty repository" fx_empty ':' 'G tag v1'
     case_ "tag: nested name" fx_base ':' 'G tag rel/1.0; G tag rel/2.0; G tag -l "rel/*"; G tag -d rel/1.0'
     case_ "tag: list is sorted bytewise" fx_base 'git tag B; git tag a; git tag _x; git tag Z' 'G tag'
+fi
+
+
+# --- patch ----------------------------------------------------------------------------------
+
+if wanted patch; then
+    case_ "patch: add -p all yes" fx_hunks ':' 'printf "y\ny\ny\ny\ny\ny\ny\ny\ny\ny\ny\ny\ny\n" | G add -p'
+    case_ "patch: add -p all no" fx_hunks ':' 'printf "n\nn\nn\nn\nn\nn\nn\nn\nn\nn\nn\nn\nn\n" | G add -p'
+    case_ "patch: add -p a" fx_hunks ':' 'printf "a\na\na\na\na\na\n" | G add -p'
+    case_ "patch: add -p d" fx_hunks ':' 'printf "d\nd\nd\nd\nd\nd\n" | G add -p'
+    case_ "patch: add -p q" fx_hunks ':' 'printf "y\nq\n" | G add -p'
+    case_ "patch: add -p one path" fx_hunks ':' 'printf "y\nn\ny\n" | G add -p f.txt'
+    case_ "patch: add -p a directory" fx_hunks ':' 'printf "y\n" | G add -p sub'
+    case_ "patch: add -p no changes" fx_hunks 'git checkout -q -- . 2>/dev/null; git reset -q --hard' 'printf "y\n" | G add -p'
+    case_ "patch: add -p empty input" fx_hunks ':' 'G add -p </dev/null'
+    case_ "patch: add -p split" fx_hunks ':' 'printf "s\ny\nn\ny\n" | G add -p s.c'
+    case_ "patch: add -p split and navigation" fx_hunks ':' 'printf "s\nj\nJ\nk\nK\ny\nn\ny\nn\n" | G add -p s.c'
+    case_ "patch: add -p help" fx_hunks ':' 'printf "?\nn\nn\nn\n" | G add -p f.txt'
+    case_ "patch: add -p unknown and long answers" fx_hunks ':' 'printf "x\nzz\n\ny\ny\ny\n" | G add -p f.txt'
+    case_ "patch: add -p cannot split" fx_hunks ':' 'printf "s\ny\ny\ny\n" | G add -p g.txt'
+    case_ "patch: add -p previous decisions" fx_hunks ':' 'printf "y\ny\nK\nn\nk\nJ\nd\n" | G add -p f.txt'
+    case_ "patch: add -p goto" fx_hunks ':' 'printf "g\n2\ny\ng\n9\ng\nx\nq\n" | G add -p f.txt'
+    case_ "patch: add -p search" fx_hunks ':' 'printf "/line 28\ny\n/nomatch\nq\n" | G add -p f.txt'
+    case_ "patch: add -p after -p again" fx_hunks 'printf "y\n" | git add -p g.txt >/dev/null' 'printf "y\ny\ny\ny\ny\ny\ny\n" | G add -p'
+    case_ "patch: add -p then commit" fx_hunks ':' 'printf "y\nn\ny\ny\n" | G add -p f.txt; G commit -qm picked; G show --stat HEAD; G status --short'
+    case_ "patch: reset -p all yes" fx_hunks 'git add -A' 'printf "y\ny\ny\ny\ny\ny\ny\ny\ny\ny\ny\ny\ny\n" | G reset -p'
+    case_ "patch: reset -p mixed" fx_hunks 'git add -A' 'printf "n\ny\nn\ny\ny\nn\n" | G reset -p'
+    case_ "patch: reset -p path" fx_hunks 'git add -A' 'printf "y\nn\n" | G reset -p f.txt'
+    case_ "patch: reset -p HEAD" fx_hunks 'git add -A' 'printf "y\ny\n" | G reset -p HEAD -- g.txt'
+    case_ "patch: reset -p new file" fx_hunks 'echo new > added.txt; git add -A' 'printf "y\n" | G reset -p added.txt'
+    case_ "patch: reset -p tree" fx_hunks ':' 'printf "y\ny\n" | G reset -p other -- g.txt'
+    case_ "patch: reset -p nothing staged" fx_hunks ':' 'printf "y\n" | G reset -p'
+    case_ "patch: restore -p" fx_hunks ':' 'printf "y\nn\ny\ny\ny\ny\ny\ny\n" | G restore -p'
+    case_ "patch: restore -p path" fx_hunks ':' 'printf "n\ny\n" | G restore -p f.txt'
+    case_ "patch: restore -p all yes" fx_hunks ':' 'printf "y\ny\ny\ny\ny\ny\ny\ny\ny\ny\ny\ny\ny\n" | G restore -p'
+    case_ "patch: restore -p split" fx_hunks ':' 'printf "s\ny\nn\ny\n" | G restore -p s.c'
+    case_ "patch: restore -p deleted file" fx_hunks ':' 'printf "y\n" | G restore -p del.txt'
+    case_ "patch: restore -p staged" fx_hunks 'git add g.txt' 'printf "y\ny\n" | G restore -p -S g.txt'
+    case_ "patch: restore -p -S -W" fx_hunks 'git add -A' 'printf "y\ny\ny\ny\ny\ny\ny\ny\n" | G restore -p -S -W'
+    case_ "patch: restore -p source" fx_hunks ':' 'printf "y\n" | G restore -p -s other -W g.txt'
+    case_ "patch: restore -p source HEAD" fx_hunks ':' 'printf "y\nn\n" | G restore -p --source=HEAD f.txt'
+    case_ "patch: checkout -p" fx_hunks ':' 'printf "y\nn\ny\ny\ny\n" | G checkout -p'
+    case_ "patch: checkout -p path" fx_hunks ':' 'printf "y\ny\ny\ny\n" | G checkout -p -- f.txt'
+    case_ "patch: checkout -p HEAD" fx_hunks 'git add -A' 'printf "y\ny\ny\ny\ny\ny\ny\ny\n" | G checkout -p HEAD'
+    case_ "patch: checkout -p tree" fx_hunks 'git add -A; git commit -qm more' 'printf "y\n" | G checkout -p other -- g.txt'
+    case_ "patch: add -p mode change and content" fx_hunks 'chmod +x g.txt' 'printf "y\ny\n" | G add -p g.txt'
+    case_ "patch: add -p mode change only" fx_hunks ':' 'printf "y\n" | G add -p run.sh'
+    case_ "patch: add -p deletion" fx_hunks ':' 'printf "y\n" | G add -p del.txt'
+    case_ "patch: add -p no final newline" fx_hunks ':' 'printf "y\n" | G add -p noeol.txt'
+    case_ "patch: add -p from a subdirectory" fx_hunks ':' 'cd sub; printf "y\n" | G add -p; printf "y\n" | G add -p ../g.txt'
+    case_ "patch: add -p link" fx_links 'ln -sfn elsewhere link' 'printf "y\n" | G add -p'
+    case_ "patch: add -p type change" fx_links 'rm link; echo f > link' 'printf "y\ny\ny\n" | G add -p'
+    case_ "patch: add -p link replaced by file, no" fx_links 'rm link; echo f > link' 'printf "n\ny\n" | G add -p'
+    case_ "patch: reset -p split" fx_hunks 'git add -A' 'printf "s\ny\nn\ny\n" | G reset -p s.c'
+    case_ "patch: restore -p mode change" fx_hunks ':' 'printf "y\n" | G restore -p run.sh'
+    case_ "patch: restore -p -S -s tree" fx_hunks ':' 'printf "y\ny\n" | G restore -p -S -s other g.txt'
+    case_ "patch: add -p quit in the second file" fx_hunks ':' 'printf "y\ny\ny\nq\n" | G add -p'
+    case_ "patch: add -p partially staged file" fx_hunks 'printf "y\nn\nn\n" | git add -p f.txt >/dev/null' 'printf "n\ny\n" | G add -p f.txt'
+    case_ "patch: add -p twice the same hunk list" fx_hunks ':' 'printf "n\ny\n" | G add -p f.txt; printf "y\n" | G add -p f.txt; G status --short'
+    case_ "patch: checkout -p discards then status" fx_hunks ':' 'printf "n\ny\ny\n" | G checkout -p f.txt; G diff --stat'
+    case_ "patch: add -p CRLF" fx_crlf 'printf "one\r\nTWO\r\n" > win.txt; printf "mixed\r\nline\nextra\n" > mix.txt' 'printf "y\ny\n" | G add -p'
+    case_ "patch: add -p unicode names" fx_unicode 'echo more >> "日本語.txt"; echo more >> "dír ectory/fïle one.txt"' 'printf "y\ny\n" | G add -p'
 fi
 
 # --- misc ---------------------------------------------------------------------------------

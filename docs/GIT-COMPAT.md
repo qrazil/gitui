@@ -243,12 +243,26 @@ Known divergences and gaps (everything else listed above matches):
   gives a `str`), and the stat data of a link in the index entry are the
   target's length and a zero mtime (there is no `lstat`), so real git
   re-checks content of links once.
-- `add -p`, `-N` (intent-to-add), `-e`, `-i`, `--pathspec-from-file`;
-  `restore -p`/`-m`, `checkout -p`/`-m`/`--orphan`, `switch -m`/`--orphan`,
-  `reset -p`/`--merge`, `commit --interactive`/`-p`/`--trailer`/`--short`/
+- `add -N` (intent-to-add), `-e`, `-i`, `--pathspec-from-file`;
+  `restore -m`, `checkout -m`/`--orphan`, `switch -m`/`--orphan`,
+  `reset --merge`, `commit --interactive`/`-p`/`--trailer`/`--short`/
   `--porcelain`, `commit -S`/`tag -s/-u/-v` (signing; `commit.gpgsign=true`
   refuses), `branch --edit-description`, `tag --column`: error (exit 129,
   or 128 for signing) naming the option.
+- **Patch mode** (`add -p`, `reset -p [<tree-ish>]`, `restore -p [-S] [-W]
+  [-s <tree-ish>]`, `checkout -p [<tree-ish>]`; 0.15.0) prints git's header,
+  hunks, prompts (`(2/3) Stage this hunk (was: y) [y,n,q,a,d,k,K,j,J,g,/,s,
+  e,p,P,?]? `), help and messages byte for byte, and applies the choices to
+  the index and/or the work tree the way git's `apply` would. The keys are
+  `y n q a d j J k K g / s p P ?`; an answer is a line of standard input (on a
+  terminal Enter ends it, there is no single-key mode). Not done: `e` (edit a
+  hunk) answers "Sorry, cannot edit this hunk"; the pager (`P` prints); the
+  `g` list is not paged; `checkout -p HEAD|<tree>` where the index differs from
+  the work tree prints nothing about the "Apply them to the worktree
+  anyway?" question git asks; `--no-color`/`interactive.*` settings and
+  `color.interactive` are not read. `scripts/compare_write.sh patch` runs 56
+  piped dialogues against git and compares the output, the index, the work
+  tree and the object ids.
 - Paths that are not valid UTF-8 are carried through the index untouched
   but cannot be named; `commit` refuses when the index holds one.
 - No `.gitattributes` or `core.autocrlf` conversion on `add`/checkout

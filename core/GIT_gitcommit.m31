@@ -15,6 +15,7 @@ import core.GIT_gitcommon;
 import core.GIT_gitstore;
 import core.GIT_gitstatus;
 import core.GIT_gitwrite;
+import core.GIT_gitaddp;
 import core.GIT_gitadd;
 import core.GIT_gitdiffcmd;
 import core.GIT_checkoutplan;
@@ -100,7 +101,7 @@ pub int run_reset(str start, List<str> overrides, List<str> argv) {
     if (bad >= 0) {
         return bad;
     }
-    if (opts.flag("patch") || opts.flag("merge") || opts.flag("intent-to-add") || opts.has("pathspec-from-file")) {
+    if (opts.flag("merge") || opts.flag("intent-to-add") || opts.has("pathspec-from-file")) {
         io.eprint("error: this option of reset is not in 1git (see docs/GIT-COMPAT.md)");
         return 129;
     }
@@ -171,6 +172,16 @@ pub int run_reset(str start, List<str> overrides, List<str> argv) {
                 path_words.push(word);
             }
         }
+    }
+    if (opts.flag("patch")) {
+        if (mode != "mixed" || mode_count > 0) {
+            return GIT_gitcommon.fatal("options '--patch' and '--" + mode + "' cannot be used together");
+        }
+        int flavor = 5;
+        if (!has_rev || rev == "HEAD") {
+            flavor = 1;
+        }
+        return GIT_gitaddp.run(ctx, flavor, rev, path_words);
     }
     GIT_gitwrite.HeadInfo head = GIT_gitwrite.read_head(ctx.gitdir);
     if (!head.ok) {

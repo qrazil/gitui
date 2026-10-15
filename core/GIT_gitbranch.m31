@@ -18,6 +18,7 @@ import core.GIT_gitcommon;
 import core.GIT_gitstore;
 import core.GIT_gitstatus;
 import core.GIT_gitwrite;
+import core.GIT_gitaddp;
 import core.GIT_gitadd;
 import core.GIT_gitcommit;
 import core.GIT_checkoutplan;
@@ -687,9 +688,49 @@ pub int run_checkout(str start, List<str> overrides, List<str> argv) {
     if (bad >= 0) {
         return bad;
     }
-    if (opts.flag("merge") || opts.has("orphan") || opts.flag("patch") || opts.has("conflict") || opts.has("pathspec-from-file")) {
+    if (opts.flag("merge") || opts.has("orphan") || opts.has("conflict") || opts.has("pathspec-from-file")) {
         io.eprint("error: this option of checkout is not in 1git (see docs/GIT-COMPAT.md)");
         return 129;
+    }
+    if (opts.flag("patch")) {
+        // `checkout -p [<tree-ish>] [--] [<paths>]`
+        str tree = "";
+        List<str> path_words = [];
+        if (opts.has_dashes) {
+            if (opts.words.size() > 1) {
+                return GIT_gitcommon.fatal("only one reference expected, " + opts.words.size().to_str() + " given");
+            }
+            if (opts.words.size() == 1) {
+                tree = opts.words[0];
+            }
+            path_words = opts.after;
+        } else {
+            for (int w in 0 .. opts.words.size()) {
+                bool is_first_rev = false;
+                if (w == 0) {
+                    match (GIT_revparse.tree_id(ctx.gitdir, opts.words[0])) {
+                        case Ok(_): {
+                            is_first_rev = true;
+                        }
+                        case Err(_): {
+                        }
+                    }
+                }
+                if (is_first_rev) {
+                    tree = opts.words[0];
+                } else {
+                    path_words.push(opts.words[w]);
+                }
+            }
+        }
+        int flavor = 2;
+        if (tree != "") {
+            flavor = 4;
+            if (tree == "HEAD") {
+                flavor = 3;
+            }
+        }
+        return GIT_gitaddp.run(ctx, flavor, tree, path_words);
     }
     Request req = new_request();
     req.is_force = opts.flag("force");

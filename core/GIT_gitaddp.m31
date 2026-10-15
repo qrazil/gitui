@@ -1,0 +1,1099 @@
+// Interactive patch selection: `add -p`, `reset -p`, `restore -p` and
+// `checkout -p`, with git's prompts and keys (`y n q a d j J k K g / s p P ?`;
+// `e` is answered with an error). Answers are read a line at a time from
+// standard input, so a pipe works exactly as it does for git when its input
+// is not a terminal; on a terminal Enter ends an answer.
+//
+// The diff shown is the one `git diff-files` / `diff-index` would print
+// (`GIT_gitdiff.patch_bytes` cut at its hunks); a hunk can be split at its
+// context gaps (`s`); what the answers select is applied to the content
+// directly rather than as a patch, which is the same result since every
+// hunk applies at its own place.
+//
+// Flavours (git's `patch_mode`s):
+//   0 add             index -> work tree, selected hunks go to the index
+//   1 reset / HEAD    HEAD -> index, selected hunks are taken out of the index
+//   2 checkout        index -> work tree, selected hunks are discarded
+//   3 checkout HEAD   HEAD -> work tree, discarded in index and work tree
+//   4 checkout <tree> work tree -> tree, applied to index and work tree
+//   5 reset <tree>    index -> tree, applied to the index
+//   6 restore -s HEAD -W   HEAD -> work tree, discarded in the work tree
+//   7 restore -s <tree> -W work tree -> tree, applied to the work tree
+//
+// Left out: `e` (editing a hunk), the pager, paging of the `g` list, and 3/4
+// when the index differs from the work tree for the selected hunks (git
+// asks whether to apply to the work tree anyway).
+
+import io;
+import fs;
+import text.diff;
+import text.regex;
+import core.GIT_object;
+import core.GIT_index;
+import core.GIT_gitcommon;
+import core.GIT_gitstore;
+import core.GIT_gitstatus;
+import core.GIT_gitwrite;
+import core.GIT_revparse;
+import diff.GIT_gitdiff;
+import diff.GIT_hunks;
+
+// --- the model -----------------------------------------------------------------------------
+
+type Hunk {
+    bytes text;
+    // 0 undecided, 1 use, 2 do not use
+    int use = 0;
+    // how many hunks this one can be split into
+    int splittable = 1;
+    bool is_mode = false;
+    // the ops of the file this hunk covers, [start, end)
+    int start = 0;
+    int end = 0;
+}
+
+type PFile {
+    str path;
+    bytes header;
+    bytes old;
+    bytes new;
+    GIT_gitdiff.Side old_side;
+    GIT_gitdiff.Side new_side;
+    List<diff.Op> ops;
+    List<Hunk> hunks;
+    bool is_deleted = false;
+    bool is_added = false;
+    bool has_mode = false;
+}
+
+type Flavor {
+    int number;
+    str verb;
+    str place;
+    // the diff is shown with a/ and b/ swapped
+    bool is_swapped = false;
+    // the selected hunks take the diff's new side (else its old side)
+    bool is_takes_new = false;
+    bool is_index = false;
+    bool is_worktree = false;
+}
+
+Flavor flavor_of(int number) {
+    Flavor f = Flavor(number, "Stage", "");
+    f.is_index = true;
+    if (number == 1) {
+        f.verb = "Unstage";
+        f.is_takes_new = false;
+    } else if (number == 2) {
+        f.verb = "Discard";
+        f.place = " from worktree";
+        f.is_index = false;
+        f.is_worktree = true;
+    } else if (number == 3) {
+        f.verb = "Discard";
+        f.place = " from index and worktree";
+        f.is_worktree = true;
+    } else if (number == 4) {
+        f.verb = "Apply";
+        f.place = " to index and worktree";
+        f.is_swapped = true;
+        f.is_takes_new = true;
+        f.is_worktree = true;
+    } else if (number == 5) {
+        f.verb = "Apply";
+        f.place = " to index";
+        f.is_swapped = true;
+        f.is_takes_new = true;
+    } else if (number == 6) {
+        f.verb = "Discard";
+        f.place = " from worktree";
+        f.is_index = false;
+        f.is_worktree = true;
+    } else if (number == 7) {
+        f.verb = "Apply";
+        f.place = " to worktree";
+        f.is_swapped = true;
+        f.is_takes_new = true;
+        f.is_index = false;
+        f.is_worktree = true;
+    } else {
+        f.is_takes_new = true;
+    }
+    return f;
+}
+
+// --- building the files ------------------------------------------------------------------------
+
+bool starts_with_at(bytes data, int at, str word) {
+    bytes w = word.to_bytes();
+    if (at + w.size() > data.size()) {
+        return false;
+    }
+    for (int k in 0 .. w.size()) {
+        if (data[at + k] != w[k]) {
+            return false;
+        }
+    }
+    return true;
+}
+
+bool has_space(bytes line) {
+    for (int c in line) {
+        if (c == ' ') {
+            return true;
+        }
+    }
+    return false;
+}
+
+// the text of `patch` split into its lines, each with its newline
+List<bytes> lines_of(bytes data) {
+    return GIT_xdiff_lines(data);
+}
+
+List<bytes> GIT_xdiff_lines(bytes data) {
+    List<bytes> out = [];
+    int start = 0;
+    for (int at in 0 .. data.size()) {
+        if (data[at] == '\n') {
+            out.push(data.substr(start, at + 1));
+            start = at + 1;
+        }
+    }
+    if (start < data.size()) {
+        out.push(data.substr(start, data.size()));
+    }
+    return out;
+}
+
+bytes join_lines(List<bytes> lines, int from, int to) {
+    bytes out = [];
+    for (int k in from .. to) {
+        out.extend(lines[k]);
+    }
+    return out;
+}
+
+// One item as a file to go through; `None` when git has nothing to ask
+// (a binary file, an empty change).
+Option<PFile> make_file(GIT_gitstore.Store repo, GIT_gitdiff.Item item, GIT_gitdiff.DOpts opts) {
+    bytes old = [];
+    bytes new = [];
+    if (item.old.mode != 0) {
+        old = GIT_gitdiff.content_of(repo, item.old);
+    }
+    if (item.new.mode != 0) {
+        new = GIT_gitdiff.content_of(repo, item.new);
+    }
+    bytes patch = GIT_gitdiff.patch_bytes(repo, item, opts);
+    List<bytes> lines = lines_of(patch);
+    int first = lines.size();
+    for (int k in 0 .. lines.size()) {
+        if (starts_with_at(lines[k], 0, "@@ ")) {
+            first = k;
+            break;
+        }
+        if (starts_with_at(lines[k], 0, "Binary files ")) {
+            return Option<PFile>.None;
+        }
+    }
+    PFile file = PFile(item.path, [], old, new, item.old, item.new, [], []);
+    file.is_deleted = item.status == "D";
+    file.is_added = item.status == "A";
+    bytes mode_text = [];
+    for (int k in 0 .. first) {
+        bytes line = lines[k];
+        if (starts_with_at(line, 0, "old mode ") || starts_with_at(line, 0, "new mode ")) {
+            mode_text.extend(line);
+        } else if ((starts_with_at(line, 0, "--- \"") || starts_with_at(line, 0, "+++ \"")) && has_space(line.substr(4, line.size()))) {
+            // the plumbing diff git runs puts a tab after a quoted name
+            // that has a space in it
+            file.header.extend(line.substr(0, line.size() - 1));
+            file.header.push('\t');
+            file.header.push('\n');
+        } else {
+            file.header.extend(line);
+        }
+    }
+    if (mode_text.size() > 0) {
+        Hunk mode = Hunk(mode_text);
+        mode.is_mode = true;
+        file.hunks.push(mode);
+        file.has_mode = true;
+    }
+    file.ops = GIT_gitdiff.make_ops(old, new, 0, 3);
+    List<GIT_hunks.Span> spans = GIT_hunks.spans(file.ops, context: 3);
+    // the rendered hunks, one per span
+    List<bytes> chunks = [];
+    int at = first;
+    while (at < lines.size()) {
+        int to = at + 1;
+        while (to < lines.size() && !starts_with_at(lines[to], 0, "@@ ")) {
+            to = to + 1;
+        }
+        chunks.push(join_lines(lines, at, to));
+        at = to;
+    }
+    if (chunks.size() != spans.size()) {
+        return Option<PFile>.None;
+    }
+    for (int k in 0 .. chunks.size()) {
+        Hunk hunk = Hunk(chunks[k]);
+        hunk.start = spans[k].start;
+        hunk.end = spans[k].end;
+        hunk.splittable = groups_in(file.ops, hunk.start, hunk.end);
+        file.hunks.push(hunk);
+    }
+    if (file.hunks.size() == 0) {
+        if (!file.is_deleted && !file.is_added) {
+            return Option<PFile>.None;
+        }
+        // a deleted or added empty file: only the file itself is asked about
+        Hunk whole = Hunk([]);
+        file.hunks.push(whole);
+    }
+    return Option<PFile>.Some(file);
+}
+
+int kind_code(diff.Op op) {
+    match (op.kind) {
+        case Keep: {
+            return 0;
+        }
+        case Remove: {
+            return 1;
+        }
+        case Add: {
+            return 2;
+        }
+    }
+}
+
+// the number of runs of changes in ops [start, end)
+int groups_in(List<diff.Op> ops, int start, int end) {
+    int count = 0;
+    bool is_in = false;
+    for (int k in start .. end) {
+        if (kind_code(ops[k]) != 0) {
+            if (!is_in) {
+                count = count + 1;
+                is_in = true;
+            }
+        } else {
+            is_in = false;
+        }
+    }
+    return count;
+}
+
+// --- splitting a hunk --------------------------------------------------------------------------
+
+// The lines before ops[k] in the old and the new file.
+int count_old_before(List<diff.Op> ops, int k) {
+    int n = 0;
+    for (int i in 0 .. k) {
+        if (kind_code(ops[i]) != 2) {
+            n = n + 1;
+        }
+    }
+    return n;
+}
+
+int count_new_before(List<diff.Op> ops, int k) {
+    int n = 0;
+    for (int i in 0 .. k) {
+        if (kind_code(ops[i]) != 1) {
+            n = n + 1;
+        }
+    }
+    return n;
+}
+
+// A hunk made of ops [start, end): `@@ -a,b +c,d @@` and the lines.
+bytes render_span(PFile file, int start, int end, bytes func) {
+    int old_before = count_old_before(file.ops, start);
+    int new_before = count_new_before(file.ops, start);
+    int old_count = 0;
+    int new_count = 0;
+    bytes body = [];
+    for (int k in start .. end) {
+        diff.Op op = file.ops[k];
+        int code = kind_code(op);
+        if (code != 2) {
+            old_count = old_count + 1;
+        }
+        if (code != 1) {
+            new_count = new_count + 1;
+        }
+        str sign = " ";
+        if (code == 1) {
+            sign = "-";
+        } else if (code == 2) {
+            sign = "+";
+        }
+        body.extend(sign.to_bytes());
+        body.extend(op.line);
+        if (op.line.size() == 0 || op.line[op.line.size() - 1] != '\n') {
+            body.extend("\n\\ No newline at end of file\n".to_bytes());
+        }
+    }
+    str head = "@@ -" + GIT_gitdiff.range_text(old_before, old_count) + " +" + GIT_gitdiff.range_text(new_before, new_count) + " @@";
+    bytes out = head.to_bytes();
+    if (func.size() > 0) {
+        out.push(' ');
+        out.extend(func);
+    }
+    out.push('\n');
+    out.extend(body);
+    return out;
+}
+
+// Split hunk `index` of `file` at the context between its groups of changes:
+// every part keeps the whole gap on both sides (git's `s`). Returns the
+// number of parts, 1 when it cannot be split.
+int split_hunk(PFile file, int index) {
+    Hunk hunk = file.hunks[index];
+    if (hunk.splittable < 2 || hunk.is_mode) {
+        return 1;
+    }
+    // the groups: [group_start, group_end) ops of changes
+    List<int> group_start = [];
+    List<int> group_end = [];
+    bool is_in = false;
+    for (int k in hunk.start .. hunk.end) {
+        if (kind_code(file.ops[k]) != 0) {
+            if (!is_in) {
+                group_start.push(k);
+                is_in = true;
+            }
+        } else if (is_in) {
+            group_end.push(k);
+            is_in = false;
+        }
+    }
+    if (is_in) {
+        group_end.push(hunk.end);
+    }
+    int parts = group_start.size();
+    List<Hunk> pieces = [];
+    for (int g in 0 .. parts) {
+        int from = hunk.start;
+        if (g > 0) {
+            from = group_end[g - 1];
+        }
+        int to = hunk.end;
+        if (g + 1 < parts) {
+            to = group_start[g + 1];
+        }
+        bytes func = [];
+        if (g == 0) {
+            // the first part keeps the function line of the original
+            bytes first = first_line(hunk.text);
+            int stop = 0;
+            // "@@ -a,b +c,d @@ func"
+            int seen = 0;
+            for (int k in 0 .. first.size()) {
+                if (first[k] == '@') {
+                    seen = seen + 1;
+                    if (seen == 4) {
+                        stop = k + 1;
+                        break;
+                    }
+                }
+            }
+            if (stop > 0 && stop + 1 < first.size()) {
+                func = first.substr(stop + 1, first.size());
+                if (func.size() > 0 && func[func.size() - 1] == '\n') {
+                    func = func.substr(0, func.size() - 1);
+                }
+            }
+        }
+        Hunk piece = Hunk(render_span(file, from, to, func));
+        piece.start = from;
+        piece.end = to;
+        piece.splittable = 1;
+        piece.use = 0;
+        pieces.push(piece);
+    }
+    // replace hunk `index` by its pieces
+    List<Hunk> next = [];
+    for (int k in 0 .. file.hunks.size()) {
+        if (k == index) {
+            for (Hunk piece in pieces) {
+                next.push(piece);
+            }
+        } else {
+            next.push(file.hunks[k]);
+        }
+    }
+    file.hunks = next;
+    return parts;
+}
+
+bytes first_line(bytes text) {
+    for (int k in 0 .. text.size()) {
+        if (text[k] == '\n') {
+            return text.substr(0, k + 1);
+        }
+    }
+    return text;
+}
+
+// --- the dialogue -----------------------------------------------------------------------------
+
+type Session {
+    GIT_gitcommon.Out out;
+    io.File input;
+    Flavor flavor;
+    bool is_eof = false;
+}
+
+// One answer: the line without its newline; `is_eof` is set at the end.
+str Session.answer() {
+    out.flush();
+    match (input.read_until([10], 65536)) {
+        case Ok(bytes line): {
+            if (line.size() == 0) {
+                is_eof = true;
+                return "";
+            }
+            bytes text = line;
+            if (text[text.size() - 1] == '\n') {
+                text = text.substr(0, text.size() - 1);
+            }
+            return text.utf8().or("");
+        }
+        case Err(_): {
+            is_eof = true;
+            return "";
+        }
+    }
+}
+
+str lower_first(str text) {
+    if (text.size() == 0) {
+        return text;
+    }
+    return text.substr(0, 1).to_lower() + text.substr(1, text.size());
+}
+
+str prompt_word(Flavor f, PFile file, Hunk hunk) {
+    if (hunk.is_mode) {
+        return f.verb + " mode change" + f.place;
+    }
+    if (file.is_deleted) {
+        return f.verb + " deletion" + f.place;
+    }
+    if (file.is_added) {
+        return f.verb + " addition" + f.place;
+    }
+    return f.verb + " this hunk" + f.place;
+}
+
+bool is_other_undecided(PFile file, int index) {
+    for (int k in 0 .. file.hunks.size()) {
+        if (k != index && file.hunks[k].use == 0) {
+            return true;
+        }
+    }
+    return false;
+}
+
+// the next undecided hunk after `index`, wrapping; -1 when none
+int next_undecided(PFile file, int index) {
+    int n = file.hunks.size();
+    for (int step in 1 .. n) {
+        int k = (index + step) % n;
+        if (file.hunks[k].use == 0) {
+            return k;
+        }
+    }
+    return -1;
+}
+
+int previous_undecided(PFile file, int index) {
+    int n = file.hunks.size();
+    for (int step in 1 .. n) {
+        int k = (index - step + n * 2) % n;
+        if (file.hunks[k].use == 0) {
+            return k;
+        }
+    }
+    return -1;
+}
+
+void print_help(Session s, Flavor f, PFile file, int index) {
+    str what = lower_first(f.verb) + " this hunk" + f.place;
+    str verb = lower_first(f.verb);
+    bool is_other = is_other_undecided(file, index);
+    bool is_many = file.hunks.size() > 1;
+    s.out.text("y - " + what + "\n");
+    s.out.text("n - do not " + what + "\n");
+    s.out.text("q - quit; do not " + verb + " this hunk or any of the remaining ones\n");
+    s.out.text("a - " + verb + " this hunk and all later hunks in the file\n");
+    s.out.text("d - do not " + verb + " this hunk or any of the later hunks in the file\n");
+    if (is_other) {
+        s.out.text("j - go to the next undecided hunk, roll over at the bottom\n");
+    }
+    if (is_many) {
+        s.out.text("J - go to the next hunk, roll over at the bottom\n");
+    }
+    if (is_other) {
+        s.out.text("k - go to the previous undecided hunk, roll over at the top\n");
+    }
+    if (is_many) {
+        s.out.text("K - go to the previous hunk, roll over at the top\n");
+        s.out.text("g - select a hunk to go to\n");
+        s.out.text("/ - search for a hunk matching the given regex\n");
+    }
+    if (file.hunks[index].splittable > 1) {
+        s.out.text("s - split the current hunk into smaller hunks\n");
+    }
+    if (!file.hunks[index].is_mode && !file.is_deleted) {
+        s.out.text("e - manually edit the current hunk\n");
+    }
+    s.out.text("p - print the current hunk\n");
+    s.out.text("P - print the current hunk using the pager\n");
+    s.out.text("? - print help\n");
+}
+
+str summary_of(PFile file, Hunk hunk) {
+    bytes first = first_line(hunk.text);
+    str head = first.utf8().or("");
+    // "@@ -a,b +c,d @@..." -> " -a,b +c,d "
+    int stop = head.index_of(" @@").or(-1);
+    str ranges = "";
+    if (head.starts_with("@@ ") && stop > 2) {
+        ranges = " " + head.substr(3, stop) + " ";
+    }
+    while (ranges.size() < 20) {
+        ranges = ranges + " ";
+    }
+    str shown = "";
+    // the first changed line
+    bytes text = hunk.text;
+    int at = first.size();
+    while (at < text.size()) {
+        int to = at;
+        while (to < text.size() && text[to] != '\n') {
+            to = to + 1;
+        }
+        if (to > at && (text[at] == '+' || text[at] == '-')) {
+            shown = text.substr(at, to).utf8().or("");
+            break;
+        }
+        at = to + 1;
+    }
+    return ranges + shown;
+}
+
+// Go through one file; true when the user quit.
+bool update_file(Session s, PFile file) {
+    Flavor f = s.flavor;
+    s.out.put(file.header);
+    int index = 0;
+    int rendered = -1;
+    bool is_quit = false;
+    while (true) {
+        int n = file.hunks.size();
+        if (index >= n) {
+            index = 0;
+        }
+        Hunk hunk = file.hunks[index];
+        bool is_other = is_other_undecided(file, index);
+        if (!is_other && hunk.use != 0) {
+            break;
+        }
+        if (rendered != index) {
+            s.out.put(hunk.text);
+            rendered = index;
+        }
+        str letters = "";
+        if (is_other) {
+            letters = letters + ",k";
+        }
+        if (n > 1) {
+            letters = letters + ",K";
+        }
+        if (is_other) {
+            letters = letters + ",j";
+        }
+        if (n > 1) {
+            letters = letters + ",J,g,/";
+        }
+        if (hunk.splittable > 1) {
+            letters = letters + ",s";
+        }
+        if (!hunk.is_mode && !file.is_deleted) {
+            letters = letters + ",e";
+        }
+        str was = "";
+        if (hunk.use == 1) {
+            was = " (was: y)";
+        } else if (hunk.use == 2) {
+            was = " (was: n)";
+        }
+        s.out.text("(" + (index + 1).to_str() + "/" + n.to_str() + ") " + prompt_word(f, file, hunk) + was + " [y,n,q,a,d" + letters + ",p,P,?]? ");
+        str answer = s.answer();
+        if (s.is_eof) {
+            is_quit = true;
+            break;
+        }
+        if (answer.size() == 0) {
+            continue;
+        }
+        str key = answer.substr(0, 1);
+        if (key == "/" || key == "g") {
+            // takes an argument on the same line or asks for it
+        } else if (answer.size() > 1) {
+            s.out.text("Only one letter is expected, got '" + answer + "'\n");
+            continue;
+        }
+        if (key == "y" || key == "n") {
+            if (key == "y") {
+                hunk.use = 1;
+            } else {
+                hunk.use = 2;
+            }
+            int next = next_undecided(file, index);
+            if (next >= 0) {
+                index = next;
+            } else {
+                index = n;
+            }
+        } else if (key == "a" || key == "d") {
+            int use = 1;
+            if (key == "d") {
+                use = 2;
+            }
+            for (int k in index .. n) {
+                if (file.hunks[k].use == 0) {
+                    file.hunks[k].use = use;
+                }
+            }
+            index = n;
+        } else if (key == "q") {
+            is_quit = true;
+            break;
+        } else if (key == "j") {
+            int next = next_undecided(file, index);
+            if (next < 0) {
+                s.out.text("No other undecided hunk\n");
+            } else {
+                index = next;
+            }
+        } else if (key == "k") {
+            int previous = previous_undecided(file, index);
+            if (previous < 0) {
+                s.out.text("No other undecided hunk\n");
+            } else {
+                index = previous;
+            }
+        } else if (key == "J") {
+            if (n < 2) {
+                s.out.text("No other hunk\n");
+            } else {
+                index = (index + 1) % n;
+            }
+        } else if (key == "K") {
+            if (n < 2) {
+                s.out.text("No other hunk\n");
+            } else {
+                index = (index + n - 1) % n;
+            }
+        } else if (key == "g") {
+            if (n < 2) {
+                s.out.text("No other hunks to goto\n");
+                continue;
+            }
+            str number = answer.substr(1, answer.size()).trim();
+            if (number == "") {
+                for (int k in 0 .. n) {
+                    str mark = " ";
+                    if (file.hunks[k].use == 1) {
+                        mark = "+";
+                    } else if (file.hunks[k].use == 2) {
+                        mark = "-";
+                    }
+                    s.out.text(mark + GIT_gitcommon.pad_left((k + 1).to_str(), 2, " ") + ": " + summary_of(file, file.hunks[k]) + "\n");
+                }
+                s.out.text("go to which hunk? ");
+                number = s.answer().trim();
+                if (s.is_eof) {
+                    is_quit = true;
+                    break;
+                }
+            }
+            match (number.parse_int()) {
+                case Some(int wanted): {
+                    if (wanted < 1 || wanted > n) {
+                        s.out.text("Sorry, only " + n.to_str() + " hunks available.\n");
+                    } else {
+                        index = wanted - 1;
+                    }
+                }
+                case None: {
+                    s.out.text("Invalid number: '" + number + "'\n");
+                }
+            }
+        } else if (key == "/") {
+            if (n < 2) {
+                s.out.text("No other hunks to search\n");
+                continue;
+            }
+            str pattern = answer.substr(1, answer.size());
+            if (pattern == "") {
+                s.out.text("search for regex? ");
+                pattern = s.answer();
+                if (s.is_eof) {
+                    is_quit = true;
+                    break;
+                }
+            }
+            if (pattern == "") {
+                continue;
+            }
+            match (regex.compile(pattern)) {
+                case Err(_): {
+                    s.out.text("Malformed search regexp " + pattern + "\n");
+                }
+                case Ok(regex.Regex compiled): {
+                    int found = -1;
+                    for (int step in 1 .. n + 1) {
+                        int k = (index + step) % n;
+                        str text = file.hunks[k].text.utf8().or("");
+                        if (compiled.is_match(text)) {
+                            found = k;
+                            break;
+                        }
+                    }
+                    if (found < 0) {
+                        s.out.text("No hunk matches the given pattern\n");
+                    } else {
+                        index = found;
+                    }
+                }
+            }
+        } else if (key == "s") {
+            int parts = split_hunk(file, index);
+            if (parts < 2) {
+                s.out.text("Sorry, cannot split this hunk\n");
+            } else {
+                s.out.text("Split into " + parts.to_str() + " hunks.\n");
+                rendered = -1;
+            }
+        } else if (key == "e") {
+            s.out.text("Sorry, cannot edit this hunk\n");
+        } else if (key == "p" || key == "P") {
+            rendered = -1;
+        } else if (key == "?") {
+            print_help(s, f, file, index);
+        } else {
+            s.out.text("Unknown command '" + key + "' (use '?' for help)\n");
+        }
+    }
+    s.out.text("\n");
+    return is_quit;
+}
+
+// --- applying the choices ----------------------------------------------------------------------
+
+// The content a target ends up with: the diff's old side with the chosen
+// hunks replaced by the new one (`is_takes_new`), or its new side with the
+// chosen hunks replaced by the old one.
+bytes chosen_content(PFile file, bool is_takes_new) {
+    int n = file.ops.size();
+    List<bool> is_chosen = [false; n];
+    for (Hunk hunk in file.hunks) {
+        if (hunk.use == 1 && !hunk.is_mode) {
+            for (int k in hunk.start .. hunk.end) {
+                is_chosen[k] = true;
+            }
+        }
+    }
+    bytes out = [];
+    for (int k in 0 .. n) {
+        diff.Op op = file.ops[k];
+        int code = kind_code(op);
+        if (code == 0) {
+            out.extend(op.line);
+            continue;
+        }
+        // is this change taken from the new side?
+        bool is_new = false;
+        if (is_takes_new) {
+            // base is the old side: chosen changes come from the new side
+            is_new = is_chosen[k];
+        } else {
+            // base is the new side: chosen changes go back to the old side
+            is_new = !is_chosen[k];
+        }
+        if (code == 2 && is_new) {
+            out.extend(op.line);
+        } else if (code == 1 && !is_new) {
+            out.extend(op.line);
+        }
+    }
+    return out;
+}
+
+bool any_used(PFile file) {
+    for (Hunk hunk in file.hunks) {
+        if (hunk.use == 1) {
+            return true;
+        }
+    }
+    return false;
+}
+
+bool all_used(PFile file) {
+    for (Hunk hunk in file.hunks) {
+        if (hunk.use != 1) {
+            return false;
+        }
+    }
+    return file.hunks.size() > 0;
+}
+
+// --- the entry point ---------------------------------------------------------------------------
+
+/// Run the patch dialogue. `flavor` as in the module header, `tree_spec` the
+/// tree-ish of flavours 3 to 7 ("" for HEAD where it is implied), `given` the
+/// pathspecs. Returns the exit status.
+pub int run(GIT_gitcommon.Ctx ctx, int flavor_number, str tree_spec, List<str> given) {
+    Flavor f = flavor_of(flavor_number);
+    GIT_gitstore.Store repo = GIT_gitstore.open(ctx.gitdir);
+    GIT_gitwrite.IdxLoaded loaded = GIT_gitwrite.read_idx(ctx.gitdir);
+    if (!loaded.ok) {
+        return 128;
+    }
+    GIT_gitwrite.Idx idx = loaded.idx;
+    if (idx.conflicted_paths().size() > 0 && flavor_number != 2) {
+        // git refuses to stage while paths are unmerged only for add;
+        // the others skip them
+    }
+    List<GIT_gitcommon.Spec> specs = [];
+    if (given.size() > 0) {
+        specs = GIT_gitcommon.parse_specs(given, ctx.prefix);
+    }
+    bool is_filemode = GIT_gitcommon.cfg_bool(ctx, "core", "", "filemode", true);
+    // what the index holds, by path (stage 0)
+    Map<str, GIT_gitdiff.Side> entries = {};
+    for (GIT_index.Entry entry in idx.list()) {
+        if (entry.stage != 0) {
+            continue;
+        }
+        match (entry.path.utf8()) {
+            case Some(str path): {
+                if (GIT_gitcommon.spec_match(specs, path)) {
+                    entries.set(path, GIT_gitdiff.Side(entry.mode, entry.id, ""));
+                }
+            }
+            case None: {
+            }
+        }
+    }
+    str tree = "";
+    if (flavor_number == 1 || flavor_number == 3 || flavor_number == 6 || flavor_number == 4 || flavor_number == 5 || flavor_number == 7) {
+        str want = tree_spec;
+        if (want == "") {
+            want = "HEAD";
+        }
+        match (GIT_revparse.tree_id(ctx.gitdir, want)) {
+            case Ok(str found): {
+                tree = found;
+            }
+            case Err(GIT_revparse.Error error): {
+                if (want == "HEAD" && tree_spec == "") {
+                    // an unborn branch: the empty tree
+                    tree = "";
+                } else {
+                    return GIT_gitcommon.fatal("invalid reference: " + want);
+                }
+            }
+        }
+    }
+    List<GIT_gitdiff.Item> items = [];
+    List<str> unmerged = [];
+    Map<str, GIT_gitdiff.Side> all_index = GIT_gitdiff.index_sides(repo, unmerged);
+    Map<str, GIT_gitdiff.Side> stat_none = {};
+    Map<str, GIT_index.Entry> cache = {};
+    for (GIT_index.Entry entry in idx.list()) {
+        if (entry.stage == 0) {
+            match (entry.path.utf8()) {
+                case Some(str path): {
+                    cache.set(path, entry);
+                }
+                case None: {
+                }
+            }
+        }
+    }
+    if (flavor_number == 0 || flavor_number == 2) {
+        items = GIT_gitdiff.index_vs_worktree(repo, ctx.root, entries, specs, is_filemode, cache);
+    } else if (flavor_number == 1) {
+        Map<str, GIT_gitdiff.Side> from = GIT_gitdiff.tree_sides(repo, tree, "", specs);
+        items = GIT_gitdiff.maps_diff(from, entries, unmerged);
+    } else if (flavor_number == 5) {
+        Map<str, GIT_gitdiff.Side> to = GIT_gitdiff.tree_sides(repo, tree, "", specs);
+        items = GIT_gitdiff.maps_diff(entries, to, unmerged);
+    } else if (flavor_number == 3 || flavor_number == 6) {
+        items = GIT_gitdiff.tree_vs_worktree(repo, ctx.root, tree, entries, specs, is_filemode, cache);
+    } else {
+        items = GIT_gitdiff.tree_vs_worktree(repo, ctx.root, tree, entries, specs, is_filemode, cache);
+        items = GIT_gitdiff.reverse_items(items);
+    }
+    GIT_gitdiff.DOpts opts = GIT_gitdiff.DOpts();
+    opts.is_renames = false;
+    if (f.is_swapped) {
+        opts.src_prefix = "b/";
+        opts.dst_prefix = "a/";
+    }
+    List<PFile> files = [];
+    for (GIT_gitdiff.Item item in GIT_gitdiff_sorted(items)) {
+        if (item.status == "U") {
+            continue;
+        }
+        List<GIT_gitdiff.Item> parts = [];
+        if (item.status == "T") {
+            parts.push(GIT_gitdiff.Item("D", item.path, item.path, item.old, GIT_gitdiff.nothing()));
+            parts.push(GIT_gitdiff.Item("A", item.path, item.path, GIT_gitdiff.nothing(), item.new));
+        } else {
+            parts.push(item);
+        }
+        for (GIT_gitdiff.Item part in parts) {
+            match (make_file(repo, part, opts)) {
+                case Some(PFile file): {
+                    files.push(file);
+                }
+                case None: {
+                }
+            }
+        }
+    }
+    GIT_gitcommon.Out out = GIT_gitcommon.Out();
+    if (files.size() == 0) {
+        out.text("No changes.\n");
+        out.flush();
+        return 0;
+    }
+    Session s = Session(out, io.stdin(), f);
+    for (PFile file in files) {
+        if (update_file(s, file)) {
+            break;
+        }
+    }
+    out.flush();
+    // apply
+    bool is_index_dirty = false;
+    // a type change is a deletion and an addition of one path: the addition
+    // cannot go in while the deletion was not chosen
+    Map<str, bool> kept = {};
+    for (PFile file in files) {
+        if (file.is_deleted && !all_used(file)) {
+            kept.set(file.path, true);
+        }
+        if (!any_used(file)) {
+            continue;
+        }
+        if (file.is_added && kept.contains(file.path)) {
+            continue;
+        }
+        GIT_gitdiff.Side take_side = file.old_side;
+        GIT_gitdiff.Side keep_side = file.new_side;
+        // the target starts as the side the chosen hunks are not taken from
+        bool is_takes_new = f.is_takes_new;
+        if (f.is_takes_new) {
+            take_side = file.new_side;
+            keep_side = file.old_side;
+        } else {
+            take_side = file.old_side;
+            keep_side = file.new_side;
+        }
+        // the final state of the path in the target
+        bool is_mode_used = file.has_mode && file.hunks[0].use == 1;
+        int mode = keep_side.mode;
+        if (is_mode_used) {
+            mode = take_side.mode;
+        }
+        bytes content = chosen_content(file, is_takes_new);
+        bool is_gone = false;
+        if (file.is_deleted || file.is_added) {
+            // the whole file is one choice
+            if (all_used(file)) {
+                is_gone = take_side.mode == 0;
+                mode = take_side.mode;
+                content = [];
+                if (take_side.mode != 0) {
+                    content = GIT_gitdiff.content_of(repo, take_side);
+                }
+            } else {
+                is_gone = keep_side.mode == 0;
+                mode = keep_side.mode;
+                content = [];
+                if (keep_side.mode != 0) {
+                    content = GIT_gitdiff.content_of(repo, keep_side);
+                }
+            }
+        }
+        if (f.is_index) {
+            if (is_gone) {
+                idx.remove(file.path);
+                is_index_dirty = true;
+            } else {
+                match (GIT_object.write_blob(ctx.gitdir, content)) {
+                    case Ok(str id): {
+                        GIT_index.Entry entry = GIT_index.from_stat(file.path.to_bytes(), fs.Stat(content.size(), mode, 0), mode >> 12 == 0o12, id);
+                        entry.mode = mode;
+                        idx.put(entry);
+                        is_index_dirty = true;
+                    }
+                    case Err(_): {
+                        return GIT_gitcommon.fatal("unable to write object for '" + file.path + "'");
+                    }
+                }
+            }
+        }
+        if (f.is_worktree) {
+            str full = fs.join(ctx.root, file.path);
+            if (is_gone) {
+                GIT_gitwrite.rm_quiet(full);
+            } else {
+                match (GIT_object.write_blob(ctx.gitdir, content)) {
+                    case Ok(str id): {
+                        GIT_gitwrite.write_blob_to(ctx.gitdir, ctx.root, file.path, mode, id);
+                    }
+                    case Err(_): {
+                        return GIT_gitcommon.fatal("unable to write object for '" + file.path + "'");
+                    }
+                }
+            }
+        }
+    }
+    if (is_index_dirty) {
+        if (!GIT_gitwrite.write_idx(ctx.gitdir, idx)) {
+            return 128;
+        }
+    }
+    return 0;
+}
+
+List<GIT_gitdiff.Item> GIT_gitdiff_sorted(List<GIT_gitdiff.Item> items) {
+    List<str> keys = [];
+    Map<str, List<GIT_gitdiff.Item>> by = {};
+    for (GIT_gitdiff.Item item in items) {
+        if (!by.contains(item.path)) {
+            by.set(item.path, []);
+            keys.push(item.path);
+        }
+        by.get(item.path).or([]).push(item);
+    }
+    keys.sort();
+    List<GIT_gitdiff.Item> out = [];
+    for (str key in keys) {
+        for (GIT_gitdiff.Item item in by.get(key).or([])) {
+            out.push(item);
+        }
+    }
+    return out;
+}

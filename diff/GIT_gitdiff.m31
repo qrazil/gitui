@@ -1271,7 +1271,7 @@ bool ends_with_nl(bytes line) {
 // back to (not including) `limit`, the nearest line that starts with a
 // letter, `_` or `$`, cut to 80 bytes with its trailing blanks dropped.
 // Returns false when there is none.
-bool func_search(List<bytes> old_lines, int start, int limit, bytes found) {
+pub bool func_search(List<bytes> old_lines, int start, int limit, bytes found) {
     int index = start;
     while (index != limit && index >= 0 && index < old_lines.size()) {
         bytes line = old_lines[index];
@@ -1296,7 +1296,7 @@ bool func_search(List<bytes> old_lines, int start, int limit, bytes found) {
     return false;
 }
 
-str range_text(int before, int count) {
+pub str range_text(int before, int count) {
     int start = before;
     if (count > 0) {
         start = before + 1;

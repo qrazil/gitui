@@ -13,6 +13,7 @@ import core.GIT_revparse;
 import core.GIT_gitcommon;
 import core.GIT_gitstore;
 import core.GIT_gitwrite;
+import core.GIT_gitaddp;
 
 // --- shared -----------------------------------------------------------------------------
 
@@ -451,11 +452,9 @@ pub int run_add(str start, List<str> overrides, List<str> argv) {
     return rc;
 }
 
-// `add -p`: per file with changes, hunk by hunk, y / n / a / d / q / s is
-// not offered (a hunk is a hunk). Reads answers from standard input.
+// `add -p`: per file with changes, hunk by hunk (`core/GIT_gitaddp.m31`).
 int add_patch(GIT_gitcommon.Ctx ctx, List<str> given) {
-    io.eprint("error: add -p is not in 1git yet (see docs/GIT-COMPAT.md)");
-    return 129;
+    return GIT_gitaddp.run(ctx, 0, "", given);
 }
 
 // --- rm ---------------------------------------------------------------------------------
@@ -895,9 +894,35 @@ pub int run_restore(str start, List<str> overrides, List<str> argv) {
     if (ctx.is_bare) {
         return GIT_gitcommon.fatal("this operation must be run in a work tree");
     }
-    if (opts.flag("patch") || opts.flag("merge") || opts.has("conflict")) {
+    if (opts.flag("merge") || opts.has("conflict")) {
         io.eprint("error: this option of restore is not in 1git (see docs/GIT-COMPAT.md)");
         return 129;
+    }
+    if (opts.flag("patch")) {
+        // -p picks hunks: the flavour follows -S/-W and --source as git's
+        // `patch_mode_*` does (HEAD is tested by name)
+        bool is_s = opts.flag("staged");
+        bool is_w = opts.flag("worktree") || !is_s;
+        str source = opts.value("source", "");
+        bool is_head = source == "" || source == "HEAD";
+        int flavor = 2;
+        if (is_s && is_w) {
+            flavor = 4;
+            if (is_head) {
+                flavor = 3;
+            }
+        } else if (is_s) {
+            flavor = 5;
+            if (is_head) {
+                flavor = 1;
+            }
+        } else if (source != "") {
+            flavor = 7;
+            if (source == "HEAD") {
+                flavor = 6;
+            }
+        }
+        return GIT_gitaddp.run(ctx, flavor, source, opts.paths());
     }
     List<str> given = opts.paths();
     if (given.size() == 0) {
