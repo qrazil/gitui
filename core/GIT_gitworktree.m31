@@ -1,0 +1,560 @@
+// `1git worktree`: add, list, remove and prune, in git's spelling and with
+// git's files (`.git/worktrees/<name>/{HEAD,commondir,gitdir,...}` and the
+// `.git` file of the new tree). See docs/GIT-COMPAT.md for what differs.
+
+import io;
+import os;
+import fs;
+import core.GIT_checkout;
+import core.GIT_object;
+import core.GIT_refs;
+import core.GIT_reflog;
+import core.GIT_repository;
+import core.GIT_revparse;
+import core.GIT_status;
+import core.GIT_gitcommit;
+import core.GIT_gitcommon;
+import core.GIT_gitstore;
+import core.GIT_gitwrite;
+
+str usage_text() {
+    return "usage: git worktree add [-f] [--detach] [--checkout] [--lock [--reason <string>]]\n                        [-b <new-branch>] <path> [<commit-ish>]\n   or: git worktree list [-v | --porcelain [-z]]\n   or: git worktree prune [-n] [-v] [--expire <expire>]\n   or: git worktree remove [-f] <worktree>";
+}
+
+/// The common git directory and the main work tree's path.
+str main_tree(str common) {
+    str clean = normalize(common);
+    if (clean.ends_with("/.git")) {
+        return clean.substr(0, clean.size() - 5);
+    }
+    return clean;
+}
+
+type Linked {
+    str name;
+    str dir;
+    str path;
+    bool is_locked;
+}
+
+/// The linked work trees, by directory name.
+List<Linked> linked_trees(str common) {
+    List<Linked> out = [];
+    str base = fs.join(common, "worktrees");
+    match (fs.listdir(base)) {
+        case Ok(List<str> names): {
+            names.sort();
+            for (str name in names) {
+                str dir = fs.join(base, name);
+                if (!fs.is_directory(dir)) {
+                    continue;
+                }
+                str path = "";
+                match (io.read(fs.join(dir, "gitdir"))) {
+                    case Ok(str body): {
+                        path = body.trim();
+                        if (path.ends_with("/.git")) {
+                            path = path.substr(0, path.size() - 5);
+                        }
+                    }
+                    case Err(_): {
+                    }
+                }
+                out.push(Linked(name, dir, path, fs.is_present(fs.join(dir, "locked"))));
+            }
+        }
+        case Err(_): {
+        }
+    }
+    return out;
+}
+
+/// `(branch ref, commit id)` of a work tree's HEAD; the ref is "" when detached.
+List<str> head_of(str git_dir, str common) {
+    str body = "";
+    match (io.read(fs.join(git_dir, "HEAD"))) {
+        case Ok(str text): {
+            body = text.trim();
+        }
+        case Err(_): {
+        }
+    }
+    if (body.starts_with("ref: ")) {
+        str ref = body.substr(5, body.size());
+        str id = "";
+        match (GIT_refs.resolve(common, ref)) {
+            case Ok(str found): {
+                id = found;
+            }
+            case Err(_): {
+            }
+        }
+        return [ref, id];
+    }
+    return ["", body];
+}
+
+str resolve_path(GIT_gitcommon.Ctx ctx, str given) {
+    str base = ctx.root;
+    if (ctx.prefix != "") {
+        base = fs.join(ctx.root, ctx.prefix);
+    }
+    return GIT_gitstatus_resolve(base, given);
+}
+
+str GIT_gitstatus_resolve(str base, str given) {
+    if (given.starts_with("/")) {
+        return normalize(given);
+    }
+    return normalize(base + "/" + given);
+}
+
+str normalize(str path) {
+    List<str> kept = [];
+    for (str part in path.split("/")) {
+        if (part == "" || part == ".") {
+            continue;
+        }
+        if (part == "..") {
+            if (kept.size() > 0) {
+                kept.pop();
+            }
+            continue;
+        }
+        kept.push(part);
+    }
+    return "/" + kept.join("/");
+}
+
+pub int run_worktree(str start, List<str> overrides, List<str> argv) {
+    GIT_gitcommon.Opened opened = GIT_gitcommon.open(start, overrides);
+    if (!opened.ok) {
+        return 128;
+    }
+    GIT_gitcommon.Ctx ctx = opened.ctx;
+    if (argv.size() == 0) {
+        io.eprint(usage_text());
+        return 129;
+    }
+    str sub = argv[0];
+    List<str> rest = argv.slice(1, argv.size());
+    if (sub == "add") {
+        return run_add(ctx, rest);
+    }
+    if (sub == "list") {
+        return run_list(ctx, rest);
+    }
+    if (sub == "remove") {
+        return run_remove(ctx, rest);
+    }
+    if (sub == "prune") {
+        return run_prune(ctx, rest);
+    }
+    io.eprint("error: unknown subcommand: `" + sub + "'");
+    io.eprint(usage_text());
+    return 129;
+}
+
+bool is_branch_checked_out(str common, str branch_ref, List<str> found_path) {
+    List<str> head = head_of(common, common);
+    if (head[0] == branch_ref) {
+        found_path.push(main_tree(common));
+        return true;
+    }
+    for (Linked tree in linked_trees(common)) {
+        List<str> there = head_of(tree.dir, common);
+        if (there[0] == branch_ref) {
+            found_path.push(tree.path);
+            return true;
+        }
+    }
+    return false;
+}
+
+int run_add(GIT_gitcommon.Ctx ctx, List<str> argv) {
+    GIT_gitwrite.Opts opts = GIT_gitwrite.parse_opts(argv, ["-b=", "-B=", "--detach", "-f --force", "-q --quiet", "--checkout", "--lock", "--reason=", "--guess-remote", "--track", "--orphan"]);
+    int bad = GIT_gitwrite.check_opts(opts, usage_text());
+    if (bad >= 0) {
+        return bad;
+    }
+    if (opts.has("lock") || opts.has("reason") || opts.has("orphan") || opts.has("track") || opts.has("guess-remote")) {
+        io.eprint("error: this option of worktree add is not in 1git (see docs/GIT-COMPAT.md)");
+        return 129;
+    }
+    List<str> words = opts.paths();
+    if (words.size() == 0 || words.size() > 2) {
+        io.eprint(usage_text());
+        return 129;
+    }
+    str common = GIT_repository.common(ctx.gitdir);
+    bool is_quiet = opts.flag("quiet");
+    str path = resolve_path(ctx, words[0]);
+    if (fs.is_present(path)) {
+        bool is_empty = false;
+        match (fs.listdir(path)) {
+            case Ok(List<str> names): {
+                is_empty = names.size() == 0;
+            }
+            case Err(_): {
+            }
+        }
+        if (!is_empty) {
+            return GIT_gitcommon.fatal("'" + path + "' already exists");
+        }
+    }
+    str new_branch = "";
+    bool is_forced_branch = false;
+    if (opts.has("b")) {
+        new_branch = opts.value("b", "");
+    }
+    if (opts.has("B")) {
+        new_branch = opts.value("B", "");
+        is_forced_branch = true;
+    }
+    str commit_spec = "";
+    if (words.size() == 2) {
+        commit_spec = words[1];
+    }
+    bool is_detached = opts.flag("detach");
+    str base_name = GIT_gitwrite.basename(path);
+    // what HEAD will be
+    str branch_ref = "";
+    str commit = "";
+    str created_from = commit_spec;
+    if (created_from == "") {
+        created_from = "HEAD";
+    }
+    bool is_new_branch = false;
+    if (new_branch != "") {
+        branch_ref = "refs/heads/" + new_branch;
+        if (GIT_refs.has_ref(common, branch_ref) && !is_forced_branch) {
+            io.eprint("fatal: a branch named '" + new_branch + "' already exists");
+            return 255;
+        }
+        is_new_branch = true;
+    } else if (is_detached) {
+        // detached at the commit
+    } else if (commit_spec != "") {
+        if (GIT_refs.has_ref(common, "refs/heads/" + commit_spec)) {
+            branch_ref = "refs/heads/" + commit_spec;
+        }
+    } else {
+        // `git worktree add <path>`: a branch named like the directory
+        branch_ref = "refs/heads/" + base_name;
+        if (!GIT_refs.has_ref(common, branch_ref)) {
+            is_new_branch = true;
+        }
+    }
+    if (!is_new_branch && branch_ref != "") {
+        match (GIT_refs.resolve(common, branch_ref)) {
+            case Ok(str found): {
+                commit = found;
+            }
+            case Err(_): {
+                return GIT_gitcommon.fatal("invalid reference: " + commit_spec);
+            }
+        }
+    } else {
+        str spec = commit_spec;
+        if (spec == "") {
+            spec = "HEAD";
+        }
+        match (GIT_revparse.commit_id(ctx.gitdir, spec)) {
+            case Ok(str found): {
+                commit = found;
+            }
+            case Err(_): {
+                return GIT_gitcommon.fatal("invalid reference: " + spec);
+            }
+        }
+    }
+    if (branch_ref != "" && !is_new_branch) {
+        List<str> where = [];
+        if (is_branch_checked_out(common, branch_ref, where) && !opts.flag("force")) {
+            io.eprint("Preparing worktree (checking out '" + GIT_gitwrite.short_ref(branch_ref) + "')");
+            return GIT_gitcommon.fatal("'" + GIT_gitwrite.short_ref(branch_ref) + "' is already used by worktree at '" + where[0] + "'");
+        }
+    }
+    GIT_gitstore.Store store = GIT_gitstore.open(ctx.gitdir);
+    if (!is_quiet) {
+        if (is_new_branch) {
+            io.eprint("Preparing worktree (new branch '" + GIT_gitwrite.short_ref(branch_ref) + "')");
+        } else if (branch_ref != "") {
+            io.eprint("Preparing worktree (checking out '" + GIT_gitwrite.short_ref(branch_ref) + "')");
+        } else {
+            io.eprint("Preparing worktree (detached HEAD " + store.unique_abbrev(commit, GIT_gitcommon.default_abbrev(ctx)) + ")");
+        }
+    }
+    if (is_new_branch) {
+        Option<str> expect = Option<str>.Some("");
+        if (is_forced_branch && GIT_refs.has_ref(common, branch_ref)) {
+            expect = Option<str>.None;
+        }
+        str log_word = "branch: Created from ";
+        if (expect.is_none()) {
+            log_word = "branch: Reset to ";
+        }
+        match (GIT_refs.update(common, branch_ref, commit, expect, reflog_message: log_word + created_from)) {
+            case Ok: {
+            }
+            case Err(GIT_refs.Error error): {
+                return GIT_gitcommon.fatal("could not create the branch: " + error.to_str());
+            }
+        }
+    }
+    // the name: the directory's, made unique
+    str name = base_name;
+    str trees = fs.join(common, "worktrees");
+    int suffix = 0;
+    while (fs.is_present(fs.join(trees, name))) {
+        suffix = suffix + 1;
+        name = base_name + suffix.to_str();
+    }
+    str dir = fs.join(trees, name);
+    match (fs.makedirs(dir)) {
+        case Ok: {
+        }
+        case Err(_): {
+            return GIT_gitcommon.fatal("could not create " + dir);
+        }
+    }
+    match (fs.makedirs(path)) {
+        case Ok: {
+        }
+        case Err(_): {
+            return GIT_gitcommon.fatal("could not create directory of '" + path + "'");
+        }
+    }
+    bool is_written = true;
+    str head_text = commit + "\n";
+    if (branch_ref != "") {
+        head_text = "ref: " + branch_ref + "\n";
+    }
+    is_written = write_file(fs.join(dir, "HEAD"), head_text) && is_written;
+    is_written = write_file(fs.join(dir, "commondir"), "../..\n") && is_written;
+    is_written = write_file(fs.join(dir, "gitdir"), fs.join(path, ".git") + "\n") && is_written;
+    is_written = write_file(fs.join(path, ".git"), "gitdir: " + dir + "\n") && is_written;
+    if (!is_written) {
+        return GIT_gitcommon.fatal("could not write the worktree files");
+    }
+    if (opts.has("checkout") && !opts.flag("checkout")) {
+        return 0;
+    }
+    match (GIT_checkout.reset_files(dir, path, commit)) {
+        case Ok(_): {
+        }
+        case Err(GIT_checkout.Error error): {
+            return GIT_gitcommon.fatal("checkout failed: " + error.to_str());
+        }
+    }
+    // what git's own `reset --hard` leaves in the new tree's directory
+    write_file(fs.join(dir, "ORIG_HEAD"), commit + "\n");
+    str who = GIT_gitwrite.ident_with_date(GIT_reflog.default_ident(ctx.gitdir));
+    str zero = GIT_gitwrite.zero_id(ctx.gitdir);
+    match (fs.makedirs(fs.join(dir, "logs"))) {
+        case Ok: {
+        }
+        case Err(_): {
+        }
+    }
+    str log_text = zero + " " + commit + " " + who + "\n";
+    if (branch_ref != "") {
+        // a detached HEAD that does not move is not logged again
+        log_text = log_text + commit + " " + commit + " " + who + "\treset: moving to HEAD\n";
+    }
+    write_file(fs.join(fs.join(dir, "logs"), "HEAD"), log_text);
+    if (!is_quiet) {
+        GIT_gitwrite.say("HEAD is now at " + store.unique_abbrev(commit, GIT_gitcommon.default_abbrev(ctx)) + " " + GIT_gitcommit.commit_subject(store, commit));
+    }
+    return 0;
+}
+
+bool write_file(str path, str text) {
+    match (io.write(path, text)) {
+        case Ok: {
+            return true;
+        }
+        case Err(_): {
+            return false;
+        }
+    }
+}
+
+int run_list(GIT_gitcommon.Ctx ctx, List<str> argv) {
+    GIT_gitwrite.Opts opts = GIT_gitwrite.parse_opts(argv, ["--porcelain", "-v --verbose", "-z", "--expire="]);
+    int bad = GIT_gitwrite.check_opts(opts, usage_text());
+    if (bad >= 0) {
+        return bad;
+    }
+    str common = GIT_repository.common(ctx.gitdir);
+    GIT_gitstore.Store store = GIT_gitstore.open(ctx.gitdir);
+    List<str> paths = [];
+    List<List<str>> heads = [];
+    List<bool> locked = [];
+    List<bool> missing = [];
+    paths.push(main_tree(common));
+    heads.push(head_of(common, common));
+    locked.push(false);
+    missing.push(false);
+    for (Linked tree in linked_trees(common)) {
+        paths.push(tree.path);
+        heads.push(head_of(tree.dir, common));
+        locked.push(tree.is_locked);
+        missing.push(!fs.is_present(tree.path));
+    }
+    int width = 0;
+    for (str path in paths) {
+        if (path.size() > width) {
+            width = path.size();
+        }
+    }
+    bool is_porcelain = opts.flag("porcelain");
+    str end = "\n";
+    if (opts.flag("z")) {
+        end = "\x00";
+    }
+    for (int i in 0 .. paths.size()) {
+        List<str> head = heads[i];
+        if (is_porcelain) {
+            GIT_gitwrite.put_bytes(("worktree " + paths[i] + end).to_bytes());
+            GIT_gitwrite.put_bytes(("HEAD " + head[1] + end).to_bytes());
+            if (head[0] != "") {
+                GIT_gitwrite.put_bytes(("branch " + head[0] + end).to_bytes());
+            } else {
+                GIT_gitwrite.put_bytes(("detached" + end).to_bytes());
+            }
+            if (locked[i]) {
+                GIT_gitwrite.put_bytes(("locked" + end).to_bytes());
+            }
+            if (missing[i]) {
+                GIT_gitwrite.put_bytes(("prunable gitdir file points to non-existent location" + end).to_bytes());
+            }
+            GIT_gitwrite.put_bytes(end.to_bytes());
+            continue;
+        }
+        str line = paths[i];
+        while (line.size() < width) {
+            line = line + " ";
+        }
+        str shown = head[1];
+        if (head[1].size() > 7) {
+            shown = store.unique_abbrev(head[1], GIT_gitcommon.default_abbrev(ctx));
+        }
+        line = line + " " + shown;
+        if (head[0] != "") {
+            line = line + " [" + GIT_gitwrite.short_ref(head[0]) + "]";
+        } else {
+            line = line + " (detached HEAD)";
+        }
+        if (locked[i]) {
+            line = line + " locked";
+        }
+        if (missing[i]) {
+            line = line + " prunable";
+        }
+        GIT_gitwrite.say(line);
+    }
+    return 0;
+}
+
+bool remove_all(str full) {
+    if (GIT_gitwrite.kind_of(full) == 3) {
+        match (fs.listdir(full)) {
+            case Ok(List<str> names): {
+                for (str name in names) {
+                    remove_all(fs.join(full, name));
+                }
+            }
+            case Err(_): {
+            }
+        }
+        match (fs.rmdir(full)) {
+            case Ok: {
+                return true;
+            }
+            case Err(_): {
+                return false;
+            }
+        }
+    }
+    GIT_gitwrite.rm_quiet(full);
+    return true;
+}
+
+int run_remove(GIT_gitcommon.Ctx ctx, List<str> argv) {
+    GIT_gitwrite.Opts opts = GIT_gitwrite.parse_opts(argv, ["-f --force"]);
+    int bad = GIT_gitwrite.check_opts(opts, usage_text());
+    if (bad >= 0) {
+        return bad;
+    }
+    List<str> words = opts.paths();
+    if (words.size() != 1) {
+        io.eprint(usage_text());
+        return 129;
+    }
+    str common = GIT_repository.common(ctx.gitdir);
+    str wanted = resolve_path(ctx, words[0]);
+    if (wanted == main_tree(common)) {
+        return GIT_gitcommon.fatal("'" + words[0] + "' is a main working tree");
+    }
+    for (Linked tree in linked_trees(common)) {
+        if (tree.path != wanted) {
+            continue;
+        }
+        if (tree.is_locked && opts.count("force") < 2) {
+            return GIT_gitcommon.fatal("cannot remove a locked working tree, lock reason: \nuse 'remove -f -f' to override or unlock first");
+        }
+        if (fs.is_present(tree.path) && opts.count("force") == 0) {
+            bool is_dirty = false;
+            match (GIT_status.status(tree.dir, tree.path)) {
+                case Ok(GIT_status.Status found): {
+                    is_dirty = found.staged.size() > 0 || found.unstaged.size() > 0 || found.untracked.size() > 0 || found.unmerged.size() > 0;
+                }
+                case Err(_): {
+                }
+            }
+            if (is_dirty) {
+                return GIT_gitcommon.fatal("'" + words[0] + "' contains modified or untracked files, use --force to delete it");
+            }
+        }
+        if (fs.is_present(tree.path)) {
+            remove_all(tree.path);
+        }
+        remove_all(tree.dir);
+        return 0;
+    }
+    return GIT_gitcommon.fatal("'" + words[0] + "' is not a working tree");
+}
+
+int run_prune(GIT_gitcommon.Ctx ctx, List<str> argv) {
+    GIT_gitwrite.Opts opts = GIT_gitwrite.parse_opts(argv, ["-n --dry-run", "-v --verbose", "--expire="]);
+    int bad = GIT_gitwrite.check_opts(opts, usage_text());
+    if (bad >= 0) {
+        return bad;
+    }
+    str common = GIT_repository.common(ctx.gitdir);
+    for (Linked tree in linked_trees(common)) {
+        if (tree.is_locked) {
+            continue;
+        }
+        bool is_gone = tree.path == "" || !fs.is_present(tree.path);
+        if (!is_gone) {
+            continue;
+        }
+        if (opts.flag("verbose") || opts.flag("dry-run")) {
+            io.eprint("Removing worktrees/" + tree.name + ": gitdir file points to non-existent location");
+        }
+        if (!opts.flag("dry-run")) {
+            remove_all(tree.dir);
+        }
+    }
+    // git leaves no empty `worktrees` directory behind
+    str base = fs.join(common, "worktrees");
+    match (fs.rmdir(base)) {
+        case Ok: {
+        }
+        case Err(_): {
+        }
+    }
+    return 0;
+}

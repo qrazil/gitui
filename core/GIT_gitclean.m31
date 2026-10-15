@@ -1,0 +1,396 @@
+// `1git clean`: git's grammar and git's bytes. The untracked and ignored
+// entries are what `status` lists (whole directories collapsed), plus the
+// empty untracked directories `-d` also takes. See docs/GIT-COMPAT.md.
+
+import io;
+import os;
+import fs;
+import core.GIT_gitcommon;
+import core.GIT_gitstatus;
+import core.GIT_gitwrite;
+import core.GIT_ignore;
+
+str usage_text() {
+    return "usage: git clean [-d] [-f] [-i] [-n] [-q] [-e <pattern>] [-x | -X] [--] [<pathspec>...]";
+}
+
+type Entry {
+    str path;
+    bool is_dir;
+    bool is_ignored;
+    bool is_repository;
+    // below an untracked directory (only `-d` or a pathspec takes those)
+    bool is_nested;
+}
+
+/// What is in an untracked directory.
+type Facts {
+    bool has_untracked = false;
+    bool has_ignored = false;
+    bool has_any = false;
+}
+
+/// The walk: which untracked and ignored entries the work tree holds, the way
+/// git's directory scan with `DIR_SHOW_OTHER_DIRECTORIES` reports them.
+type Scan {
+    str root;
+    GIT_ignore.Ignore ignore;
+    Map<str, bool> tracked_files;
+    Map<str, bool> tracked_dirs;
+    List<str> specs;
+    bool has_glob = false;
+    bool is_all = false;
+    List<Entry> entries = [];
+}
+
+bool Scan.is_dir_ignored(str dir) {
+    return ignore.is_ignored(dir + "/probe");
+}
+
+bool Scan.is_repository(str dir) {
+    return fs.is_present(fs.join(fs.join(root, dir), ".git"));
+}
+
+/// Does a pathspec name this directory, or lie inside it?
+bool Scan.is_spec_inside(str dir) {
+    for (str spec in specs) {
+        str bare = spec;
+        while (bare.ends_with("/")) {
+            bare = bare.substr(0, bare.size() - 1);
+        }
+        if (bare.starts_with(dir + "/")) {
+            return true;
+        }
+    }
+    return false;
+}
+
+Facts Scan.facts_of(str dir) {
+    Facts out = Facts();
+    match (fs.listdir(fs.join(root, dir))) {
+        case Ok(List<str> names): {
+            for (str name in names) {
+                if (name == ".git") {
+                    continue;
+                }
+                str rel = dir + "/" + name;
+                int kind = GIT_gitwrite.kind_of(fs.join(root, rel));
+                if (kind == 3) {
+                    if (is_repository(rel)) {
+                        out.has_untracked = true;
+                        out.has_any = true;
+                    } else if (is_dir_ignored(rel)) {
+                        out.has_ignored = true;
+                        out.has_any = true;
+                    } else {
+                        Facts inner = facts_of(rel);
+                        if (inner.has_untracked) {
+                            out.has_untracked = true;
+                        }
+                        if (inner.has_ignored) {
+                            out.has_ignored = true;
+                        }
+                        if (inner.has_any) {
+                            out.has_any = true;
+                        }
+                    }
+                } else {
+                    out.has_any = true;
+                    if (ignore.is_ignored(rel)) {
+                        out.has_ignored = true;
+                    } else {
+                        out.has_untracked = true;
+                    }
+                }
+            }
+        }
+        case Err(_): {
+        }
+    }
+    return out;
+}
+
+void Scan.add(str path, bool is_dir, bool is_ignored, bool is_repo, bool is_nested) {
+    entries.push(Entry(path, is_dir, is_ignored, is_repo, is_nested));
+}
+
+/// A directory that holds tracked files (or the root).
+void Scan.walk_tracked(str dir) {
+    str full = root;
+    if (dir != "") {
+        full = fs.join(root, dir);
+    }
+    match (fs.listdir(full)) {
+        case Ok(List<str> names): {
+            names.sort();
+            for (str name in names) {
+                if (name == ".git" && dir == "") {
+                    continue;
+                }
+                str rel = name;
+                if (dir != "") {
+                    rel = dir + "/" + name;
+                }
+                int kind = GIT_gitwrite.kind_of(fs.join(root, rel));
+                if (kind == 3) {
+                    if (tracked_dirs.contains(rel)) {
+                        walk_tracked(rel);
+                    } else if (is_repository(rel)) {
+                        add(rel + "/", true, false, true, false);
+                    } else {
+                        untracked_dir(rel, false);
+                    }
+                } else if (!tracked_files.contains(rel)) {
+                    add(rel, false, ignore.is_ignored(rel), false, false);
+                }
+            }
+        }
+        case Err(_): {
+        }
+    }
+}
+
+/// A directory with no tracked file in it.
+void Scan.untracked_dir(str dir, bool is_nested) {
+    if (is_dir_ignored(dir)) {
+        add(dir + "/", true, true, false, is_nested);
+        return;
+    }
+    bool is_named = false;
+    for (str spec in specs) {
+        str bare = spec;
+        while (bare.ends_with("/")) {
+            bare = bare.substr(0, bare.size() - 1);
+        }
+        if (bare == dir) {
+            is_named = true;
+        }
+    }
+    Facts facts = facts_of(dir);
+    bool is_expanded = has_glob || is_spec_inside(dir);
+    if (!is_expanded && facts.has_any && !facts.has_untracked) {
+        // nothing but ignored files: the directory goes as one ignored entry
+        add(dir + "/", true, true, false, is_nested);
+        return;
+    }
+    if (!is_expanded && (facts.has_untracked || !facts.has_any) && (!facts.has_ignored || is_all)) {
+        add(dir + "/", true, false, false, is_nested);
+        return;
+    }
+    if (is_named && !is_expanded && !facts.has_ignored) {
+        add(dir + "/", true, false, false, is_nested);
+        return;
+    }
+    match (fs.listdir(fs.join(root, dir))) {
+        case Ok(List<str> names): {
+            names.sort();
+            for (str name in names) {
+                if (name == ".git") {
+                    continue;
+                }
+                str rel = dir + "/" + name;
+                int kind = GIT_gitwrite.kind_of(fs.join(root, rel));
+                if (kind == 3) {
+                    if (is_repository(rel)) {
+                        add(rel + "/", true, false, true, true);
+                    } else {
+                        untracked_dir(rel, true);
+                    }
+                } else {
+                    add(rel, false, ignore.is_ignored(rel), false, true);
+                }
+            }
+        }
+        case Err(_): {
+        }
+    }
+}
+
+void remove_tree(str full) {
+    if (GIT_gitwrite.kind_of(full) == 3) {
+        match (fs.listdir(full)) {
+            case Ok(List<str> names): {
+                for (str name in names) {
+                    remove_tree(fs.join(full, name));
+                }
+            }
+            case Err(_): {
+            }
+        }
+        match (fs.rmdir(full)) {
+            case Ok: {
+            }
+            case Err(_): {
+            }
+        }
+    } else {
+        GIT_gitwrite.rm_quiet(full);
+    }
+}
+
+pub int run_clean(str start, List<str> overrides, List<str> argv) {
+    GIT_gitcommon.Opened opened = GIT_gitcommon.open(start, overrides);
+    if (!opened.ok) {
+        return 128;
+    }
+    GIT_gitcommon.Ctx ctx = opened.ctx;
+    GIT_gitwrite.Opts opts = GIT_gitwrite.parse_opts(argv, ["-d", "-f --force", "-i --interactive", "-n --dry-run", "-q --quiet", "-e --exclude=", "-x", "-X"]);
+    int bad = GIT_gitwrite.check_opts(opts, usage_text());
+    if (bad >= 0) {
+        return bad;
+    }
+    if (opts.flag("interactive")) {
+        io.eprint("error: this option of clean is not in 1git (see docs/GIT-COMPAT.md)");
+        return 129;
+    }
+    if (ctx.is_bare) {
+        return GIT_gitcommon.fatal("this operation must be run in a work tree");
+    }
+    if (opts.flag("x") && opts.flag("X")) {
+        io.eprint("error: options '-x' and '-X' cannot be used together");
+        return 129;
+    }
+    bool is_dry = opts.flag("dry-run");
+    bool is_quiet = opts.flag("quiet");
+    int force_count = opts.count("force");
+    bool is_required = GIT_gitcommon.cfg_bool(ctx, "clean", "", "requireForce", true);
+    if (is_required && force_count == 0 && !is_dry) {
+        return GIT_gitcommon.fatal("clean.requireForce defaults to true and neither -i, -n, nor -f given; refusing to clean");
+    }
+    if (opts.has("exclude")) {
+        io.eprint("error: -e of clean is not in 1git (see docs/GIT-COMPAT.md)");
+        return 129;
+    }
+    bool is_dirs = opts.flag("d");
+    bool is_all = opts.flag("x");
+    bool is_only_ignored = opts.flag("X");
+    List<str> words = opts.paths();
+    List<str> specs = [];
+    for (str word in words) {
+        specs.push(GIT_gitwrite.rooted(ctx.prefix, word));
+    }
+    int named_count = specs.size();
+    if (specs.size() == 0 && ctx.prefix != "") {
+        // from a subdirectory, clean works below it
+        specs.push(ctx.prefix);
+    }
+    match (GIT_ignore.load(ctx.gitdir, ctx.root)) {
+        case Ok(GIT_ignore.Ignore ignore): {
+            return clean_with(ctx, ignore, specs, named_count, is_dirs, is_all, is_only_ignored, is_dry, is_quiet, force_count);
+        }
+        case Err(_): {
+            return GIT_gitcommon.fatal("could not read the ignore files");
+        }
+    }
+}
+
+int clean_with(GIT_gitcommon.Ctx ctx, GIT_ignore.Ignore ignore, List<str> specs, int named_count, bool is_dirs, bool is_all, bool is_only_ignored, bool is_dry, bool is_quiet, int force_count) {
+    GIT_gitwrite.IdxLoaded loaded_index = GIT_gitwrite.read_idx(ctx.gitdir);
+    Map<str, bool> tracked_files = {};
+    Map<str, bool> tracked_dirs = {};
+    if (loaded_index.ok) {
+        for (str path in loaded_index.idx.sorted_paths()) {
+            tracked_files.set(path, true);
+            str dir = GIT_gitwrite.dirname(path);
+            while (dir != "" && dir != ".") {
+                tracked_dirs.set(dir, true);
+                dir = GIT_gitwrite.dirname(dir);
+            }
+        }
+    }
+    Scan scan = Scan(ctx.root, ignore, tracked_files, tracked_dirs, specs);
+    for (str spec in specs) {
+        if (GIT_gitstatus.has_wildcard(spec)) {
+            scan.has_glob = true;
+        }
+    }
+    scan.is_all = is_all;
+    scan.walk_tracked("");
+    List<GIT_gitcommon.Spec> parsed = GIT_gitcommon.parse_specs(specs, "");
+    List<Entry> entries = [];
+    for (Entry entry in scan.entries) {
+        if (specs.size() > 0) {
+            str bare = entry.path;
+            if (entry.is_dir) {
+                bare = bare.substr(0, bare.size() - 1);
+            }
+            if (!GIT_gitcommon.spec_match(parsed, bare)) {
+                continue;
+            }
+        }
+        entries.push(entry);
+    }
+    // order: git lists in path order
+    List<str> names = [];
+    Map<str, Entry> by_name = {};
+    for (Entry entry in entries) {
+        if (!by_name.contains(entry.path)) {
+            names.push(entry.path);
+        }
+        by_name.set(entry.path, entry);
+    }
+    names.sort();
+    List<str> removed_dirs = [];
+    for (str name in names) {
+        Entry entry = by_name.get(name).or(Entry(name, false, false, false, false));
+        // which kinds this run takes
+        if (entry.is_ignored && !is_all && !is_only_ignored) {
+            continue;
+        }
+        if (!entry.is_ignored && is_only_ignored) {
+            continue;
+        }
+        // without -d a directory goes only when a pathspec names it or a
+        // directory above it; `-X` also takes what lies in untracked directories
+        bool is_named = false;
+        if (entry.is_dir && named_count > 0 && GIT_gitcommon.spec_match(parsed, name.substr(0, name.size() - 1))) {
+            is_named = true;
+        }
+        if (entry.is_dir && !is_dirs && !is_named) {
+            continue;
+        }
+        if (entry.is_nested && !entry.is_dir && !is_dirs && !is_only_ignored) {
+            bool is_spec_file = false;
+            if (named_count > 0 && GIT_gitcommon.spec_match(parsed, name)) {
+                is_spec_file = true;
+            }
+            if (!is_spec_file) {
+                continue;
+            }
+        }
+        if (entry.is_repository && force_count < 2) {
+            continue;
+        }
+        // inside a directory that is going already
+        bool is_inside = false;
+        for (str dir in removed_dirs) {
+            if (name.starts_with(dir)) {
+                is_inside = true;
+            }
+        }
+        if (is_inside) {
+            continue;
+        }
+        str full = fs.join(ctx.root, name);
+        if (entry.is_dir) {
+            full = fs.join(ctx.root, name.substr(0, name.size() - 1));
+            removed_dirs.push(name);
+        }
+        if (is_dry) {
+            if (!is_quiet) {
+                GIT_gitwrite.say("Would remove " + shown(ctx, name));
+            }
+            continue;
+        }
+        remove_tree(full);
+        if (!is_quiet) {
+            GIT_gitwrite.say("Removing " + shown(ctx, name));
+        }
+    }
+    return 0;
+}
+
+/// A path as typed from the directory the command runs in, quoted as git does.
+str shown(GIT_gitcommon.Ctx ctx, str path) {
+    return GIT_gitstatus.quote(GIT_gitstatus.relative_to(path, ctx.prefix), false);
+}

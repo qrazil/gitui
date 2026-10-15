@@ -1681,7 +1681,7 @@ Result<str, Error> index_lookup(str gitdir, int stage, str path) {
         case Err(_): {
             // No index file at all is an empty index; one that is there and
             // will not parse is an error.
-            if (fs.is_present(fs.join(GIT_repository.common(gitdir), "index"))) {
+            if (fs.is_present(fs.join(gitdir, "index"))) {
                 return Result<str, Error>.Err(Error.Io);
             }
         }
