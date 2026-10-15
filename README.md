@@ -36,7 +36,7 @@ import all of them.
 | `diff/` | content work: xdiff, udiff, diff3, hunks, patch, blame, file log, merge, sequencer (cherry-pick, revert), rebase and its todo, stash, undo |
 | `net/` | remotes and transports: remote URLs, wire protocol, smart-HTTP fetch and push, ssh transport, pull |
 | `ui/` | the interactive client: `GIT_client` (the top), and every `GIT_ui_*` layer and overlay |
-| root | `git.m31` (command line client: `1git status`, `log`, `show`, `diff` and the change commands (`add`, `commit`, `switch`, ...) in git's grammar, `-log`-style plumbing), `gitui.m31` (interactive client), `deps`, `deps.lock` |
+| root | `git.m31` (command line client: `1git status`, `log`, `show`, `diff` and the change commands (`add`, `commit`, `switch`, `merge`, `rebase`, `stash`, ...) in git's grammar, `-log`-style plumbing), `gitui.m31` (interactive client), `deps`, `deps.lock` |
 
 Two placements are by import graph, not by name: `GIT_client` is in `ui/` (it imports
 every `GIT_ui_*` module), and `GIT_watch` is in `core/` (it imports only ignore and
@@ -65,6 +65,11 @@ bash scripts/build.sh git.m31         # the command line client -> ./1git
 ./1git add -p                          # also reset -p, restore -p, checkout -p: git's prompts, y n q a d s j k g / p ?
 ./1git show -c HEAD                    # merges: --cc (default for show), -c, -m, --first-parent, --diff-merges=
 ./1git -c gerrit.createChangeId=true commit -m "x"   # appends Gerrit's Change-Id trailer
+./1git stash push -u -m "wip"         # also stash pop/apply/list/show/drop/branch
+./1git merge --no-ff feature          # also --squash, --ff-only, -X theirs, --abort; renames are followed
+./1git cherry-pick -x A..B            # also revert, --continue/--skip/--abort, -m 1 for merge commits
+./1git rebase -i --autosquash main    # also --onto, --root, --autostash, -x cmd, --continue/--abort
+./1git clean -fdx -n                  # also worktree add/list/remove/prune
 ./1git -log --max 5                   # the older `-word` grammar, unchanged
 
 bash scripts/build.sh                 # gitui.m31 -> ./mgit   (-o name to rename)
@@ -125,6 +130,7 @@ bash scripts/build.sh                 # gitui.m31 -> ./mgit   (-o name to rename
 | `tests/pty_e2e.py`, `tests/pty_blame_undo.py` | drive `mgit` under a real pty against disposable fixtures, real `git` as the oracle (the second file: blame, history, undo, tags, ahead/behind, `push -u`, auto-refresh) |
 | `scripts/compare.sh` | every command beside the real `git`, compared octet for octet |
 | `scripts/compare_status.sh` | `1git status` beside the real `git status` on disposable fixtures: ~20 forms each, bytes and exit status |
+| `scripts/compare_merge.sh` | the same method for `stash`, `cherry-pick`, `revert`, `merge` (renames, conflict styles, criss-cross), `rebase` (`-i`, autosquash), `clean` and `worktree`, over the case files `scripts/compare_merge_*.sh`; also compares every state file (`MERGE_*`, `sequencer/`, `rebase-merge/`, `worktrees/`) |
 | `scripts/compare_write.sh` | the change commands beside the real git: two identical repositories per case (fixed identities and dates), then output, exit status, index, refs, reflogs, work tree and `fsck` compared; object ids identical; a reconstruction of Gerrit's `commit-msg` hook (`scripts/gerrit-commit-msg.sh`) is the oracle for `Change-Id` |
 | `scripts/compare_log.sh`, `compare_show.sh`, `compare_diff.sh` | `1git log`, `show` and `diff` beside the real git on the fixtures of `scripts/fixtures_look.sh` (15 histories, 10 work-tree states, merge diffs, symlinks, a conflicted merge): 2000 to 8000 forms each, bytes and exit status |
 | `core/GIT_gitlog.m31` | `log` and `show`: revision.c's walk (list, `limit_list`, TREESAME simplification, parent rewriting, topological order, `--follow`), log-tree.c's header / message / diff assembly, pretty.c's formats and placeholders, decorations, date parsing for `--since` / `--until` |

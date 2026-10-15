@@ -217,6 +217,10 @@ pub str Error.to_str() {
 pub type Options {
     pub bool should_skip_commit = false;
     pub bool should_record_origin = false;
+    /// `-s`: a `Signed-off-by:` of the committer ends the message.
+    pub bool should_signoff = false;
+    /// `-X ours` (1) / `-X theirs` (2) for the content merges.
+    pub int favor = 0;
     pub int mainline = 0;
     pub bool is_empty_allowed = false;
     pub bool should_keep_redundant = false;
@@ -637,6 +641,27 @@ str pick_message(str original, str id, bool should_record_origin) {
     return text;
 }
 
+// `Signed-off-by:` of `who` at the end of the message: in its trailer block
+// when it has one, else after a blank line; not twice in a row.
+str signoff_message(str original, GIT_object.Ident who) {
+    str line = "Signed-off-by: " + who.name.utf8().or("") + " <" + who.email.utf8().or("") + ">";
+    str text = original;
+    if (!text.ends_with("\n")) {
+        text = text + "\n";
+    }
+    List<str> lines = text.split("\n");
+    while (lines.size() > 0 && lines[lines.size() - 1] == "") {
+        lines.pop();
+    }
+    if (lines.size() > 0 && lines[lines.size() - 1] == line) {
+        return text;
+    }
+    if (!has_footer(text)) {
+        text = text + "\n";
+    }
+    return text + line + "\n";
+}
+
 str revert_message(str original, str id, str mainline_parent) {
     str subject = subject_of(original);
     str title = "Revert \"" + subject + "\"";
@@ -745,11 +770,14 @@ pub Result<StepResult, Error> apply_step(str gitdir, str worktree, Item item, Op
         }
         message = revert_message(original, item.id, shown);
     }
+    if (opts.should_signoff) {
+        message = signoff_message(message, GIT_merge.ident(gitdir, "COMMITTER"));
+    }
     str ours = head.id;
     if (opts.should_skip_commit) {
         ours = index_tree_of(gitdir)?;
     }
-    GIT_merge.Opts merge_opts = GIT_merge.Opts(ours_label: "HEAD", theirs_label: theirs_label, base_label: base_label, style: opts.style);
+    GIT_merge.Opts merge_opts = GIT_merge.Opts(ours_label: "HEAD", theirs_label: theirs_label, base_label: base_label, style: opts.style, favor: opts.favor);
     GIT_merge.Applied applied = lift_applied(GIT_merge.merge_with_base(gitdir, worktree, base, ours, theirs, merge_opts))?;
     lift_bool(GIT_merge.write_state(gitdir, "AUTO_MERGE", applied.tree + "\n"))?;
     if (applied.conflicts.size() > 0) {
@@ -898,6 +926,14 @@ pub Options read_options(str directory) {
             opts.should_skip_commit = is_enabled;
         } else if (key == "record-origin") {
             opts.should_record_origin = is_enabled;
+        } else if (key == "signoff") {
+            opts.should_signoff = is_enabled;
+        } else if (key == "strategy-option") {
+            if (value == "ours") {
+                opts.favor = 1;
+            } else if (value == "theirs") {
+                opts.favor = 2;
+            }
         } else if (key == "allow-empty") {
             opts.is_empty_allowed = is_enabled;
         } else if (key == "keep-redundant-commits") {
@@ -921,6 +957,14 @@ pub Result<bool, Error> write_options(str directory, Verb verb, Options opts) {
     }
     if (opts.should_record_origin) {
         body = body + "\trecord-origin = true\n";
+    }
+    if (opts.should_signoff) {
+        body = body + "\tsignoff = true\n";
+    }
+    if (opts.favor == 1) {
+        body = body + "\tstrategy-option = ours\n";
+    } else if (opts.favor == 2) {
+        body = body + "\tstrategy-option = theirs\n";
     }
     if (opts.mainline > 0) {
         body = body + "\tmainline = " + opts.mainline.to_str() + "\n";
