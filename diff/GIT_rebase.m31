@@ -743,14 +743,15 @@ Result<bool, GIT_sequencer.Error> begin(str gitdir, str worktree, Plan plan, Lis
         write_state(gitdir, "autostash", autostash + "\n")?;
     }
     write_state(gitdir, "git-rebase-todo", GIT_rebase_todo.full_text(rest))?;
-    // git keeps the list as it was started with, with its help comments
-    str backup = GIT_rebase_todo.full_text(todo);
+    // git keeps the list as it was planned (before an editor changed it),
+    // with its help comments
+    str backup = GIT_rebase_todo.full_text(plan.commands);
     str range = GIT_sequencer.abbrev(gitdir, plan.orig_head);
     if (!plan.is_root && plan.upstream != "") {
         range = GIT_sequencer.abbrev(gitdir, plan.upstream) + ".." + range;
     }
-    str count = todo.size().to_str() + " command";
-    if (todo.size() != 1) {
+    str count = plan.commands.size().to_str() + " command";
+    if (plan.commands.size() != 1) {
         count = count + "s";
     }
     backup = backup + "\n# Rebase " + range + " onto " + GIT_sequencer.abbrev(gitdir, onto) + " (" + count + ")\n" + GIT_rebase_todo.HELP;

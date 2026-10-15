@@ -195,7 +195,7 @@ mg_compare() {
     note "merge: $label (state, refs, reflogs and state files equal git's; rc=$grc; ours: $(echo "$oout" | head -1))"
 }
 
-# mg_refuse <label> <git flags> <our flags> <setup> : git refuses; ours must refuse and write nothing
+# mg_refuse <label> <git flags> <our flags> <setup> : git refuses; ours must refuse and leave the state git leaves
 mg_refuse() {
     local label=$1 gflags=$2 oflags=$3 setup=${4:-:}
     mg_twin "$WORK/mg_src" "$WORK/mg_g"; mg_twin "$WORK/mg_src" "$WORK/mg_o"
@@ -206,11 +206,16 @@ mg_refuse() {
     oout=$(mg_ours "$WORK/mg_o/.git" "$WORK/mg_o" merge side $oflags 2>&1)
     if [ $grc -eq 0 ]; then bad "merge: $label" "test expects git to refuse, it said: $(echo "$gout" | head -2)"; return 1; fi
     case $oout in refused*) ;; *) bad "merge: $label" "git refused ($(echo "$gout" | head -1)), ours: $(echo "$oout" | head -2)"; return 1 ;; esac
-    if [ "$before" != "$(mg_state "$WORK/mg_o")" ]; then
-        bad "merge: $label: refusal wrote something" "$(diff <(echo "$before") <(mg_state "$WORK/mg_o") | head -8)"
+    # git writes ORIG_HEAD (and, for local changes, a tree in AUTO_MERGE that
+    # this does not) before it refuses: the state must be what git's is
+    local after_git after_ours
+    after_git=$(mg_state "$WORK/mg_g" | sed -e '/^== AUTO_MERGE absent$/d' -e '/^== AUTO_MERGE$/,+1d')
+    after_ours=$(mg_state "$WORK/mg_o" | sed -e '/^== AUTO_MERGE absent$/d' -e '/^== AUTO_MERGE$/,+1d')
+    if [ "$after_git" != "$after_ours" ]; then
+        bad "merge: $label: refusal left another state than git's" "$(diff <(echo "$after_git") <(echo "$after_ours") | head -8)"
         return 1
     fi
-    note "merge: $label refused like git, nothing written (${oout#refused })"
+    note "merge: $label refused like git, same state left (${oout#refused })"
 }
 
 mg_unrelated_edit() { echo "local edit" >>"$1/k"; echo "untracked" >"$1/scratch.txt"; }
