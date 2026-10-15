@@ -79,7 +79,7 @@ run() { # <label> <script using G and $URL>
               echo "## remote"; git -C "$WORK/srv/r.git" for-each-ref; git -C "$WORK/srv/r.git" fsck 2>&1 | head -3
               [ -d w/.git ] && (cd w; echo "## tree"; git ls-files -s; echo "## fsck"; git fsck --strict 2>&1 | head -3; git config --local --list | sort); } >> "$WORK/log-$side" 2>&1
         )
-        sed -i "/templates not found/d; s|$WORK|W|g; s|$PORT|PORT|g" "$WORK/log-$side"
+        sed -i.bak "/templates not found/d; s|$WORK|W|g; s|$PORT|PORT|g" "$WORK/log-$side"; rm -f "$WORK/log-$side.bak"
     done
     if cmp -s "$WORK/log-git" "$WORK/log-ours"; then :; else
         bad=$((bad + 1)); printf '\033[31mdiffer\033[0m %s\n' "$1"; diff "$WORK/log-git" "$WORK/log-ours" | head -12 | sed 's/^/       /'

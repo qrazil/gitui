@@ -180,7 +180,7 @@ dump_remote() {
 }
 
 normalise() { # <file> <repo-name> <local-dir>
-    sed -i -e "s|127\.0\.0\.1:$PORT|HOST|g" -e "s|$3|LOCAL|g" "$1"
+    sed -i.bak -e "s|127\.0\.0\.1:$PORT|HOST|g" -e "s|$3|LOCAL|g" "$1"; rm -f "$1.bak"
 }
 
 run_side() {
@@ -210,7 +210,7 @@ run_side() {
         G() {
             "$bin" "$@" > "$T/o" 2> "$T/e"
             local rc=$?
-            sed -i '/templates not found/d' "$T/e"
+            sed -i.bak '/templates not found/d' "$T/e"; rm -f "$T/e.bak"
             { printf '$ %s\n' "$*"; cat "$T/o"; printf 'rc=%s\n' "$rc"; } >> "$log"
             { printf '$ %s\n' "$*"; cat "$T/e"; } >> "$log.err"
             return $rc
@@ -235,7 +235,7 @@ case_() {
     { dump_local "$a"; dump_remote "$SRV/repos/ra/r.git"; } > "$WORK/dump-a" 2>&1
     { dump_local "$b"; dump_remote "$SRV/repos/rb/r.git"; } > "$WORK/dump-b" 2>&1
     # `rebase` here prints no `Rebasing (n/m)` progress (docs/GIT-COMPAT.md)
-    sed -i 's/Rebasing ([0-9]*\/[0-9]*)\r\{0,1\}//' "$WORK/log-a.err" "$WORK/log-b.err"
+    sed -i.bak 's/Rebasing ([0-9]*\/[0-9]*)\r\{0,1\}//' "$WORK/log-a.err" "$WORK/log-b.err"; rm -f "$WORK"/log-[ab].err.bak
     for f in log-a log-a.err dump-a; do normalise "$WORK/$f" ra "$a"; done
     for f in log-b log-b.err dump-b; do normalise "$WORK/$f" rb "$b"; done
     local failed=0
