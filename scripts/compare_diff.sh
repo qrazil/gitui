@@ -12,6 +12,8 @@
 # ending changes, binary changes, a rename in the index). Nothing here writes
 # outside <workdir>. `git` is the oracle; there is no expected-output file.
 set -uo pipefail
+# sed -i that BSD sed (macOS) also takes (it wants a suffix; GNU takes none)
+sedi() { local f="${@: -1}"; sed "${@:1:$#-1}" "$f" > "$f.sedi" && mv "$f.sedi" "$f"; }
 
 OURS=$(cd "$(dirname "$1")" && pwd)/$(basename "$1")
 HERE=$(cd "$(dirname "$0")" && pwd)
@@ -281,7 +283,7 @@ printf 'ln\n' > ln-target
 ln -s ln-target link
 g add -A; commit_at base
 g checkout -q -b other
-sed -i 's/^line 2$/line 2 other/; s/^line 11$/line 11 other/' f.txt
+sedi 's/^line 2$/line 2 other/; s/^line 11$/line 11 other/' f.txt
 printf 'other add\n' > both-add.txt
 printf 'y changed\n' > del-them.txt
 g rm -q del-us.txt
@@ -292,7 +294,7 @@ printf 'gone other\n' > gone.txt
 rm link; ln -s other-target link
 g add -A; commit_at other
 g checkout -q main
-sed -i 's/^line 2$/line 2 main/; s/^line 6$/line 6 main/' f.txt
+sedi 's/^line 2$/line 2 main/; s/^line 6$/line 6 main/' f.txt
 printf 'main add\n' > both-add.txt
 printf 'x changed\n' > del-us.txt
 g rm -q del-them.txt
