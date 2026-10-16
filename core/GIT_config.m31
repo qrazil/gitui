@@ -40,7 +40,7 @@
 // that names it, `~/` is the home directory, a missing file is skipped and
 // nesting stops at git's depth of 10. `includeIf` conditions: `gitdir:`,
 // `gitdir/i:` (the glob has `*`, `?` and `**` but no `[...]`; the path is made
-// absolute with `$PWD`, not by resolving symlinks) and `onbranch:`. A
+// absolute and resolved through symlinks, as git does, and the pattern's literal leading directories are tried resolved too) and `onbranch:`. A
 // `hasconfig:` condition never holds.
 //
 // `parse` is strict where git is strict: a line that is none of the above is
@@ -468,11 +468,76 @@ bool is_matching_gitdir(str raw, str gitdir, str file, bool should_fold_case) {
         pattern = "**/" + pattern;
     }
     pattern = trailing_wildcard(pattern);
-    str target = absolute(gitdir);
+    // git matches the gitdir's real path against the pattern as written, then
+    // against the pattern with the leading literal directories resolved too
+    // (macOS: /tmp and /var are links to /private/...).
+    str target = real_or_absolute(gitdir);
+    if (is_glob_match_folded(pattern, target, should_fold_case)) {
+        return true;
+    }
+    if (pattern.starts_with("/")) {
+        return is_glob_match_folded(real_literal_prefix(pattern), target, should_fold_case);
+    }
+    return false;
+}
+
+bool is_glob_match_folded(str pattern, str target, bool should_fold_case) {
     if (should_fold_case) {
         return GIT_ignore.is_path_glob_match(pattern.to_lower(), target.to_lower());
     }
     return GIT_ignore.is_path_glob_match(pattern, target);
+}
+
+// `path` made absolute and, when it exists, resolved through symlinks.
+str real_or_absolute(str path) {
+    str full = absolute(path);
+    match (fs.realpath(full)) {
+        case Ok(str real): {
+            return real;
+        }
+        case Err(io.Error unknown): {
+            return full;
+        }
+    }
+}
+
+// An absolute glob with the directories before its first wildcard resolved
+// through symlinks; unchanged when none of it exists.
+str real_literal_prefix(str pattern) {
+    int stop = pattern.size();
+    int at = 0;
+    while (at < pattern.size()) {
+        int byte = pattern.byte_at(at);
+        if (byte == '*' || byte == '?' || byte == '[') {
+            stop = at;
+            break;
+        }
+        at = at + 1;
+    }
+    // Resolve the longest leading run of directories that exists (the rest,
+    // e.g. a case-folded name, is kept as written), like git's non-strict
+    // realpath.
+    int cut = stop;
+    while (cut > 1) {
+        while (cut > 0 && pattern.byte_at(cut - 1) != '/') {
+            cut = cut - 1;
+        }
+        if (cut <= 1) {
+            return pattern;
+        }
+        match (fs.realpath(pattern.substr(0, cut - 1))) {
+            case Ok(str real): {
+                if (real == "/") {
+                    real = "";
+                }
+                return real + pattern.substr(cut - 1, pattern.size());
+            }
+            case Err(io.Error unknown): {
+            }
+        }
+        cut = cut - 1;
+    }
+    return pattern;
 }
 
 str trailing_wildcard(str pattern) {

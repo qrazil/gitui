@@ -107,10 +107,29 @@ CFG
     cx_inc_case "repo outside every gitdir pattern on release-1 (onbranch:rel*, local core.editor)" "$cex/outside/r3"
     echo "ref: refs/heads/main" >"$cex/outside/r3/.git/HEAD"
     cx_inc_case "same repo after HEAD moves to main" "$cex/outside/r3"
-    # a relative gitdir is made absolute with $PWD
+    # a relative gitdir is made absolute with the physical current directory
     want=$(cd "$cx_home/work/r1" && cx_git config --get inc.work 2>/dev/null || echo "<unset>")
     got=$(cd "$cx_home/work/r1" && ce "$WORK/t_config_extras" .git get inc.work 2>&1)
     if [ "$want" = "$got" ]; then note "config includes: gitdir given as .git from inside the repository ($got)"; else bad "config includes: relative gitdir" "git=$want ours=$got"; fi
+
+    # HOME and the repository reached through a symlink (macOS: /tmp and /var are
+    # links to /private/...): git matches the gitdir's real path against the
+    # pattern as written and against the pattern with its leading directories
+    # resolved, so `~/work/` still holds.
+    ln -s "$cx_home" "$cex/homelink"
+    cx_real_home=$cx_home
+    cx_home="$cex/homelink"
+    for cx_key in inc.work inc.workfold inc.other inc.r1; do
+        want=$(cd "$cx_home/work/r1" && cx_git config --get "$cx_key" 2>/dev/null || echo "<unset>")
+        got=$(cd "$cx_home/work/r1" && ce "$WORK/t_config_extras" .git get "$cx_key" 2>&1)
+        got_abs=$(ce "$WORK/t_config_extras" "$cx_home/work/r1/.git" get "$cx_key" 2>&1)
+        if [ "$want" = "$got" ] && [ "$want" = "$got_abs" ]; then
+            note "config includes: through a symlinked HOME, $cx_key ($want)"
+        else
+            bad "config includes: through a symlinked HOME, $cx_key" "git=$want relative=$got absolute=$got_abs"
+        fi
+    done
+    cx_home=$cx_real_home
 
     # --- identity ---------------------------------------------------------------
 
