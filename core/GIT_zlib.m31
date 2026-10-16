@@ -209,6 +209,14 @@ type Bits {
     int position = 0;
     int value = 0;
     int count = 0;
+    /// How many of the `count` bits are zeros supplied past the end of
+    /// `source`. The decoder looks 15 bits ahead, which near the end of the
+    /// stream reaches past it without the stream being wrong: only handing
+    /// out one of these bits is an overrun.
+    int pad = 0;
+    /// How many octets the stream is expected to inflate to, when the caller
+    /// knows (a pack entry's header says); -1 when it does not.
+    int expect = -1;
     /// Set the first time a read went past the end. See the module header:
     /// the reader answers zero bits rather than failing, and the caller's loop
     /// checks this once per symbol.
@@ -220,7 +228,7 @@ type Bits {
 int Bits.take(int bit_count) {
     while (count < bit_count) {
         if (position >= source.size()) {
-            has_overrun = true;
+            pad = pad + 8;
             count = count + 8;
         } else {
             value = value | source[position] << count;
@@ -231,6 +239,10 @@ int Bits.take(int bit_count) {
     int taken = value & (1 << bit_count) - 1;
     value = value >> bit_count;
     count = count - bit_count;
+    if (count < pad) {
+        has_overrun = true;
+        pad = count;
+    }
     return taken;
 }
 
@@ -238,13 +250,16 @@ int Bits.take(int bit_count) {
 /// octets the accumulator was holding, so `position` is again where reading should
 /// continue. A stored block starts here.
 void Bits.align() {
-    int back = count / 8;
+    int back = (count - pad) / 8;
     if (back > position) {
         back = position;
     }
-    position = position - back;
+    if (back > 0) {
+        position = position - back;
+    }
     value = 0;
     count = 0;
+    pad = 0;
 }
 
 /// One octet, read directly. Only valid straight after `align`.
@@ -263,37 +278,79 @@ int Bits.byte() {
 /// A canonical Huffman code as RFC 1951 §3.2.2 describes it: how many codes
 /// there are of each length, and the symbols in canonical order. `left` is how
 /// much of the code space is unused -- zero for a complete code, negative for
-/// one that claims more than exists.
+/// one that claims more than exists. `fast` answers every code of at most
+/// `FAST_BITS` bits in one lookup (see `Huff.decode`).
 type Huff {
     Array<int> count = [0; 16];
     Array<int> symbol = [0; 320];
+    Array<int> fast = [-1; 1];
+    bool has_fast = false;
     int left = 0;
 }
 
-/// The next symbol, or -1 if the bits match no code. One bit at a time, the
-/// way §3.2.2 defines the code: `first` is the smallest code of this length,
-/// `index` where its symbols start.
+/// Codes this short are looked up, not walked: `fast[next 9 bits]` is
+/// `symbol * 16 + length`, or -1 when the code is longer (or there is none).
+const int FAST_BITS = 9;
+
+/// The next symbol, or -1 if the bits match no code. A code of up to
+/// `FAST_BITS` bits is one table lookup on the next bits. A longer one is
+/// walked the way §3.2.2 defines the code, a bit at a time: `first` is the
+/// smallest code of this length, `index` where its symbols start. The bits
+/// come from a 15-bit look-ahead; only the ones the code uses are handed out.
 int Huff.decode(Bits bits) {
-    int code = 0;
-    int first = 0;
-    int index = 0;
-    int length = 1;
-    while (length <= 15) {
-        code = code | bits.take(1);
-        int here = count[length];
-        if (code - first < here) {
-            return symbol[index + code - first];
+    while (bits.count < 15) {
+        if (bits.position >= bits.source.size()) {
+            bits.pad = bits.pad + 8;
+        } else {
+            bits.value = bits.value | bits.source[bits.position] << bits.count;
+            bits.position = bits.position + 1;
         }
-        index = index + here;
-        first = first + here << 1;
-        code = code << 1;
-        length = length + 1;
+        bits.count = bits.count + 8;
     }
-    return -1;
+    int peeked = bits.value;
+    int entry = -1;
+    if (has_fast) {
+        entry = fast[peeked & 511];
+    }
+    int used = 0;
+    int result = -1;
+    if (entry >= 0) {
+        used = entry & 15;
+        result = entry >> 4;
+    } else {
+        int code = 0;
+        int first = 0;
+        int index = 0;
+        int length = 1;
+        used = 15;
+        while (length <= 15) {
+            code = code | peeked & 1;
+            peeked = peeked >> 1;
+            int here = count[length];
+            if (code - first < here) {
+                used = length;
+                result = symbol[index + code - first];
+                break;
+            }
+            index = index + here;
+            first = first + here << 1;
+            code = code << 1;
+            length = length + 1;
+        }
+    }
+    bits.value = bits.value >> used;
+    bits.count = bits.count - used;
+    if (bits.count < bits.pad) {
+        bits.has_overrun = true;
+        bits.pad = bits.count;
+    }
+    return result;
 }
 
-/// The code `lengths[off .. off+n]` describes.
-Huff build(Array<int> lengths, int off, int symbol_count) {
+/// The code `lengths[off .. off+n]` describes. `want_fast` also builds the
+/// lookup table for the short codes, which pays for itself only when there
+/// is enough left to decode (see `run`).
+Huff build(Array<int> lengths, int off, int symbol_count, bool want_fast) {
     Huff huff = Huff();
     int symbol = 0;
     while (symbol < symbol_count) {
@@ -317,10 +374,25 @@ Huff build(Array<int> lengths, int off, int symbol_count) {
     }
     huff.left = left;
     Array<int> offs = [0; 17];
+    Array<int> next_code = [0; 17];
+    int code = 0;
     length = 1;
     while (length < 15) {
         offs[length + 1] = offs[length] + huff.count[length];
         length = length + 1;
+    }
+    if (want_fast) {
+        huff.fast = [-1; 512];
+        huff.has_fast = true;
+        length = 1;
+        while (length <= 15) {
+            if (length > 1) {
+                code = code + huff.count[length - 1];
+            }
+            code = code << 1;
+            next_code[length] = code;
+            length = length + 1;
+        }
     }
     symbol = 0;
     while (symbol < symbol_count) {
@@ -328,6 +400,26 @@ Huff build(Array<int> lengths, int off, int symbol_count) {
         if (code_length != 0) {
             huff.symbol[offs[code_length]] = symbol;
             offs[code_length] = offs[code_length] + 1;
+            if (want_fast && code_length <= FAST_BITS) {
+                // the code, in the order the bits arrive: reversed
+                int forward = next_code[code_length];
+                int reversed = 0;
+                int bit = 0;
+                while (bit < code_length) {
+                    reversed = reversed << 1 | forward & 1;
+                    forward = forward >> 1;
+                    bit = bit + 1;
+                }
+                int slot = reversed;
+                int entry = symbol << 4 | code_length;
+                while (slot < 512) {
+                    huff.fast[slot] = entry;
+                    slot = slot + (1 << code_length);
+                }
+            }
+            if (want_fast) {
+                next_code[code_length] = next_code[code_length] + 1;
+            }
         }
         symbol = symbol + 1;
     }
@@ -365,7 +457,7 @@ Result<void, Error> stored(Bits bits, bytes out, int limit) {
 /// complete -- 288 literal/length codes and 32 distance codes -- so the two
 /// symbols at each end that have no meaning are refused where they are used
 /// rather than left out of the table, which would make it incomplete.
-Huff fixed_literal() {
+Huff fixed_literal(bool want_fast) {
     Array<int> lengths = [0; 320];
     int index = 0;
     while (index < 144) {
@@ -384,12 +476,12 @@ Huff fixed_literal() {
         lengths[index] = 8;
         index = index + 1;
     }
-    return build(lengths, 0, 288);
+    return build(lengths, 0, 288, want_fast);
 }
 
-Huff fixed_distance() {
+Huff fixed_distance(bool want_fast) {
     Array<int> lengths = [5; 32];
-    return build(lengths, 0, 32);
+    return build(lengths, 0, 32, want_fast);
 }
 
 /// The two code tables a dynamic block declares. A struct, rather than two
@@ -399,7 +491,7 @@ type Tables {
     Huff dist;
 }
 
-Result<Tables, Error> dynamic_tables(Bits bits) {
+Result<Tables, Error> dynamic_tables(Bits bits, bool want_fast) {
     int nlen = bits.take(5) + 257;
     int ndist = bits.take(5) + 1;
     int ncode = bits.take(4) + 4;
@@ -413,7 +505,7 @@ Result<Tables, Error> dynamic_tables(Bits bits) {
     for (int i in 0 .. ncode) {
         clen[CLEN_ORDER[i]] = bits.take(3);
     }
-    Huff length_huff = build(clen, 0, 19);
+    Huff length_huff = build(clen, 0, 19, false);
     if (length_huff.left < 0) {
         return Result<Tables, Error>.Err(Error.OverSubscribed);
     }
@@ -464,14 +556,14 @@ Result<Tables, Error> dynamic_tables(Bits bits) {
     if (lengths[256] == 0) {
         return Result<Tables, Error>.Err(Error.NoEndOfBlock);
     }
-    Huff lit = build(lengths, 0, nlen);
+    Huff lit = build(lengths, 0, nlen, want_fast);
     if (lit.left < 0) {
         return Result<Tables, Error>.Err(Error.OverSubscribed);
     }
     if (lit.left > 0) {
         return Result<Tables, Error>.Err(Error.Incomplete);
     }
-    Huff dist = build(lengths, nlen, ndist);
+    Huff dist = build(lengths, nlen, ndist, want_fast);
     // An incomplete DISTANCE code is legal in exactly one case: a block that
     // uses a single distance, which cannot fill a one-bit code space. zlib
     // and puff both allow it, and streams in the wild contain it.
@@ -529,13 +621,30 @@ Result<void, Error> symbols(Bits bits, Huff lit, Huff dist, bytes out, int limit
                 return Result<void, Error>.Err(Error.TooBig);
             }
             int from = out.size() - distance;
-            int index = 0;
-            // One octet at a time on purpose: the ranges overlap when the
-            // distance is shorter than the length, which is how DEFLATE
-            // spells a run, and a block copy would get that wrong.
-            while (index < length) {
-                out.push(out[from + index]);
-                index = index + 1;
+            if (length < 16) {
+                // One octet at a time: the ranges overlap when the distance
+                // is shorter than the length, which is how DEFLATE spells a
+                // run, and one block copy would get that wrong.
+                int index = 0;
+                while (index < length) {
+                    out.push(out[from + index]);
+                    index = index + 1;
+                }
+            } else {
+                // A long match moves in pieces, each of what already exists
+                // from `from` on: a distance shorter than the length repeats
+                // the pattern, one lap per piece, which is the same bytes
+                // the octet-at-a-time copy writes.
+                int remaining = length;
+                while (remaining > 0) {
+                    int piece = out.size() - from;
+                    if (piece > remaining) {
+                        piece = remaining;
+                    }
+                    out.extend(out.substr(from, from + piece));
+                    from = from + piece;
+                    remaining = remaining - piece;
+                }
             }
         }
     }
@@ -544,6 +653,13 @@ Result<void, Error> symbols(Bits bits, Huff lit, Huff dist, bytes out, int limit
 // --- the stream --------------------------------------------------------------
 
 Result<void, Error> run(Bits bits, bytes out, int limit) {
+    // The lookup tables cost more to build than a few thousand octets of
+    // output save: a commit or a small tree is decoded without them.
+    int work = bits.expect;
+    if (work < 0) {
+        work = (bits.source.size() - bits.position) * 3;
+    }
+    bool want_fast = work > 4096;
     bool is_last = false;
     while (!is_last) {
         is_last = bits.take(1) == 1;
@@ -554,9 +670,9 @@ Result<void, Error> run(Bits bits, bytes out, int limit) {
         if (kind == 0) {
             stored(bits, out, limit)?;
         } else if (kind == 1) {
-            symbols(bits, fixed_literal(), fixed_distance(), out, limit)?;
+            symbols(bits, fixed_literal(want_fast), fixed_distance(want_fast), out, limit)?;
         } else if (kind == 2) {
-            Tables tables = dynamic_tables(bits)?;
+            Tables tables = dynamic_tables(bits, want_fast)?;
             symbols(bits, tables.lit, tables.dist, out, limit)?;
         } else {
             return Result<void, Error>.Err(Error.BlockType);
@@ -672,7 +788,7 @@ pub bytes compress(bytes data) {
 /// file compares the object's declared size with what came out, which is what
 /// `GIT_object.m31` does.
 pub Result<bytes, Error> decompress(bytes source, int limit = -1) {
-    Decoded decoded = decompress_from(source, 0, limit)?;
+    Decoded decoded = decompress_from(source, 0, limit, -1)?;
     return Result<bytes, Error>.Ok(decoded.data);
 }
 
@@ -686,11 +802,11 @@ pub Result<bytes, Error> decompress(bytes source, int limit = -1) {
 /// `inflate_at`'s raw DEFLATE. No copy, for the same reason `inflate_at` does
 /// not need one: `bytes` is a reference type, so `source` is aliased, not cloned,
 /// however large the packfile around this one object is.
-pub Result<Decoded, Error> decompress_at(bytes source, int start, int limit = -1) {
-    return decompress_from(source, start, limit);
+pub Result<Decoded, Error> decompress_at(bytes source, int start, int limit = -1, int expect = -1) {
+    return decompress_from(source, start, limit, expect);
 }
 
-Result<Decoded, Error> decompress_from(bytes source, int start, int limit) {
+Result<Decoded, Error> decompress_from(bytes source, int start, int limit, int expect) {
     if (start + 2 > source.size()) {
         return Result<Decoded, Error>.Err(Error.Truncated);
     }
@@ -704,6 +820,7 @@ Result<Decoded, Error> decompress_from(bytes source, int start, int limit) {
     }
     bytes out = [];
     Bits bits = Bits(source, position: start + 2);
+    bits.expect = expect;
     run(bits, out, limit)?;
     bits.align();
     int adler_first = bits.byte();

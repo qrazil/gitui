@@ -185,6 +185,206 @@ pub type Cache {
     pub List<PackFile> packs = [];
     pub bool is_loaded = false;
     pub Map<str, bytes> files = {};
+    /// packed-object lookups made through this cache so far
+    pub int lookups = 0;
+    // open `.idx`/`.pack` files, for the reads that go by `seek`
+    pub Map<str, io.File> handles = {};
+    // each `.idx`'s fanout table (its first 1032 bytes)
+    pub Map<str, bytes> heads = {};
+}
+
+/// How many lookups a cache serves by reading just the parts of the `.idx`
+/// and `.pack` files each one needs. A command that reads a handful of
+/// objects (and every `GIT_object.read`, which makes a fresh cache per call)
+/// never reads a pack whole; one that reads more than this has shown that it
+/// will read most of the pack anyway, and from then on each file is read once,
+/// whole, and kept -- as every cache did before.
+const int WHOLE_AFTER = 24;
+
+/// The first read of a pack's entry: big enough for almost every commit and
+/// tree. A longer entry is read again with a window four times the size.
+const int WINDOW = 16384;
+
+bool Cache.is_whole(str path) {
+    return lookups > WHOLE_AFTER || files.contains(path);
+}
+
+Option<io.File> Cache.handle(str path) {
+    match (handles.get(path)) {
+        case Some(io.File known): {
+            return Option<io.File>.Some(known);
+        }
+        case None: {
+        }
+    }
+    match (io.open(path)) {
+        case Ok(io.File opened): {
+            handles.set(path, opened);
+            return Option<io.File>.Some(opened);
+        }
+        case Err(_): {
+            return Option<io.File>.None;
+        }
+    }
+}
+
+/// `length` bytes of the file from `offset` on: fewer at the end of the file,
+/// none when it cannot be read.
+pub bytes Cache.range(str path, int offset, int length) {
+    bytes out = [];
+    match (handle(path)) {
+        case Some(io.File file): {
+            match (file.seek(offset)) {
+                case Ok(_): {
+                }
+                case Err(_): {
+                    return out;
+                }
+            }
+            while (out.size() < length) {
+                match (file.read(length - out.size())) {
+                    case Ok(bytes chunk): {
+                        if (chunk.size() == 0) {
+                            return out;
+                        }
+                        out.extend(chunk);
+                    }
+                    case Err(_): {
+                        return out;
+                    }
+                }
+            }
+        }
+        case None: {
+        }
+    }
+    return out;
+}
+
+/// Where the object `raw_id` starts in the pack that `index_path` indexes.
+pub Option<int> Cache.offset_in(str index_path, bytes raw_id) {
+    if (is_whole(index_path)) {
+        match (parse_index(bytes_of(index_path), raw_id.size())) {
+            case Ok(Idx pack_index): {
+                return pack_index.offset_of(raw_id);
+            }
+            case Err(_): {
+                return Option<int>.None;
+            }
+        }
+    }
+    return ranged_offset(index_path, raw_id);
+}
+
+// `Idx.offset_of`, reading the fanout table once, then the one slice of the
+// sorted names the first byte selects, then the one offset: the same answer
+// without the whole `.idx` in memory.
+Option<int> Cache.ranged_offset(str index_path, bytes raw_id) {
+    int width = raw_id.size();
+    if (width == 0) {
+        return Option<int>.None;
+    }
+    bytes head = [];
+    match (heads.get(index_path)) {
+        case Some(bytes known): {
+            head = known;
+        }
+        case None: {
+            head = range(index_path, 0, 8 + 1024);
+            heads.set(index_path, head);
+        }
+    }
+    if (head.size() < 8 + 1024) {
+        return Option<int>.None;
+    }
+    bool has_magic = head[0] == 0xFF && head[1] == 0x74 && head[2] == 0x4F && head[3] == 0x63;
+    if (!has_magic || u32be(head, 4) != 2) {
+        return Option<int>.None;
+    }
+    int count = u32be(head, 8 + 255 * 4);
+    int first = raw_id[0];
+    int low = 0;
+    if (first > 0) {
+        low = u32be(head, 8 + (first - 1) * 4);
+    }
+    int high = u32be(head, 8 + first * 4);
+    if (low >= high || high > count) {
+        return Option<int>.None;
+    }
+    int names_off = 8 + 1024;
+    bytes names = range(index_path, names_off + low * width, (high - low) * width);
+    if (names.size() != (high - low) * width) {
+        return Option<int>.None;
+    }
+    int lo = 0;
+    int hi = high - low;
+    while (lo < hi) {
+        int mid = lo + (hi - lo) / 2;
+        int comparison = cmp_raw(names, mid * width, raw_id);
+        if (comparison == 0) {
+            int entry_index = low + mid;
+            int off_off = names_off + width * count + 4 * count;
+            bytes small = range(index_path, off_off + entry_index * 4, 4);
+            if (small.size() != 4) {
+                return Option<int>.None;
+            }
+            int raw_offset = u32be(small, 0);
+            if ((raw_offset & 0x80000000) != 0) {
+                int large_off = off_off + 4 * count;
+                bytes large = range(index_path, large_off + (raw_offset & 0x7FFFFFFF) * 8, 8);
+                if (large.size() != 8) {
+                    return Option<int>.Some(-1);
+                }
+                return Option<int>.Some(u64be(large, 0));
+            }
+            return Option<int>.Some(raw_offset);
+        } else if (comparison < 0) {
+            lo = mid + 1;
+        } else {
+            hi = mid;
+        }
+    }
+    return Option<int>.None;
+}
+
+/// The pack entry that starts at `current`, read out of the whole file when
+/// the cache holds it whole, else out of a window that grows until the entry
+/// fits (or the file ends).
+Result<Step, Error> Cache.step_at(str pack_path, int current, int raw_width) {
+    if (is_whole(pack_path)) {
+        bytes pack = bytes_of(pack_path);
+        if (pack.size() == 0) {
+            return Result<Step, Error>.Err(Error.Io);
+        }
+        return parse_step(pack, 0, current, raw_width);
+    }
+    int size = WINDOW;
+    while (true) {
+        bytes window = range(pack_path, current, size);
+        if (window.size() == 0) {
+            match (handle(pack_path)) {
+                case Some(_): {
+                    return Result<Step, Error>.Err(Error.BadPack);
+                }
+                case None: {
+                    return Result<Step, Error>.Err(Error.Io);
+                }
+            }
+        }
+        match (parse_step(window, current, current, raw_width)) {
+            case Ok(Step done): {
+                return Result<Step, Error>.Ok(done);
+            }
+            case Err(Error failed): {
+                // a window that came back short reached the end of the
+                // file: the entry is damaged, not cut off
+                if (window.size() < size) {
+                    return Result<Step, Error>.Err(failed);
+                }
+            }
+        }
+        size = size * 4;
+    }
 }
 
 /// A file's bytes, read once.
@@ -350,7 +550,7 @@ pub Result<List<Unpacked>, Error> read_pack(str gitdir, bytes pack) {
         } else if (header.kind < 1 || header.kind > 4) {
             return Result<List<Unpacked>, Error>.Err(Error.BadPack);
         }
-        GIT_zlib.Decoded decoded = inflate_pack_zlib(pack, position)?;
+        GIT_zlib.Decoded decoded = inflate_pack_zlib(pack, position, header.size)?;
         index_at.set(current, raws.size());
         Raw one_raw = Raw(header.kind, base_off, base_id, decoded.data);
         one_raw.start = current;
@@ -598,35 +798,85 @@ Result<Found, Error> resolve_id(Cache pack_cache, str gitdir, List<PackFile> pac
         }
     }
     bytes raw_id = hex_decode(id);
+    pack_cache.lookups = pack_cache.lookups + 1;
     for (PackFile pack_file in packs) {
-        bytes idata = pack_cache.bytes_of(pack_file.index_path);
-        match (parse_index(idata, raw_id.size())) {
-            case Ok(Idx pack_index): {
-                match (pack_index.offset_of(raw_id)) {
-                    case Some(int off): {
-                        bytes packbytes = pack_cache.bytes_of(pack_file.pack_path);
-                        if (packbytes.size() == 0) {
-                            return Result<Found, Error>.Err(Error.Io);
-                        }
-                        return resolve_offset(pack_cache, gitdir, packs, pack_index, packbytes, off, depth);
-                    }
-                    case None: {
-                    }
-                }
+        match (pack_cache.offset_in(pack_file.index_path, raw_id)) {
+            case Some(int off): {
+                return resolve_offset(pack_cache, gitdir, packs, pack_file, raw_id.size(), off, depth);
             }
-            case Err(_): {
+            case None: {
             }
         }
     }
     return Result<Found, Error>.Err(Error.NotFound);
 }
 
-// The object at `start_offset` in `pack` (indexed by `pack_index`), walking down an
+// One entry of a pack, decoded as far as one step goes: its own inflated
+// stream (the content of a whole object, or a delta), and where its base is.
+type Step {
+    int kind;
+    // `OBJ_OFS_DELTA`: the base's absolute offset in the pack; -1 otherwise
+    int base_offset;
+    // `OBJ_REF_DELTA`: the base's id, raw; empty otherwise
+    bytes base_id;
+    bytes data;
+}
+
+// The entry whose header starts at absolute offset `current`, parsed out of
+// `window`, which holds the pack's bytes from absolute offset `base` on (the
+// whole file has `base` 0).
+Result<Step, Error> parse_step(bytes window, int base, int current, int raw_width) {
+    int at = current - base;
+    ObjHeader header = read_obj_header(window, at)?;
+    int position = at + header.header_length;
+    if (header.kind == 1 || header.kind == 2 || header.kind == 3 || header.kind == 4) {
+        GIT_zlib.Decoded decoded = inflate_pack_zlib(window, position, header.size)?;
+        return Result<Step, Error>.Ok(Step(header.kind, -1, [], decoded.data));
+    }
+    if (header.kind == 6) {
+        if (position >= window.size()) {
+            return Result<Step, Error>.Err(Error.BadPack);
+        }
+        int byte_value = window[position];
+        position = position + 1;
+        int value = byte_value & 0x7F;
+        int guard = 0;
+        while ((byte_value & 0x80) != 0) {
+            guard = guard + 1;
+            if (guard > 8) {
+                return Result<Step, Error>.Err(Error.BadPack);
+            }
+            if (position >= window.size()) {
+                return Result<Step, Error>.Err(Error.BadPack);
+            }
+            byte_value = window[position];
+            position = position + 1;
+            value = (value + 1) << 7 | (byte_value & 0x7F);
+        }
+        int base_off = current - value;
+        if (base_off < 0 || base_off >= current) {
+            return Result<Step, Error>.Err(Error.BadPack);
+        }
+        GIT_zlib.Decoded decoded = inflate_pack_zlib(window, position, header.size)?;
+        return Result<Step, Error>.Ok(Step(6, base_off, [], decoded.data));
+    }
+    if (header.kind == 7) {
+        if (position + raw_width > window.size()) {
+            return Result<Step, Error>.Err(Error.BadPack);
+        }
+        bytes base_sha = window.substr(position, position + raw_width);
+        GIT_zlib.Decoded decoded = inflate_pack_zlib(window, position + raw_width, header.size)?;
+        return Result<Step, Error>.Ok(Step(7, -1, base_sha, decoded.data));
+    }
+    return Result<Step, Error>.Err(Error.BadPack);
+}
+
+// The object at `start_offset` in `pack_file`, walking down an
 // `OBJ_OFS_DELTA`/`OBJ_REF_DELTA` chain iteratively and applying it back up
 // once the chain bottoms out at a real commit/tree/blob/tag. See the module
 // header, "resolving a delta chain", for why this is a loop and not a
 // recursive call for the common case.
-Result<Found, Error> resolve_offset(Cache pack_cache, str gitdir, List<PackFile> packs, Idx pack_index, bytes pack, int start_offset, int depth) {
+Result<Found, Error> resolve_offset(Cache pack_cache, str gitdir, List<PackFile> packs, PackFile pack_file, int raw_width, int start_offset, int depth) {
     List<bytes> chain = [];
     int current = start_offset;
     int steps = 0;
@@ -637,69 +887,21 @@ Result<Found, Error> resolve_offset(Cache pack_cache, str gitdir, List<PackFile>
         if (steps > depth) {
             return Result<Found, Error>.Err(Error.ChainTooDeep);
         }
-        ObjHeader header = read_obj_header(pack, current)?;
-        if (header.kind == 1 || header.kind == 2 || header.kind == 3 || header.kind == 4) {
-            GIT_zlib.Decoded decoded = inflate_pack_zlib(pack, current + header.header_length)?;
-            base_kind = kind_name(header.kind);
-            base_content = decoded.data;
-            break;
-        } else if (header.kind == 6) {
-            // OBJ_OFS_DELTA: a backward byte offset from `current`, the start of
-            // THIS object's own type+size header -- not from the end of the
-            // header, not from the start of the pack. Encoded as successive
-            // 7-bit groups, continuation in the top bit, but with a `+1`
-            // folded into every continuation past the first (the encoding's
-            // own trick for not wasting a representable value on 0, which a
-            // plain base-128 varint would); see the header note on why this
-            // is the easiest arithmetic here to get subtly wrong.
-            int position = current + header.header_length;
-            if (position >= pack.size()) {
-                return Result<Found, Error>.Err(Error.BadPack);
-            }
-            int byte_value = pack[position];
-            position = position + 1;
-            int value = byte_value & 0x7F;
-            int guard = 0;
-            while ((byte_value & 0x80) != 0) {
-                guard = guard + 1;
-                if (guard > 8) {
-                    return Result<Found, Error>.Err(Error.BadPack);
-                }
-                if (position >= pack.size()) {
-                    return Result<Found, Error>.Err(Error.BadPack);
-                }
-                byte_value = pack[position];
-                position = position + 1;
-                value = (value + 1) << 7 | (byte_value & 0x7F);
-            }
-            int base_off = current - value;
-            if (base_off < 0 || base_off >= current) {
-                return Result<Found, Error>.Err(Error.BadPack);
-            }
-            GIT_zlib.Decoded decoded = inflate_pack_zlib(pack, position)?;
-            chain.push(decoded.data);
-            current = base_off;
-        } else if (header.kind == 7) {
-            // OBJ_REF_DELTA: the base named by its own binary id, which may
-            // or may not be in THIS pack (a thin pack leaves it out on
-            // purpose) -- checked against `pack_index` first, since that is the
-            // common case and stays inside this iterative loop; only a miss
-            // falls back to `resolve_id`'s general search.
-            int position = current + header.header_length;
-            int raw_width = pack_index.raw_width;
-            if (position + raw_width > pack.size()) {
-                return Result<Found, Error>.Err(Error.BadPack);
-            }
-            bytes base_sha = pack.substr(position, position + raw_width);
-            GIT_zlib.Decoded decoded = inflate_pack_zlib(pack, position + raw_width)?;
-            chain.push(decoded.data);
+        Step step = pack_cache.step_at(pack_file.pack_path, current, raw_width)?;
+        if (step.kind == 6) {
+            chain.push(step.data);
+            current = step.base_offset;
+        } else if (step.kind == 7) {
+            chain.push(step.data);
             bool is_base_done = false;
-            match (pack_index.offset_of(base_sha)) {
+            // the base is usually in this very pack; a thin pack's is not,
+            // and `resolve_id`'s general search (loose, any pack) finds it
+            match (pack_cache.offset_in(pack_file.index_path, step.base_id)) {
                 case Some(int base_off): {
                     current = base_off;
                 }
                 case None: {
-                    Found found = resolve_id(pack_cache, gitdir, packs, base_sha.hex(), depth - steps)?;
+                    Found found = resolve_id(pack_cache, gitdir, packs, step.base_id.hex(), depth - steps)?;
                     base_kind = found.kind;
                     base_content = found.content;
                     is_base_done = true;
@@ -709,7 +911,9 @@ Result<Found, Error> resolve_offset(Cache pack_cache, str gitdir, List<PackFile>
                 break;
             }
         } else {
-            return Result<Found, Error>.Err(Error.BadPack);
+            base_kind = kind_name(step.kind);
+            base_content = step.data;
+            break;
         }
     }
     bytes content = base_content;
@@ -915,8 +1119,8 @@ Result<ObjHeader, Error> read_obj_header(bytes pack, int offset) {
 // every packed object's stream is a full RFC 1950 stream, exactly like a
 // loose object's (the module header says why `decompress_at` and not
 // `inflate_at` is what belongs here).
-Result<GIT_zlib.Decoded, Error> inflate_pack_zlib(bytes pack, int start) {
-    match (GIT_zlib.decompress_at(pack, start)) {
+Result<GIT_zlib.Decoded, Error> inflate_pack_zlib(bytes pack, int start, int expect) {
+    match (GIT_zlib.decompress_at(pack, start, expect: expect)) {
         case Ok(GIT_zlib.Decoded decoded): {
             return Result<GIT_zlib.Decoded, Error>.Ok(decoded);
         }
