@@ -280,7 +280,7 @@ pub type Core {
     pub bool is_jump_shown = false;
     pub bool is_jump_focused = false;
     /// Syntax colours in every view that shows file text (see
-    /// `GIT_ui_highlight`): set from `NO_COLOR`/`GITUI_SYNTAX`/`gitui.syntax`
+    /// `GIT_ui_highlight`): set from `NO_COLOR`/`M31GIT_SYNTAX`/`mgit.syntax`
     /// at start, flipped by `C`.
     pub bool is_syntax_on = true;
     /// The terminal's background is dark (`$COLORFGBG`).
@@ -308,7 +308,7 @@ pub type Core {
     pub List<GIT_ui_model.BranchRow> branch_rows = [];
     /// `stash@{n}: <message>` per stash, newest first -- the "Stashes" section.
     pub List<str> stash_labels = [];
-    /// Set by `edit_message` and read by `gitui.m31`'s own top-level driver
+    /// Set by `edit_message` and read by `mgit.m31`'s own top-level driver
     /// after `TUI_app.Loop.run` returns: true means the loop stopped so
     /// `$EDITOR` could have the terminal, not because the operator pressed
     /// `q`. See `GIT_client.m31`'s header, "launching `$EDITOR`".
@@ -352,7 +352,7 @@ pub type Core {
     /// to the neighbouring file. "" while no diff is open.
     pub str diff_row_id = "";
     pub Map<str, bool> collapsed = {};
-    /// What `gitui.collapsed` last held (or was last written as), so a fold
+    /// What `mgit.collapsed` last held (or was last written as), so a fold
     /// writes the repository's config only when the set of folded sections
     /// actually changed.
     pub str folded_saved = "";
@@ -616,11 +616,20 @@ pub str Core.repo_name() {
     return "";
 }
 
-/// Read `gitui.collapsed` (a comma-separated list of root section ids) into
+/// Read `mgit.collapsed` (a comma-separated list of root section ids) into
 /// `collapsed`, so the sections folded in an earlier run start folded. Call
 /// before the first `reload`.
 pub void Core.load_folds() {
-    match (GIT_config.get(gitdir, "gitui", "", "collapsed")) {
+    // `mgit.collapsed`; `mgit.collapsed` is read when only the old key exists.
+    Option<str> saved = GIT_config.get(gitdir, "mgit", "", "collapsed");
+    match (saved) {
+        case Some(_): {
+        }
+        case None: {
+            saved = GIT_config.get(gitdir, "gitui", "", "collapsed");
+        }
+    }
+    match (saved) {
         case Some(str value): {
             for (str id in GIT_ui_sections.parse_folded(value)) {
                 collapsed.set(id, true);
@@ -632,7 +641,7 @@ pub void Core.load_folds() {
     folded_saved = GIT_ui_sections.folded_roots(collapsed).join(",");
 }
 
-/// Write the folded root sections to `gitui.collapsed` when they changed
+/// Write the folded root sections to `mgit.collapsed` when they changed
 /// since last time; unset the key when none is folded. A repository whose
 /// config cannot be written just does not remember.
 pub void Core.persist_folds() {
@@ -642,6 +651,12 @@ pub void Core.persist_folds() {
     }
     folded_saved = now;
     if (now == "") {
+        match (GIT_config.unset(gitdir, "mgit", "", "collapsed")) {
+            case Ok(_): {
+            }
+            case Err(_): {
+            }
+        }
         match (GIT_config.unset(gitdir, "gitui", "", "collapsed")) {
             case Ok(_): {
             }
@@ -650,7 +665,14 @@ pub void Core.persist_folds() {
         }
         return;
     }
-    match (GIT_config.set(gitdir, "gitui", "", "collapsed", now)) {
+    match (GIT_config.set(gitdir, "mgit", "", "collapsed", now)) {
+        case Ok(_): {
+        }
+        case Err(_): {
+        }
+    }
+    // Drop a leftover old-name key so it cannot resurrect the folds.
+    match (GIT_config.unset(gitdir, "gitui", "", "collapsed")) {
         case Ok(_): {
         }
         case Err(_): {
@@ -812,7 +834,7 @@ pub Option<str> Core.take_pick(str purpose) {
 /// commit message (`COMMIT_EDITMSG`, git's own name) and the new branch's name.
 pub void Core.set_editor_paths() {
     commit_message_path = fs.join(gitdir, "COMMIT_EDITMSG");
-    branch_name_path = fs.join(gitdir, "GITUI_BRANCH_NAME");
+    branch_name_path = fs.join(gitdir, "MGIT_BRANCH_NAME");
 }
 
 // --- the key table ------------------------------------------------------------

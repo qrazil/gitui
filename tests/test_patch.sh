@@ -1,7 +1,7 @@
 # `GIT_patch.m31`: applying or reverting exactly one hunk of a diff, byte for
 # byte -- the piece the diff view's `s`/`u` (hunk-level staging) is built
 # on. `t_patch.m31` checks the round-trip properties with no repository at
-# all; `test_gitui.sh`'s own "gitui hunk:" checks are where the result is
+# all; `test_mgit.sh`'s own "mgit hunk:" checks are where the result is
 # compared against real `git apply --cached` and `git add -p`'s outcome.
 #
 # Sourced from `test.sh`, on the same terms as `test_hunks.sh`: no `set`,

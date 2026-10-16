@@ -205,7 +205,7 @@ went from "`http://` only" to "both" by changing one call: every request in
 `parse_remote` keeps the scheme it was given and refuses everything else.
 
 Decisions: (1) there is no insecure mode to expose, and none is added; the one
-knob is `GITUI_HTTP_CA_FILE` (a PEM of roots, `tls.Trust.CaFile`), which is what
+knob is `M31GIT_HTTP_CA_FILE` (a PEM of roots, `tls.Trust.CaFile`), which is what
 a self-hosted server with a private CA needs and what the tests use for their
 throwaway CA. (2) The error enums gain `Certificate`, `Tls` and
 `InsecureRedirect` (in `GIT_http_fetch`, and in `GIT_http_push`), derived from
@@ -218,7 +218,7 @@ followed, `https` to `http` never is.
 ## ssh remotes, 2026-10-10
 
 SSH was "held" above until m31 v0.3.3 shipped an ssh client (`sshclient`,
-`sshhosts`, `sshkey`, `sshauth`, `sshexec`) validated against OpenSSH. gitui
+`sshhosts`, `sshkey`, `sshauth`, `sshexec`) validated against OpenSSH. m31git
 adds the transport on top of it (`GIT_ssh_transport.m31`): an exec channel
 running `git-upload-pack` / `git-receive-pack` is wrapped as a `GIT_wire.Stream`,
 so the v0 conversation `GIT_wire.m31` holds over HTTP runs unchanged, minus the
@@ -231,13 +231,13 @@ unknown host is `Error.UnknownHost(PendingHost)` carrying the key the server
 presented (`ssh.presented_host_key`), the UI asks, and only `y` records it
 (`sshhosts.add`, hashed when `HashKnownHosts yes` applies to the host). A
 changed key is a refusal with no override from the UI. (2) The library call has
-no read timeout, so gitui first connects and waits up to 15 s for the server's
+no read timeout, so mgit first connects and waits up to 15 s for the server's
 banner (an ssh server speaks first), bounding a silent server. A watchdog thread
 was rejected: m31 has no select or cancel, and the program waits for every
 spawned thread, so a parked or sleeping watchdog would stall exit. A server that
 sends the banner and then stalls, or a TCP connect that never answers, is not
 bounded. (3) The environment overrides
-`GITUI_SSH_IDENTITY` and `GITUI_SSH_KNOWN_HOSTS` exist for the tests and for
+`M31GIT_SSH_IDENTITY` and `M31GIT_SSH_KNOWN_HOSTS` exist for the tests and for
 unusual setups; nothing reads a password from anywhere, and an encrypted key or
 a missing key ends in a message that names `https://` as the alternative.
 
@@ -340,7 +340,7 @@ and new in two columns. Decisions, with the ones that were close:
 ## m31 0.4.0, 2026-10-10
 
 m31 v0.4.0 grouped the standard library into folders (`import net.http;`,
-`import encoding.base64;`) and made `m31c lint` a gate, so gitui follows the
+`import encoding.base64;`) and made `m31c lint` a gate, so m31git follows the
 new naming rules: booleans start with is_/has_/did_/should_, abbreviations are
 spelled out, and short names became real ones. Nothing about the design
 changed. `RENAMES.md` lists every old public name next to its new one.

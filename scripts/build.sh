@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Build gitui (`gitui.m31`, the interactive client) or the read-only CLI
+# Build mgit (`mgit.m31`, the interactive client) or the read-only CLI
 # (`git.m31`) into a real executable, like the other qrazil apps' one
 # scripts/build.sh.
 #
@@ -8,7 +8,7 @@
 #   M31_ROOT=/path/to/m31 bash scripts/build.sh git.m31          -> ./1git
 #   M31_ROOT=/path/to/m31 bash scripts/build.sh tests/t_x.m31 -o t_x
 #
-# Any other `.m31` file builds into ./<its basename>. `gitui.m31` imports
+# Any other `.m31` file builds into ./<its basename>. `mgit.m31` imports
 # github.com/qrazil/tui as `import tui.app.TUI_app;` and so on: the `deps`
 # file at the repo root names the exact commit, and the first compile fetches
 # it into `.m31-deps/` and records it in `deps.lock`.
@@ -38,7 +38,7 @@ fi
 LANGC=${LANGC:-./m31c}
 CC=${CC:-cc}
 
-src=gitui.m31
+src=mgit.m31
 out=
 while [ $# -gt 0 ]; do
     case $1 in
@@ -49,7 +49,7 @@ while [ $# -gt 0 ]; do
 done
 if [ -z "$out" ]; then
     case $src in
-        gitui.m31) out=mgit ;;
+        mgit.m31) out=mgit ;;
         git.m31)   out=1git ;;
         *)         out=$(basename "$src" ".$LANG_EXT") ;;
     esac

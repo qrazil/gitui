@@ -21,9 +21,9 @@
 // `lib/diff.m31`'s own header, say why at more length). Grouping that script
 // into hunks and turning each `diff.Op`'s `bytes` line into the `str`
 // `TUI_diff_view.Line.text` wants is presentation, not algorithm, so it lives
-// here instead -- `gitui` is the one place today that needs both
+// here instead -- `mgit` is the one place today that needs both
 // `lib/diff` and `tui`, and the client this is for (`docs/design.md`) is
-// itself an `gitui` program.
+// itself an `mgit` program.
 //
 // --- grouping into hunks, with context -----------------------------------------
 //

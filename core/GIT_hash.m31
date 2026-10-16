@@ -37,7 +37,7 @@
 //
 // --- what is refused -----------------------------------------------------------
 //
-// `refusal` is for the entry points (`git`, `gitui`) to call once, after
+// `refusal` is for the entry points (`1git`, `mgit`) to call once, after
 // finding the repository. It names a repository format version above 1, an
 // extension git defines in a version 0 repository (git dies on that too), an
 // `objectFormat` that is neither `sha1` nor `sha256`, and every extension in

@@ -388,10 +388,10 @@ source tests/test_lines.sh
 
 # --- the interactive client: unit, oracle and pty-driven end-to-end --------
 #
-# `test_gitui.sh` shares this script's shell the same way `test_write.sh`
+# `test_mgit.sh` shares this script's shell the same way `test_write.sh`
 # does -- see its own header.
 
-source tests/test_gitui.sh
+source tests/test_mgit.sh
 source tests/test_uilines.sh
 source tests/test_sbs.sh
 source tests/test_highlight.sh
@@ -428,7 +428,7 @@ source tests/test_httpfetch.sh
 # --- discarding changes and amending HEAD, against real git ------------------
 #
 # `test_discard_amend.sh` shares this script's shell the same way the
-# others do, and reuses the `t_gitclient_ops` harness `test_gitui.sh` built.
+# others do, and reuses the `t_gitclient_ops` harness `test_mgit.sh` built.
 
 source tests/test_discard_amend.sh
 

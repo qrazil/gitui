@@ -464,7 +464,7 @@ int log(str git_directory, args.Parsed parsed_command) {
         }
     }
     // The walk itself -- git's date-ordered queue -- lives in `GIT_log.m31`
-    // now, shared with the interactive client (`gitui.m31`) so there is one
+    // now, shared with the interactive client (`mgit.m31`) so there is one
     // implementation of it rather than two (`docs/design.md`).
     match (GIT_log.walk(git_directory, spec, limit)) {
         case Ok(List<GIT_log.Entry> entries): {

@@ -7,7 +7,7 @@
 #
 # Downloads the m31 musl release (static compiler + runtime SDK), builds the
 # programs with it and Alpine's own cc, smoke-runs them, and writes
-# gitui-linux-<arch>-musl.tar.gz with the same layout as the glibc tarballs.
+# m31git-linux-<arch>-musl.tar.gz with the same layout as the glibc tarballs.
 # It runs as a plain `docker run`, not a job container: the JS actions
 # (checkout, upload-artifact) need glibc node on the host.
 set -eu
@@ -28,14 +28,14 @@ curl -fsSL "https://github.com/qrazil/m31/releases/download/$M31_MUSL_REF/m31-li
 chmod +x "$M31_DIR/m31c"
 export LANGC="$M31_DIR/m31c" M31_ROOT="$M31_DIR"
 
-OUT="dist/gitui-linux-$arch-musl"
+OUT="dist/m31git-linux-$arch-musl"
 rm -rf dist
 mkdir -p "$OUT"
 bash scripts/build.sh git.m31 -o "$OUT/1git"
-bash scripts/build.sh gitui.m31 -o "$OUT/mgit"
+bash scripts/build.sh mgit.m31 -o "$OUT/mgit"
 cp README.md docs/design.md docs/FRICTION.md "$OUT/" 2>/dev/null || true
 cat >"$OUT/NOTES.txt" <<EOF
-gitui - Linux $arch (musl / Alpine) release build
+m31git - Linux $arch (musl / Alpine) release build
 Built from commit: ${GITHUB_SHA:-unknown}
 Tag: ${GITHUB_REF_NAME:-unknown}
 Built against m31 $M31_MUSL_REF, tui $(awk '$1=="tui"{print $3}' deps)
@@ -49,5 +49,5 @@ EOF
 "$OUT/1git" -log --max 1 >/dev/null
 [ -x "$OUT/mgit" ]
 
-tar -C "$OUT" -czf "gitui-linux-$arch-musl.tar.gz" .
-ls -l "gitui-linux-$arch-musl.tar.gz"
+tar -C "$OUT" -czf "m31git-linux-$arch-musl.tar.gz" .
+ls -l "m31git-linux-$arch-musl.tar.gz"

@@ -2,7 +2,7 @@
 // Every command takes the remote as a URL (`ssh://`, scp-like, or an ssh_config
 // alias) and resolves it exactly as the UI does: `GIT_remote.parse` then
 // `GIT_ssh_transport.target_for`, which reads `$HOME/.ssh/config` and the
-// `GITUI_SSH_KNOWN_HOSTS` / `GITUI_SSH_IDENTITY` overrides.
+// `M31GIT_SSH_KNOWN_HOSTS` / `M31GIT_SSH_IDENTITY` overrides.
 //
 //   ./t_ssh unit
 //       Checks with no server: known_hosts spellings, plain and hashed lines

@@ -298,14 +298,14 @@ if build t_stash; then
 fi
 
 # --- the stash UI under a pty (z menu, Stashes section, list overlay) -----------------
-if [ ! -x "$WORK/gitui" ]; then
-    bash scripts/build.sh -o "$WORK/gitui" >"$WORK/stash_build.log" 2>&1 \
+if [ ! -x "$WORK/mgit" ]; then
+    bash scripts/build.sh -o "$WORK/mgit" >"$WORK/stash_build.log" 2>&1 \
         || bad "stash ui: scripts/build.sh" "$(cat "$WORK/stash_build.log")"
 fi
-if [ -x "$WORK/gitui" ] && command -v python3 >/dev/null; then
-    if out=$(python3 tests/pty_stash.py "$WORK/gitui" "$WORK/ptystash" 2>&1); then
-        note "gitui stash pty: $(echo "$out" | grep -c '^ok') checks agree with git stash"
+if [ -x "$WORK/mgit" ] && command -v python3 >/dev/null; then
+    if out=$(python3 tests/pty_stash.py "$WORK/mgit" "$WORK/ptystash" 2>&1); then
+        note "mgit stash pty: $(echo "$out" | grep -c '^ok') checks agree with git stash"
     else
-        bad "gitui stash pty" "$(echo "$out" | grep -v '^ok' | head -30)"
+        bad "mgit stash pty" "$(echo "$out" | grep -v '^ok' | head -30)"
     fi
 fi

@@ -1,21 +1,22 @@
-// Syntax highlighting for the places gitui shows file text outside a
+// Syntax highlighting for the places mgit shows file text outside a
 // `TUI_diff_view.DiffView` (which colours its own hunks, given a `language`):
 // the commit view, the stash preview, the blame view and the conflict view.
-// The lexer is the `syntax` library's, styled by `GIT_ui_syntax`; this module is the gitui side of it -- when
+// The lexer is the `syntax` library's, styled by `GIT_ui_syntax`; this module is the mgit side of it -- when
 // highlighting is on, which language a path is, and how a diff, a blame or a
 // conflict is walked line by line so the carried lexer state is right.
 //
 // Switches, strongest first:
 //
 //   NO_COLOR       set (non-empty): no syntax colours (https://no-color.org)
-//   GITUI_SYNTAX   off | 0 | false | no | none: off; anything else: on
-//   gitui.syntax   the same values in git config (`git config --global gitui.syntax off`)
+//   M31GIT_SYNTAX   off | 0 | false | no | none: off; anything else: on
+//   mgit.syntax    the same values in git config (`git config --global mgit.syntax off`)
 //   C              the key, in the outline, the diff view and every overlay
 //                  that shows file text: flip it for this session
 //
 // The terminal's light/dark comes from `$COLORFGBG`, as in m3d1tor.
 
 import os;
+import core.GIT_env;
 import core.GIT_config;
 import tui.core.TUI_buffer;
 import tui.core.TUI_style;
@@ -32,7 +33,7 @@ pub const int KIND_CONTEXT = 3;
 pub const int KIND_ADD = 4;
 pub const int KIND_REMOVE = 5;
 
-/// A value of `NO_COLOR`/`GITUI_SYNTAX`/`gitui.syntax` that means "off".
+/// A value of `NO_COLOR`/`M31GIT_SYNTAX`/`mgit.syntax` that means "off".
 pub bool is_off_word(str value) {
     str word = value.trim().to_lower();
     return word == "off" || word == "0" || word == "false" || word == "no" || word == "none";
@@ -43,7 +44,7 @@ pub bool is_enabled(str gitdir) {
     if (os.env("NO_COLOR").or("") != "") {
         return false;
     }
-    match (os.env("GITUI_SYNTAX")) {
+    match (GIT_env.get("SYNTAX")) {
         case Some(str value): {
             if (value != "") {
                 return !is_off_word(value);
@@ -52,7 +53,14 @@ pub bool is_enabled(str gitdir) {
         case None: {
         }
     }
-    match (GIT_config.get(gitdir, "gitui", "", "syntax")) {
+    match (GIT_config.get(gitdir, "mgit", "", "syntax")) {
+        case Some(str value): {
+            return !is_off_word(value);
+        }
+        case None: {
+        }
+    }
+    match (GIT_config.get(gitdir, "mgit", "", "syntax")) {
         case Some(str value): {
             return !is_off_word(value);
         }
@@ -67,7 +75,7 @@ pub bool is_dark_terminal() {
     return TUI_syntax.is_dark(os.env("COLORFGBG").or(""));
 }
 
-/// The highlighter's language for a path (bytes, as gitui holds them) and,
+/// The highlighter's language for a path (bytes, as mgit holds them) and,
 /// when the file has no known extension, its first line (for a `#!`).
 /// "" when highlighting is off or the file is not a known language.
 pub str language_for(bool is_on, bytes path, str first_line = "") {

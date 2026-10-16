@@ -50,7 +50,7 @@ import tui.widgets.TUI_menu;
 import tui.core.TUI_style;
 import tui.core.TUI_text;
 
-const str TODO_FILE = "GITUI_REBASE_TODO";
+const str TODO_FILE = "M31GIT_REBASE_TODO";
 
 pub type RebaseLayer {
     pub GIT_ui_merge.MergeLayer;

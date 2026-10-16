@@ -7,7 +7,7 @@ Disposable fixtures, real `git` as the oracle where there is one:
 
   * `[` / `]` between the outline's section headers (seen through what a
     following Enter or Tab folds), `{` / `}`, Tab on a section and on a leaf,
-    `-` and `+`, and the fold list kept in `git config gitui.collapsed`;
+    `-` and `+`, and the fold list kept in `git config mgit.collapsed`;
   * the diff view: `[` / `]` between hunks (seen through what `s` stages, git
     is the oracle), Tab and `-` / `+` folding hunks, `{` / `}` between files;
   * the statusline on the frame's top border: ahead and behind, the stash
@@ -166,7 +166,7 @@ def main():
     s.quit()
 
     # Tab, - and +
-    git(fx, "config", "--unset-all", "gitui.collapsed")
+    git(fx, "config", "--unset-all", "mgit.collapsed")
     s = SizedSession(binpath, fx, 80)
     s.send("j")  # new.txt
     s.send("\t")
@@ -186,23 +186,23 @@ def main():
     s.quit()
 
     # persisted folds
-    got, _, _ = git(fx, "config", "--get", "gitui.collapsed")
+    got, _, _ = git(fx, "config", "--get", "mgit.collapsed")
     check("folds: nothing is kept when all are open", got == "", got)
-    git(fx, "config", "--unset-all", "gitui.collapsed")
+    git(fx, "config", "--unset-all", "mgit.collapsed")
     s = SizedSession(binpath, fx, 80)
     s.send("\t")  # on the Untracked header: fold it
     s.send("]")
     s.send("]")
     s.send("\t")  # Staged
     s.quit()
-    got, _, _ = git(fx, "config", "--get", "gitui.collapsed")
-    check("folds: the folded sections are kept in gitui.collapsed", got == "staged,untracked", got)
+    got, _, _ = git(fx, "config", "--get", "mgit.collapsed")
+    check("folds: the folded sections are kept in mgit.collapsed", got == "staged,untracked", got)
     s = SizedSession(binpath, fx, 80)
     t = s.text()
     check("folds: they start folded in the next run", "▸ Untracked files (2)" in t and "▸ Staged changes (1)" in t and "▾ Unstaged changes (1)" in t, t)
     s.send("+")
     s.quit()
-    got, _, rc = git(fx, "config", "--get", "gitui.collapsed")
+    got, _, rc = git(fx, "config", "--get", "mgit.collapsed")
     check("folds: unfolding everything unsets the key", got == "" and rc != 0, got)
 
     # ------------------------------------------------------ hunks in the diff

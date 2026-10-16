@@ -10,8 +10,8 @@ bytes the client writes are read back for their SGR colours: a C keyword is
 magenta (palette 5) and bold, a string green (2), a comment bright black (8),
 the `+`/`-` markers keep green/red. Then a 5000-line diff is scrolled, the
 screen must stay right (text of the last rows) and the redraws must be quick;
-`C` turns the colours off and on; `NO_COLOR`, `GITUI_SYNTAX=off` and
-`git config gitui.syntax off` each start with them off.
+`C` turns the colours off and on; `NO_COLOR`, `M31GIT_SYNTAX=off` and
+`git config mgit.syntax off` each start with them off.
 """
 import os
 import re
@@ -123,7 +123,7 @@ def main():
     os.makedirs(root)
 
     env = dict(CLIENT_ENV)
-    for key in ("NO_COLOR", "GITUI_SYNTAX", "COLORFGBG"):
+    for key in ("NO_COLOR", "M31GIT_SYNTAX", "COLORFGBG"):
         env.pop(key, None)
     env["COLORFGBG"] = "15;0"
 
@@ -171,8 +171,8 @@ def main():
     # --- the switches that start with it off --------------------------------
     for label, make_env, setup in [
         ("NO_COLOR", lambda e: dict(e, NO_COLOR="1"), None),
-        ("GITUI_SYNTAX=off", lambda e: dict(e, GITUI_SYNTAX="off"), None),
-        ("git config gitui.syntax", lambda e: dict(e), lambda fx: git(fx, "config", "gitui.syntax", "false")),
+        ("M31GIT_SYNTAX=off", lambda e: dict(e, M31GIT_SYNTAX="off"), None),
+        ("git config mgit.syntax", lambda e: dict(e), lambda fx: git(fx, "config", "mgit.syntax", "false")),
     ]:
         fx = fixture(root, "off-" + re.sub(r"\W", "", label))
         if setup:

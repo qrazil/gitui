@@ -4,9 +4,9 @@
 # `git checkout HEAD -- <path>`, `git rm -f <path>`, `git commit --amend
 # --no-edit`. Nothing here compares this program with itself.
 #
-# Sourced from `test.sh` after `test_gitui.sh`, sharing its shell, `$WORK`,
+# Sourced from `test.sh` after `test_mgit.sh`, sharing its shell, `$WORK`,
 # `build`, `note`/`bad` and the `pass`/`fail` counters -- `$WORK/
-# t_gitclient_ops` is the harness `test_gitui.sh` already built; it is
+# t_gitclient_ops` is the harness `test_mgit.sh` already built; it is
 # rebuilt here only if that step was skipped.
 #
 # Every fixture is disposable, under `$WORK`, never a real repository.

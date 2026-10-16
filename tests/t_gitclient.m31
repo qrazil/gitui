@@ -270,7 +270,7 @@ counter.check("commit message: whitespace-only input strips to empty", GIT_ui_mo
 // on either side becomes `is_diff_binary` instead of a garbled render. Which
 // on-disk/index/HEAD comparison feeds `open_diff` for each of the
 // unstaged/staged/untracked cases is exercised against real git in
-// `test_gitui.sh` instead, since that needs an actual repository.
+// `test_mgit.sh` instead, since that needs an actual repository.
 GIT_client.State diff_state = GIT_client.State.open("", "");
 diff_state.open_diff("t.txt", "a\nb\nc\n".to_bytes(), "a\nB\nc\n".to_bytes());
 counter.check("open_diff: a one-line text change opens a non-binary, single-hunk view", diff_state.is_diff_open && !diff_state.is_diff_binary && diff_state.diff_view.hunks.size() == 1, "diff_open=" + diff_state.is_diff_open.to_str() + " binary=" + diff_state.is_diff_binary.to_str() + " hunks=" + diff_state.diff_view.hunks.size().to_str());

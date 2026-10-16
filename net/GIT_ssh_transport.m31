@@ -27,7 +27,7 @@
 // which the connect errors do not carry, so `probe_host_key` asks the ssh
 // library for it (`ssh.presented_host_key`: the key exchange only, signature
 // checked, nothing trusted, no credentials sent) on a second connection,
-// bounded by a 15 s timeout of gitui's own. What the user approves is then
+// bounded by a 15 s timeout of mgit's own. What the user approves is then
 // enforced by the real connection, which refuses any other key.
 //
 // --- what is not here --------------------------------------------------------------
@@ -36,9 +36,9 @@
 // library's one suite); no ssh-agent, no password or passphrase prompt (there
 // is no terminal to ask on -- the error says to use https instead); no
 // `Match`/`Include` in ssh_config; only the user's own known_hosts file (or
-// `GITUI_SSH_KNOWN_HOSTS`).
+// `M31GIT_SSH_KNOWN_HOSTS`).
 //
-// Environment: `GITUI_SSH_KNOWN_HOSTS` and `GITUI_SSH_IDENTITY` replace the
+// Environment: `M31GIT_SSH_KNOWN_HOSTS` and `M31GIT_SSH_IDENTITY` replace the
 // known_hosts file and the identity list (the tests point them at throwaway
 // files); `HOME` locates `~/.ssh`.
 
@@ -52,6 +52,7 @@ import fs;
 import io;
 import net;
 import os;
+import core.GIT_env;
 import ssh;
 import ssh.sshauth;
 import ssh.sshclient;
@@ -237,7 +238,7 @@ pub type Target {
     pub bool is_hashed;
 }
 
-const str AGENT = "gitui-ssh/1";
+const str AGENT = "1git/0.23.0";
 const str DEFAULT_KEY = "id_ed25519";
 
 str home_directory() {
@@ -341,7 +342,7 @@ pub Result<Target, Error> target_for(GIT_remote.Remote remote) {
         port = 22;
     }
     List<str> identities = [];
-    match (os.env("GITUI_SSH_IDENTITY")) {
+    match (GIT_env.get("SSH_IDENTITY")) {
         case Some(str only): {
             identities.push(only);
         }
@@ -356,7 +357,7 @@ pub Result<Target, Error> target_for(GIT_remote.Remote remote) {
         }
     }
     str known = fs.join(fs.join(home_directory(), ".ssh"), "known_hosts");
-    match (os.env("GITUI_SSH_KNOWN_HOSTS")) {
+    match (GIT_env.get("SSH_KNOWN_HOSTS")) {
         case Some(str overridden): {
             known = overridden;
         }

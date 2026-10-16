@@ -54,12 +54,12 @@
 // HTTP Basic, from `http://user:password@host/...` userinfo (stripped from
 // the URL before `lib/http.m31` sees it -- that module refuses userinfo on
 // principle, and is right to; the secret belongs in a header) or, when the
-// URL carries none, from `GITUI_HTTP_USER`/`GITUI_HTTP_PASSWORD`. The
+// URL carries none, from `M31GIT_HTTP_USER`/`M31GIT_HTTP_PASSWORD`. The
 // password is never written to any message, log or error this module
 // produces; `Remote.url` is the credential-free form for exactly that
 // reason. `https://` remotes go through `lib/https.m31` (see "TLS" in
 // `GIT_http_fetch.m31`): the certificate is always checked, against the
-// operating system's roots or the PEM file `GITUI_HTTP_CA_FILE` names, and the
+// operating system's roots or the PEM file `M31GIT_HTTP_CA_FILE` names, and the
 // credentials only ever travel inside the encrypted connection.
 
 import encoding.base64;
@@ -69,6 +69,7 @@ import net.GIT_wire;
 import core.GIT_hash;
 import core.GIT_object;
 import os;
+import core.GIT_env;
 import core.GIT_pack_write;
 
 /// Why a push did not happen, or was refused. Payload-free
@@ -77,7 +78,7 @@ pub enum Error {
     /// The HTTP exchange itself failed (`lib/http.m31` said why).
     Http;
     /// An `https://` server's certificate was refused: not issued by a
-    /// trusted root (see `GITUI_HTTP_CA_FILE`), expired, or for another host.
+    /// trusted root (see `M31GIT_HTTP_CA_FILE`), expired, or for another host.
     Certificate;
     /// The TLS connection failed for any other reason.
     Tls;
@@ -190,8 +191,8 @@ pub type Remote {
     pub Option<Credentials> auth;
 }
 
-/// Split userinfo out of `url`, falling back to `GITUI_HTTP_USER`/
-/// `GITUI_HTTP_PASSWORD` when there is none. Refuses anything that is not
+/// Split userinfo out of `url`, falling back to `M31GIT_HTTP_USER`/
+/// `M31GIT_HTTP_PASSWORD` when there is none. Refuses anything that is not
 /// `http://...` or `https://...` up front, before a credential has been
 /// handled at all.
 pub Result<Remote, Error> parse_remote(str url) {
@@ -244,9 +245,9 @@ pub Result<Remote, Error> parse_remote(str url) {
             auth = Option<Credentials>.Some(Credentials(user, password));
         }
         case None: {
-            match (os.env("GITUI_HTTP_USER")) {
+            match (GIT_env.get("HTTP_USER")) {
                 case Some(str environment_user): {
-                    auth = Option<Credentials>.Some(Credentials(environment_user, os.env("GITUI_HTTP_PASSWORD").or("")));
+                    auth = Option<Credentials>.Some(Credentials(environment_user, GIT_env.get("HTTP_PASSWORD").or("")));
                 }
                 case None: {
                 }

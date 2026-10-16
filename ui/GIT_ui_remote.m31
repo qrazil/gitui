@@ -210,7 +210,7 @@ pub void RemoteLayer.record_pushed(str refname, str id, bool should_set_upstream
 /// own: upstream remote, credential helpers, netrc, askpass or a terminal
 /// prompt, ssh known_hosts, git's reflog lines). The TUI cannot draw a
 /// password prompt or git's progress, so this sets `is_editor_wanted` and the
-/// loop in `gitui.m31` hands the terminal over, runs `run_net_now`, and
+/// loop in `mgit.m31` hands the terminal over, runs `run_net_now`, and
 /// comes back; the status line then says how it ended.
 pub void RemoteLayer.want_net(str verb, List<str> args) {
     want_net_then(verb, args, "");

@@ -73,6 +73,7 @@ import net.http;
 import net.https;
 import io;
 import os;
+import core.GIT_env;
 import tls;
 
 // --- TLS ----------------------------------------------------------------------
@@ -83,7 +84,7 @@ import tls;
 // hops; `http` to `https` on the same host is followed; `https` to `http` is
 // never followed -- `Error.InsecureRedirect`). There is no way to switch the
 // check off. The only knob is where the roots come from: the operating
-// system's by default, or the PEM file named by `GITUI_HTTP_CA_FILE` (a
+// system's by default, or the PEM file named by `M31GIT_HTTP_CA_FILE` (a
 // private CA for a self-hosted server, or a test's throwaway one).
 
 /// Why a fetch or a ref listing could not be completed. Payload-free
@@ -98,7 +99,7 @@ pub enum Error {
     /// at this layer.
     Http;
     /// An `https://` server's certificate was refused: not issued by a
-    /// trusted root (see `GITUI_HTTP_CA_FILE`), expired, or for another host.
+    /// trusted root (see `M31GIT_HTTP_CA_FILE`), expired, or for another host.
     Certificate;
     /// The TLS connection failed for any other reason.
     Tls;
@@ -295,9 +296,9 @@ Error error_of(http.Error error) {
 }
 
 /// Whom an `https://` server must prove it is: the roots in the PEM file
-/// `GITUI_HTTP_CA_FILE` names, or the operating system's.
+/// `M31GIT_HTTP_CA_FILE` names, or the operating system's.
 pub tls.Trust trust() {
-    match (os.env("GITUI_HTTP_CA_FILE")) {
+    match (GIT_env.get("HTTP_CA_FILE")) {
         case Some(str path): {
             if (path != "") {
                 return tls.Trust.CaFile(path);

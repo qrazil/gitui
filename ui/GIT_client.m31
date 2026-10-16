@@ -1,11 +1,11 @@
-// The interactive client's own state and logic, split out of `gitui.m31` so
+// The interactive client's own state and logic, split out of `mgit.m31` so
 // it is importable and unit-testable the way `t_status.m31`/`t_index_stage.m31`
 // test `GIT_status.m31`/`GIT_index.m31` directly -- a top-level statement anywhere in
 // an imported file is refused (`docs/reference.md` §2), so anything this
 // program needs a test harness to call has to live here rather than in the
 // `.m31` that actually runs the terminal loop.
 //
-// `gitui.m31` is the thin driver: parse a path off the command line, build a
+// `mgit.m31` is the thin driver: parse a path off the command line, build a
 // `State`, and hand it to `TUI_app.Loop` exactly as `tui's `browse.m31``
 // hands its own `State` to the same loop. Everything a test needs --
 // building the outline from a `GIT_status.Status`, staging or unstaging one
@@ -57,7 +57,7 @@
 // `raw()` snapshotted before it ever touched termios, alternate screen
 // already turned off by the `leave` sequence `Loop.run` registered with
 // `on_exit`. That is the drop half of "drop the Session and re-acquire
-// `raw()` afterward" -- `gitui.m31`'s own top-level driver, watching
+// `raw()` afterward" -- `mgit.m31`'s own top-level driver, watching
 // `is_editor_wanted`, is what does both: it runs `os.run` for real now that the
 // terminal is cooked and on the normal screen, calls `launch_editor` to
 // interpret the result, and -- unless the loop actually asked to quit --
@@ -115,7 +115,7 @@ import tui.core.TUI_text;
 import tui.core.TUI_widget;
 
 /// Everything the interactive client is showing and doing right now: the
-/// whole layer tower in one value, held by `gitui.m31`'s top-level driver.
+/// whole layer tower in one value, held by `mgit.m31`'s top-level driver.
 /// There is no mutable module state to put it in instead (reference §2).
 pub type State {
     pub GIT_ui_remote.RemoteLayer;
@@ -134,7 +134,7 @@ pub static State State.open(str gitdir, str worktree) {
 }
 
 /// Actually launch `$EDITOR` (or `vi`) on `commit_message_path` and act on how it
-/// ended -- called by `gitui.m31`'s driver after `TUI_app.Loop.run` has
+/// ended -- called by `mgit.m31`'s driver after `TUI_app.Loop.run` has
 /// returned with `is_editor_wanted` set, so the terminal `os.run`'s child
 /// inherits is the real, cooked one, not the raw alternate screen this
 /// program draws on.

@@ -35,7 +35,7 @@ pub void CommitLayer.open_commit() {
 
 /// Write the commit-message template at `commit_message_path`, unless something
 /// -- a previous `e`, or a person's own `git commit` in another terminal --
-/// already left one there, and ask `gitui.m31`'s own driver to actually
+/// already left one there, and ask `mgit.m31`'s own driver to actually
 /// launch `$EDITOR` on it once the terminal is safe to hand over.
 ///
 /// This cannot call `os.run` itself: the terminal is still in raw mode with
@@ -351,7 +351,7 @@ pub TUI_app.Action CommitOverlay.handle_key(term.Code code) {
                 host.edit_message();
                 // `Quit` unwinds `TUI_app.Loop.run`'s own `Session`, which is
                 // what actually leaves raw mode and the alternate screen --
-                // see `edit_message`'s own header. `gitui.m31`'s driver reads
+                // see `edit_message`'s own header. `mgit.m31`'s driver reads
                 // `is_editor_wanted` on the way out and calls `Loop.run` again
                 // once `launch_editor` is done.
                 if (host.is_editor_wanted) {

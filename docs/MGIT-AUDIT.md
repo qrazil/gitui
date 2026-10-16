@@ -1,7 +1,7 @@
 # mgit audit against the `core/` library (0.18.0)
 
 What each library capability that `1git` gained in 0.14-0.17 has in `mgit`
-(the interactive client, `gitui.m31`). Status is as of this branch; the
+(the interactive client, `mgit.m31`). Status is as of this branch; the
 "before" column is master 0.17.0.
 
 | Library (1git) | mgit before 0.18.0 | mgit now |

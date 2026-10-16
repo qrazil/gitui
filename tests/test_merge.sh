@@ -499,8 +499,8 @@ fi
 # "Unmerged paths" section, the resolution view, the editor hand-off, abort, and the
 # offer of a merge when a pull cannot fast-forward, each checked against real git.
 # It builds its own fixtures under `$WORK/pty_merge`.
-if [ -f "$WORK/gitui" ] || bash scripts/build.sh -o "$WORK/gitui_merge" >"$WORK/gitui_merge_build.log" 2>&1; then
-    [ -f "$WORK/gitui" ] && gm_bin="$WORK/gitui" || gm_bin="$WORK/gitui_merge"
+if [ -f "$WORK/mgit" ] || bash scripts/build.sh -o "$WORK/mgit_merge" >"$WORK/mgit_merge_build.log" 2>&1; then
+    [ -f "$WORK/mgit" ] && gm_bin="$WORK/mgit" || gm_bin="$WORK/mgit_merge"
     if command -v python3 >/dev/null; then
         if out=$(python3 tests/pty_merge.py "$gm_bin" "$WORK/pty_merge" 2>&1); then
             note "merge pty: $(echo "$out" | grep -c '^ok') merge-screen checks passed under a real pty"
@@ -511,5 +511,5 @@ if [ -f "$WORK/gitui" ] || bash scripts/build.sh -o "$WORK/gitui_merge" >"$WORK/
         echo "merge pty: skipped, no python3" >&2
     fi
 else
-    bad "merge pty: scripts/build.sh" "$(cat "$WORK/gitui_merge_build.log")"
+    bad "merge pty: scripts/build.sh" "$(cat "$WORK/mgit_merge_build.log")"
 fi

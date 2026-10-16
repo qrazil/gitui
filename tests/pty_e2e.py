@@ -10,11 +10,11 @@ Run from anywhere:
     python3 tests/pty_e2e.py <mgit-binary> <scratch-dir>
 
 `<scratch-dir>` is created fresh (and removed first if it already exists) --
-`test_gitui.sh` passes it a directory under its own `mktemp -d`, never
+`test_mgit.sh` passes it a directory under its own `mktemp -d`, never
 anything resembling a real repository.
 
 Every `ok`/`FAIL` line this prints is one check; the exit code is the number
-of failures, so `test_gitui.sh` can both grep for `FAIL` and trust `$?`. This
+of failures, so `test_mgit.sh` can both grep for `FAIL` and trust `$?`. This
 is the "drive it under a pty against a disposable fixture, oracle-checked"
 half of the client's test obligations (`docs/design.md`, "how you'll know
 you're done and correct"); `t_gitclient.m31` and `t_gitclient_ops.m31` cover
@@ -241,7 +241,7 @@ def write_editor_script(path, message):
     fixed line and exit 0. `e` now actually runs `$EDITOR` via `os.run` and
     waits for it, so the pty tests below drive a real (if trivial) child
     process rather than editing `COMMIT_EDITMSG` out of band from Python --
-    the same thing `tests/test_gitui.sh`'s own stand-in editors do for the
+    the same thing `tests/test_mgit.sh`'s own stand-in editors do for the
     non-pty, oracle-level checks of every `os.run` outcome."""
     with open(path, "w") as f:
         f.write("#!/bin/sh\n")
@@ -381,7 +381,7 @@ def main():
     # it -- see `GIT_client.m31`'s own header, "launching `$EDITOR`, and the
     # terminal handoff that takes" -- so this drives that for real, with a
     # stand-in editor standing in for `$EDITOR` exactly as
-    # `tests/test_gitui.sh`'s own non-pty checks do for every `os.run`
+    # `tests/test_mgit.sh`'s own non-pty checks do for every `os.run`
     # outcome. What only a pty can prove is the terminal handoff itself: raw
     # mode and the alternate screen are left before the editor (a real child
     # process) runs, at all -- this session would simply hang or scribble
@@ -630,7 +630,7 @@ def main():
     # a normal quit once `ed` exits).
     ed_path = shutil.which("ed")
     if ed_path is None:
-        print("gitui pty: interactive $EDITOR (ed) check skipped, no ed on $PATH", file=sys.stderr)
+        print("mgit pty: interactive $EDITOR (ed) check skipped, no ed on $PATH", file=sys.stderr)
     else:
         fx6 = make_fixture(root, "interactive-editor")
         with open(os.path.join(fx6, "a.txt"), "w") as f:
@@ -727,7 +727,7 @@ def main():
     # one hunk that is left. Then from the staged side: `u` on its only hunk
     # unstages it again and, with nothing left to show, the view closes back
     # to the outline. Real `git diff --cached` is the oracle for which hunk
-    # went where; `test_gitui.sh`'s "gitui hunk:" checks compare the index
+    # went where; `test_mgit.sh`'s "mgit hunk:" checks compare the index
     # blob itself against `git apply --cached`.
     fx11 = make_fixture(root, "hunkstage")
     with open(os.path.join(fx11, "f.txt"), "w") as f:
@@ -919,7 +919,7 @@ def main():
 
     backend = os.path.join(subprocess.run(["git", "--exec-path"], capture_output=True, text=True).stdout.strip(), "git-http-backend")
     if not os.path.exists(backend):
-        print("gitui pty: push check skipped, no git-http-backend", file=sys.stderr)
+        print("mgit pty: push check skipped, no git-http-backend", file=sys.stderr)
     else:
         ps_root = os.path.join(root, "push-e2e")
         os.makedirs(os.path.join(ps_root, "www", "cgi-bin"))

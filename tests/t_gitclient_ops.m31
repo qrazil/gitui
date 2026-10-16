@@ -1,6 +1,6 @@
 // Drives `GIT_client.State`'s staging, unstaging, committing and diffing
 // directly -- no terminal, no `TUI_app.Loop` -- against a real, disposable
-// fixture, so `test_gitui.sh` can check each action's on-disk effect against
+// fixture, so `test_mgit.sh` can check each action's on-disk effect against
 // real git the same way `t_index_stage.m31` and `t_write_refs.m31` already
 // do for the plumbing underneath this client.
 //
@@ -32,7 +32,7 @@
 //
 // `stage_hunk`/`unstage_hunk` drive `State.did_stage_hunk`/`did_unstage_hunk` --
 // the diff view's own `s`/`u` -- on hunk `k` (0-based, in the order
-// `diff` above prints them) and print `State.message`, so `test_gitui.sh`
+// `diff` above prints them) and print `State.message`, so `test_mgit.sh`
 // can check the index against real git's `add -p`/`reset -p` outcome.
 // `hunk_patch` prints hunk `k` of the named comparison as a minimal unified
 // diff (`--- a/path`, `+++ b/path`, the one `@@` block) -- the exact patch
@@ -40,7 +40,7 @@
 // fixture, so the two index blobs can be compared byte for byte.
 //
 // `edit` calls `edit_message()` then `launch_editor()` exactly as
-// `gitui.m31`'s own driver does once `TUI_app.Loop.run` has handed the
+// `mgit.m31`'s own driver does once `TUI_app.Loop.run` has handed the
 // terminal back -- there is no terminal or `Session` in this harness at all,
 // which is exactly what makes it able to drive `os.run`'s every outcome
 // (success, nonzero exit, signal, `$EDITOR` unset or not found)

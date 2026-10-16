@@ -50,13 +50,13 @@ jobs:
       - name: Build
         run: |
           set -euo pipefail
-          OUT=dist/gitui-linux-x86_64
+          OUT=dist/m31git-linux-x86_64
           mkdir -p "$OUT"
           bash scripts/build.sh git.m31 -o "$OUT/1git"
-          bash scripts/build.sh gitui.m31 -o "$OUT/mgit"
+          bash scripts/build.sh mgit.m31 -o "$OUT/mgit"
           cp README.md docs/design.md docs/FRICTION.md "$OUT/" 2>/dev/null || true
           sed 's/^ *//' > "$OUT/NOTES.txt" <<EOF
-          gitui — Linux x86-64 release build
+          m31git — Linux x86-64 release build
           Built from commit: ${GITHUB_SHA}
           Tag: ${GITHUB_REF_NAME}
           Built against m31 ${{ env.M31_REF }}, tui $(awk '$1=="tui"{print $3}' deps)
@@ -66,12 +66,12 @@ jobs:
           EOF
 
       - name: Package
-        run: tar -C "dist/gitui-linux-x86_64" -czf gitui-linux-x86_64.tar.gz .
+        run: tar -C "dist/m31git-linux-x86_64" -czf m31git-linux-x86_64.tar.gz .
 
       - uses: actions/upload-artifact@v4
         with:
-          name: gitui-linux-x86_64
-          path: gitui-linux-x86_64.tar.gz
+          name: m31git-linux-x86_64
+          path: m31git-linux-x86_64.tar.gz
           if-no-files-found: error
 
   build-linux-aarch64:
@@ -95,13 +95,13 @@ jobs:
       - name: Build
         run: |
           set -euo pipefail
-          OUT=dist/gitui-linux-aarch64
+          OUT=dist/m31git-linux-aarch64
           mkdir -p "$OUT"
           bash scripts/build.sh git.m31 -o "$OUT/1git"
-          bash scripts/build.sh gitui.m31 -o "$OUT/mgit"
+          bash scripts/build.sh mgit.m31 -o "$OUT/mgit"
           cp README.md docs/design.md docs/FRICTION.md "$OUT/" 2>/dev/null || true
           sed 's/^ *//' > "$OUT/NOTES.txt" <<EOF
-          gitui — Linux aarch64 release build
+          m31git — Linux aarch64 release build
           Built from commit: ${GITHUB_SHA}
           Tag: ${GITHUB_REF_NAME}
           Built against m31 ${{ env.M31_REF }}, tui $(awk '$1=="tui"{print $3}' deps)
@@ -111,12 +111,12 @@ jobs:
           EOF
 
       - name: Package
-        run: tar -C "dist/gitui-linux-aarch64" -czf gitui-linux-aarch64.tar.gz .
+        run: tar -C "dist/m31git-linux-aarch64" -czf m31git-linux-aarch64.tar.gz .
 
       - uses: actions/upload-artifact@v4
         with:
-          name: gitui-linux-aarch64
-          path: gitui-linux-aarch64.tar.gz
+          name: m31git-linux-aarch64
+          path: m31git-linux-aarch64.tar.gz
           if-no-files-found: error
 
   build-macos-arm64:
@@ -140,13 +140,13 @@ jobs:
       - name: Build
         run: |
           set -euo pipefail
-          OUT=dist/gitui-macos-arm64
+          OUT=dist/m31git-macos-arm64
           mkdir -p "$OUT"
           bash scripts/build.sh git.m31 -o "$OUT/1git"
-          bash scripts/build.sh gitui.m31 -o "$OUT/mgit"
+          bash scripts/build.sh mgit.m31 -o "$OUT/mgit"
           cp README.md docs/design.md docs/FRICTION.md "$OUT/" 2>/dev/null || true
           sed 's/^ *//' > "$OUT/NOTES.txt" <<EOF
-          gitui — macOS arm64 (Apple Silicon) release build
+          m31git — macOS arm64 (Apple Silicon) release build
           Built from commit: ${GITHUB_SHA}
           Tag: ${GITHUB_REF_NAME}
           Built against m31 ${{ env.M31_REF }}, tui $(awk '$1=="tui"{print $3}' deps)
@@ -156,17 +156,17 @@ jobs:
           EOF
 
       - name: Package
-        run: tar -C "dist/gitui-macos-arm64" -czf gitui-macos-arm64.tar.gz .
+        run: tar -C "dist/m31git-macos-arm64" -czf m31git-macos-arm64.tar.gz .
 
       - uses: actions/upload-artifact@v4
         with:
-          name: gitui-macos-arm64
-          path: gitui-macos-arm64.tar.gz
+          name: m31git-macos-arm64
+          path: m31git-macos-arm64.tar.gz
           if-no-files-found: error
 
   # ---------------------------------------------------------------------
   # Alpine / musl: built and smoke-run inside an alpine container with the m31
-  # musl release; gitui-linux-<arch>-musl.tar.gz has the same layout as the glibc
+  # musl release; m31git-linux-<arch>-musl.tar.gz has the same layout as the glibc
   # tarballs. Body: scripts/ci-musl.sh. A plain `docker run` on the host
   # runner, not a job container, because JS actions need glibc node.
   # ---------------------------------------------------------------------
@@ -193,8 +193,8 @@ jobs:
 
       - uses: actions/upload-artifact@v4
         with:
-          name: gitui-linux-${{ matrix.arch }}-musl
-          path: gitui-linux-${{ matrix.arch }}-musl.tar.gz
+          name: m31git-linux-${{ matrix.arch }}-musl
+          path: m31git-linux-${{ matrix.arch }}-musl.tar.gz
           if-no-files-found: error
 
   release:
@@ -212,9 +212,22 @@ jobs:
           path: dist
           merge-multiple: true
 
+      # SHA256SUMS over the tarballs, in `sha256sum` format with bare file
+      # names, so `sha256sum -c` / `shasum -a 256 -c` verify it from the
+      # directory the assets were downloaded to (install.sh does).
+      - name: Checksums
+        working-directory: dist
+        run: |
+          set -euo pipefail
+          ls -1 *.tar.gz | LC_ALL=C sort | xargs sha256sum > SHA256SUMS
+          cat SHA256SUMS
+          sha256sum -c SHA256SUMS
+
       - name: Publish to GitHub Releases
         uses: softprops/action-gh-release@v2
         with:
-          files: dist/*.tar.gz
+          files: |
+            dist/*.tar.gz
+            dist/SHA256SUMS
           fail_on_unmatched_files: true
           generate_release_notes: true

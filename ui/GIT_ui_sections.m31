@@ -195,7 +195,7 @@ pub str fold_parent(TUI_outline.Outline outline, Map<str, bool> collapsed, str i
     }
 }
 
-/// The root ids that are folded, for `gitui.collapsed`: every key of
+/// The root ids that are folded, for `mgit.collapsed`: every key of
 /// `collapsed` with no ":" in it (a root section's id) that is set, in
 /// order. A row id under a commit or a file path has a ":" and is session
 /// state only.
@@ -210,7 +210,7 @@ pub List<str> folded_roots(Map<str, bool> collapsed) {
     return out;
 }
 
-/// The reverse: `gitui.collapsed`'s value ("untracked,staged") into the ids
+/// The reverse: `mgit.collapsed`'s value ("untracked,staged") into the ids
 /// it names, blanks and duplicates dropped.
 pub List<str> parse_folded(str value) {
     List<str> out = [];

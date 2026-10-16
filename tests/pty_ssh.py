@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """The interactive client's ssh remotes, driven under a real pty against a
 disposable sshd (set up by `test_ssh.sh`, which also supplies the environment:
-HOME, GITUI_SSH_IDENTITY, GITUI_SSH_KNOWN_HOSTS). Reuses `pty_e2e.py`'s
+HOME, M31GIT_SSH_IDENTITY, M31GIT_SSH_KNOWN_HOSTS). Reuses `pty_e2e.py`'s
 terminal emulator and session driver; real git is the oracle throughout.
 
-    python3 tests/pty_ssh.py <gitui> <scratch-dir> <bare-repo> <ssh-url> \
+    python3 tests/pty_ssh.py <mgit> <scratch-dir> <bare-repo> <ssh-url> \
         <host-fingerprint> <other-host-key.pub> <port>
 
 `<bare-repo>` is the repository `<ssh-url>` names, reachable here by path so
@@ -47,7 +47,7 @@ def main():
     binpath, root, bare, url, fingerprint, other_pub, port = sys.argv[1:8]
     binpath = os.path.abspath(binpath)
     root = os.path.abspath(root)
-    known_hosts = os.environ["GITUI_SSH_KNOWN_HOSTS"]
+    known_hosts = os.environ["M31GIT_SSH_KNOWN_HOSTS"]
     if os.path.exists(root):
         shutil.rmtree(root)
     os.makedirs(root)

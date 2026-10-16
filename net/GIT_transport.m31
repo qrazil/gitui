@@ -33,6 +33,7 @@
 
 import io;
 import os;
+import core.GIT_env;
 import fs;
 import text;
 import tls;
@@ -50,7 +51,7 @@ import core.GIT_object;
 import core.GIT_config;
 import core.GIT_gitcommon;
 
-pub const str AGENT = "1git/0.22.0";
+pub const str AGENT = "1git/0.23.0";
 
 /// One ref as listed: `peeled` is the commit a tag points at ("" when the
 /// ref is not an annotated tag), `symref` the target of a symbolic ref.
@@ -745,7 +746,7 @@ tls.Trust trust_of(GIT_gitcommon.Ctx ctx) {
         path = cfg_text(ctx, "http", "", "sslCAInfo", "");
     }
     if (path == "") {
-        path = os.env("GITUI_HTTP_CA_FILE").or("");
+        path = GIT_env.get("HTTP_CA_FILE").or("");
     }
     if (path != "") {
         return tls.Trust.CaFile(path);

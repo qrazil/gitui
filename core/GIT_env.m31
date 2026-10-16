@@ -1,0 +1,18 @@
+// Environment variables of this program, under their current and their old
+// name. The current names are `M31GIT_<NAME>`; before the repository became
+// m31git they were `GITUI_<NAME>`, and the old spelling is still read when the
+// new one is not set.
+//
+//   GIT_env.get("HTTP_CA_FILE")   -> Option<str>   $M31GIT_HTTP_CA_FILE, else $GITUI_HTTP_CA_FILE
+import os;
+
+pub Option<str> get(str name) {
+    match (os.env("M31GIT_" + name)) {
+        case Some(str value): {
+            return Option<str>.Some(value);
+        }
+        case None: {
+        }
+    }
+    return os.env("GITUI_" + name);
+}

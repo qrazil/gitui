@@ -431,10 +431,10 @@ PY
         else
             bad "push with URL credentials" "$got"
         fi
-        got=$(GITUI_HTTP_USER=pusher GITUI_HTTP_PASSWORD=fixture-pw "$WORK/t_push" push "$pp_gd" "$pp_aurl" refs/heads/main 2>&1)
+        got=$(M31GIT_HTTP_USER=pusher M31GIT_HTTP_PASSWORD=fixture-pw "$WORK/t_push" push "$pp_gd" "$pp_aurl" refs/heads/main 2>&1)
         if git -C "$pp_asrv" rev-parse -q --verify refs/heads/main >/dev/null &&
             git -C "$pp_asrv" fsck --full >/dev/null 2>&1; then
-            note "push: GITUI_HTTP_USER/GITUI_HTTP_PASSWORD authenticate when the URL carries none"
+            note "push: M31GIT_HTTP_USER/M31GIT_HTTP_PASSWORD authenticate when the URL carries none"
         else
             bad "push with env credentials" "$got"
         fi

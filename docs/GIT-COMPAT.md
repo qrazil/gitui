@@ -154,7 +154,7 @@ to the byte, piped or not:
 - Colour is on for `--color=always`, `color.ui` / `color.diff` /
   `color.log`-style values and a terminal (`auto`). On a terminal with
   colour on, added and removed lines are also coloured by token class with
-  the `syntax` library (`GITUI_SYNTAX=off`, `gitui.syntax` and `NO_COLOR`
+  the `syntax` library (`M31GIT_SYNTAX=off`, `mgit.syntax` and `NO_COLOR`
   switch it off); piped output never is, so it stays git's bytes.
 
 `scripts/compare_log.sh` (~1500 forms over 13 fixture histories),
@@ -550,7 +550,7 @@ Deliberate departures, and gaps:
 - Not done: `--filter`/partial clone (needs lazy object fetch), submodules,
   `--mirror`, `--reference`, local-path and `git://` remotes, `file://`,
   `http.proxy`, `http.sslVerify=false` (certificates are always checked; roots
-  from the system, `GIT_SSL_CAINFO`, `http.sslCAInfo`, `GITUI_HTTP_CA_FILE`),
+  from the system, `GIT_SSL_CAINFO`, `http.sslCAInfo`, `M31GIT_HTTP_CA_FILE`),
   client certificates, `credential.helper=cache`'s daemon (the helper program
   is run if present), `fetch.negotiationAlgorithm`, `push --follow-tags`,
   `--signed`, `push --mirror`/`--prune`, `remote update`/`set-branches`,
@@ -565,7 +565,7 @@ Deliberate departures, and gaps:
   ~40 s at `-O0`, a 21 MB repository 7 s at `-O2`). This is an m31 library
   limit, not worked around.
 - `init` writes no templates (no sample hooks, `info/exclude`, `description`).
-- The advertised user agent is `1git/0.22.0`.
+- The advertised user agent is `1git/0.23.0`.
 
 ## Case-insensitive and Unicode-normalizing volumes (0.19.0, 0.19.1)
 

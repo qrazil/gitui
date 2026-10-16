@@ -5,7 +5,9 @@
 #
 # Picks the asset for this OS and CPU (Linux x86-64 / aarch64, macOS arm64;
 # on a musl system -- Alpine -- the -musl Linux asset, falling back to the
-# glibc one for a release that predates it),
+# glibc one for a release that predates it; releases up to v0.20.0 name their
+# assets gitui-*, those are found too; the download is checked against the
+# release's SHA256SUMS when there is one),
 # unpacks it under $PREFIX/opt/m31git/<version> and links the programs into
 # $PREFIX/bin. PREFIX defaults to ~/.local. Re-running upgrades; old versions
 # stay in opt/ until you delete them.
@@ -17,7 +19,8 @@
 set -eu
 
 REPO=m31git
-ASSET=gitui          # release asset prefix: <ASSET>-<os>-<arch>.tar.gz
+ASSET=m31git         # release asset prefix: <ASSET>-<os>-<arch>.tar.gz
+OLD_ASSET=gitui      # the prefix of releases up to v0.20.0
 BINS="mgit 1git"          # programs linked into $PREFIX/bin
 PREFIX=${PREFIX:-$HOME/.local}
 OPT="$PREFIX/opt/$REPO"
@@ -69,15 +72,26 @@ if [ -z "$libc" ] && [ "$os" = linux ]; then
     fi
 fi
 base="https://github.com/qrazil/$REPO/releases/download/$VERSION"
-file="$ASSET-$os-$arch.tar.gz"
+# Asset names: m31git-<os>-<arch>[-musl].tar.gz since 0.21.0; releases up to
+# v0.20.0 name them gitui-<os>-<arch>[-musl].tar.gz. Tried in this order, the
+# first one that exists wins: for musl the musl assets (new, then old), then
+# the glibc ones (a release that predates the musl assets; the glibc build
+# will not run on musl without gcompat, but say so and carry on).
+cands=""
 if [ "$libc" = musl ] && [ "$os" = linux ]; then
-    file="$ASSET-$os-$arch-musl.tar.gz"
-    # Releases before the musl assets existed: use the glibc tarball (it
-    # will not run on musl without gcompat, but say so and carry on).
-    if ! curl -fsSLI "$base/$file" >/dev/null 2>&1; then
-        say "no musl asset in $VERSION; using the glibc one"
-        file="$ASSET-$os-$arch.tar.gz"
+    cands="$ASSET-$os-$arch-musl.tar.gz $OLD_ASSET-$os-$arch-musl.tar.gz"
+fi
+cands="$cands $ASSET-$os-$arch.tar.gz $OLD_ASSET-$os-$arch.tar.gz"
+file=
+for c in $cands; do
+    if curl -fsSLI "$base/$c" >/dev/null 2>&1; then
+        file=$c
+        break
     fi
+done
+[ -n "$file" ] || die "no release asset for $os $arch in $VERSION ($base)"
+if [ "$libc" = musl ] && [ "$os" = linux ]; then
+    case "$file" in *-musl.tar.gz) ;; *) say "no musl asset in $VERSION; using the glibc one" ;; esac
 fi
 url="$base/$file"
 dest="$OPT/$VERSION"
@@ -86,6 +100,30 @@ trap 'rm -rf "$tmp"' EXIT INT TERM
 
 say "$REPO $VERSION ($os $arch${libc:+ $libc})"
 curl -fsSL "$url" -o "$tmp/$file" || die "download failed: $url"
+
+# Verify against the release's SHA256SUMS when it has one (releases from 0.21.0
+# on); older releases have none, which is fine.
+if curl -fsSL "$base/SHA256SUMS" -o "$tmp/SHA256SUMS" 2>/dev/null; then
+    want=$(awk -v f="$file" '{n=$2; sub(/^\*/, "", n); if (n == f) print $1}' "$tmp/SHA256SUMS" | head -n 1)
+    if [ -z "$want" ]; then
+        say "SHA256SUMS has no entry for $file; not verified"
+    else
+        if command -v sha256sum >/dev/null 2>&1; then
+            got=$(sha256sum "$tmp/$file" | awk '{print $1}')
+        elif command -v shasum >/dev/null 2>&1; then
+            got=$(shasum -a 256 "$tmp/$file" | awk '{print $1}')
+        else
+            got=
+            say "no sha256sum or shasum here; $file not verified"
+        fi
+        if [ -n "$got" ]; then
+            [ "$got" = "$want" ] || die "checksum mismatch for $file (wanted $want, got $got)"
+            say "checksum ok"
+        fi
+    fi
+else
+    say "no SHA256SUMS in $VERSION; not verified"
+fi
 mkdir -p "$tmp/x" "$BIN" "$OPT"
 tar -xzf "$tmp/$file" -C "$tmp/x" || die "could not unpack $file"
 

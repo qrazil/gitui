@@ -1,7 +1,7 @@
 # Syntax highlighting: the pure line styling (`t_highlight`), and the diff,
 # blame and commit views, the 5000-line scroll and the switches under a real
-# pty (`pty_highlight.py`). Sourced from `test.sh` right after `test_gitui.sh`,
-# whose `$WORK/gitui` build it reuses (built here when that is missing).
+# pty (`pty_highlight.py`). Sourced from `test.sh` right after `test_mgit.sh`,
+# whose `$WORK/mgit` build it reuses (built here when that is missing).
 
 if build t_highlight; then
     "$WORK/t_highlight" >"$WORK/highlight.out" 2>"$WORK/highlight.err"
@@ -14,14 +14,14 @@ if build t_highlight; then
     fi
 fi
 
-if [ ! -x "$WORK/gitui" ]; then
-    bash scripts/build.sh -o "$WORK/gitui" >"$WORK/highlight_build.log" 2>&1 \
+if [ ! -x "$WORK/mgit" ]; then
+    bash scripts/build.sh -o "$WORK/mgit" >"$WORK/highlight_build.log" 2>&1 \
         || bad "highlight: scripts/build.sh" "$(cat "$WORK/highlight_build.log")"
 fi
-if [ -x "$WORK/gitui" ] && command -v python3 >/dev/null; then
-    if out=$(python3 tests/pty_highlight.py "$WORK/gitui" "$WORK/ptyhighlight" 2>&1); then
-        note "gitui highlight pty: $(echo "$out" | grep -c '^ok') checks (colours, scrolling 5000 lines, switches)"
+if [ -x "$WORK/mgit" ] && command -v python3 >/dev/null; then
+    if out=$(python3 tests/pty_highlight.py "$WORK/mgit" "$WORK/ptyhighlight" 2>&1); then
+        note "mgit highlight pty: $(echo "$out" | grep -c '^ok') checks (colours, scrolling 5000 lines, switches)"
     else
-        bad "gitui highlight pty" "$(echo "$out" | grep -v '^ok' | head -30)"
+        bad "mgit highlight pty" "$(echo "$out" | grep -v '^ok' | head -30)"
     fi
 fi

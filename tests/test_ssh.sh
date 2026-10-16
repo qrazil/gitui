@@ -52,7 +52,7 @@ ss_pid=""
 ss_g() { git -c user.name=Tester -c user.email=t@example.com -c init.defaultBranch=main -c protocol.file.allow=always "$@"; }
 
 # Run t_ssh as a user with a throwaway home. $ss_kh and $ss_id, when set,
-# are the GITUI_SSH_KNOWN_HOSTS / GITUI_SSH_IDENTITY overrides.
+# are the M31GIT_SSH_KNOWN_HOSTS / M31GIT_SSH_IDENTITY overrides.
 # sshd gives a session its own short PATH (/usr/bin:/bin on macOS), which does
 # not hold a Homebrew or hand-built git; hand it the directories git's two
 # server programs were found in.
@@ -61,8 +61,8 @@ case "$ss_session_path" in *" "*) ss_session_path="/usr/bin:/bin:/usr/sbin:/sbin
 
 ss_t() {
     local -a e=(HOME="$ss_home")
-    [ -n "${ss_kh:-}" ] && e+=(GITUI_SSH_KNOWN_HOSTS="$ss_kh")
-    [ -n "${ss_id:-}" ] && e+=(GITUI_SSH_IDENTITY="$ss_id")
+    [ -n "${ss_kh:-}" ] && e+=(M31GIT_SSH_KNOWN_HOSTS="$ss_kh")
+    [ -n "${ss_id:-}" ] && e+=(M31GIT_SSH_IDENTITY="$ss_id")
     env "${e[@]}" "$WORK/t_ssh" "$@"
 }
 
@@ -103,7 +103,7 @@ ss_stop() {
 
 ssh-keygen -t ed25519 -f "$ss_root/host_key" -N "" -q
 ssh-keygen -t ed25519 -f "$ss_root/other_host_key" -N "" -q
-ssh-keygen -t ed25519 -f "$ss_root/user_key" -N "" -q -C "gitui ssh test"
+ssh-keygen -t ed25519 -f "$ss_root/user_key" -N "" -q -C "mgit ssh test"
 ssh-keygen -t ed25519 -f "$ss_root/wrong_key" -N "" -q
 ssh-keygen -t ed25519 -f "$ss_root/enc_key" -N "correct horse" -q
 chmod 600 "$ss_root"/*_key
@@ -633,20 +633,20 @@ PY
     ss_has "revoked host key: refused" "$ss_out" "revoked"
 
     # --- 5. the interactive client under a pty ------------------------------------------
-    if bash scripts/build.sh -o "$WORK/gitui_ssh" >"$ss_root/gitui_build.log" 2>&1; then
+    if bash scripts/build.sh -o "$WORK/mgit_ssh" >"$ss_root/mgit_build.log" 2>&1; then
         ss_pty_bare="$ss_root/repos/pty.git"
         ss_g init -q --bare "$ss_pty_bare"
         ss_g -C "$ss_root/seed" push -q "$ss_pty_bare" main 2>/dev/null
         rm -rf "$ss_root/pty"
-        if out=$(HOME="$ss_home" GITUI_SSH_IDENTITY="$ss_root/user_key" GITUI_SSH_KNOWN_HOSTS="$ss_root/pty_kh/known_hosts" \
-            python3 tests/pty_ssh.py "$WORK/gitui_ssh" "$ss_root/pty" "$ss_pty_bare" "$(ss_url_of "$ss_pty_bare")" \
+        if out=$(HOME="$ss_home" M31GIT_SSH_IDENTITY="$ss_root/user_key" M31GIT_SSH_KNOWN_HOSTS="$ss_root/pty_kh/known_hosts" \
+            python3 tests/pty_ssh.py "$WORK/mgit_ssh" "$ss_root/pty" "$ss_pty_bare" "$(ss_url_of "$ss_pty_bare")" \
             "$ss_fp" "$ss_root/other_host_key.pub" "$ss_port" 2>&1); then
             note "ssh pty: $(echo "$out" | grep -c '^ok') end-to-end checks passed under a real pty"
         else
             bad "ssh pty end-to-end" "$out"
         fi
     else
-        bad "ssh: scripts/build.sh" "$(tail -5 "$ss_root/gitui_build.log")"
+        bad "ssh: scripts/build.sh" "$(tail -5 "$ss_root/mgit_build.log")"
     fi
 fi
 

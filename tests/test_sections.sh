@@ -2,7 +2,7 @@
 # (`t_sections`, no repository and no terminal), and `[`/`]`, folding,
 # the persisted fold list, the statusline's contents and the `i` overview under a
 # real pty (`pty_sections.py`). Sourced from `test.sh` right after
-# `test_gitui.sh`, whose `$WORK/gitui` build it reuses (built here when that
+# `test_mgit.sh`, whose `$WORK/mgit` build it reuses (built here when that
 # is missing). No `set`, no `cd` and no `trap`: see `test_write.sh`'s header.
 
 if build t_sections; then
@@ -16,14 +16,14 @@ if build t_sections; then
     fi
 fi
 
-if [ ! -x "$WORK/gitui" ]; then
-    bash scripts/build.sh -o "$WORK/gitui" >"$WORK/sections_build.log" 2>&1 \
+if [ ! -x "$WORK/mgit" ]; then
+    bash scripts/build.sh -o "$WORK/mgit" >"$WORK/sections_build.log" 2>&1 \
         || bad "sections: scripts/build.sh" "$(cat "$WORK/sections_build.log")"
 fi
-if [ -x "$WORK/gitui" ] && command -v python3 >/dev/null; then
-    if out=$(python3 tests/pty_sections.py "$WORK/gitui" "$WORK/ptysections" 2>&1); then
-        note "gitui sections pty: $(echo "$out" | grep -c '^ok') checks (sections, folds, hunks, statusline, overview)"
+if [ -x "$WORK/mgit" ] && command -v python3 >/dev/null; then
+    if out=$(python3 tests/pty_sections.py "$WORK/mgit" "$WORK/ptysections" 2>&1); then
+        note "mgit sections pty: $(echo "$out" | grep -c '^ok') checks (sections, folds, hunks, statusline, overview)"
     else
-        bad "gitui sections pty" "$(echo "$out" | grep -v '^ok' | head -30)"
+        bad "mgit sections pty" "$(echo "$out" | grep -v '^ok' | head -30)"
     fi
 fi

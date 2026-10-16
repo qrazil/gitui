@@ -9,7 +9,7 @@
 #
 # There is no insecure mode in the standard library's TLS, so nothing here
 # switches verification off. The test CA is supplied the one way a user
-# would supply a private CA: `GITUI_HTTP_CA_FILE=<ca.pem>` (see
+# would supply a private CA: `M31GIT_HTTP_CA_FILE=<ca.pem>` (see
 # `GIT_http_fetch.trust`), which becomes `tls.Trust.CaFile`. The server's
 # certificate is for `localhost`, issued by that CA, made with `openssl`.
 #
@@ -153,7 +153,9 @@ if [ "$hs_have_certs" = 1 ] && [ -x "$WORK/t_httpfetch" ] && [ -x "$WORK/t_push"
         hs_asrv="$hs_root/auth/repo.git"
         hs_cred="https://pusher:fixture-pw@localhost:$hs_atls/git/repo.git"
         # The client under test trusts the test CA only through this variable.
-        hs_with_ca() { GITUI_HTTP_CA_FILE="$hs_ca" "$@"; }
+        hs_with_ca() { M31GIT_HTTP_CA_FILE="$hs_ca" "$@"; }
+        # The pre-m31git spelling still works (read when M31GIT_HTTP_CA_FILE is unset).
+        hs_with_legacy_ca() { M31GIT_HTTP_CA_FILE="$hs_ca" "$@"; }
 
         # --- the oracle itself: real git over the same TLS server ------------------
 
@@ -165,7 +167,7 @@ if [ "$hs_have_certs" = 1 ] && [ -x "$WORK/t_httpfetch" ] && [ -x "$WORK/t_push"
 
         # --- fetch -----------------------------------------------------------------
 
-        if hs_with_ca "$WORK/t_httpfetch" ls-remote "$hs_url" >"$hs_root/ls.got" 2>"$hs_root/ls.err" &&
+        if hs_with_legacy_ca "$WORK/t_httpfetch" ls-remote "$hs_url" >"$hs_root/ls.got" 2>"$hs_root/ls.err" &&
             cmp -s "$hs_root/ls.got" "$hs_root/ls.want"; then
             note "https fetch: the ref advertisement over TLS matches 'git ls-remote' byte for byte"
         else
@@ -209,7 +211,7 @@ if [ "$hs_have_certs" = 1 ] && [ -x "$WORK/t_httpfetch" ] && [ -x "$WORK/t_push"
         # --- trust: refused, with nothing written ----------------------------------
 
         rm -f "$hs_root/refused.pack"
-        env -u GITUI_HTTP_CA_FILE "$WORK/t_httpfetch" clone "$hs_url" "$hs_root/refused.pack" >/dev/null 2>"$hs_root/untrusted.err"
+        env -u M31GIT_HTTP_CA_FILE "$WORK/t_httpfetch" clone "$hs_url" "$hs_root/refused.pack" >/dev/null 2>"$hs_root/untrusted.err"
         hs_status=$?
         if [ "$hs_status" -ne 0 ] && [ ! -e "$hs_root/refused.pack" ] && grep -q "certificate was refused" "$hs_root/untrusted.err"; then
             note "https trust: a certificate from a CA the system does not trust is refused, nothing written"
@@ -217,7 +219,7 @@ if [ "$hs_have_certs" = 1 ] && [ -x "$WORK/t_httpfetch" ] && [ -x "$WORK/t_push"
             bad "https untrusted certificate" "status $hs_status" "$(head -3 "$hs_root/untrusted.err")"
         fi
 
-        GITUI_HTTP_CA_FILE="$hs_certs/other-ca.pem" "$WORK/t_httpfetch" clone "$hs_url" "$hs_root/refused.pack" >/dev/null 2>"$hs_root/otherca.err"
+        M31GIT_HTTP_CA_FILE="$hs_certs/other-ca.pem" "$WORK/t_httpfetch" clone "$hs_url" "$hs_root/refused.pack" >/dev/null 2>"$hs_root/otherca.err"
         hs_status=$?
         if [ "$hs_status" -ne 0 ] && [ ! -e "$hs_root/refused.pack" ] && grep -q "certificate was refused" "$hs_root/otherca.err"; then
             note "https trust: a CA file that does not hold the issuer refuses the certificate"
@@ -225,7 +227,7 @@ if [ "$hs_have_certs" = 1 ] && [ -x "$WORK/t_httpfetch" ] && [ -x "$WORK/t_push"
             bad "https wrong CA file" "status $hs_status" "$(head -3 "$hs_root/otherca.err")"
         fi
 
-        GITUI_HTTP_CA_FILE="$hs_certs/no-such-file.pem" "$WORK/t_httpfetch" clone "$hs_url" "$hs_root/refused.pack" >/dev/null 2>"$hs_root/nocafile.err"
+        M31GIT_HTTP_CA_FILE="$hs_certs/no-such-file.pem" "$WORK/t_httpfetch" clone "$hs_url" "$hs_root/refused.pack" >/dev/null 2>"$hs_root/nocafile.err"
         hs_status=$?
         if [ "$hs_status" -ne 0 ] && [ ! -e "$hs_root/refused.pack" ] && grep -q "error: " "$hs_root/nocafile.err"; then
             note "https trust: a CA file that is not there is an error, not a silent fallback"
@@ -269,7 +271,7 @@ if [ "$hs_have_certs" = 1 ] && [ -x "$WORK/t_httpfetch" ] && [ -x "$WORK/t_push"
 
         # --- http is untouched -------------------------------------------------------
 
-        if env -u GITUI_HTTP_CA_FILE "$WORK/t_httpfetch" ls-remote "http://localhost:$hs_oplain/git/repo.git" >"$hs_root/http.got" 2>"$hs_root/http.err" &&
+        if env -u M31GIT_HTTP_CA_FILE "$WORK/t_httpfetch" ls-remote "http://localhost:$hs_oplain/git/repo.git" >"$hs_root/http.got" 2>"$hs_root/http.err" &&
             GIT_SSL_CAINFO="$hs_ca" git ls-remote "$hs_url" | cmp -s - "$hs_root/http.got"; then
             note "http: the plain listener of the same server still works with no CA configured"
         else
@@ -286,7 +288,7 @@ if [ "$hs_have_certs" = 1 ] && [ -x "$WORK/t_httpfetch" ] && [ -x "$WORK/t_push"
         else
             bad "https push without credentials" "$got"
         fi
-        got=$(GITUI_HTTP_CA_FILE="$hs_certs/other-ca.pem" "$WORK/t_push" push "$hs_src/.git" "$hs_cred" refs/heads/main 2>&1)
+        got=$(M31GIT_HTTP_CA_FILE="$hs_certs/other-ca.pem" "$WORK/t_push" push "$hs_src/.git" "$hs_cred" refs/heads/main 2>&1)
         case "$got" in
             *fixture-pw*) bad "https push leaked the password on a refused certificate" "$got" ;;
             *"certificate was refused"*)
@@ -322,12 +324,12 @@ if [ "$hs_have_certs" = 1 ] && [ -x "$WORK/t_httpfetch" ] && [ -x "$WORK/t_push"
         # Credentials from the environment, to a second branch, through a
         # same-origin redirect (POST included; the Authorization header is kept).
         git -C "$hs_src" branch feature main~1
-        got=$(GITUI_HTTP_USER=pusher GITUI_HTTP_PASSWORD=fixture-pw GITUI_HTTP_CA_FILE="$hs_ca" \
+        got=$(M31GIT_HTTP_USER=pusher M31GIT_HTTP_PASSWORD=fixture-pw M31GIT_HTTP_CA_FILE="$hs_ca" \
             "$WORK/t_push" push "$hs_src/.git" "https://localhost:$hs_atls/moved/repo.git" refs/heads/feature 2>&1)
         if [ "$(git -C "$hs_asrv" rev-parse refs/heads/feature 2>/dev/null)" = "$(git -C "$hs_src" rev-parse feature)" ]; then
             case "$got" in
                 *fixture-pw*) bad "https push (environment credentials) leaked the password" "$got" ;;
-                *) note "https push: credentials from GITUI_HTTP_USER/PASSWORD, through a same-origin redirect, push a second branch" ;;
+                *) note "https push: credentials from M31GIT_HTTP_USER/PASSWORD, through a same-origin redirect, push a second branch" ;;
             esac
         else
             bad "https push via environment credentials and redirect" "$got"
@@ -383,7 +385,7 @@ if [ "$hs_have_certs" = 1 ] && [ -x "$WORK/t_httpfetch" ] && [ -x "$WORK/t_push"
             bad "https pull without credentials moved HEAD" "$got"
         fi
 
-        got=$(env -u GITUI_HTTP_CA_FILE "$WORK/t_pull" pull "$hs_root/pullcl/.git" "$hs_root/pullcl" "$hs_cred" 2>&1)
+        got=$(env -u M31GIT_HTTP_CA_FILE "$WORK/t_pull" pull "$hs_root/pullcl/.git" "$hs_root/pullcl" "$hs_cred" 2>&1)
         case "$got" in
             *"certificate was refused"*)
                 if [ "$(git -C "$hs_root/pullcl" rev-parse HEAD)" = "$hs_before" ]; then

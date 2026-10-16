@@ -1,3 +1,39 @@
+# m31git 0.23.0: the repository is m31git; release assets, entry file, env and config names
+
+Version 0.23.0 (0.21.0 was skipped), from master 06a1e06 (0.22.0). The
+GitHub repository `qrazil/gitui` is now `qrazil/m31git`; the programs stay
+`mgit` (interactive) and `1git` (command line). No library module was renamed
+or removed. Decisions:
+
+- Entry file `gitui.m31` is now `mgit.m31` (it builds `./mgit`); `scripts/build.sh`
+  defaults to it. `tests/test_gitui.sh` is `tests/test_mgit.sh`; test labels
+  and `$WORK/gitui` build outputs say `mgit`. `deps` says `name m31git`.
+- Modules keep their names: the `GIT_` prefix is the library's, `GIT_ui_*` /
+  `GIT_client` say "UI", a generic word, not the old app name, and renaming
+  them would touch every import for nothing. `GIT_env` is new (core).
+- Release assets are `m31git-<os>-<arch>[-musl].tar.gz` (layout unchanged:
+  `1git`, `mgit`, docs, NOTES.txt) plus `SHA256SUMS`. `install.sh` prefers
+  these, falls back to the `gitui-` names of releases up to v0.20.0, and
+  verifies the checksum when the release has a `SHA256SUMS`.
+- Environment: `GITUI_HTTP_CA_FILE`, `GITUI_HTTP_USER`, `GITUI_HTTP_PASSWORD`,
+  `GITUI_SSH_IDENTITY`, `GITUI_SSH_KNOWN_HOSTS`, `GITUI_SYNTAX` are now
+  `M31GIT_<same>`; the old names are still read when the new one is unset
+  (`GIT_env.get`).
+- Git config: `gitui.syntax` and `gitui.collapsed` are now `mgit.syntax` and
+  `mgit.collapsed`; the old keys are still read, and `mgit` drops an old
+  `gitui.collapsed` when it writes the new one. The in-gitdir scratch file
+  `GITUI_BRANCH_NAME` is `MGIT_BRANCH_NAME`.
+- User agent and the wire `agent=` capability are `1git/0.23.0` over HTTP and
+  ssh (the ssh one was `gitui-ssh/1`).
+- `mgit` keeps no config directory of its own (it never had `~/.config/gitui`);
+  nothing to move.
+- Untracked-by-design: `__pycache__/` and `*.pyc` are ignored and the four
+  committed `.pyc` files are gone from the index.
+
+Migration: none required; scripts that set `GITUI_*` or `gitui.*` keep working.
+Installers that downloaded `gitui-<os>-<arch>.tar.gz` from a new release must
+use the `m31git-` name.
+
 # gitui 0.19.0: `core.ignorecase` and `core.precomposeunicode`
 
 Version 0.19.0, from master 6816a27 (0.18.0). No module was renamed or

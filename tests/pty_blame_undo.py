@@ -302,7 +302,7 @@ def run(ctx):
     # --------------------------------------------- push -u over smart HTTP
     backend = os.path.join(subprocess.run(["git", "--exec-path"], capture_output=True, text=True).stdout.strip(), "git-http-backend")
     if not os.path.exists(backend):
-        print("gitui pty: push -u check skipped, no git-http-backend", file=sys.stderr)
+        print("mgit pty: push -u check skipped, no git-http-backend", file=sys.stderr)
         return
     pu_root = os.path.join(root, "pushu")
     os.makedirs(os.path.join(pu_root, "www", "cgi-bin"))

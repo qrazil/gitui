@@ -49,7 +49,7 @@ Host srv
   IdentityFile $WORK/user_key
 EOF
 printf '[127.0.0.1]:%s %s\n' "$PORT" "$(cut -d' ' -f1,2 "$WORK/host_key.pub")" > "$HOMEDIR/.ssh/known_hosts"
-export GITUI_SSH_KNOWN_HOSTS=$HOMEDIR/.ssh/known_hosts
+export M31GIT_SSH_KNOWN_HOSTS=$HOMEDIR/.ssh/known_hosts
 GIT_SSH_COMMAND="ssh -F $HOMEDIR/.ssh/config -o UserKnownHostsFile=$HOMEDIR/.ssh/known_hosts -o StrictHostKeyChecking=yes -o BatchMode=yes"
 
 bad=0; n=0

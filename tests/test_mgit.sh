@@ -1,4 +1,4 @@
-# The interactive client (`gitui.m31`/`GIT_client.m31`) -- unit-level,
+# The interactive client (`mgit.m31`/`GIT_client.m31`) -- unit-level,
 # oracle-level and pty-driven end-to-end checks, the three tiers
 # `docs/design.md`'s "how you'll know you're done and correct" names.
 #
@@ -18,17 +18,17 @@
 if build t_gitclient; then
     "$WORK/t_gitclient" >"$WORK/gitclient_unit.out" 2>"$WORK/gitclient_unit.err"
     if grep -q 'FAIL' "$WORK/gitclient_unit.out"; then
-        bad "gitui: unit tests (t_gitclient)" "$(grep 'FAIL' "$WORK/gitclient_unit.out")" "$(cat "$WORK/gitclient_unit.err")"
+        bad "mgit: unit tests (t_gitclient)" "$(grep 'FAIL' "$WORK/gitclient_unit.out")" "$(cat "$WORK/gitclient_unit.err")"
     elif ! tail -1 "$WORK/gitclient_unit.out" | grep -q ' 0 failed'; then
-        bad "gitui: unit tests (t_gitclient) did not finish" "$(tail -3 "$WORK/gitclient_unit.out")" "$(cat "$WORK/gitclient_unit.err")"
+        bad "mgit: unit tests (t_gitclient) did not finish" "$(tail -3 "$WORK/gitclient_unit.out")" "$(cat "$WORK/gitclient_unit.err")"
     else
-        note "gitui: unit tests -- $(tail -1 "$WORK/gitclient_unit.out")"
+        note "mgit: unit tests -- $(tail -1 "$WORK/gitclient_unit.out")"
     fi
 fi
 
 # --- oracle: stage/unstage/commit driven directly, checked against git -----
 
-opsfx="$WORK/gitui_ops"
+opsfx="$WORK/mgit_ops"
 mkdir -p "$opsfx"
 (
     set -e
@@ -42,43 +42,43 @@ mkdir -p "$opsfx"
         git commit -q -m first
     printf 'changed\n' >>a.txt
     printf 'brand new\n' >new.txt
-) >"$WORK/gitui_ops.log" 2>&1 || bad "gitui: ops fixture" "$(tail -5 "$WORK/gitui_ops.log")"
+) >"$WORK/mgit_ops.log" 2>&1 || bad "mgit: ops fixture" "$(tail -5 "$WORK/mgit_ops.log")"
 
 if build t_gitclient_ops; then
     "$WORK/t_gitclient_ops" "$opsfx/.git" "$opsfx" stage new.txt >"$WORK/ops1.out" 2>"$WORK/ops1.err"
     got=$(git -C "$opsfx" status --short)
     want=$(printf ' M a.txt\nA  new.txt')
     if [ "$got" = "$want" ]; then
-        note "gitui ops: stage_path on an untracked file matches git status --short"
+        note "mgit ops: stage_path on an untracked file matches git status --short"
     else
-        bad "gitui ops: stage_path on an untracked file" "got:  $got" "want: $want" "$(cat "$WORK/ops1.out")" "$(cat "$WORK/ops1.err")"
+        bad "mgit ops: stage_path on an untracked file" "got:  $got" "want: $want" "$(cat "$WORK/ops1.out")" "$(cat "$WORK/ops1.err")"
     fi
 
     "$WORK/t_gitclient_ops" "$opsfx/.git" "$opsfx" stage a.txt >"$WORK/ops2.out" 2>"$WORK/ops2.err"
     got=$(git -C "$opsfx" status --short)
     want=$(printf 'M  a.txt\nA  new.txt')
     if [ "$got" = "$want" ]; then
-        note "gitui ops: stage_path on a modified, already-tracked file matches git status --short"
+        note "mgit ops: stage_path on a modified, already-tracked file matches git status --short"
     else
-        bad "gitui ops: stage_path on a modified file" "got:  $got" "want: $want" "$(cat "$WORK/ops2.out")" "$(cat "$WORK/ops2.err")"
+        bad "mgit ops: stage_path on a modified file" "got:  $got" "want: $want" "$(cat "$WORK/ops2.out")" "$(cat "$WORK/ops2.err")"
     fi
 
     "$WORK/t_gitclient_ops" "$opsfx/.git" "$opsfx" unstage new.txt >"$WORK/ops3.out" 2>"$WORK/ops3.err"
     got=$(git -C "$opsfx" status --short)
     want=$(printf 'M  a.txt\n?? new.txt')
     if [ "$got" = "$want" ]; then
-        note "gitui ops: unstage_path on a path never in HEAD drops it from the index"
+        note "mgit ops: unstage_path on a path never in HEAD drops it from the index"
     else
-        bad "gitui ops: unstage_path (never in HEAD)" "got:  $got" "want: $want" "$(cat "$WORK/ops3.out")" "$(cat "$WORK/ops3.err")"
+        bad "mgit ops: unstage_path (never in HEAD)" "got:  $got" "want: $want" "$(cat "$WORK/ops3.out")" "$(cat "$WORK/ops3.err")"
     fi
 
     "$WORK/t_gitclient_ops" "$opsfx/.git" "$opsfx" unstage a.txt >"$WORK/ops4.out" 2>"$WORK/ops4.err"
     got=$(git -C "$opsfx" status --short)
     want=$(printf ' M a.txt\n?? new.txt')
     if [ "$got" = "$want" ]; then
-        note "gitui ops: unstage_path on a path tracked in HEAD restores HEAD's entry"
+        note "mgit ops: unstage_path on a path tracked in HEAD restores HEAD's entry"
     else
-        bad "gitui ops: unstage_path (tracked in HEAD)" "got:  $got" "want: $want" "$(cat "$WORK/ops4.out")" "$(cat "$WORK/ops4.err")"
+        bad "mgit ops: unstage_path (tracked in HEAD)" "got:  $got" "want: $want" "$(cat "$WORK/ops4.out")" "$(cat "$WORK/ops4.err")"
     fi
 
     # A blob written by a stage that a later unstage (of a never-committed
@@ -89,9 +89,9 @@ if build t_gitclient_ops; then
     fsck_out=$(git -C "$opsfx" fsck --full 2>&1)
     bad_fsck=$(echo "$fsck_out" | grep -v '^dangling blob ' || true)
     if [ -z "$bad_fsck" ]; then
-        note "gitui ops: fsck reports nothing but expected dangling blobs after stage/unstage"
+        note "mgit ops: fsck reports nothing but expected dangling blobs after stage/unstage"
     else
-        bad "gitui ops: fsck after stage/unstage" "$fsck_out"
+        bad "mgit ops: fsck after stage/unstage" "$fsck_out"
     fi
 
     # commit: write a message file directly -- exactly the fallback path
@@ -102,11 +102,11 @@ if build t_gitclient_ops; then
     "$WORK/t_gitclient_ops" "$opsfx/.git" "$opsfx" commit >"$WORK/ops5.out" 2>"$WORK/ops5.err"
     log_line=$(git -C "$opsfx" log -1 --format=%s 2>&1)
     if [ "$log_line" = "a message written by the test, not an editor" ]; then
-        note "gitui ops: finish_commit's message and tree match what git log/cat-file see"
+        note "mgit ops: finish_commit's message and tree match what git log/cat-file see"
     else
-        bad "gitui ops: finish_commit" "log_line: $log_line" "$(cat "$WORK/ops5.out")" "$(cat "$WORK/ops5.err")"
+        bad "mgit ops: finish_commit" "log_line: $log_line" "$(cat "$WORK/ops5.out")" "$(cat "$WORK/ops5.err")"
     fi
-    [ -f "$opsfx/.git/COMMIT_EDITMSG" ] && bad "gitui ops: COMMIT_EDITMSG should be removed after a successful commit" "still present"
+    [ -f "$opsfx/.git/COMMIT_EDITMSG" ] && bad "mgit ops: COMMIT_EDITMSG should be removed after a successful commit" "still present"
 
     # the empty-message refusal, driven the same way.
     printf 'nothing staged\n' >"$opsfx/untracked-only.txt"
@@ -115,14 +115,14 @@ if build t_gitclient_ops; then
     "$WORK/t_gitclient_ops" "$opsfx/.git" "$opsfx" commit >"$WORK/ops6.out" 2>"$WORK/ops6.err"
     after=$(git -C "$opsfx" rev-parse HEAD)
     if [ "$before" = "$after" ] && grep -qx "aborting commit due to empty commit message" "$WORK/ops6.out"; then
-        note "gitui ops: finish_commit refuses an empty message and moves nothing"
+        note "mgit ops: finish_commit refuses an empty message and moves nothing"
     else
-        bad "gitui ops: empty-message refusal" "before=$before after=$after" "$(cat "$WORK/ops6.out")"
+        bad "mgit ops: empty-message refusal" "before=$before after=$after" "$(cat "$WORK/ops6.out")"
     fi
 
     # --- show_diff_current: unstaged/staged/untracked/binary, against real git
 
-    diffx="$WORK/gitui_diff"
+    diffx="$WORK/mgit_diff"
     mkdir -p "$diffx"
     (
         set -e
@@ -144,37 +144,37 @@ if build t_gitclient_ops; then
         printf 'a\nB\nC\n' >f.txt
         printf 'brand\nnew\n' >new.txt
         printf 'hello\000world\n' >bin.dat
-    ) >"$WORK/gitui_diff.log" 2>&1 || bad "gitui: diff fixture" "$(tail -5 "$WORK/gitui_diff.log")"
+    ) >"$WORK/mgit_diff.log" 2>&1 || bad "mgit: diff fixture" "$(tail -5 "$WORK/mgit_diff.log")"
 
     "$WORK/t_gitclient_ops" "$diffx/.git" "$diffx" diff staged f.txt >"$WORK/diff_staged.out" 2>"$WORK/diff_staged.err"
     git -C "$diffx" diff --cached --no-color -- f.txt | tail -n +5 >"$WORK/diff_staged.want"
     if cmp -s "$WORK/diff_staged.out" "$WORK/diff_staged.want"; then
-        note "gitui diff: staged row diffs the index's blob against HEAD's tree, matching git diff --cached"
+        note "mgit diff: staged row diffs the index's blob against HEAD's tree, matching git diff --cached"
     else
-        bad "gitui diff: staged" "$(diff "$WORK/diff_staged.out" "$WORK/diff_staged.want")"
+        bad "mgit diff: staged" "$(diff "$WORK/diff_staged.out" "$WORK/diff_staged.want")"
     fi
 
     "$WORK/t_gitclient_ops" "$diffx/.git" "$diffx" diff unstaged f.txt >"$WORK/diff_unstaged.out" 2>"$WORK/diff_unstaged.err"
     git -C "$diffx" diff --no-color -- f.txt | tail -n +5 >"$WORK/diff_unstaged.want"
     if cmp -s "$WORK/diff_unstaged.out" "$WORK/diff_unstaged.want"; then
-        note "gitui diff: unstaged row diffs the index's blob against the working tree, matching git diff"
+        note "mgit diff: unstaged row diffs the index's blob against the working tree, matching git diff"
     else
-        bad "gitui diff: unstaged" "$(diff "$WORK/diff_unstaged.out" "$WORK/diff_unstaged.want")"
+        bad "mgit diff: unstaged" "$(diff "$WORK/diff_unstaged.out" "$WORK/diff_unstaged.want")"
     fi
 
     "$WORK/t_gitclient_ops" "$diffx/.git" "$diffx" diff untracked new.txt >"$WORK/diff_untracked.out" 2>"$WORK/diff_untracked.err"
     want_untracked=$'@@ -0,0 +1,2 @@\n+brand\n+new'
     if [ "$(cat "$WORK/diff_untracked.out")" = "$want_untracked" ]; then
-        note "gitui diff: an untracked row is one all-added hunk against an empty old side"
+        note "mgit diff: an untracked row is one all-added hunk against an empty old side"
     else
-        bad "gitui diff: untracked" "got: $(cat "$WORK/diff_untracked.out")" "want: $want_untracked"
+        bad "mgit diff: untracked" "got: $(cat "$WORK/diff_untracked.out")" "want: $want_untracked"
     fi
 
     "$WORK/t_gitclient_ops" "$diffx/.git" "$diffx" diff untracked bin.dat >"$WORK/diff_binary.out" 2>"$WORK/diff_binary.err"
     if [ "$(cat "$WORK/diff_binary.out")" = "Binary files differ" ]; then
-        note "gitui diff: a NUL-bearing file reports 'Binary files differ', git's own wording"
+        note "mgit diff: a NUL-bearing file reports 'Binary files differ', git's own wording"
     else
-        bad "gitui diff: binary" "$(cat "$WORK/diff_binary.out")"
+        bad "mgit diff: binary" "$(cat "$WORK/diff_binary.out")"
     fi
 
     # --- e: actually launching $EDITOR, every os.run outcome ----------------
@@ -184,7 +184,7 @@ if build t_gitclient_ops; then
     # "editor" -- a tiny shell script, standing in for $EDITOR, that rewrites
     # the message file and exits with whatever status the scenario needs.
     # `edit` (t_gitclient_ops.m31's own new op) calls `edit_message()` then
-    # `launch_editor()` exactly as `gitui.m31`'s driver does once the terminal
+    # `launch_editor()` exactly as `mgit.m31`'s driver does once the terminal
     # has been handed back -- there is no terminal in this harness at all,
     # which is what makes every outcome reachable with no pty and no keystrokes.
 
@@ -213,7 +213,7 @@ EOF
     cp "$WORK/editor-ok.sh" "$WORK/fakebin/vi"
     chmod +x "$WORK/fakebin/vi"
 
-    editfx="$WORK/gitui_edit"
+    editfx="$WORK/mgit_edit"
     mkdir -p "$editfx"
     (
         set -e
@@ -228,7 +228,7 @@ EOF
         printf 'changed\n' >>a.txt
         git add -A
         rm -f .git/COMMIT_EDITMSG
-    ) >"$WORK/gitui_edit.log" 2>&1 || bad "gitui edit fixture" "$(tail -5 "$WORK/gitui_edit.log")"
+    ) >"$WORK/mgit_edit.log" 2>&1 || bad "mgit edit fixture" "$(tail -5 "$WORK/mgit_edit.log")"
 
     # exit 0, a real message: launch_editor reuses finish_commit's own
     # stripping/empty-message logic, so a successful edit commits without a
@@ -237,9 +237,9 @@ EOF
     log_line=$(git -C "$editfx" log -1 --format=%s 2>&1)
     status_out=$(git -C "$editfx" status --short)
     if [ "$log_line" = "a message from the stand-in editor" ] && [ "$status_out" = "" ] && [ ! -f "$editfx/.git/COMMIT_EDITMSG" ]; then
-        note "gitui edit: exit 0 reads the message back and finishes the commit (git log/status agree)"
+        note "mgit edit: exit 0 reads the message back and finishes the commit (git log/status agree)"
     else
-        bad "gitui edit: exit 0 finishes the commit" "log_line=$log_line status=$status_out" "$(cat "$WORK/edit1.out")" "$(cat "$WORK/edit1.err")"
+        bad "mgit edit: exit 0 finishes the commit" "log_line=$log_line status=$status_out" "$(cat "$WORK/edit1.out")" "$(cat "$WORK/edit1.err")"
     fi
 
     # exit 0, an empty message: the same refusal `f` already gives, reached
@@ -251,9 +251,9 @@ EOF
     EDITOR="$WORK/editor-empty.sh" "$WORK/t_gitclient_ops" "$editfx/.git" "$editfx" edit >"$WORK/edit2.out" 2>"$WORK/edit2.err"
     after=$(git -C "$editfx" rev-parse HEAD)
     if [ "$before" = "$after" ] && grep -qx "aborting commit due to empty commit message" "$WORK/edit2.out"; then
-        note "gitui edit: exit 0 with an empty message refuses, exactly like f"
+        note "mgit edit: exit 0 with an empty message refuses, exactly like f"
     else
-        bad "gitui edit: exit 0 empty-message refusal" "before=$before after=$after" "$(cat "$WORK/edit2.out")"
+        bad "mgit edit: exit 0 empty-message refusal" "before=$before after=$after" "$(cat "$WORK/edit2.out")"
     fi
 
     # nonzero exit: a cancelled edit, real git's own treatment -- nothing is
@@ -264,9 +264,9 @@ EOF
     after=$(git -C "$editfx" rev-parse HEAD)
     left=$(cat "$editfx/.git/COMMIT_EDITMSG" 2>/dev/null)
     if [ "$before" = "$after" ] && grep -q "exited 9" "$WORK/edit3.out" && [ "$left" = "edited but the editor refused" ]; then
-        note "gitui edit: a nonzero exit cancels the edit, commits nothing, and leaves the message file"
+        note "mgit edit: a nonzero exit cancels the edit, commits nothing, and leaves the message file"
     else
-        bad "gitui edit: nonzero exit" "before=$before after=$after left=$left" "$(cat "$WORK/edit3.out")"
+        bad "mgit edit: nonzero exit" "before=$before after=$after left=$left" "$(cat "$WORK/edit3.out")"
     fi
 
     # killed by a signal: also a cancelled edit, but named differently -- a
@@ -275,9 +275,9 @@ EOF
     EDITOR="$WORK/editor-signal.sh" "$WORK/t_gitclient_ops" "$editfx/.git" "$editfx" edit >"$WORK/edit4.out" 2>"$WORK/edit4.err"
     after=$(git -C "$editfx" rev-parse HEAD)
     if [ "$before" = "$after" ] && grep -q "killed by signal 15" "$WORK/edit4.out"; then
-        note "gitui edit: a signalled editor cancels the edit and says so distinctly"
+        note "mgit edit: a signalled editor cancels the edit and says so distinctly"
     else
-        bad "gitui edit: signalled editor" "before=$before after=$after" "$(cat "$WORK/edit4.out")"
+        bad "mgit edit: signalled editor" "before=$before after=$after" "$(cat "$WORK/edit4.out")"
     fi
 
     # $EDITOR unset: falls back to vi, real git's own default -- proven here
@@ -287,9 +287,9 @@ EOF
     after=$(git -C "$editfx" rev-parse HEAD)
     log_line=$(git -C "$editfx" log -1 --format=%s 2>&1)
     if [ "$before" != "$after" ] && [ "$log_line" = "a message from the stand-in editor" ]; then
-        note "gitui edit: \$EDITOR unset falls back to vi, found on \$PATH"
+        note "mgit edit: \$EDITOR unset falls back to vi, found on \$PATH"
     else
-        bad "gitui edit: vi fallback" "before=$before after=$after log_line=$log_line got=$got"
+        bad "mgit edit: vi fallback" "before=$before after=$after log_line=$log_line got=$got"
     fi
 
     # os.run itself fails: no process ever started, so this falls back to
@@ -302,17 +302,17 @@ EOF
     EDITOR="$WORK/no-such-editor-anywhere" "$WORK/t_gitclient_ops" "$editfx/.git" "$editfx" edit >"$WORK/edit5.out" 2>"$WORK/edit5.err"
     after=$(git -C "$editfx" rev-parse HEAD)
     if [ "$before" = "$after" ] && grep -q "cannot launch" "$WORK/edit5.out" && grep -q "press f to finish" "$WORK/edit5.out" && [ -f "$editfx/.git/COMMIT_EDITMSG" ]; then
-        note "gitui edit: os.run itself failing falls back to the template-and-edit-externally path"
+        note "mgit edit: os.run itself failing falls back to the template-and-edit-externally path"
     else
-        bad "gitui edit: os.run Err fallback" "before=$before after=$after" "$(cat "$WORK/edit5.out")"
+        bad "mgit edit: os.run Err fallback" "before=$before after=$after" "$(cat "$WORK/edit5.out")"
     fi
 
     fsck_out=$(git -C "$editfx" fsck --full 2>&1)
     bad_fsck=$(echo "$fsck_out" | grep -v '^dangling blob ' || true)
     if [ -z "$bad_fsck" ]; then
-        note "gitui edit: fsck reports nothing but expected dangling blobs after the editor scenarios"
+        note "mgit edit: fsck reports nothing but expected dangling blobs after the editor scenarios"
     else
-        bad "gitui edit: fsck after the editor scenarios" "$fsck_out"
+        bad "mgit edit: fsck after the editor scenarios" "$fsck_out"
     fi
 fi
 
@@ -345,7 +345,7 @@ if [ -x "$WORK/t_gitclient_ops" ]; then
         printf 'brand new\n' >new.txt
         git add new.txt
         rm gone.txt
-    ) >"$WORK/hunkfx.log" 2>&1 || bad "gitui hunk: fixture" "$(tail -5 "$WORK/hunkfx.log")"
+    ) >"$WORK/hunkfx.log" 2>&1 || bad "mgit hunk: fixture" "$(tail -5 "$WORK/hunkfx.log")"
 
     hunk_full=$(git -C "$hfx" diff --no-color -- f.txt)
     hunk0_want=$(printf '%s\n' "$hunk_full" | awk '/^@@/{n++} n==1')
@@ -355,32 +355,32 @@ if [ -x "$WORK/t_gitclient_ops" ]; then
 
     ours=$("$WORK/t_gitclient_ops" "$hfx/.git" "$hfx" hunk_patch unstaged f.txt 0 2>"$WORK/hp.err")
     if [ "$(printf '%s\n' "$ours" | tail -n +3)" = "$hunk0_want" ]; then
-        note "gitui hunk: the view's hunk 0 is byte for byte git diff's own first @@ block"
+        note "mgit hunk: the view's hunk 0 is byte for byte git diff's own first @@ block"
     else
-        bad "gitui hunk: hunk_patch text" "ours: $ours" "want: $hunk0_want" "$(cat "$WORK/hp.err")"
+        bad "mgit hunk: hunk_patch text" "ours: $ours" "want: $hunk0_want" "$(cat "$WORK/hp.err")"
     fi
-    printf '%s\n' "$ours" | git -C "$hgit" apply --cached >"$WORK/happly.log" 2>&1 || bad "gitui hunk: git apply --cached in the oracle copy" "$(cat "$WORK/happly.log")"
+    printf '%s\n' "$ours" | git -C "$hgit" apply --cached >"$WORK/happly.log" 2>&1 || bad "mgit hunk: git apply --cached in the oracle copy" "$(cat "$WORK/happly.log")"
 
     msg=$("$WORK/t_gitclient_ops" "$hfx/.git" "$hfx" stage_hunk f.txt 0 2>"$WORK/hs0.err")
     got=$(git -C "$hfx" status --short)
     want=$(git -C "$hgit" status --short)
     if [ "$got" = "$want" ] && printf '%s' "$got" | grep -q '^MM f.txt$'; then
-        note "gitui hunk: staging hunk 0 leaves f.txt partially staged (MM), matching git apply --cached"
+        note "mgit hunk: staging hunk 0 leaves f.txt partially staged (MM), matching git apply --cached"
     else
-        bad "gitui hunk: stage_hunk status" "got:  $got" "want: $want" "msg: $msg" "$(cat "$WORK/hs0.err")"
+        bad "mgit hunk: stage_hunk status" "got:  $got" "want: $want" "msg: $msg" "$(cat "$WORK/hs0.err")"
     fi
     if [ "$(git -C "$hfx" show :f.txt)" = "$(git -C "$hgit" show :f.txt)" ] && \
        [ "$(git -C "$hfx" ls-files --stage f.txt | cut -d' ' -f2)" = "$(git -C "$hgit" ls-files --stage f.txt | cut -d' ' -f2)" ]; then
-        note "gitui hunk: the index blob after stage_hunk is identical to git apply --cached's"
+        note "mgit hunk: the index blob after stage_hunk is identical to git apply --cached's"
     else
-        bad "gitui hunk: index blob" "ours: $(git -C "$hfx" ls-files --stage f.txt)" "git:  $(git -C "$hgit" ls-files --stage f.txt)"
+        bad "mgit hunk: index blob" "ours: $(git -C "$hfx" ls-files --stage f.txt)" "git:  $(git -C "$hgit" ls-files --stage f.txt)"
     fi
     cached_body=$(git -C "$hfx" diff --cached --no-color -- f.txt | awk '/^@@/{n++} n>=1')
     plain_body=$(git -C "$hfx" diff --no-color -- f.txt | awk '/^@@/{n++} n>=1')
     if [ "$cached_body" = "$hunk0_want" ] && [ "$plain_body" = "$hunk1_want" ]; then
-        note "gitui hunk: git diff --cached shows exactly hunk 0, git diff exactly hunk 1"
+        note "mgit hunk: git diff --cached shows exactly hunk 0, git diff exactly hunk 1"
     else
-        bad "gitui hunk: split" "cached: $cached_body" "plain: $plain_body"
+        bad "mgit hunk: split" "cached: $cached_body" "plain: $plain_body"
     fi
 
     # Now stage everything, then unstage only the second hunk: HEAD vs index
@@ -388,7 +388,7 @@ if [ -x "$WORK/t_gitclient_ops" ]; then
     "$WORK/t_gitclient_ops" "$hfx/.git" "$hfx" stage f.txt >/dev/null 2>&1
     git -C "$hgit" add f.txt
     ours=$("$WORK/t_gitclient_ops" "$hfx/.git" "$hfx" hunk_patch staged f.txt 1 2>"$WORK/hp2.err")
-    printf '%s\n' "$ours" | git -C "$hgit" apply --cached -R >"$WORK/happly2.log" 2>&1 || bad "gitui hunk: git apply --cached -R in the oracle copy" "$(cat "$WORK/happly2.log")"
+    printf '%s\n' "$ours" | git -C "$hgit" apply --cached -R >"$WORK/happly2.log" 2>&1 || bad "mgit hunk: git apply --cached -R in the oracle copy" "$(cat "$WORK/happly2.log")"
     msg=$("$WORK/t_gitclient_ops" "$hfx/.git" "$hfx" unstage_hunk f.txt 1 2>"$WORK/hu1.err")
     got=$(git -C "$hfx" status --short)
     want=$(git -C "$hgit" status --short)
@@ -396,34 +396,34 @@ if [ -x "$WORK/t_gitclient_ops" ]; then
     plain_body=$(git -C "$hfx" diff --no-color -- f.txt | awk '/^@@/{n++} n>=1')
     if [ "$got" = "$want" ] && [ "$(git -C "$hfx" show :f.txt)" = "$(git -C "$hgit" show :f.txt)" ] && \
        [ "$cached_body" = "$hunk0_want" ] && [ "$plain_body" = "$hunk1_want" ]; then
-        note "gitui hunk: unstaging hunk 1 of a fully staged file matches git apply --cached -R, hunk 0 stays staged"
+        note "mgit hunk: unstaging hunk 1 of a fully staged file matches git apply --cached -R, hunk 0 stays staged"
     else
-        bad "gitui hunk: unstage_hunk" "got:  $got" "want: $want" "cached: $cached_body" "plain: $plain_body" "msg: $msg" "$(cat "$WORK/hu1.err")"
+        bad "mgit hunk: unstage_hunk" "got:  $got" "want: $want" "cached: $cached_body" "plain: $plain_body" "msg: $msg" "$(cat "$WORK/hu1.err")"
     fi
 
     msg=$("$WORK/t_gitclient_ops" "$hfx/.git" "$hfx" unstage_hunk new.txt 0 2>&1)
     if git -C "$hfx" status --short | grep '^?? new.txt$' >/dev/null; then
-        note "gitui hunk: unstaging the only hunk of a new file is git's 'unstage addition' -- untracked again"
+        note "mgit hunk: unstaging the only hunk of a new file is git's 'unstage addition' -- untracked again"
     else
-        bad "gitui hunk: unstage addition" "$(git -C "$hfx" status --short)" "msg: $msg"
+        bad "mgit hunk: unstage addition" "$(git -C "$hfx" status --short)" "msg: $msg"
     fi
     msg=$("$WORK/t_gitclient_ops" "$hfx/.git" "$hfx" stage_hunk gone.txt 0 2>&1)
     if git -C "$hfx" status --short | grep '^D  gone.txt$' >/dev/null; then
-        note "gitui hunk: staging the only hunk of a file gone from disk is git's 'stage deletion'"
+        note "mgit hunk: staging the only hunk of a file gone from disk is git's 'stage deletion'"
     else
-        bad "gitui hunk: stage deletion" "$(git -C "$hfx" status --short)" "msg: $msg"
+        bad "mgit hunk: stage deletion" "$(git -C "$hfx" status --short)" "msg: $msg"
     fi
     msg=$("$WORK/t_gitclient_ops" "$hfx/.git" "$hfx" stage_hunk f.txt 7 2>&1)
     if [ "$msg" = "no such hunk to stage" ]; then
-        note "gitui hunk: an out-of-range hunk index is refused with a message, index untouched"
+        note "mgit hunk: an out-of-range hunk index is refused with a message, index untouched"
     else
-        bad "gitui hunk: out of range" "msg: $msg"
+        bad "mgit hunk: out of range" "msg: $msg"
     fi
     fsck_out=$(git -C "$hfx" fsck --full 2>&1)
     if [ -z "$(echo "$fsck_out" | grep -v '^dangling blob ' || true)" ]; then
-        note "gitui hunk: fsck reports nothing but expected dangling blobs after hunk staging"
+        note "mgit hunk: fsck reports nothing but expected dangling blobs after hunk staging"
     else
-        bad "gitui hunk: fsck" "$fsck_out"
+        bad "mgit hunk: fsck" "$fsck_out"
     fi
 fi
 
@@ -438,17 +438,17 @@ fi
 # given; `$WORK/pty` is `test.sh`'s own scratch directory, removed with
 # everything else on exit.
 
-if bash scripts/build.sh -o "$WORK/gitui" >"$WORK/gitui_build.log" 2>&1; then
-    note "gitui: scripts/build.sh produces a working executable"
+if bash scripts/build.sh -o "$WORK/mgit" >"$WORK/mgit_build.log" 2>&1; then
+    note "mgit: scripts/build.sh produces a working executable"
     if command -v python3 >/dev/null; then
-        if out=$(python3 tests/pty_e2e.py "$WORK/gitui" "$WORK/pty" 2>&1); then
-            note "gitui pty: $(echo "$out" | grep -c '^ok') end-to-end checks passed under a real pty"
+        if out=$(python3 tests/pty_e2e.py "$WORK/mgit" "$WORK/pty" 2>&1); then
+            note "mgit pty: $(echo "$out" | grep -c '^ok') end-to-end checks passed under a real pty"
         else
-            bad "gitui pty end-to-end" "$out"
+            bad "mgit pty end-to-end" "$out"
         fi
     else
-        echo "gitui pty: skipped, no python3" >&2
+        echo "mgit pty: skipped, no python3" >&2
     fi
 else
-    bad "gitui: scripts/build.sh" "$(cat "$WORK/gitui_build.log")"
+    bad "mgit: scripts/build.sh" "$(cat "$WORK/mgit_build.log")"
 fi

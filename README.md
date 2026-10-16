@@ -1,15 +1,15 @@
-# gitui — a terminal git client
+# m31git — a terminal git client
 
 Git plumbing and an interactive client, written entirely in m31 (the
 language at github.com/qrazil/m31): SHA-1, zlib inflate, the loose-object
 format, refs, the index, working-tree status, and both a read-only CLI
-(`git.m31`) and a `TUI_app.Loop`-driven interactive client (`gitui.m31`) over
+(`git.m31`) and a `TUI_app.Loop`-driven interactive client (`mgit.m31`) over
 github.com/qrazil/tui. Nothing here is a binding to anything; the only C in
 the program is the runtime every program links.
 
-The repo is an m31 project: the `deps` file names it (`gitui`, its version) and pins
+The repo is an m31 project: the `deps` file names it (`m31git`, its version) and pins
 github.com/qrazil/tui by commit; m31c fetches that into `.m31-deps/` on the first
-build and records it in `deps.lock`. The two entry points (`git.m31`, `gitui.m31`)
+build and records it in `deps.lock`. The two entry points (`git.m31`, `mgit.m31`)
 stay at the root; the library modules live in `core/`, `diff/`, `net/` and `ui/`
 (see Layout below); `tests/`, `tests/oracles/`, `scripts/` and `docs/` hold the rest.
 
@@ -38,7 +38,7 @@ import all of them.
 | `diff/` | content work: xdiff, udiff, diff3, hunks, patch, blame, file log, merge, sequencer (cherry-pick, revert), rebase and its todo, stash, undo |
 | `net/` | remotes and transports: remote URLs, wire protocol, smart-HTTP fetch and push, ssh transport, pull |
 | `ui/` | the interactive client: `GIT_client` (the top), and every `GIT_ui_*` layer and overlay |
-| root | `git.m31` (command line client: `1git status`, `log`, `show`, `diff` and the change commands (`add`, `commit`, `switch`, `merge`, `rebase`, `stash`, ...) in git's grammar, `-log`-style plumbing), `gitui.m31` (interactive client), `deps`, `deps.lock` |
+| root | `git.m31` (command line client: `1git status`, `log`, `show`, `diff` and the change commands (`add`, `commit`, `switch`, `merge`, `rebase`, `stash`, ...) in git's grammar, `-log`-style plumbing), `mgit.m31` (interactive client), `deps`, `deps.lock` |
 
 Two placements are by import graph, not by name: `GIT_client` is in `ui/` (it imports
 every `GIT_ui_*` module), and `GIT_watch` is in `core/` (it imports only ignore and
@@ -75,7 +75,7 @@ bash scripts/build.sh git.m31         # the command line client -> ./1git
 ./1git clone --depth 1 https://host/repo.git   # also fetch/pull/push/remote/ls-remote over HTTPS and ssh, git's output
 ./1git -log --max 5                   # the older `-word` grammar, unchanged
 
-bash scripts/build.sh                 # gitui.m31 -> ./mgit   (-o name to rename)
+bash scripts/build.sh                 # mgit.m31 -> ./mgit   (-o name to rename)
 ./mgit                         # run from a repository's own top level
 ```
 
@@ -96,7 +96,7 @@ bash scripts/build.sh                 # gitui.m31 -> ./mgit   (-o name to rename
 | `GIT_patch.m31` | apply or revert exactly one hunk of a diff, or any selection of its `+`/`-` lines (`apply_lines`, `revert_lines`), byte for byte -- what the diff view's `s`/`u` stage and unstage with |
 | `GIT_xdiff.m31` | a port of git's xdiff line diff (Myers with its heuristics): same edit script as `git diff --no-indent-heuristic`, and with `diff_lines_indent` the same as plain `git diff` (the indent heuristic, which `GIT_blame` needs to attribute repeated lines as git does); `GIT_hunks` and `GIT_patch` diff with it |
 | `GIT_diff3.m31` | line-based three-way merge matching `git merge-file` byte for byte (`merge3`, merge and diff3 styles, `Level` Minimal..ZealousAlnum), and the conflict reader: `parse_conflicts`, `render`, `resolve`, `resolve_all` |
-| `GIT_log.m31` | the commit-history walk, shared by `git.m31 -log` and `gitui.m31` |
+| `GIT_log.m31` | the commit-history walk, shared by `git.m31 -log` and `mgit.m31` |
 | `GIT_client.m31` | the interactive client's top: `State` (the layer tower's last floor), key dispatch, drawing the overlay stack over the body, the `$EDITOR` handoff (no top-level statements, so it is importable and testable) |
 | `GIT_ui_core.m31` | the shared `Core`, the `Overlay` interface (`handle_key`, `render`, `hints`), **the key table** that drives dispatch, the footer and `?` alike, and the command-log ring buffer |
 | `GIT_ui_model.m31` | the pure model: outline rows, commit-file diffs, commit template, editor choice |
@@ -110,22 +110,22 @@ bash scripts/build.sh                 # gitui.m31 -> ./mgit   (-o name to rename
 | `GIT_branches.m31` | upstream tracking (`branch.<n>.remote`/`.merge` mapped through `remote.<r>.fetch`; ahead/behind and git's `[ahead 2, behind 1]`/`[gone]` labels), `set_upstream`, `record_push` ("update by push"), and tags: `tags`, `create_lightweight`, `create_annotated` (byte-identical tag objects), `delete_tag` |
 | `GIT_watch.m31` | has the repository changed? `stat`-only fingerprint of the index, HEAD, refs, every tracked file and every non-ignored directory (bounded) |
 | `GIT_ui_blame.m31`, `GIT_ui_filelog.m31`, `GIT_ui_show.m31` | `B` blame overlay (with `,` re-blame at the parent), `H` file history, and the read-only commit view both open; `GIT_ui_blame.target` works out which file and revision `B`/`H` mean |
-| `GIT_ui_highlight.m31` | syntax colours outside the diff view: whether they are on (`NO_COLOR`, `GITUI_SYNTAX`, `gitui.syntax`), the language of a path, and `DiffText`/`ConflictText`, which walk a diff or a conflicted file line by line with the lexer's state carried |
+| `GIT_ui_highlight.m31` | syntax colours outside the diff view: whether they are on (`NO_COLOR`, `M31GIT_SYNTAX`, `mgit.syntax`), the language of a path, and `DiffText`/`ConflictText`, which walk a diff or a conflicted file line by line with the lexer's state carried |
 | `GIT_ui_undo.m31`, `GIT_ui_tags.m31`, `GIT_ui_prompt.m31` | the `Z` undo/redo overlay, the `T` tag list, and the one-line text prompt it uses |
 | `GIT_ui_loop.m31`, `GIT_ui_autorefresh.m31` | `TUI_app.Loop.run` with an idle `Ticker`, and the ticker that polls `GIT_watch` about once a second and reloads the outline when something changed behind the client's back |
-| `gitui.m31` | the interactive client's thin driver: parses a path, runs `TUI_app.Loop` |
+| `mgit.m31` | the interactive client's thin driver: parses a path, runs `TUI_app.Loop` |
 | `GIT_http_fetch.m31` | git's smart-HTTP protocol, v0 fetch/clone only: pkt-line framing, the ref advertisement, want/have negotiation, side-band-64k demultiplexing, and pack checksum verification, over `lib/https.m31` (`http://` and `https://`) |
 | `GIT_wire.m31` | the transport-independent half of git's wire protocol over a duplex `Stream { read(n), write(bytes), close() }`: pkt-lines, the advertisement, want/have negotiation in rounds of at most 256 haves with the ACKs read between rounds (no write/write deadlock on a long-lived channel), side-band demultiplexing, pack verification, and the receive-pack command and report-status; `GIT_http_fetch.m31` and `GIT_http_push.m31` are now HTTP adapters over it |
 | `GIT_remote.m31` | where a remote lives: URL parsing (https, http, `ssh://`, scp-like, local) checked against the argv git hands to ssh, `url.<base>.insteadOf` / `pushInsteadOf` rewriting, `sq_quote` and the `git-upload-pack` / `git-receive-pack` command, a pure `~/.ssh/config` subset resolver, pure `known_hosts` matching (plain, `[host]:port`, wildcard, hashed via HMAC-SHA1, markers surfaced), no I/O; the ssh transport that uses it is `GIT_ssh_transport.m31` |
 | `GIT_ssh_transport.m31` | git over ssh: an exec channel of the m31 ssh client (`lib/sshclient.m31`) as a `GIT_wire.Stream` running `git-upload-pack` / `git-receive-pack` (a v0 conversation with no `# service=` preamble), `~/.ssh/config` and `known_hosts` handling, the unknown-host probe (`ssh.presented_host_key`, banner wait bounded by 15 s), `trust_host` (`sshhosts.add`); `GIT_pull.pull_ssh` and `GIT_ui_remote.m31`'s `HostTrustOverlay` sit on top of it |
 | `GIT_pack_write.m31` | writes packfiles (whole objects, stored-zlib) and computes the object set a push must send, like `git rev-list --objects tips ^known` |
-| `GIT_http_push.m31` | smart-HTTP v0 push (`git-receive-pack`): fast-forward-only, `report-status`, HTTP Basic auth from the URL's userinfo or `GITUI_HTTP_USER`/`GITUI_HTTP_PASSWORD` |
+| `GIT_http_push.m31` | smart-HTTP v0 push (`git-receive-pack`): fast-forward-only, `report-status`, HTTP Basic auth from the URL's userinfo or `M31GIT_HTTP_USER`/`M31GIT_HTTP_PASSWORD` |
 | `GIT_config.m31` | `.git/config` in full: every section/subsection/key, multi-valued keys, system/global/local layering with `include`/`includeIf` (`gitdir:`, `gitdir/i:`, `onbranch:`) followed, defaults for `commit.gpgsign`, `pull.rebase`, `push.default`, `init.defaultBranch` and `rerere.enabled`, and safe in-place `set`/`add`/`unset` that keep the rest of the file byte for byte |
 | `GIT_ident.m31` | the author/committer name and email: `GIT_<ROLE>_*`, `<role>.*`, `user.*`, `$EMAIL`, then the login name |
 | `GIT_reflog.m31` | `.git/logs/<ref>` in git's own format: read, append, delete with `--rewrite`; `GIT_refs.update` writes it for every ref move |
 | `GIT_graph.m31` | the commit graph: ancestors, `is_ancestor`, `merge_bases` (criss-cross gives several), `ahead_behind`, `rev_list(include, exclude)` |
 | `deps` | the project manifest: name, version and the pinned qrazil/tui commit (`deps.lock` records what was fetched) |
-| `scripts/build.sh` | builds `gitui.m31` (default, `./mgit`), `git.m31` (`./1git`) or any other `.m31` file; gitui's `import tui.TUI_app;` lines resolve through `deps`, so nothing is staged or copied |
+| `scripts/build.sh` | builds `mgit.m31` (default, `./mgit`), `git.m31` (`./1git`) or any other `.m31` file; mgit's `import tui.TUI_app;` lines resolve through `deps`, so nothing is staged or copied |
 | `tests/t_*.m31` | test programs, each printing what a Python oracle prints, or asserting against its own expectations |
 | `tests/oracles/oracle_*.py` | the oracles: `hashlib`, `zlib`, and a from-scratch format reader |
 | `tests/t_sections.m31`, `tests/pty_sections.py` | the section model and statusline text, and the section keys, folds, hunk folds, statusline and overview under a pty |
@@ -176,7 +176,7 @@ tree, commit), ref writing (`update`, `update_symbolic`, compare-and-swap),
 and working-tree status, all checked against real git in disposable
 fixtures (`test_write.sh`).
 
-The interactive client (`gitui.m31`, `docs/design.md`'s locked design):
+The interactive client (`mgit.m31`, `docs/design.md`'s locked design):
 a collapsible outline of untracked files, unstaged changes, staged changes
 and recent commits; whole-file staging and unstaging (`s`/`u`); a hunk-level
 diff view (`d` on a staged/unstaged/untracked row; `Enter` directly on one
@@ -194,7 +194,7 @@ hunk of a staged diff unstages exactly that hunk (`git reset -p`), the file
 then showing as partially staged (`MM`) the way git shows it; the index blob
 is built by `GIT_patch.m31` over the real `diff.Op` bytes, never the rendered
 text, and checked against real `git apply --cached` byte for byte
-(`test_gitui.sh`). `P` opens a push which-key; `p` pushes the current branch to the
+(`test_mgit.sh`). `P` opens a push which-key; `p` pushes the current branch to the
 same-named branch on `origin` over smart HTTP, fast-forward only (see
 "Push" below). `F` opens a pull which-key; `p` fast-forwards the current branch
 from `origin` (see "Pull" below). Merge and rebase are described under "Merge"
@@ -510,12 +510,12 @@ the list it came from. Staging a folded hunk stages the whole hunk. A hunk
 fold lasts as long as the view is open (staging reopens it).
 
 **What is remembered.** Folds are kept for the session. The folded root
-sections are also written to `git config gitui.collapsed` (comma-separated
+sections are also written to `git config mgit.collapsed` (comma-separated
 section ids, e.g. `staged,untracked`) when they change, and read at start, so
 a repository you keep folded stays folded; unfolding the last one unsets the
 key. Folds of commits and of what is under them are session-only. A repository
 whose config cannot be written just does not remember. Set the key by hand,
-or `git config --unset gitui.collapsed`, to change it.
+or `git config --unset mgit.collapsed`, to change it.
 
 The hunk folds are `TUI_diff_view`'s (`Hunk.is_collapsed`, `DiffView.toggle_hunk`
 and `set_all_collapsed`, tui 0.7.0). Tests: `tests/t_sections.m31` (the model
@@ -543,8 +543,8 @@ a clean state, its old side and its new side separately, and only as far as it
 is drawn; the result is cached, so scrolling a 5000-line diff costs nothing.
 
 Turn it off with, strongest first: `NO_COLOR` set (no-color.org),
-`GITUI_SYNTAX=off` (`0`, `false`, `no`, `none` also), or
-`git config gitui.syntax off` (per repository or `--global`). `C` flips it for
+`M31GIT_SYNTAX=off` (`0`, `false`, `no`, `none` also), or
+`git config mgit.syntax off` (per repository or `--global`). `C` flips it for
 the rest of the session in any of the views above. Light terminals are
 detected from `$COLORFGBG` (as in m3d1tor): a few colours swap to the shade
 that reads on a light background. Tests: `tests/t_highlight.m31` (the line
@@ -666,10 +666,10 @@ switch that skips the check.
 
   - **Trust.** The operating system's root certificates by default. To trust a
     private CA (a self-hosted server, orogit behind its own CA), set
-    `GITUI_HTTP_CA_FILE=/path/to/ca.pem`; it replaces the system roots for the
+    `M31GIT_HTTP_CA_FILE=/path/to/ca.pem`; it replaces the system roots for the
     run and becomes `tls.Trust.CaFile`.
   - **Credentials.** As for `http://`: `https://user:pass@host/...` or
-    `GITUI_HTTP_USER`/`GITUI_HTTP_PASSWORD`, sent as HTTP Basic inside the
+    `M31GIT_HTTP_USER`/`M31GIT_HTTP_PASSWORD`, sent as HTTP Basic inside the
     encrypted connection. The password is stripped from the URL before the
     request is built and is never part of any message or error, including
     when the certificate is refused (nothing is sent before the handshake
@@ -692,7 +692,7 @@ switch that skips the check.
 
 `test_https.sh` runs real `git http-backend` behind Python's `ssl` (TLS 1.3, a
 throwaway CA and `localhost` leaf made with `openssl`, handed to the client
-through `GITUI_HTTP_CA_FILE`): the ref advertisement over TLS equals `git
+through `M31GIT_HTTP_CA_FILE`): the ref advertisement over TLS equals `git
 ls-remote`; a clone and a fetch with haves are accepted by `git index-pack`;
 push to a Basic-auth server (URL credentials, environment credentials, none,
 wrong) leaves a `git fsck`-clean repository and never prints the password; a
@@ -823,7 +823,7 @@ The UI then reloads. The push is synchronous: the screen does not repaint
 while it runs.
 
 Authentication is HTTP Basic, from `http://user:pass@host/...` in the remote
-URL or, when the URL carries none, `GITUI_HTTP_USER`/`GITUI_HTTP_PASSWORD`.
+URL or, when the URL carries none, `M31GIT_HTTP_USER`/`M31GIT_HTTP_PASSWORD`.
 The userinfo is stripped from the URL before anything is displayed, and the
 password is never part of any message or error. Remotes may be `http://` or
 `https://` (see "HTTPS" below), or ssh (see "Remotes over ssh" below, where the
@@ -1009,8 +1009,8 @@ What is read, and from where:
     defaults to `$USER`, the port to 22.
   - **Which key.** The config's `IdentityFile`s in order, then
     `~/.ssh/id_ed25519`; each that exists is tried until the server accepts one.
-    `GITUI_SSH_IDENTITY=<file>` replaces that list with the one file.
-  - **Which hosts.** `~/.ssh/known_hosts`; `GITUI_SSH_KNOWN_HOSTS=<file>` names
+    `M31GIT_SSH_IDENTITY=<file>` replaces that list with the one file.
+  - **Which hosts.** `~/.ssh/known_hosts`; `M31GIT_SSH_KNOWN_HOSTS=<file>` names
     another. Plain, `[host]:port` and hashed entries match; `@revoked` is
     honoured.
 
@@ -1022,7 +1022,7 @@ to that host in `~/.ssh/config`) through the m31 library's `sshhosts.add` and
 runs the push or pull again; any other key cancels with nothing written. The
 fingerprint comes from `ssh.presented_host_key`, a short handshake on a second
 connection that checks the server's signature and reads its key, nothing else;
-that call has no timeout of its own, so gitui first waits up to 15 s for the
+that call has no timeout of its own, so mgit first waits up to 15 s for the
 server's banner and reports `no host key from ... within 15 s` for a server that
 accepts the connection and says nothing (a server that sends the banner and then
 stalls is not bounded). The real connection then enforces the

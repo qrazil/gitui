@@ -1,5 +1,7 @@
 .m31-deps/
 /git
-/gitui
+/m31git
 /1git
 /mgit
+__pycache__/
+*.pyc

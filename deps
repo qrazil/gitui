@@ -1,5 +1,5 @@
-# gitui project file: this directory is the project root.
-name gitui
-version 0.22.0
+# m31git project file: this directory is the project root.
+name m31git
+version 0.23.0
 syntax https://github.com/qrazil/syntax e49e01c32fba95d23b9ad2267a3cfaa967fb758b
 tui https://github.com/qrazil/tui 57a63afb4ce800975d7e00aa08a090780a5cdde3
