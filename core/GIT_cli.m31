@@ -73,7 +73,7 @@ pub const str PROG = "1git";
 
 /// `1git 0.24.0`, from the one place the version is written down.
 pub str version_line() {
-    return PROG + " " + GIT_transport.AGENT.substr(5, GIT_transport.AGENT.size());
+    return PROG + " " + GIT_transport.AGENT.substr(5, GIT_transport.AGENT.size);
 }
 
 // --- the parser ---------------------------------------------------------------
@@ -81,10 +81,7 @@ pub str version_line() {
 pub Cli build() {
     args.Parser top = args.Parser(PROG, summary: "a git client: git's repositories, protocols and output, a command line of its own");
     top.version = version_line();
-    top.epilog = "exit status: 0 done, 1 a command failed (the commands after it did not run), 2 the line was not understood (nothing ran)\n" +
-        "one dash is a command, two dashes an option, anything else data: 1git -add --all -commit --message 'fix' -push\n" +
-        "an option's value cannot start with a dash: write --message=-x. Put an option that takes a list (--path, --message) after the operands.\n" +
-        "from git: 1git -migrate 'git log --oneline -5' (docs/MIGRATING-FROM-GIT.md)";
+    top.epilog = "exit status: 0 done, 1 a command failed (the commands after it did not run), 2 the line was not understood (nothing ran)\n" + "one dash is a command, two dashes an option, anything else data: 1git -add --all -commit --message 'fix' -push\n" + "an option's value cannot start with a dash: write --message=-x. Put an option that takes a list (--path, --message) after the operands.\n" + "from git: 1git -migrate 'git log --oneline -5' (docs/MIGRATING-FROM-GIT.md)";
     top.value("dir", short: "C", help: "run as if started in this directory", placeholder: "DIR");
     top.values("config", short: "c", help: "set configuration for this run, like git -c", placeholder: "NAME=VALUE");
     top.value("git-dir", help: "the repository's git directory", placeholder: "DIR");
@@ -1260,14 +1257,12 @@ Result<List<str>, str> rewrite_command(Cli cli, Env env, str git, List<str> rest
                 return fail_with("'remote " + sub + "' is not in 1git");
             }
             word = "remote-" + sub;
+        } else if (sub == "list") {
+            word = "worktree";
+        } else if (is_in(sub, "add,remove,prune")) {
+            word = "worktree-" + sub;
         } else {
-            if (sub == "list") {
-                word = "worktree";
-            } else if (is_in(sub, "add,remove,prune")) {
-                word = "worktree-" + sub;
-            } else {
-                return fail_with("'worktree " + sub + "' is not in 1git");
-            }
+            return fail_with("'worktree " + sub + "' is not in 1git");
         }
     } else if (git == "ls-remote") {
         word = "remote-refs";

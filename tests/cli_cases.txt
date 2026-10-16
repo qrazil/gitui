@@ -139,6 +139,15 @@
 -diff --name-only --name-status --numstat
 = git diff --numstat --name-only --name-status
 
+-diff --patch --shortstat --raw --summary --context 0
+= x
+-diff --ignore-all-space --ignore-space-change --renames off --rename-threshold 90 --swap
+= x
+-diff --merge-diff separate --diff-filter M --word-diff color --text --full-index --nul
+= x
+-diff --side-by-side --width 100 --color always
+= x
+
 # --- add
 -add .
 = git add -- .
