@@ -27,6 +27,7 @@ import os;
 import fs;
 import term;
 import core.GIT_object;
+import core.GIT_pack;
 import core.GIT_refs;
 import core.GIT_index;
 import core.GIT_ignore;
@@ -567,8 +568,8 @@ str abbrev(str id) {
 }
 
 // HEAD's tree entries, keyed by full path, with mode and id.
-Result<bool, GIT_status.Error> walk_head(str gitdir, str tree, str prefix, Map<str, HeadItem> out) {
-    match (GIT_object.read(gitdir, tree)) {
+Result<bool, GIT_status.Error> walk_head(GIT_pack.Cache packs, str gitdir, str tree, str prefix, Map<str, HeadItem> out) {
+    match (GIT_object.read_with(packs, gitdir, tree)) {
         case Ok(GIT_object.Object object): {
             match (object.body) {
                 case Tree(List<GIT_object.Entry> entries): {
@@ -580,7 +581,7 @@ Result<bool, GIT_status.Error> walk_head(str gitdir, str tree, str prefix, Map<s
                                     full = prefix + "/" + name;
                                 }
                                 if (entry.is_tree()) {
-                                    walk_head(gitdir, entry.id, full, out)?;
+                                    walk_head(packs, gitdir, entry.id, full, out)?;
                                 } else {
                                     out.set(full, HeadItem(entry.mode, entry.id));
                                 }
@@ -1077,10 +1078,28 @@ void mode_pass(str root, str path, GIT_index.Entry entry, bool is_filemode, Map<
     }
     str full = fs.join(root, path);
     bool is_link = fs.is_link(full);
-    if (!fs.is_present(full) && !is_link) {
+    // one `stat` answers what was five: is it there, a directory, a plain
+    // file, and which mode a regular file gets
+    bool is_present = false;
+    bool is_dir = false;
+    bool is_plain = false;
+    int wt_mode = 0o100644;
+    match (fs.stat(full)) {
+        case Ok(fs.Stat found): {
+            is_present = true;
+            is_dir = found.is_directory();
+            is_plain = found.is_file();
+            if (found.mode & 0o111 != 0) {
+                wt_mode = 0o100755;
+            }
+        }
+        case Err(_): {
+        }
+    }
+    if (!is_present && !is_link) {
         return;
     }
-    if (!is_link && fs.is_directory(full)) {
+    if (!is_link && is_dir) {
         // a directory where the entry was: deleted, mode 000000
         return;
     }
@@ -1103,12 +1122,12 @@ void mode_pass(str root, str path, GIT_index.Entry entry, bool is_filemode, Map<
         y = "T";
         mode_wt = 0o120000;
     } else if (!is_link && entry.is_link()) {
-        if (fs.is_file(full)) {
+        if (is_plain) {
             y = "T";
-            mode_wt = worktree_mode(path, root, entry.mode);
+            mode_wt = wt_mode;
         }
     } else if (!is_link && is_regular_mode(entry.mode)) {
-        mode_wt = worktree_mode(path, root, entry.mode);
+        mode_wt = wt_mode;
         if (is_filemode && canonical(mode_wt) != canonical(entry.mode) && y == " ") {
             y = "M";
         }
@@ -1146,13 +1165,13 @@ Result<Snapshot, GIT_status.Error> gather(str gitdir, str root, Opts opts, List<
                     }
                     snap.head_id = id;
                     str tree = tree_of(gitdir, id)?;
-                    walk_head(gitdir, tree, "", head)?;
+                    walk_head(GIT_pack.cache(gitdir), gitdir, tree, "", head)?;
                 }
                 case Detached(str id): {
                     snap.is_detached = true;
                     snap.head_id = id;
                     str tree = tree_of(gitdir, id)?;
-                    walk_head(gitdir, tree, "", head)?;
+                    walk_head(GIT_pack.cache(gitdir), gitdir, tree, "", head)?;
                     detached_from(gitdir, id, snap);
                 }
             }
@@ -1179,7 +1198,11 @@ Result<Snapshot, GIT_status.Error> gather(str gitdir, str root, Opts opts, List<
         }
     }
     GIT_icase.Names folded = GIT_icase.Names();
-    GIT_status.Status lib = GIT_status.status_with(gitdir, root, is_icase)?;
+    Map<str, str> head_ids = {};
+    for (str head_path in head.keys()) {
+        head_ids.set(head_path, head.get(head_path).or(HeadItem(0, "")).id);
+    }
+    GIT_status.Status lib = GIT_status.status_given(gitdir, root, is_icase, head_ids)?;
     Map<str, HeadItem> staged_index = {};
     Map<str, GIT_index.Entry> entries = {};
     Map<str, bool> tracked_dirs = {};

@@ -449,7 +449,7 @@ Result<Object, Error> read_stored(GIT_pack.Cache pack_cache, str gitdir, str id)
 /// name that is not UTF-8 is left out, the same skip `walk_tree` makes.
 pub Result<Map<str, str>, Error> flatten_tree(str gitdir, str id) {
     Map<str, str> out = {};
-    match (flatten_tree_into(gitdir, id, "", out)) {
+    match (flatten_tree_into(GIT_pack.cache(gitdir), gitdir, id, "", out)) {
         case Ok: {
             return Result<Map<str, str>, Error>.Ok(out);
         }
@@ -459,8 +459,8 @@ pub Result<Map<str, str>, Error> flatten_tree(str gitdir, str id) {
     }
 }
 
-Result<bool, Error> flatten_tree_into(str gitdir, str id, str prefix, Map<str, str> out) {
-    match (read(gitdir, id)) {
+Result<bool, Error> flatten_tree_into(GIT_pack.Cache packs, str gitdir, str id, str prefix, Map<str, str> out) {
+    match (read_with(packs, gitdir, id)) {
         case Ok(Object object): {
             match (object.body) {
                 case Tree(List<Entry> entries): {
@@ -472,7 +472,7 @@ Result<bool, Error> flatten_tree_into(str gitdir, str id, str prefix, Map<str, s
                                     full = prefix + "/" + name;
                                 }
                                 if (entry.is_tree()) {
-                                    flatten_tree_into(gitdir, entry.id, full, out)?;
+                                    flatten_tree_into(packs, gitdir, entry.id, full, out)?;
                                 } else {
                                     out.set(full, entry.id);
                                 }

@@ -176,6 +176,29 @@ pub Result<Ignore, Error> load(str gitdir, str worktree) {
 /// candidate path is compared case-folded. `is_precomposed` (`core.
 /// precomposeunicode`) reads the work tree's directory names as NFC.
 pub Result<Ignore, Error> load_with(str gitdir, str worktree, bool is_icase, bool is_precomposed) {
+    List<str> relatives = [];
+    match (fs.walk(worktree)) {
+        case Ok(List<str> paths): {
+            str base = fs.join(worktree, "");
+            for (str file_path in paths) {
+                str relative_path = text.strip_prefix(file_path, base);
+                if (relative_path == ".git" || relative_path.starts_with(".git/")) {
+                    continue;
+                }
+                relatives.push(relative_path);
+            }
+        }
+        case Err: {
+            return Result<Ignore, Error>.Err(Error.Io);
+        }
+    }
+    return load_known(gitdir, worktree, is_icase, is_precomposed, relatives);
+}
+
+/// `load_with` for a caller that has already listed the work tree: every path
+/// under it (files and links; directories and `.git` are not needed),
+/// relative to `worktree`. Only the `.gitignore` files among them are read.
+pub Result<Ignore, Error> load_known(str gitdir, str worktree, bool is_icase, bool is_precomposed, List<str> relatives) {
     List<IgnoreFile> files = [];
     str excl = fs.join(GIT_repository.common(gitdir), "info/exclude");
     match (io.read(excl)) {
@@ -185,41 +208,31 @@ pub Result<Ignore, Error> load_with(str gitdir, str worktree, bool is_icase, boo
         case Err: {
         }
     }
-    match (fs.walk(worktree)) {
-        case Ok(List<str> paths): {
-            str base = fs.join(worktree, "");
-            for (str file_path in paths) {
-                str relative_path = text.strip_prefix(file_path, base);
-                if (relative_path == ".git" || relative_path.starts_with(".git/")) {
-                    continue;
-                }
-                if (relative_path != ".gitignore" && !relative_path.ends_with("/.gitignore")) {
-                    continue;
-                }
-                if (is_precomposed) {
-                    relative_path = nfc_of(relative_path);
-                }
-                if (!fs.is_file(file_path)) {
-                    continue;
-                }
-                match (io.read(file_path)) {
-                    case Ok(str contents): {
-                        str directory = "";
-                        if (relative_path != ".gitignore") {
-                            directory = text.strip_suffix(relative_path, "/.gitignore");
-                        }
-                        if (is_icase) {
-                            directory = directory.to_lower();
-                        }
-                        files.push(IgnoreFile(split_segments(directory), parse_patterns(contents, is_icase)));
-                    }
-                    case Err: {
-                    }
-                }
-            }
+    for (str listed in relatives) {
+        if (listed != ".gitignore" && !listed.ends_with("/.gitignore")) {
+            continue;
         }
-        case Err: {
-            return Result<Ignore, Error>.Err(Error.Io);
+        str relative_path = listed;
+        str file_path = fs.join(worktree, listed);
+        if (is_precomposed) {
+            relative_path = nfc_of(relative_path);
+        }
+        if (!fs.is_file(file_path)) {
+            continue;
+        }
+        match (io.read(file_path)) {
+            case Ok(str contents): {
+                str directory = "";
+                if (relative_path != ".gitignore") {
+                    directory = text.strip_suffix(relative_path, "/.gitignore");
+                }
+                if (is_icase) {
+                    directory = directory.to_lower();
+                }
+                files.push(IgnoreFile(split_segments(directory), parse_patterns(contents, is_icase)));
+            }
+            case Err: {
+            }
         }
     }
     files.sort();

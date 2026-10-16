@@ -85,6 +85,7 @@ import io;
 import fs;
 import text;
 import core.GIT_object;
+import core.GIT_pack;
 import core.GIT_refs;
 import core.GIT_index;
 import core.GIT_ignore;
@@ -231,6 +232,17 @@ pub Result<Status, Error> status(str gitdir, str worktree) {
 /// command line is not in the files `status` reads it from): a work-tree path
 /// that folds to an index path is that path, not an untracked file.
 pub Result<Status, Error> status_with(str gitdir, str worktree, bool is_icase) {
+    Map<str, str> none = {};
+    return status_core(gitdir, worktree, is_icase, false, none);
+}
+
+/// `status_with` for a caller that has already read HEAD's tree (`head`: every
+/// blob path and its id, as `walk_tree` makes it): the tree is not read again.
+pub Result<Status, Error> status_given(str gitdir, str worktree, bool is_icase, Map<str, str> head) {
+    return status_core(gitdir, worktree, is_icase, true, head);
+}
+
+Result<Status, Error> status_core(str gitdir, str worktree, bool is_icase, bool has_head, Map<str, str> given_head) {
     bool is_pre = GIT_icase.precompose(GIT_config.effective(gitdir));
     Map<str, GIT_index.Entry> staged_entries = {};
     List<Unmerged> unmerged = [];
@@ -277,19 +289,21 @@ pub Result<Status, Error> status_with(str gitdir, str worktree, bool is_icase) {
             }
         }
     }
-    Map<str, str> head = {};
-    match (head_tree(gitdir)) {
-        case Ok(Option<str> link_target): {
-            match (link_target) {
-                case Some(str tree): {
-                    walk_tree(gitdir, tree, "", head)?;
-                }
-                case None: {
+    Map<str, str> head = given_head;
+    if (!has_head) {
+        match (head_tree(gitdir)) {
+            case Ok(Option<str> link_target): {
+                match (link_target) {
+                    case Some(str tree): {
+                        walk_tree(GIT_pack.cache(gitdir), gitdir, tree, "", head)?;
+                    }
+                    case None: {
+                    }
                 }
             }
-        }
-        case Err(Error error): {
-            return Result<Status, Error>.Err(error);
+            case Err(Error error): {
+                return Result<Status, Error>.Err(error);
+            }
         }
     }
     List<WFile> worktree_files = list_worktree(worktree, is_pre)?;
@@ -391,7 +405,7 @@ pub Result<Status, Error> status_with(str gitdir, str worktree, bool is_icase) {
             }
         }
     }
-    GIT_ignore.Ignore ignore = load_ignore(gitdir, worktree, is_icase, is_pre)?;
+    GIT_ignore.Ignore ignore = load_ignore_among(gitdir, worktree, is_icase, is_pre, worktree_files)?;
     List<bytes> untracked = [];
     GIT_icase.Names folded = GIT_icase.Names();
     if (is_icase) {
@@ -524,6 +538,30 @@ Result<GIT_ignore.Ignore, Error> load_ignore(str gitdir, str worktree, bool is_i
     }
 }
 
+// `load_ignore` for a caller that has just listed the work tree: the
+// `.gitignore` files are picked out of that listing instead of walking the
+// tree a second time. The spellings that listing may not hold as the disk has
+// them (case-folding volumes, precomposed names) keep the walk.
+Result<GIT_ignore.Ignore, Error> load_ignore_among(str gitdir, str worktree, bool is_icase, bool is_precomposed, List<WFile> listed) {
+    if (is_icase || is_precomposed) {
+        return load_ignore(gitdir, worktree, is_icase, is_precomposed);
+    }
+    List<str> relatives = [];
+    for (WFile each in listed) {
+        if (each.path == ".gitignore" || each.path.ends_with("/.gitignore")) {
+            relatives.push(each.path);
+        }
+    }
+    match (GIT_ignore.load_known(gitdir, worktree, is_icase, is_precomposed, relatives)) {
+        case Ok(GIT_ignore.Ignore ignore): {
+            return Result<GIT_ignore.Ignore, Error>.Ok(ignore);
+        }
+        case Err(GIT_ignore.Error error): {
+            return Result<GIT_ignore.Ignore, Error>.Err(Error.Gitignore(error));
+        }
+    }
+}
+
 Result<str, Error> commit_tree(str gitdir, str id) {
     match (GIT_object.read(gitdir, id)) {
         case Ok(GIT_object.Object object): {
@@ -550,8 +588,8 @@ Result<str, Error> commit_tree(str gitdir, str id) {
 
 // Every blob HEAD's tree reaches, recursively, keyed by its full path from
 // the repository root. A name that is not UTF-8 is left out (module header).
-Result<bool, Error> walk_tree(str gitdir, str id, str prefix, Map<str, str> out) {
-    match (GIT_object.read(gitdir, id)) {
+Result<bool, Error> walk_tree(GIT_pack.Cache packs, str gitdir, str id, str prefix, Map<str, str> out) {
+    match (GIT_object.read_with(packs, gitdir, id)) {
         case Ok(GIT_object.Object object): {
             match (object.body) {
                 case Tree(List<GIT_object.Entry> entries): {
@@ -563,7 +601,7 @@ Result<bool, Error> walk_tree(str gitdir, str id, str prefix, Map<str, str> out)
                                     full = prefix + "/" + name;
                                 }
                                 if (entry.is_tree()) {
-                                    walk_tree(gitdir, entry.id, full, out)?;
+                                    walk_tree(packs, gitdir, entry.id, full, out)?;
                                 } else {
                                     out.set(full, entry.id);
                                 }
@@ -602,28 +640,46 @@ type WFile {
 // inside it, which `fs.walk` already visits.
 Result<List<WFile>, Error> list_worktree(str worktree, bool is_precomposed) {
     List<WFile> out = [];
-    str base = fs.join(worktree, "");
-    match (fs.walk(worktree)) {
-        case Ok(List<str> paths): {
-            for (str path in paths) {
-                str relative_path = text.strip_prefix(path, base);
-                if (relative_path == ".git" || relative_path.starts_with(".git/")) {
-                    continue;
-                }
-                // `core.precomposeunicode`: the name as git's readdir hands it over
-                relative_path = GIT_icase.nfc_if(is_precomposed, relative_path);
-                if (fs.is_link(path)) {
-                    out.push(WFile(relative_path, true));
-                } else if (fs.is_directory(path)) {
-                    continue;
-                } else if (fs.is_file(path)) {
-                    out.push(WFile(relative_path, false));
-                }
-            }
+    match (walk_files(fs.join(worktree, ""), worktree, is_precomposed, out)) {
+        case Ok: {
         }
         case Err(_): {
             return Result<List<WFile>, Error>.Err(Error.Io);
         }
     }
     return Result<List<WFile>, Error>.Ok(out);
+}
+
+// `fs.walk`'s order (a directory's names sorted, each directory's contents
+// right after it) with what `list_worktree` wants made on the way: two
+// system calls for an entry (is it a link; if not, what is it) where `walk`
+// followed by three questions asked again took four, and `.git` is not
+// entered at all -- `fs.walk` listed every object file in it just to have
+// them dropped.
+Result<bool, io.Error> walk_files(str base, str directory, bool is_precomposed, List<WFile> out) {
+    for (str name in fs.listdir(directory)?) {
+        str path = fs.join(directory, name);
+        str relative_path = text.strip_prefix(path, base);
+        if (relative_path == ".git") {
+            continue;
+        }
+        if (fs.is_link(path)) {
+            out.push(WFile(GIT_icase.nfc_if(is_precomposed, relative_path), true));
+            continue;
+        }
+        match (fs.stat(path)) {
+            case Ok(fs.Stat found): {
+                if (found.is_directory()) {
+                    walk_files(base, path, is_precomposed, out)?;
+                } else if (found.is_file()) {
+                    // `core.precomposeunicode`: the name as git's readdir hands it over
+                    out.push(WFile(GIT_icase.nfc_if(is_precomposed, relative_path), false));
+                }
+            }
+            case Err(io.Error failure): {
+                return Result<bool, io.Error>.Err(failure);
+            }
+        }
+    }
+    return Result<bool, io.Error>.Ok(true);
 }
