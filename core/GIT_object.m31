@@ -1165,7 +1165,7 @@ Result<str, Error> write_object(str gitdir, str kind, bytes content) {
     if (fs.is_present(path)) {
         return Result<str, Error>.Ok(id);
     }
-    match (fs.makedirs(directory)) {
+    match (GIT_repository.ensure_dir(directory)) {
         case Ok: {
         }
         case Err(_): {

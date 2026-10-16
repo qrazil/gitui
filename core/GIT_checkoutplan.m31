@@ -9,6 +9,7 @@ import core.GIT_index;
 import core.GIT_ignore;
 import core.GIT_gitcommon;
 import core.GIT_gitstore;
+import core.GIT_pack;
 import core.GIT_gitwrite;
 import core.GIT_gitadd;
 
@@ -270,11 +271,12 @@ pub bool apply(GIT_gitcommon.Ctx ctx, GIT_gitwrite.Idx idx, Plan plan) {
         }
         idx.remove(action.path);
     }
+    GIT_pack.Cache packs = GIT_pack.cache(ctx.gitdir);
     for (Action action in plan.actions) {
         if (action.is_remove) {
             continue;
         }
-        if (!GIT_gitwrite.write_blob_to(ctx.gitdir, ctx.root, action.path, action.flat.mode, action.flat.id)) {
+        if (!GIT_gitwrite.write_blob_with(packs, ctx.gitdir, ctx.root, action.path, action.flat.mode, action.flat.id)) {
             io.eprint("error: unable to write '" + action.path + "'");
             return false;
         }

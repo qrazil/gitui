@@ -38,6 +38,7 @@
 import core.GIT_config;
 import core.GIT_graph;
 import core.GIT_object;
+import core.GIT_pack;
 import core.GIT_refs;
 import core.GIT_reflog;
 import core.GIT_repository;
@@ -356,12 +357,13 @@ pub Result<List<Tag>, Error> tags(str gitdir) {
     }
     List<Tag> out = [];
     str prefix = "refs/tags/";
+    GIT_pack.Cache packs = GIT_pack.cache(gitdir);
     for (GIT_refs.Ref ref in refs) {
         if (!ref.name.starts_with(prefix)) {
             continue;
         }
         Tag tag = Tag(ref.name.substr(prefix.size(), ref.name.size()), ref.id, false, ref.id, "");
-        match (GIT_object.read(gitdir, ref.id)) {
+        match (GIT_object.read_with(packs, gitdir, ref.id)) {
             case Ok(GIT_object.Object object): {
                 match (object.body) {
                     case Tag(GIT_object.Tag annotation): {

@@ -53,6 +53,7 @@
 //     it is not given a terminal.
 
 import fs;
+import core.GIT_repository;
 import core.GIT_checkout;
 import core.GIT_graph;
 import core.GIT_index;
@@ -718,7 +719,7 @@ Result<bool, GIT_sequencer.Error> begin(str gitdir, str worktree, Plan plan, Lis
     str from_tree = tree_of(gitdir, plan.orig_head)?;
     str to_tree = tree_of(gitdir, new_head)?;
     move_files(gitdir, worktree, from_tree, to_tree)?;
-    match (fs.makedirs(state_directory(gitdir))) {
+    match (GIT_repository.ensure_dir(state_directory(gitdir))) {
         case Ok: {
         }
         case Err(_): {

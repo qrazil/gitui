@@ -16,6 +16,7 @@
 // `--max` and default.
 
 import core.GIT_object;
+import core.GIT_pack;
 import core.GIT_refs;
 import core.GIT_revparse;
 
@@ -70,6 +71,10 @@ pub Result<List<Entry>, Error> walk(str gitdir, str rev, int limit) {
             return Result<List<Entry>, Error>.Err(Error.Rev(error));
         }
     }
+    // commits are read once each: a parent is read for its date when it is
+    // queued and used from here when it is reached, and the packs are read once
+    GIT_pack.Cache packs = GIT_pack.cache(gitdir);
+    Map<str, GIT_object.Object> held = {};
     List<str> queue = [tip];
     List<int> dates = [0];
     Map<str, bool> seen = {};
@@ -81,7 +86,7 @@ pub Result<List<Entry>, Error> walk(str gitdir, str rev, int limit) {
         }
         str id = queue.remove_at(0);
         dates.remove_at(0);
-        match (GIT_object.read(gitdir, id)) {
+        match (read_held(packs, held, gitdir, id)) {
             case Ok(GIT_object.Object object): {
                 match (object.body) {
                     case Commit(GIT_object.Commit commit): {
@@ -91,7 +96,7 @@ pub Result<List<Entry>, Error> walk(str gitdir, str rev, int limit) {
                                 continue;
                             }
                             seen.set(par, true);
-                            insert(queue, dates, par, commit_date(gitdir, par));
+                            insert(queue, dates, par, commit_date(packs, held, gitdir, par));
                         }
                     }
                     case Blob: {
@@ -129,8 +134,27 @@ void insert(List<str> queue, List<int> dates, str id, int when) {
 // A commit's committer timestamp, or 0 for anything that is not a readable
 // commit -- a parent in a packfile, say, which sorts to the end of the queue
 // and reports itself when it is reached.
-int commit_date(str gitdir, str id) {
-    match (GIT_object.read(gitdir, id)) {
+Result<GIT_object.Object, GIT_object.Error> read_held(GIT_pack.Cache packs, Map<str, GIT_object.Object> held, str gitdir, str id) {
+    match (held.get(id)) {
+        case Some(GIT_object.Object known): {
+            return Result<GIT_object.Object, GIT_object.Error>.Ok(known);
+        }
+        case None: {
+        }
+    }
+    match (GIT_object.read_with(packs, gitdir, id)) {
+        case Ok(GIT_object.Object object): {
+            held.set(id, object);
+            return Result<GIT_object.Object, GIT_object.Error>.Ok(object);
+        }
+        case Err(GIT_object.Error error): {
+            return Result<GIT_object.Object, GIT_object.Error>.Err(error);
+        }
+    }
+}
+
+int commit_date(GIT_pack.Cache packs, Map<str, GIT_object.Object> held, str gitdir, str id) {
+    match (read_held(packs, held, gitdir, id)) {
         case Ok(GIT_object.Object object): {
             match (object.body) {
                 case Commit(GIT_object.Commit commit): {

@@ -706,7 +706,7 @@ str where_for(str gitdir, str name) {
 // rename either lands or it does not, and either way `path` holds a complete
 // file, old or new.
 Result<bool, Error> write_atomic(str path, str content) {
-    match (fs.makedirs(directory_of(path))) {
+    match (GIT_repository.ensure_dir(directory_of(path))) {
         case Ok: {
         }
         case Err(_): {

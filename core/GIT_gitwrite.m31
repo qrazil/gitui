@@ -15,6 +15,7 @@ import os;
 import fs;
 import date;
 import core.GIT_object;
+import core.GIT_pack;
 import core.GIT_refs;
 import core.GIT_index;
 import core.GIT_reflog;
@@ -862,12 +863,18 @@ pub bool worktree_matches(str full, GIT_index.Entry entry, bool filemode) {
 
 /// Put a blob in the work tree. A symlink's blob is its target.
 pub bool write_blob_to(str gitdir, str root, str path, int mode, str id) {
+    return write_blob_with(GIT_pack.cache(gitdir), gitdir, root, path, mode, id);
+}
+
+/// `write_blob_to` through the caller's `GIT_pack.Cache`: a loop over many
+/// files reads each pack once, not once per file.
+pub bool write_blob_with(GIT_pack.Cache packs, str gitdir, str root, str path, int mode, str id) {
     str full = fs.join(root, path);
     if (mode >> 12 == 0o16) {
         if (kind_of(full) == 2 || kind_of(full) == 1) {
             rm_quiet(full);
         }
-        match (fs.makedirs(full)) {
+        match (GIT_repository.ensure_dir(full)) {
             case Ok(_): {
                 return true;
             }
@@ -877,7 +884,7 @@ pub bool write_blob_to(str gitdir, str root, str path, int mode, str id) {
         }
     }
     bytes content = [];
-    match (GIT_object.read(gitdir, id)) {
+    match (GIT_object.read_with(packs, gitdir, id)) {
         case Ok(GIT_object.Object object): {
             content = object.raw;
         }

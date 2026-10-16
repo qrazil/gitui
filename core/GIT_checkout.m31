@@ -68,6 +68,7 @@
 // working tree or index touched -- the one checkout that never needs step 3.
 
 import fs;
+import core.GIT_repository;
 import core.GIT_index;
 import io;
 import core.GIT_object;
@@ -635,7 +636,7 @@ Result<bool, Error> walk(str gitdir, str id, str prefix, Map<str, TreeEntry> out
 pub Result<bool, Error> write_path(str full, bytes content, int mode) {
     str parent = parent_directory(full);
     if (parent != "") {
-        match (fs.makedirs(parent)) {
+        match (GIT_repository.ensure_dir(parent)) {
             case Ok: {
             }
             case Err(_): {

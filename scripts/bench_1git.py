@@ -194,8 +194,9 @@ def restore(repo, env, git):
 
 
 class Case:
-    def __init__(self, name, argv, setup=None, per=None, sizes=None):
-        self.name, self.argv, self.setup, self.per, self.sizes = name, argv, setup, per, sizes
+    def __init__(self, name, argv, per=None, one=None):
+        # `one`: the same work in 1git's own spelling, where it is not git's (plumbing is `-rev-parse`)
+        self.name, self.argv, self.per, self.one = name, argv, per, one
 
 
 def cases(repo, env, git):
@@ -231,10 +232,10 @@ def cases(repo, env, git):
     A(Case("blame <file>", ["blame", "README.md"]))
     A(Case("branch", ["branch"]))
     A(Case("branch -a -vv", ["branch", "-a", "-vv"]))
-    A(Case("rev-parse HEAD", ["rev-parse", "HEAD"]))
-    A(Case("rev-parse HEAD~100^{tree}", ["rev-parse", "HEAD~100^{tree}"]))
+    A(Case("rev-parse HEAD", ["rev-parse", "HEAD"], one=["-rev-parse", "HEAD"]))
+    A(Case("rev-parse HEAD~100^{tree}", ["rev-parse", "HEAD~100^{tree}"], one=["-rev-parse", "HEAD~100^{tree}"]))
     A(Case("ls-files", ["ls-files"]))
-    A(Case("cat-file -p HEAD", ["cat-file", "-p", "HEAD"]))
+    A(Case("cat-file -p HEAD", ["cat-file", "-p", "HEAD"], one=["-cat-file", "HEAD"]))
     A(Case("ls-tree -r HEAD", ["ls-tree", "-r", "HEAD"]))
 
     def many():
@@ -272,6 +273,58 @@ def cases(repo, env, git):
     return cs
 
 
+def mgit_first_paint(mgit, repo, env, quiet=0.25, limit=60.0):
+    """Seconds from spawning `mgit` on a pty until its screen has been quiet for
+    `quiet` seconds (the first full paint of the status view), and until its first
+    byte. Needs a POSIX pty; returns None where there is none."""
+    try:
+        import pty, select, struct, fcntl, termios, signal
+    except ImportError:
+        return None
+    master, slave = pty.openpty()
+    fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 40, 120, 0, 0))
+    e = dict(env, TERM="xterm", PWD=repo)
+    t0 = time.perf_counter()
+    p = subprocess.Popen([mgit], cwd=repo, env=e, stdin=slave, stdout=slave, stderr=slave,
+                         close_fds=True, preexec_fn=os.setsid)
+    os.close(slave)
+    first = None
+    last = None
+    try:
+        while True:
+            now = time.perf_counter()
+            if now - t0 > limit:
+                break
+            r, _, _ = select.select([master], [], [], 0.02)
+            if r:
+                try:
+                    data = os.read(master, 65536)
+                except OSError:
+                    break
+                if not data:
+                    break
+                now = time.perf_counter()
+                if first is None:
+                    first = now - t0
+                last = now
+            elif last is not None and time.perf_counter() - last >= quiet:
+                break
+    finally:
+        try:
+            os.write(master, b"q")
+            p.wait(timeout=2)
+        except Exception:
+            try:
+                os.killpg(p.pid, signal.SIGKILL)
+            except Exception:
+                pass
+            p.wait()
+        os.close(master)
+    if last is None:
+        return None
+    return first, last - t0
+
+
 def stats(xs):
     return min(xs), statistics.median(xs)
 
@@ -306,14 +359,20 @@ def main():
     ap.add_argument("--warmup", type=int, default=1)
     ap.add_argument("--sizes", default="small,medium,large-packed,large-loose")
     ap.add_argument("--only", default="")
+    ap.add_argument("--large-runs", type=int, default=0, help="timed runs on the large repositories (default: --runs)")
+    ap.add_argument("--large-warmup", type=int, default=-1, help="warmup runs on the large repositories (default: --warmup)")
+    ap.add_argument("--timeout", type=int, default=120, help="seconds a single run may take (recorded as that long, rc 124)")
     ap.add_argument("--medium-src", default="https://github.com/qrazil/m31")
     ap.add_argument("--work", default="")
     ap.add_argument("--keep", action="store_true")
     ap.add_argument("--files", type=int, default=20000)
     ap.add_argument("--commits", type=int, default=5000)
+    ap.add_argument("--mgit", default="", help="also time this mgit binary to its first paint on each repository")
     ap.add_argument("--json", default="")
     ap.add_argument("--md", default="")
     args = ap.parse_args()
+    global TIMEOUT
+    TIMEOUT = args.timeout
     one = os.path.abspath(args.one)
     git = args.git
     made = not args.work
@@ -353,11 +412,12 @@ def main():
             argv = [readme if a == "README.md" else a for a in c.argv]
             if size.startswith("large") and argv[:1] == ["log"] and "core/" in argv:
                 argv = [a if a != "core/" else "d001/" for a in argv]
-            if size.startswith("large") and c.name == "log (full)" or \
-                    size.startswith("large") and c.name == "log --oneline (full)":
-                runs = max(1, min(args.runs, 3))
-            else:
-                runs = args.runs
+            runs, warmup = args.runs, args.warmup
+            if size.startswith("large"):
+                if args.large_runs > 0:
+                    runs = args.large_runs
+                if args.large_warmup >= 0:
+                    warmup = args.large_warmup
             if size == "small" and c.name == "diff HEAD~50 HEAD (large)":
                 pass
             row = {"size": size, "case": c.name}
@@ -365,7 +425,9 @@ def main():
                 av = argv
                 if c.name.startswith("startup") and tool == "1git":
                     av = ["--help"]      # 1git has no --version; --help is its trivial path
-                ts, first = bench([exe] + av, repo, env, runs, args.warmup, c.per)
+                elif tool == "1git" and c.one:
+                    av = [readme if a == "README.md" else a for a in c.one]
+                ts, first = bench([exe] + av, repo, env, runs, warmup, c.per)
                 row[tool] = ts
                 row[tool + "_rc"] = first.returncode
                 row[tool + "_out"] = first.stdout
@@ -398,6 +460,13 @@ def main():
             r["size"], r["case"], fmt(gmin), fmt(gmed), fmt(omin), fmt(omed), ratio, r.get("note", "")))
     table = "\n".join(lines)
     print(table)
+    if args.mgit:
+        print("\nmgit (%s): spawn to first byte / to first full paint" % args.mgit)
+        for size in args.sizes.split(","):
+            res = [mgit_first_paint(os.path.abspath(args.mgit), repos[size], env) for _ in range(max(1, min(args.runs, 3)))]
+            res = [r for r in res if r]
+            if res:
+                print("  %-14s first byte %s, painted %s" % (size, fmt(min(r[0] for r in res)), fmt(min(r[1] for r in res))))
     if args.md:
         with open(args.md, "w") as f:
             f.write("<!-- %s -->\n%s\n" % (ver, table))

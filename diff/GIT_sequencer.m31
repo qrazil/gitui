@@ -95,6 +95,7 @@
 //   - A commit message that is not UTF-8 is refused.
 
 import fs;
+import core.GIT_repository;
 import core.GIT_checkout;
 import diff.GIT_diff3;
 import core.GIT_graph;
@@ -854,7 +855,7 @@ pub List<str> todo_lines(str gitdir, List<Item> items) {
 
 /// Write `<dir>/todo`, creating `dir`.
 pub Result<bool, Error> write_todo(str gitdir, str directory, List<Item> items) {
-    match (fs.makedirs(directory)) {
+    match (GIT_repository.ensure_dir(directory)) {
         case Ok: {
         }
         case Err(_): {
@@ -1266,7 +1267,7 @@ pub Result<Report, Error> start(str gitdir, str worktree, Verb verb, List<str> i
 }
 
 Result<bool, Error> write_text_in(str directory, str name, str text) {
-    match (fs.makedirs(directory)) {
+    match (GIT_repository.ensure_dir(directory)) {
         case Ok: {
         }
         case Err(_): {

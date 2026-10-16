@@ -88,6 +88,7 @@
 // the caller, which has a repository; this module has only the advertisement.
 
 import core.GIT_hash;
+import core.GIT_repository;
 import core.GIT_object;
 import fs;
 import io;
@@ -825,7 +826,7 @@ int be32(bytes data, int offset) {
 
 // Write `content` to `path` without ever leaving a half-written file there.
 Result<bool, io.Error> write_atomic(str path, bytes content) {
-    match (fs.makedirs(directory_of(path))) {
+    match (GIT_repository.ensure_dir(directory_of(path))) {
         case Ok: {
         }
         case Err(io.Error error): {

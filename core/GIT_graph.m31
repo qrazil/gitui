@@ -43,6 +43,7 @@
 //     `behind` from b and not a.
 
 import core.GIT_object;
+import core.GIT_pack;
 
 /// Why a graph question could not be answered. A missing or damaged commit
 /// (a shallow clone, a corrupt store) is `Object`; an id that is an object but
@@ -79,6 +80,8 @@ type Node {
 pub type Graph {
     pub str gitdir;
     Map<str, Node> nodes;
+    // the pack bytes read for the commits above, kept for the next one
+    GIT_pack.Cache packs = GIT_pack.Cache();
 }
 
 Result<Node, Error> Graph.node(str id) {
@@ -89,7 +92,7 @@ Result<Node, Error> Graph.node(str id) {
         case None: {
         }
     }
-    match (GIT_object.read(gitdir, id)) {
+    match (GIT_object.read_with(packs, gitdir, id)) {
         case Ok(GIT_object.Object object): {
             match (object.body) {
                 case Commit(GIT_object.Commit commit): {

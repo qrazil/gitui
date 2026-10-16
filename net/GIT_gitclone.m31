@@ -588,7 +588,7 @@ bool checkout_commit(GIT_gitcommon.Ctx ctx, str commit) {
     GIT_gitwrite.Idx idx = GIT_gitwrite.Idx();
     for (str path in paths) {
         GIT_gitwrite.Flat entry = flat.get(path).or(GIT_gitwrite.Flat(0, ""));
-        if (!GIT_gitwrite.write_blob_to(ctx.gitdir, ctx.root, path, entry.mode, entry.id)) {
+        if (!GIT_gitwrite.write_blob_with(store.packs, ctx.gitdir, ctx.root, path, entry.mode, entry.id)) {
             io.eprint("error: unable to write '" + path + "'");
             return false;
         }

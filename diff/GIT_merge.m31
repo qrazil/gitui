@@ -78,6 +78,7 @@
 //     email, date) first, then `user.name` / `user.email`.
 
 import core.GIT_checkout;
+import core.GIT_repository;
 import core.GIT_config;
 import diff.GIT_diff3;
 import core.GIT_graph;
@@ -86,6 +87,7 @@ import diff.GIT_gitdiff;
 import core.GIT_ident;
 import core.GIT_index;
 import core.GIT_object;
+import core.GIT_pack;
 import core.GIT_refs;
 import core.GIT_reflog;
 import core.GIT_revparse;
@@ -600,7 +602,13 @@ str short_id(str id) {
 }
 
 Result<GIT_object.Object, Error> read_object(str gitdir, str id) {
-    match (GIT_object.read(gitdir, id)) {
+    return read_object_with(GIT_pack.cache(gitdir), gitdir, id);
+}
+
+// `read_object` through a `GIT_pack.Cache`, so a merge that reads thousands of
+// trees reads each pack once instead of once per tree.
+Result<GIT_object.Object, Error> read_object_with(GIT_pack.Cache packs, str gitdir, str id) {
+    match (GIT_object.read_with(packs, gitdir, id)) {
         case Ok(GIT_object.Object object): {
             return Result<GIT_object.Object, Error>.Ok(object);
         }
@@ -645,11 +653,15 @@ pub Result<str, Error> write_commit(str gitdir, GIT_object.Commit commit) {
 
 /// The entries of the tree `id` (`""`: none).
 Result<List<GIT_object.Entry>, Error> read_tree(str gitdir, str id) {
+    return read_tree_with(GIT_pack.cache(gitdir), gitdir, id);
+}
+
+Result<List<GIT_object.Entry>, Error> read_tree_with(GIT_pack.Cache packs, str gitdir, str id) {
     List<GIT_object.Entry> none = [];
     if (id == "") {
         return Result<List<GIT_object.Entry>, Error>.Ok(none);
     }
-    GIT_object.Object object = read_object(gitdir, id)?;
+    GIT_object.Object object = read_object_with(packs, gitdir, id)?;
     match (object.body) {
         case Tree(List<GIT_object.Entry> entries): {
             return Result<List<GIT_object.Entry>, Error>.Ok(entries);
@@ -725,13 +737,17 @@ Result<Map<str, Side>, Error> side_map(List<GIT_object.Entry> entries) {
 
 /// Every non-directory a tree reaches, by full path.
 pub Result<Map<str, Side>, Error> flatten(str gitdir, str tree) {
+    return flatten_with(GIT_pack.cache(gitdir), gitdir, tree);
+}
+
+Result<Map<str, Side>, Error> flatten_with(GIT_pack.Cache packs, str gitdir, str tree) {
     Map<str, Side> out = {};
-    flatten_into(gitdir, tree, "", out)?;
+    flatten_into(packs, gitdir, tree, "", out)?;
     return Result<Map<str, Side>, Error>.Ok(out);
 }
 
-Result<bool, Error> flatten_into(str gitdir, str tree, str prefix, Map<str, Side> out) {
-    List<GIT_object.Entry> entries = read_tree(gitdir, tree)?;
+Result<bool, Error> flatten_into(GIT_pack.Cache packs, str gitdir, str tree, str prefix, Map<str, Side> out) {
+    List<GIT_object.Entry> entries = read_tree_with(packs, gitdir, tree)?;
     for (GIT_object.Entry entry in entries) {
         str name = "";
         match (entry.name.utf8()) {
@@ -747,7 +763,7 @@ Result<bool, Error> flatten_into(str gitdir, str tree, str prefix, Map<str, Side
             full = prefix + "/" + name;
         }
         if (entry.is_tree()) {
-            flatten_into(gitdir, entry.id, full, out)?;
+            flatten_into(packs, gitdir, entry.id, full, out)?;
         } else {
             out.set(full, Side(entry.mode, entry.id));
         }
@@ -767,6 +783,8 @@ type Ctx {
     // a path that was renamed on one side: its names (ours, base, theirs), for
     // the `HEAD:path` form of the markers
     Map<str, List<str>> names = {};
+    // the pack bytes this merge has read, shared by everything it reads
+    GIT_pack.Cache packs = GIT_pack.Cache();
 }
 
 /// Merge three trees (or commits; `""` is the empty tree). See the module header.
@@ -1021,9 +1039,9 @@ Result<RenamePlan, Error> plan_renames(Ctx context, str base_tree, str ours_tree
     if (!has_removed_and_added(store, base_tree, ours_tree) && !has_removed_and_added(store, base_tree, theirs_tree)) {
         return Result<RenamePlan, Error>.Ok(plan);
     }
-    Map<str, Side> base = flatten(context.gitdir, base_tree)?;
-    Map<str, Side> ours = flatten(context.gitdir, ours_tree)?;
-    Map<str, Side> theirs = flatten(context.gitdir, theirs_tree)?;
+    Map<str, Side> base = flatten_with(context.packs, context.gitdir, base_tree)?;
+    Map<str, Side> ours = flatten_with(context.packs, context.gitdir, ours_tree)?;
+    Map<str, Side> theirs = flatten_with(context.packs, context.gitdir, theirs_tree)?;
     Map<str, str> ours_renames = detect_file_renames(context.gitdir, base, ours);
     Map<str, str> theirs_renames = detect_file_renames(context.gitdir, base, theirs);
     if (ours_renames.size() == 0 && theirs_renames.size() == 0) {
@@ -1178,9 +1196,9 @@ RenamePlan move_into_renamed(Ctx context, RenamePlan plan, Map<str, Side> base_o
 
 // The merged tree of one directory, written; `""` when it came out empty.
 Result<str, Error> merge_directory(Ctx context, str prefix, str base_tree, str ours_tree, str theirs_tree) {
-    Map<str, Side> base = side_map(read_tree(context.gitdir, base_tree)?)?;
-    Map<str, Side> ours = side_map(read_tree(context.gitdir, ours_tree)?)?;
-    Map<str, Side> theirs = side_map(read_tree(context.gitdir, theirs_tree)?)?;
+    Map<str, Side> base = side_map(read_tree_with(context.packs, context.gitdir, base_tree)?)?;
+    Map<str, Side> ours = side_map(read_tree_with(context.packs, context.gitdir, ours_tree)?)?;
+    Map<str, Side> theirs = side_map(read_tree_with(context.packs, context.gitdir, theirs_tree)?)?;
     Map<str, bool> taken = {};
     List<str> names = [];
     for (str name in base.keys()) {
@@ -1389,10 +1407,10 @@ Result<bool, Error> merge_leaves(Ctx context, str full, str name, Side base_side
     } else {
         bytes base_content = [];
         if (base_side.mode != 0) {
-            base_content = read_object(context.gitdir, base_side.id)?.raw;
+            base_content = read_object_with(context.packs, context.gitdir, base_side.id)?.raw;
         }
-        bytes ours_content = read_object(context.gitdir, ours_side.id)?.raw;
-        bytes theirs_content = read_object(context.gitdir, theirs_side.id)?.raw;
+        bytes ours_content = read_object_with(context.packs, context.gitdir, ours_side.id)?.raw;
+        bytes theirs_content = read_object_with(context.packs, context.gitdir, theirs_side.id)?.raw;
         if (is_binary(base_content) || is_binary(ours_content) || is_binary(theirs_content)) {
             id = ours_side.id;
             is_content_conflict = true;
@@ -2504,7 +2522,7 @@ Result<GIT_index.Entry, Error> put_file(str gitdir, str worktree, str path, Side
     bytes content = read_object(gitdir, want.id)?.raw;
     str parent = parent_directory(full);
     if (parent != "") {
-        match (fs.makedirs(parent)) {
+        match (GIT_repository.ensure_dir(parent)) {
             case Ok: {
             }
             case Err(_): {

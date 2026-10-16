@@ -5,6 +5,7 @@ import io;
 import os;
 import fs;
 import core.GIT_object;
+import core.GIT_pack;
 import core.GIT_refs;
 import core.GIT_index;
 import core.GIT_status;
@@ -409,6 +410,7 @@ pub bool reset_hard_tree(GIT_gitcommon.Ctx ctx, GIT_gitwrite.Idx idx, Map<str, G
     List<str> paths = target.keys();
     paths.sort();
     Map<str, GIT_gitwrite.Flat> no_index = {};
+    GIT_pack.Cache packs = GIT_pack.cache(ctx.gitdir);
     for (str path in paths) {
         GIT_gitwrite.Flat flat = target.get(path).or(GIT_gitwrite.Flat(0, ""));
         GIT_index.Entry old = idx.entries.get(path).or(GIT_gitwrite.blank_entry());
@@ -416,7 +418,7 @@ pub bool reset_hard_tree(GIT_gitcommon.Ctx ctx, GIT_gitwrite.Idx idx, Map<str, G
         if (is_same && GIT_gitadd.file_is(ctx.gitdir, ctx.root, path, flat, is_filemode_on, no_index, false)) {
             continue;
         }
-        if (!GIT_gitwrite.write_blob_to(ctx.gitdir, ctx.root, path, flat.mode, flat.id)) {
+        if (!GIT_gitwrite.write_blob_with(packs, ctx.gitdir, ctx.root, path, flat.mode, flat.id)) {
             io.eprint("error: unable to write '" + path + "'");
             return false;
         }

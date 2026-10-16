@@ -3,6 +3,7 @@
 // docs/GIT-COMPAT.md for what differs.
 
 import io;
+import core.GIT_repository;
 import os;
 import fs;
 import core.GIT_object;
@@ -416,7 +417,7 @@ pub int run_rebase(str start, List<str> overrides, List<str> argv) {
         }
         str text = GIT_rebase_todo.editor_text(ctx.gitdir, todo, range, onto);
         str path = fs.join(ctx.gitdir, "rebase-merge");
-        match (fs.makedirs(path)) {
+        match (GIT_repository.ensure_dir(path)) {
             case Ok: {
             }
             case Err(_): {

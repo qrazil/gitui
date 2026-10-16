@@ -870,7 +870,7 @@ str ref_path(str gitdir, str name) {
 
 Result<bool, Error> write_ref(str gitdir, str name, str id) {
     str path = ref_path(gitdir, name);
-    match (fs.makedirs(directory_of(path))) {
+    match (GIT_repository.ensure_dir(directory_of(path))) {
         case Ok: {
         }
         case Err: {
@@ -1213,7 +1213,7 @@ Result<bool, Error> write_untracked(str gitdir, str worktree, str path, GIT_udif
     GIT_object.Object object = read_object(gitdir, leaf.id)?;
     content = object.raw;
     str full = fs.join(worktree, path);
-    match (fs.makedirs(directory_of(full))) {
+    match (GIT_repository.ensure_dir(directory_of(full))) {
         case Ok: {
         }
         case Err: {

@@ -123,3 +123,14 @@ str gitfile(str tree, str path) {
         }
     }
 }
+
+/// `fs.makedirs`, after one `stat` has said the directory is already there:
+/// `makedirs` asks about every ancestor from `/` down (ten calls for a path
+/// eight deep), and a checkout, an `add` or a merge asks once for each file
+/// it writes.
+pub Result<bool, io.Error> ensure_dir(str path) {
+    if (fs.is_directory(path)) {
+        return Result<bool, io.Error>.Ok(true);
+    }
+    return fs.makedirs(path);
+}

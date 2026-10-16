@@ -387,7 +387,7 @@ pub Result<bool, Error> append(str gitdir, str ref, str old, str new, GIT_object
         return Result<bool, Error>.Err(Error.BadValue);
     }
     str path = log_path(gitdir, ref);
-    match (fs.makedirs(parent_of(path))) {
+    match (GIT_repository.ensure_dir(parent_of(path))) {
         case Ok: {
         }
         case Err(_): {

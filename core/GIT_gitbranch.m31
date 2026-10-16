@@ -1718,7 +1718,7 @@ int branch_move(GIT_gitcommon.Ctx ctx, GIT_gitwrite.HeadInfo head, List<str> wor
         }
     }
     if (old_log != "" || GIT_reflog.should_log(ctx.gitdir, new_full)) {
-        match (fs.makedirs(GIT_gitwrite.dirname(new_log_path))) {
+        match (GIT_repository.ensure_dir(GIT_gitwrite.dirname(new_log_path))) {
             case Ok(_): {
             }
             case Err(_): {

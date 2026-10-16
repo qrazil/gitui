@@ -563,7 +563,7 @@ int remote_rename(GIT_gitcommon.Ctx ctx, List<str> argv) {
         }
         delete_ref_and_log(ctx.gitdir, ref);
         if (has_log) {
-            match (fs.makedirs(GIT_gitwrite.dirname(log_new))) {
+            match (GIT_repository.ensure_dir(GIT_gitwrite.dirname(log_new))) {
                 case Ok(_): {
                 }
                 case Err(_): {

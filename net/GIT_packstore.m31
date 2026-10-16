@@ -184,7 +184,7 @@ pub Result<int, str> store(str gitdir, bytes pack, int unpack_limit) {
         return Result<int, str>.Ok(count);
     }
     str directory = fs.join(fs.join(GIT_repository.common(gitdir), "objects"), "pack");
-    match (fs.makedirs(directory)) {
+    match (GIT_repository.ensure_dir(directory)) {
         case Ok(_): {
         }
         case Err(_): {
