@@ -288,10 +288,6 @@ type Huff {
     int left = 0;
 }
 
-/// Codes this short are looked up, not walked: `fast[next 9 bits]` is
-/// `symbol * 16 + length`, or -1 when the code is longer (or there is none).
-const int FAST_BITS = 9;
-
 /// The next symbol, or -1 if the bits match no code. A code of up to
 /// `FAST_BITS` bits is one table lookup on the next bits. A longer one is
 /// walked the way §3.2.2 defines the code, a bit at a time: `first` is the
@@ -346,6 +342,10 @@ int Huff.decode(Bits bits) {
     }
     return result;
 }
+
+/// Codes this short are looked up, not walked: `fast[next 9 bits]` is
+/// `symbol * 16 + length`, or -1 when the code is longer (or there is none).
+const int FAST_BITS = 9;
 
 /// The code `lengths[off .. off+n]` describes. `want_fast` also builds the
 /// lookup table for the short codes, which pays for itself only when there

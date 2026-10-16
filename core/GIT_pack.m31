@@ -193,18 +193,6 @@ pub type Cache {
     pub Map<str, bytes> heads = {};
 }
 
-/// How many lookups a cache serves by reading just the parts of the `.idx`
-/// and `.pack` files each one needs. A command that reads a handful of
-/// objects (and every `GIT_object.read`, which makes a fresh cache per call)
-/// never reads a pack whole; one that reads more than this has shown that it
-/// will read most of the pack anyway, and from then on each file is read once,
-/// whole, and kept -- as every cache did before.
-const int WHOLE_AFTER = 24;
-
-/// The first read of a pack's entry: big enough for almost every commit and
-/// tree. A longer entry is read again with a window four times the size.
-const int WINDOW = 16384;
-
 bool Cache.is_whole(str path) {
     return lookups > WHOLE_AFTER || files.contains(path);
 }
@@ -464,6 +452,17 @@ pub List<str> Cache.with_prefix(str gitdir, str prefix, int limit) {
     }
     return out;
 }
+
+/// How many lookups a cache serves by reading just the parts of the `.idx`
+/// and `.pack` files each one needs. A command that reads a handful of
+/// objects (and every `GIT_object.read`, which makes a fresh cache per call)
+/// never reads a pack whole; one that reads more than this has shown that it
+/// will read most of the pack anyway, and from then on each file is read once,
+/// whole, and kept -- as every cache did before.
+const int WHOLE_AFTER = 24;
+/// The first read of a pack's entry: big enough for almost every commit and
+/// tree. A longer entry is read again with a window four times the size.
+const int WINDOW = 16384;
 
 /// An empty cache for `gitdir`'s packs (they are listed on first use).
 pub Cache cache(str gitdir) {
