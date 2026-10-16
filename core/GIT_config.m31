@@ -76,6 +76,7 @@ import fs;
 import io;
 import os;
 import random;
+import core.GIT_env;
 import core.GIT_ignore;
 import core.GIT_repository;
 
@@ -511,13 +512,12 @@ str dirname(str path) {
     return path.substr(0, cut - 1);
 }
 
-// `path` against `$PWD` when it is relative, with `.`, `..` and empty
-// segments folded away. There is no `realpath`, so a symlinked directory is
-// compared by the name it was reached through.
+// `path` against the physical current directory when it is relative, with
+// `.`, `..` and empty segments folded away.
 str absolute(str path) {
     str full = path;
     if (!full.starts_with("/")) {
-        full = fs.join(os.env("PWD").or("/"), full);
+        full = fs.join(GIT_env.here(), full);
     }
     List<str> kept = [];
     for (str part in full.split("/")) {

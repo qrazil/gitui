@@ -3,8 +3,11 @@
 // m31git they were `GITUI_<NAME>`, and the old spelling is still read when the
 // new one is not set.
 //
+//   GIT_env.here()                -> str           the physical current directory (`.` resolved), else $PWD, else "/"
 //   GIT_env.get("HTTP_CA_FILE")   -> Option<str>   $M31GIT_HTTP_CA_FILE, else $GITUI_HTTP_CA_FILE
 import os;
+import fs;
+import io;
 
 pub Option<str> get(str name) {
     match (os.env("M31GIT_" + name)) {
@@ -15,4 +18,26 @@ pub Option<str> get(str name) {
         }
     }
     return os.env("GITUI_" + name);
+}
+
+/// The physical current directory, as git's getcwd: `.` resolved first, because
+/// a parent that does not export `$PWD` leaves a stale one; `$PWD` (resolved,
+/// then as given) only when `.` cannot be, "/" when there is none.
+pub str here() {
+    match (fs.realpath(".")) {
+        case Ok(str dir): {
+            return dir;
+        }
+        case Err(io.Error unknown): {
+        }
+    }
+    str pwd = os.env("PWD").or("/");
+    match (fs.realpath(pwd)) {
+        case Ok(str real): {
+            return real;
+        }
+        case Err(io.Error failed): {
+        }
+    }
+    return pwd;
 }

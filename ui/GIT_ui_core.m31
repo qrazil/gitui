@@ -46,6 +46,7 @@ import fs;
 import os;
 import core.GIT_branches;
 import core.GIT_config;
+import core.GIT_env;
 import core.GIT_checkout;
 import core.GIT_log;
 import diff.GIT_merge;
@@ -586,13 +587,13 @@ pub void Core.refresh() {
 }
 
 /// The working tree's path as far as it is known: as given when absolute,
-/// else under `$PWD` (the shell's idea of the current directory), else as
+/// else under the physical current directory, else as
 /// given. For the overview, and `repo_name`.
 pub str Core.repo_path() {
     if (worktree.starts_with("/")) {
         return worktree;
     }
-    str here = os.env("PWD").or("");
+    str here = GIT_env.here();
     if (here == "" || !here.starts_with("/")) {
         return worktree;
     }
