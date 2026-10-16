@@ -5,7 +5,7 @@
 #
 # Picks the asset for this OS and CPU (Linux x86-64 / aarch64, macOS arm64;
 # on a musl system -- Alpine -- the -musl Linux asset, falling back to the
-# glibc one for a release that predates it; releases up to v0.20.0 name their
+# glibc one for a release that predates it; releases up to v0.22.0 name their
 # assets gitui-*, those are found too; the download is checked against the
 # release's SHA256SUMS when there is one),
 # unpacks it under $PREFIX/opt/m31git/<version> and links the programs into
@@ -20,7 +20,7 @@ set -eu
 
 REPO=m31git
 ASSET=m31git         # release asset prefix: <ASSET>-<os>-<arch>.tar.gz
-OLD_ASSET=gitui      # the prefix of releases up to v0.20.0
+OLD_ASSET=gitui      # the prefix of releases up to v0.22.0
 BINS="mgit 1git"          # programs linked into $PREFIX/bin
 PREFIX=${PREFIX:-$HOME/.local}
 OPT="$PREFIX/opt/$REPO"
@@ -73,7 +73,7 @@ if [ -z "$libc" ] && [ "$os" = linux ]; then
 fi
 base="https://github.com/qrazil/$REPO/releases/download/$VERSION"
 # Asset names: m31git-<os>-<arch>[-musl].tar.gz since 0.21.0; releases up to
-# v0.20.0 name them gitui-<os>-<arch>[-musl].tar.gz. Tried in this order, the
+# v0.22.0 name them gitui-<os>-<arch>[-musl].tar.gz. Tried in this order, the
 # first one that exists wins: for musl the musl assets (new, then old), then
 # the glibc ones (a release that predates the musl assets; the glibc build
 # will not run on musl without gcompat, but say so and carry on).

@@ -310,12 +310,12 @@ fi
 
 # --- mgit under a pty ---------------------------------------------------------------
 
-if [ ! -x "$WORK/gitui" ]; then
-    bash scripts/build.sh -o "$WORK/gitui" >"$WORK/sbs_build.log" 2>&1 \
+if [ ! -x "$WORK/mgit" ]; then
+    bash scripts/build.sh -o "$WORK/mgit" >"$WORK/sbs_build.log" 2>&1 \
         || bad "sbs: scripts/build.sh" "$(tail -5 "$WORK/sbs_build.log")"
 fi
-if [ -x "$WORK/gitui" ] && command -v python3 >/dev/null; then
-    if out=$(python3 tests/pty_sbs.py "$WORK/gitui" "$WORK/ptysbs" 2>&1); then
+if [ -x "$WORK/mgit" ] && command -v python3 >/dev/null; then
+    if out=$(python3 tests/pty_sbs.py "$WORK/mgit" "$WORK/ptysbs" 2>&1); then
         note "mgit side-by-side pty: $(echo "$out" | grep -c '^ok') checks"
     else
         bad "mgit side-by-side pty" "$(echo "$out" | grep -v '^ok' | head -60)"

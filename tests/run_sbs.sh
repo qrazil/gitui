@@ -4,7 +4,7 @@
 #   M31_ROOT=/path/to/m31 LANGC=/path/to/m31c bash tests/run_sbs.sh
 #   UPDATE_GOLDEN=1 ... bash tests/run_sbs.sh      # rewrite tests/golden/sbs/
 #
-# The mgit and 1git checks use `$WORK/gitui` and `$WORK/1git`; point
+# The mgit and 1git checks use `$WORK/mgit` and `$WORK/1git`; point
 # `SBS_MGIT` / `SBS_1GIT` at binaries you already built to skip building them.
 set -uo pipefail
 cd "$(dirname "$0")/.."
@@ -39,7 +39,7 @@ build() {
     fi
     return 0
 }
-[ -n "${SBS_MGIT:-}" ] && cp "$SBS_MGIT" "$WORK/gitui"
+[ -n "${SBS_MGIT:-}" ] && cp "$SBS_MGIT" "$WORK/mgit"
 [ -n "${SBS_1GIT:-}" ] && cp "$SBS_1GIT" "$WORK/1git"
 source tests/test_sbs.sh
 echo "$pass passed, $fail failed"

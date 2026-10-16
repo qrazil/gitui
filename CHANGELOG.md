@@ -3,6 +3,21 @@
 Each release's changes in one place (the details are in `README.md` and
 `docs/GIT-COMPAT.md`).
 
+## 0.23.0
+
+- **The repository is qrazil/m31git** (it was qrazil/gitui); the programs stay `mgit` and `1git`.
+  0.21.0 was skipped. Release assets are now `m31git-<os>-<arch>[-musl].tar.gz`
+  (same layout) with a `SHA256SUMS` file; `install.sh` takes the new names, still
+  finds the `gitui-` assets of releases up to v0.22.0, and verifies the checksum
+  when the release has one.
+- The entry file is `mgit.m31` (was `gitui.m31`), `tests/test_gitui.sh` is
+  `tests/test_mgit.sh`; `deps` names the project `m31git`.
+- Environment variables are `M31GIT_*` (was `GITUI_*`): `HTTP_CA_FILE`, `HTTP_USER`,
+  `HTTP_PASSWORD`, `SSH_IDENTITY`, `SSH_KNOWN_HOSTS`, `SYNTAX`, `MOUSE`. Git config keys are
+  `mgit.syntax`, `mgit.collapsed`, `mgit.mouse` (was `gitui.*`). The old names are
+  still read when the new ones are unset. The user agent is `1git/0.23.0`.
+- Housekeeping: `__pycache__/` and `*.pyc` are untracked and ignored.
+
 ## 0.22.0
 
 - **mgit: side-by-side diff.** `D` in the diff view, the commit view and the stash

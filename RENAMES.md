@@ -13,14 +13,14 @@ or removed. Decisions:
   them would touch every import for nothing. `GIT_env` is new (core).
 - Release assets are `m31git-<os>-<arch>[-musl].tar.gz` (layout unchanged:
   `1git`, `mgit`, docs, NOTES.txt) plus `SHA256SUMS`. `install.sh` prefers
-  these, falls back to the `gitui-` names of releases up to v0.20.0, and
+  these, falls back to the `gitui-` names of releases up to v0.22.0, and
   verifies the checksum when the release has a `SHA256SUMS`.
 - Environment: `GITUI_HTTP_CA_FILE`, `GITUI_HTTP_USER`, `GITUI_HTTP_PASSWORD`,
-  `GITUI_SSH_IDENTITY`, `GITUI_SSH_KNOWN_HOSTS`, `GITUI_SYNTAX` are now
+  `GITUI_SSH_IDENTITY`, `GITUI_SSH_KNOWN_HOSTS`, `GITUI_SYNTAX`, `GITUI_MOUSE` are now
   `M31GIT_<same>`; the old names are still read when the new one is unset
   (`GIT_env.get`).
-- Git config: `gitui.syntax` and `gitui.collapsed` are now `mgit.syntax` and
-  `mgit.collapsed`; the old keys are still read, and `mgit` drops an old
+- Git config: `gitui.syntax`, `gitui.collapsed` and `gitui.mouse` are now `mgit.syntax`, `mgit.collapsed`,
+  `mgit.mouse`; the old keys are still read, and `mgit` drops an old
   `gitui.collapsed` when it writes the new one. The in-gitdir scratch file
   `GITUI_BRANCH_NAME` is `MGIT_BRANCH_NAME`.
 - User agent and the wire `agent=` capability are `1git/0.23.0` over HTTP and
