@@ -119,12 +119,23 @@ match (parser.parse(argv.slice(1, argv.size()))) {
 int git_spelling(List<str> argv) {
     // git works on the physical directory (getcwd), so a work tree reached
     // through a link (macOS: /tmp, /var) is recorded by its real path.
+    // `.` first, not `$PWD`: a parent that does not export it (a script
+    // language's subprocess call, a make rule, an editor) leaves a stale
+    // one, and every command then ran in -- and, for `add`, `commit`,
+    // `switch`, `merge`, changed -- the parent's directory.
     str cwd = os.env("PWD").or("/");
-    match (fs.realpath(cwd)) {
-        case Ok(str real): {
-            cwd = real;
+    match (fs.realpath(".")) {
+        case Ok(str here): {
+            cwd = here;
         }
-        case Err(io.Error failed): {
+        case Err(io.Error unknown): {
+            match (fs.realpath(cwd)) {
+                case Ok(str real): {
+                    cwd = real;
+                }
+                case Err(io.Error failed): {
+                }
+            }
         }
     }
     List<str> overrides = [];

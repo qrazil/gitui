@@ -42,6 +42,7 @@ def run(cmd, cwd, env, inp=None):
 
 
 def sh(cmd, cwd, env, inp=None, check=True):
+    env = dict(env, PWD=cwd)
     p = subprocess.run(cmd, cwd=cwd, env=env, input=inp, stdout=subprocess.PIPE,
                        stderr=subprocess.PIPE)
     if check and p.returncode != 0:
@@ -334,6 +335,9 @@ def main():
     rows = []
     for size in args.sizes.split(","):
         repo = repos[size]
+        # the cases below add, commit, switch and merge: only ever in our own copy
+        if not os.path.realpath(repo).startswith(os.path.realpath(work) + os.sep):
+            sys.exit("refusing to run mutating cases in %s, outside --work" % repo)
         nfiles = len([f for f in sh([git, "ls-files"], repo, env).stdout.split(b"\n") if f])
         sys.stderr.write("== %s (%d files)\n" % (size, nfiles))
         sh([git, "checkout", "-q", "-f", "main"], repo, env, check=False)
