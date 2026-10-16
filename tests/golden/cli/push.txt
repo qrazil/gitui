@@ -1,0 +1,24 @@
+usage: 1git -push [options] [<REF>...]
+
+send commits and refs to a remote
+
+arguments:
+  [<REF>...]             what to send: a branch, SRC:DST, or a tag (default: the current branch)
+
+options:
+       --help            show this help
+       --to REMOTE       where to send it (default: the upstream remote, else origin)
+       --for BRANCH      ask Gerrit for review of the commit, as refs/for/BRANCH
+       --topic NAME      with --for, the Gerrit topic
+  --t, --track           make the pushed branch track its remote counterpart
+  --f, --force           overwrite the remote branch, but only if it is where you last saw it
+       --overwrite       overwrite the remote branch whatever is on it
+       --delete          delete these refs on the remote
+  --a, --all             send every branch
+       --tags            send every tag
+       --follow-tags     also send the annotated tags that point at what is sent
+       --atomic          all or none of the refs
+  --o, --option TEXT...  a push option for the server
+       --dry-run         show what would be sent
+  --q, --quiet           print nothing
+  --v, --verbose         say more

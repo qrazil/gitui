@@ -1,0 +1,15 @@
+usage: 1git -remove [options] [<PATH>...]
+
+stop tracking files, and delete them
+
+arguments:
+  [<PATH>...]        files to remove
+
+options:
+       --help        show this help
+       --keep-files  remove from the index only, keep the files
+  --r, --recursive   allow directories
+  --f, --force       remove files that have changes
+       --dry-run     show what would be removed
+  --q, --quiet       print nothing
+       --missing-ok  succeed when nothing matches

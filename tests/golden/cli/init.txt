@@ -1,0 +1,13 @@
+usage: 1git -init [options] [<DIR>]
+
+start a repository
+
+arguments:
+  [<DIR>]                           where (default: here)
+
+options:
+       --help                       show this help
+       --bare                       no work tree, just the repository
+  --b, --branch NAME                name the first branch this
+       --object-format sha1|sha256  the hash the repository uses
+  --q, --quiet                      print nothing

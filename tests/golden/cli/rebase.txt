@@ -1,0 +1,26 @@
+usage: 1git -rebase [options] [<REV>] [<REV>]
+
+replay commits on top of another base
+
+arguments:
+  [<REV>]                    the new base (default: the upstream of the current branch)
+  [<REV>]                    the branch to rebase (default: the current one)
+
+options:
+       --help                show this help
+       --onto REV            put the commits on this base instead of UPSTREAM
+       --root                rebase every commit, including the first
+  --i, --interactive         edit the list of commits first
+       --autosquash          fold fixup! and squash! commits into their targets
+       --autostash           stash local changes and bring them back afterwards
+       --keep-base           keep the fork point, whatever UPSTREAM is now
+       --update-refs         move branches that point into the rebased commits
+       --replay              replay the commits even when nothing changes
+  --x, --exec COMMAND...     run this command after each commit
+       --continue            go on after resolving conflicts
+       --skip                leave out the commit that conflicts
+       --abort               give up and go back
+       --quit                forget the rebase but keep the work tree as it is
+       --edit-todo           edit the list of commits that remain
+       --show-current-patch  show the commit being applied
+  --q, --quiet               print only errors

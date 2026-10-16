@@ -3,6 +3,36 @@
 Each release's changes in one place (the details are in `README.md` and
 `docs/GIT-COMPAT.md`).
 
+## 0.24.0
+
+- **Breaking: 1git and mgit have a command line of their own** (`docs/CLI.md`):
+  Oro's args grammar instead of git's argv. One dash is a command, two dashes an
+  option, anything else data; several commands share a line and run in order
+  (the whole line is validated first, the first failure ends it); `--help` per
+  command; `--completions bash|zsh|fish`; exit status 0, 1 (a command failed) or 2
+  (the line was not understood, nothing ran). `1git log --oneline -n 5` is
+  `1git -log --oneline --max 5`; `-switch`, `-restore` and `-reset` replace
+  `switch`/`checkout`/`restore`/`reset`; `stash`, `remote` and `worktree`
+  subcommands are `-stash-pop`, `-remote-add`, `-worktree-add`, ...; `ls-remote` is
+  `-remote-refs`; `push` takes `--to REMOTE` and Gerrit's `--for BRANCH --topic T`;
+  `--force` pushes with a lease and `--overwrite` without; `--no-x` spellings are
+  values (`--edit off`, `--renames off`) or named for what they do (`--skip-hooks`).
+  New: `-fetch --pull-request N` and `--merge-request N`, `-migrate`.
+  The table is `docs/MIGRATING-FROM-GIT.md`.
+- Repository, protocol and output compatibility with git is unchanged; argv
+  compatibility is no longer a goal (`docs/GIT-COMPAT.md`).
+- **Transition: git-style arguments still work in 0.24.0**, rewritten into the new
+  grammar with a warning on stderr (`1git: git-style arguments are deprecated; use
+  '1git -log --max 5' (see 1git --help)`); a line with an option 1git dropped runs as
+  git would. The shim is deleted in 0.25.0.
+- mgit: `mgit [PATH] [--mouse on|off] [--help|--version|--completions SHELL]`;
+  `--mouse` overrides `M31GIT_MOUSE` and `mgit.mouse`. Exit status 1 when there is no
+  repository or no terminal, 2 for a bad command line.
+- Needs m31 0.6.0 (`lib/args` with `version`, `completions`, `parse_or_exit`).
+- Tests: `tests/test_cli.sh` (`tests/run_cli.sh` alone), `tests/cli_cases.txt` (every
+  option, both directions), `tests/pty_cli.py`; the `scripts/compare_*.sh` oracles call
+  1git through the table (`scripts/lib_cli.sh`) and compare with git as before.
+
 ## 0.23.0
 
 - **The repository is qrazil/m31git** (it was qrazil/gitui); the programs stay `mgit` and `1git`.

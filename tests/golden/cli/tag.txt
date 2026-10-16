@@ -1,0 +1,25 @@
+usage: 1git -tag [options] [<PATTERN>...]
+
+list, create and delete tags
+
+arguments:
+  [<PATTERN>...]          list only tags matching these
+
+options:
+       --help             show this help
+       --create NAME      create a tag
+       --from REV         what --create tags (default: HEAD)
+  --m, --message TEXT...  an annotated tag with this message: each text is a paragraph
+  --F, --file FILE        an annotated tag with the message read from a file
+  --a, --annotate         an annotated tag, with the message from the editor
+       --delete NAME...   delete tags
+  --f, --force            replace an existing tag
+       --contains REV     only tags that contain this commit
+       --without REV      only tags that do not contain this commit
+       --merged REV       only tags merged into this commit
+       --unmerged REV     only tags not merged into this commit
+       --points-at REV    only tags at this commit
+       --sort KEY         order by this key (refname, -refname, version:refname, ...)
+       --format FORMAT    print each tag in this format
+  --n, --lines N          with the list, show this many lines of each annotation
+  --i, --ignore-case      sort and filter without regard to case

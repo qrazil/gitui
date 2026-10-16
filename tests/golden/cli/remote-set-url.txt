@@ -1,0 +1,14 @@
+usage: 1git -remote-set-url [options] <NAME> <URL> [<OLD>]
+
+change the URL of a remote
+
+arguments:
+  <NAME>         the remote
+  <URL>          the new URL
+  [<OLD>]        with --add or --delete, which URL; otherwise replace only this one
+
+options:
+       --help    show this help
+       --push    change the URL pushes go to
+       --add     add a URL instead of replacing
+       --delete  delete the URLs that match instead of replacing

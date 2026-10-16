@@ -245,39 +245,39 @@ if [ -d "$sbs_work/text/.git" ]; then
     if [ -x "$WORK/1git" ]; then
         cd "$sbs_work/text" || exit 1
         # without the flag: git's own bytes, whatever the terminal says
-        COLUMNS=60 "$WORK/1git" diff HEAD~1 HEAD -M >"$sbs_work/out/1git-plain" 2>&1
+        COLUMNS=60 "$WORK/1git" -diff HEAD~1 HEAD --renames on >"$sbs_work/out/1git-plain" 2>&1
         git diff HEAD~1 HEAD -M >"$sbs_work/out/git-plain" 2>&1
         if cmp -s "$sbs_work/out/1git-plain" "$sbs_work/out/git-plain"; then
             note "1git diff: without --side-by-side the bytes are git's"
         else
             bad "1git diff: default output changed" "$(diff "$sbs_work/out/git-plain" "$sbs_work/out/1git-plain" | head)"
         fi
-        "$WORK/1git" diff HEAD~1 HEAD -M --side-by-side --width=100 >"$sbs_work/out/1git-sbs" 2>&1
+        "$WORK/1git" -diff HEAD~1 HEAD --renames on --side-by-side --width 100 >"$sbs_work/out/1git-sbs" 2>&1
         "$sbs_bin" text 100 "$sbs_work/out/git-plain" >"$sbs_work/out/want-sbs"
         if cmp -s "$sbs_work/out/1git-sbs" "$sbs_work/out/want-sbs"; then
             note "1git diff --side-by-side is git's diff laid out in 100 columns"
         else
             bad "1git diff --side-by-side" "$(diff "$sbs_work/out/want-sbs" "$sbs_work/out/1git-sbs" | head -20)"
         fi
-        "$WORK/1git" diff HEAD~1 HEAD -M -y --width=100 >"$sbs_work/out/1git-y" 2>&1
+        "$WORK/1git" -diff HEAD~1 HEAD --renames on --y --width 100 >"$sbs_work/out/1git-y" 2>&1
         if cmp -s "$sbs_work/out/1git-y" "$sbs_work/out/1git-sbs"; then
             note "1git diff -y is --side-by-side"
         else
             bad "1git diff -y" "$(diff "$sbs_work/out/1git-sbs" "$sbs_work/out/1git-y" | head)"
         fi
-        COLUMNS=100 "$WORK/1git" diff HEAD~1 HEAD -M --side-by-side >"$sbs_work/out/1git-cols" 2>&1
+        COLUMNS=100 "$WORK/1git" -diff HEAD~1 HEAD --renames on --side-by-side >"$sbs_work/out/1git-cols" 2>&1
         if cmp -s "$sbs_work/out/1git-cols" "$sbs_work/out/1git-sbs"; then
             note "1git diff --side-by-side takes its width from \$COLUMNS"
         else
             bad "1git diff --side-by-side: \$COLUMNS" "$(diff "$sbs_work/out/1git-sbs" "$sbs_work/out/1git-cols" | head)"
         fi
-        COLUMNS=60 "$WORK/1git" diff HEAD~1 HEAD -M --side-by-side --width=100 >"$sbs_work/out/1git-w" 2>&1
+        COLUMNS=60 "$WORK/1git" -diff HEAD~1 HEAD --renames on --side-by-side --width 100 >"$sbs_work/out/1git-w" 2>&1
         if cmp -s "$sbs_work/out/1git-w" "$sbs_work/out/1git-sbs"; then
             note "1git diff --side-by-side: --width beats \$COLUMNS"
         else
             bad "1git diff --side-by-side: --width" "$(diff "$sbs_work/out/1git-sbs" "$sbs_work/out/1git-w" | head)"
         fi
-        "$WORK/1git" diff HEAD~1 HEAD -M --side-by-side --width=100 --color=always >"$sbs_work/out/1git-color" 2>&1
+        "$WORK/1git" -diff HEAD~1 HEAD --renames on --side-by-side --width 100 --color always >"$sbs_work/out/1git-color" 2>&1
         git diff HEAD~1 HEAD -M --color=never >"$sbs_work/out/git-never"
         "$sbs_bin" text 100 "$sbs_work/out/git-never" color >"$sbs_work/out/want-color" 2>&1
         # the test harness shows ESC as <ESC>
@@ -292,13 +292,13 @@ if [ -d "$sbs_work/text/.git" ]; then
         else
             note "1git diff --side-by-side to a pipe: no escapes unless --color=always"
         fi
-        "$WORK/1git" show HEAD -M --side-by-side --width=100 >"$sbs_work/out/1git-show" 2>&1
+        "$WORK/1git" -show HEAD --renames on --side-by-side --width 100 >"$sbs_work/out/1git-show" 2>&1
         if grep -q '^commit ' "$sbs_work/out/1git-show" && grep -q ' + ' "$sbs_work/out/1git-show"; then
             note "1git show --side-by-side keeps the commit header and lays out the diff"
         else
             bad "1git show --side-by-side" "$(head -20 "$sbs_work/out/1git-show")"
         fi
-        "$WORK/1git" diff --side-by-side --width=0 >/dev/null 2>"$sbs_work/out/1git-w0"
+        "$WORK/1git" -diff --side-by-side --width 0 >/dev/null 2>"$sbs_work/out/1git-w0"
         if [ -s "$sbs_work/out/1git-w0" ]; then
             note "1git diff --width=0 is refused"
         else

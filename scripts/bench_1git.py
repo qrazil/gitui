@@ -337,6 +337,16 @@ def fmt(t):
     return "%.2f s" % t
 
 
+def to_one_git(one, argv):
+    """git's words as 1git's (`1git -migrate --nul`), so the timed run is the new
+    command line and not the transition shim; unchanged when there is no rewrite."""
+    data = b"".join(a.encode() + b"\0" for a in argv)
+    proc = subprocess.run([one, "-migrate", "--nul"], input=data, capture_output=True)
+    if proc.returncode != 0:
+        return argv
+    return [w.decode() for w in proc.stdout.split(b"\0")[:-1]]
+
+
 def bench(argv, repo, env, runs, warmup, per):
     ts = []
     first = None
@@ -424,9 +434,11 @@ def main():
             for tool, exe in (("git", git), ("1git", one)):
                 av = argv
                 if c.name.startswith("startup") and tool == "1git":
-                    av = ["--help"]      # 1git has no --version; --help is its trivial path
+                    av = ["--version"]
                 elif tool == "1git" and c.one:
                     av = [readme if a == "README.md" else a for a in c.one]
+                elif tool == "1git":
+                    av = to_one_git(one, argv)
                 ts, first = bench([exe] + av, repo, env, runs, warmup, c.per)
                 row[tool] = ts
                 row[tool + "_rc"] = first.returncode

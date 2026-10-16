@@ -734,7 +734,7 @@ if wanted checkout; then
     case_ "checkout: --ours" fx_conflict ':' 'G checkout --ours f.txt'
     case_ "checkout: --theirs" fx_conflict ':' 'G checkout --theirs f.txt'
     case_ "checkout: unmerged path" fx_conflict ':' 'G checkout -- f.txt'
-    case_ "checkout: unmerged tree refuses a switch" fx_conflict 'git branch other2 other' 'G checkout other2'
+    case_ "switch: an unmerged tree refuses a switch" fx_conflict 'git branch other2 other' 'G switch other2'
     case_ "checkout: remote branch is guessed" fx_base 'git update-ref refs/remotes/origin/feature HEAD~1; git remote add origin /nowhere' 'G checkout feature'
     case_ "checkout: -b from a remote branch tracks it" fx_base 'git update-ref refs/remotes/origin/feature HEAD~1; git remote add origin /nowhere' 'G checkout -b mine origin/feature'
     case_ "checkout: --track" fx_base 'git update-ref refs/remotes/origin/feature HEAD~1; git remote add origin /nowhere' 'G checkout --track origin/feature'

@@ -1,0 +1,9 @@
+usage: 1git -rev-parse <REV>
+
+the object names a revision resolves to
+
+arguments:
+  <REV>        a revision: a ref, an object name, HEAD~2, main^{tree}, v1:path, A..B, ...
+
+options:
+       --help  show this help

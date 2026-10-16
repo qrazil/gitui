@@ -91,7 +91,7 @@
 -log --merge-diff dense
 = git log --cc
 -log --merge-diff first-parent
-= git log --diff-merges=first-parent
+= git log --dd
 -log --merge-diff off
 = git log --no-diff-merges
 -log --diff-filter AM --word-diff plain
@@ -140,13 +140,13 @@
 = git diff --numstat --name-only --name-status
 
 -diff --patch --shortstat --raw --summary --context 0
-= x
+= git diff -p --shortstat --raw --summary -U0
 -diff --ignore-all-space --ignore-space-change --renames off --rename-threshold 90 --swap
-= x
+= git diff -w -b --no-renames -M90% -R
 -diff --merge-diff separate --diff-filter M --word-diff color --text --full-index --nul
-= x
+= git diff -m --diff-filter=M --word-diff=color -a --full-index -z
 -diff --side-by-side --width 100 --color always
-= x
+= git diff -y --width=100 --color=always
 
 # --- add
 -add .
@@ -372,7 +372,7 @@
 -fetch
 = git fetch
 -fetch origin 'refs/heads/*:refs/remotes/o/*' --all --prune --tags --depth 3 --unshallow --force --filter blob:none --dry-run --quiet --verbose
-= git fetch --all -p --tags --depth=3 --unshallow -f --filter=blob:none --dry-run -q -v origin 'refs/heads/*:refs/remotes/o/*'
+= git fetch --all --prune --tags --depth 3 --unshallow --force --filter=blob:none --dry-run -q --verbose origin 'refs/heads/*:refs/remotes/o/*'
 -fetch --pull-request 7
 = git fetch origin +refs/pull/7/head:refs/heads/pr/7
 -fetch up --merge-request 9
@@ -380,10 +380,10 @@
 -pull
 = git pull
 -pull origin main --integrate rebase --autostash --squash --all --prune --tags --depth 2 --force --dry-run --quiet
-= git pull --rebase --autostash --squash --all -p --tags --depth=2 -f --dry-run -q origin main
+= git pull --rebase --autostash --squash --all --prune --tags --depth 2 --force --dry-run -q origin main
 < git pull --rebase --autostash --squash --all -p --tags --depth=2 -f --dry-run -q origin main
 -pull --integrate merge
-= git pull --rebase=false
+= git pull --no-rebase
 -pull --integrate ff-only
 = git pull --ff-only
 -push

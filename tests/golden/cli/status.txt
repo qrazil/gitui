@@ -1,0 +1,16 @@
+usage: 1git -status [options] [<PATH>...]
+
+show what changed in the work tree and the index
+
+arguments:
+  [<PATH>...]                                    only report these paths
+
+options:
+       --help                                    show this help
+  --f, --format long|short|porcelain|porcelain2  the layout: long, short, or a stable one for programs (default long)
+  --b, --branch                                  show the branch in the short layout
+  --z, --nul                                     end each entry with a NUL (with the porcelain layouts)
+  --u, --untracked all|normal|no                 how untracked files are shown (default: normal, or status.showUntrackedFiles)
+       --ignored traditional|matching|no         also show ignored files
+       --renames on|off                          detect renamed files (default: status.renames)
+       --stash                                   show how many stashes there are

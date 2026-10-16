@@ -1,0 +1,36 @@
+usage: 1git -diff [options] [<REV>...]
+
+show changes between the work tree, the index and commits
+
+arguments:
+  [<REV>...]                                                  none: work tree against index; one: work tree against it; two, or a..b: between them
+
+options:
+       --help                                                 show this help
+       --staged                                               compare the index against HEAD (or against the revision)
+       --exit-code                                            exit with 1 when there are differences
+  --q, --quiet                                                print nothing, and exit with 1 when there are differences
+  --p, --patch                                                show the patch
+       --stat                                                 show a diffstat
+       --numstat                                              added and removed lines per file, for programs
+       --shortstat                                            only the totals line of the diffstat
+       --name-only                                            show the names of the changed files
+       --name-status                                          show the names, each with a letter for what happened
+       --raw                                                  show git's raw diff format
+       --summary                                              show created, deleted and renamed files and mode changes
+  --c, --context N                                            lines of context around each change
+  --w, --ignore-all-space                                     ignore whitespace when comparing lines
+  --b, --ignore-space-change                                  ignore changes in the amount of whitespace
+       --renames on|off                                       detect renamed files (default: diff.renames)
+       --rename-threshold PERCENT                             how similar two files must be to be a rename
+       --swap                                                 swap the two sides
+       --merge-diff separate|combined|dense|first-parent|off  how a merge commit shows its changes
+       --diff-filter KINDS                                    keep only these kinds: A C D M R T U (lower case leaves them out)
+       --word-diff plain|color|porcelain|none                 compare by words
+  --a, --text                                                 treat every file as text
+       --full-index                                           print full object names in the index lines
+  --z, --nul                                                  end each name with a NUL instead of a newline
+  --y, --side-by-side                                         lay the patch out as two columns, old and new
+       --width COLUMNS                                        columns for --side-by-side (default: the terminal)
+       --color always|never|auto                              when to use colour (default: auto)
+       --path PATH...                                         only changes to these paths (put it last)

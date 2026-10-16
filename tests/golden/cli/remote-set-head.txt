@@ -1,0 +1,12 @@
+usage: 1git -remote-set-head [options] <NAME> [<BRANCH>]
+
+set what the remote's HEAD is here
+
+arguments:
+  <NAME>         the remote
+  [<BRANCH>]     the branch
+
+options:
+       --help    show this help
+  --a, --auto    ask the remote
+  --d, --delete  delete it

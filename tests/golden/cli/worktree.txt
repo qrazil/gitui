@@ -1,0 +1,9 @@
+usage: 1git -worktree [options]
+
+list the work trees of this repository
+
+options:
+       --help       show this help
+       --porcelain  a stable layout for programs
+  --v, --verbose    show more
+  --z, --nul        end each field with a NUL (with --porcelain)

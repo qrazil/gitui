@@ -1,0 +1,13 @@
+usage: 1git -move [options] [<PATH>...]
+
+move or rename files and directories
+
+arguments:
+  [<PATH>...]         one or more sources, then the destination
+
+options:
+       --help         show this help
+  --f, --force        overwrite an existing destination
+       --dry-run      show what would be moved
+  --k, --skip-errors  skip sources that cannot be moved
+  --v, --verbose      list each file moved

@@ -1,0 +1,15 @@
+usage: 1git -worktree-add [options] <PATH>
+
+check a branch out in another directory
+
+arguments:
+  <PATH>                    where to put the work tree
+
+options:
+       --help               show this help
+       --from REV           what to check out (default: HEAD)
+  --b, --branch NAME        create this branch there
+       --reset-branch NAME  create this branch there, or reset it if it exists
+  --d, --detach             check out a commit, not a branch
+  --f, --force              allow a branch that is checked out elsewhere
+  --q, --quiet              print nothing

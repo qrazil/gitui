@@ -71,9 +71,9 @@ pub type Job {
 
 pub const str PROG = "1git";
 
-/// `1git 0.24.0`, from the one place the version is written down.
+/// `0.24.0`, from the one place the version is written down.
 pub str version_line() {
-    return PROG + " " + GIT_transport.AGENT.substr(5, GIT_transport.AGENT.size);
+    return GIT_transport.AGENT.substr(5, GIT_transport.AGENT.size);
 }
 
 // --- the parser ---------------------------------------------------------------
@@ -283,7 +283,8 @@ str adjust(GIT_clitable.Cmd cmd, args.Parsed parsed, Env env, List<str> opts, Li
         if (parsed.is_given("from") && !parsed.is_given("create")) {
             return "'--from' says where a new branch starts, so it needs '--create'";
         }
-        if (chosen > 0 && words.size() > 0) {
+        bool is_upstream_mode = parsed.is_given("set-upstream") || parsed.is_given("unset-upstream");
+        if (chosen > 0 && words.size() > 0 && !(is_upstream_mode && words.size() == 1)) {
             return "a pattern is for listing; with an action name the branch in '--create NAME', '--delete NAME...' and so on";
         }
         if (parsed.is_given("create")) {
@@ -291,7 +292,7 @@ str adjust(GIT_clitable.Cmd cmd, args.Parsed parsed, Env env, List<str> opts, Li
             if (parsed.is_given("from")) {
                 words.push(parsed.value("from").or(""));
             }
-        } else if (words.size() > 0) {
+        } else if (words.size() > 0 && !is_upstream_mode) {
             opts.push("--list");
         }
     } else if (word == "tag") {
@@ -639,15 +640,22 @@ pub int run_line(Cli cli, args.Parsed parsed) {
 pub int start(List<str> argv) {
     List<str> line = argv;
     Cli cli = build();
+    // `M31GIT_SHIM_QUIET`: set by the program for the lines it writes itself
+    // (pull runs itself again) and by the oracle scripts, which compare stderr
+    bool is_quiet = os.env("M31GIT_SHIM_QUIET").or("") != "";
     if (is_git_style(argv)) {
         Env probe = environment(Option<str>.None, [], Option<str>.None, Option<str>.None);
         match (from_git(cli, probe, argv)) {
             case Ok(List<str> rewritten): {
-                io.eprint(PROG + ": git-style arguments are deprecated; use '" + PROG + " " + shell_line(rewritten) + "' (see " + PROG + " --help)");
+                if (!is_quiet) {
+                    io.eprint(PROG + ": git-style arguments are deprecated; use '" + PROG + " " + shell_line(rewritten) + "' (see " + PROG + " --help)");
+                }
                 line = rewritten;
             }
             case Err(str reason): {
-                io.eprint(PROG + ": git-style arguments are deprecated, and this line has no equivalent in the new command line (" + reason + "); running it as git would, for this release only");
+                if (!is_quiet) {
+                    io.eprint(PROG + ": git-style arguments are deprecated, and this line has no equivalent in the new command line (" + reason + "); running it as git would, for this release only");
+                }
                 return run_legacy(argv);
             }
         }
@@ -897,6 +905,7 @@ type Rewrite {
     List<str> after = [];
     str error = "";
     int forces = 0;
+    bool has_header = false;
 }
 
 str option_text(str name) {
@@ -911,6 +920,21 @@ void add_scalar(Rewrite work, str name, str value, bool has_value) {
         }
         return;
     }
+    // git lets the last of a repeated option win; the grammar here refuses a repeat
+    List<str> kept = [];
+    int at = 0;
+    while (at < work.scalars.size()) {
+        str token = work.scalars[at];
+        if (token == option_text(name)) {
+            at = at + 2;
+        } else if (token.starts_with(option_text(name) + "=")) {
+            at = at + 1;
+        } else {
+            kept.push(token);
+            at = at + 1;
+        }
+    }
+    work.scalars = kept;
     if (value.starts_with("-") && value != "-" && !is_digits(value.substr(1, value.size()))) {
         work.scalars.push(option_text(name) + "=" + value);
     } else {
@@ -971,6 +995,10 @@ bool read_words(Rewrite work, List<str> words) {
         if (word == "--") {
             int rest = index + 1;
             while (rest < words.size()) {
+                if (is_dash_word(words[rest])) {
+                    work.error = "'" + words[rest] + "' starts with a dash, so it cannot be written as an operand";
+                    return false;
+                }
                 work.after.push(words[rest]);
                 rest = rest + 1;
             }
@@ -991,6 +1019,14 @@ bool read_words(Rewrite work, List<str> words) {
             case Some(Hit hit): {
                 if (hit.spec.name == "force" && hit.spec.kind == "flag") {
                     work.forces = work.forces + 1;
+                }
+                // git lets a format after `-s` bring the output back, and we put
+                // `--header-only` last: the order matters, so there is no rewrite
+                if (hit.spec.name == "header-only") {
+                    work.has_header = true;
+                } else if (work.has_header && is_in(hit.spec.name, "patch,stat,numstat,shortstat,name-only,name-status,raw,summary,context,side-by-side,word-diff")) {
+                    work.error = "'-s' before '" + word + "': the order of those matters to git";
+                    return false;
                 }
                 apply_hit(work, hit, words, index);
                 index = index + hit.used;
@@ -1324,12 +1360,23 @@ Result<List<str>, str> shape(Env env, Rewrite work) {
             if (every.size() == 2) {
                 add_scalar(work, "from", every[1], true);
             }
+        } else if (every.size() > 0 && !scalars_have(work, "set-upstream") && !scalars_have(work, "unset-upstream") && has_mode) {
+            // `branch -d -r a b`: the names after the other options belong to the action
+            List<str> actions = ["delete", "force-delete", "rename", "copy"];
+            for (str name in actions) {
+                if (work.list_names.contains(name)) {
+                    add_list(work, name, every);
+                    return Result<List<str>, str>.Ok(assemble(work, operands));
+                }
+            }
         } else {
             GIT_clitable.append(operands, every);
         }
     } else if (word == "tag") {
         bool is_list = work.seen.contains("list") || scalars_have(work, "contains") || scalars_have(work, "without") || scalars_have(work, "merged") || scalars_have(work, "unmerged") || scalars_have(work, "points-at") || scalars_have(work, "lines");
-        if (work.list_names.contains("delete") || is_list) {
+        if (work.list_names.contains("delete") && every.size() > 0) {
+            add_list(work, "delete", every);
+        } else if (work.list_names.contains("delete") || is_list) {
             GIT_clitable.append(operands, every);
         } else if (every.size() > 0) {
             if (every.size() > 2) {
@@ -1395,10 +1442,66 @@ Result<List<str>, str> shape(Env env, Rewrite work) {
     return Result<List<str>, str>.Ok(assemble(work, operands));
 }
 
-/// `git checkout` is two commands of 1git: `-switch` for branches, `-restore`
-/// for files.
+/// Is `word` a local branch here? (Outside a repository, assume it is.)
+bool is_branch(Env env, str word) {
+    str root = GIT_gitstatus.find_root(env.cwd);
+    if (root == "") {
+        return true;
+    }
+    str gitdir = GIT_repository.find(root);
+    if (gitdir == "") {
+        return true;
+    }
+    match (GIT_revparse.object_id(gitdir, "refs/heads/" + word)) {
+        case Ok(_): {
+            return true;
+        }
+        case Err(_): {
+        }
+    }
+    return false;
+}
+
+/// `git checkout` is two commands of 1git, `-switch` for branches and
+/// `-restore` for files, and only the forms that mean exactly what the new
+/// command means are rewritten: a branch, `-b`, `--detach`, and files with or
+/// without a tree. The others (`checkout HEAD`, a commit without `--detach`,
+/// `-p`, `--merge`) keep git's own behaviour through the shim.
 Result<List<str>, str> rewrite_checkout(Cli cli, Env env, List<str> rest) {
-    bool is_files = has_flag_word(rest, ["--ours", "--theirs", "-p", "--patch"]) || rest.contains("--");
+    if (has_flag_word(rest, ["-p", "--patch", "-m", "--merge", "--orphan"])) {
+        return fail_with("'checkout' with that option is not a -switch or -restore");
+    }
+    List<str> options = [];
+    List<str> bare = [];
+    List<str> paths = [];
+    bool is_after = false;
+    for (str word in rest) {
+        if (word == "--" && !is_after) {
+            is_after = true;
+        } else if (is_after) {
+            paths.push(word);
+        } else if (is_dash_word(word)) {
+            options.push(word);
+        } else {
+            bare.push(word);
+        }
+    }
+    bool is_new = has_flag_word(options, ["-b", "-B"]);
+    bool is_detach = has_flag_word(options, ["--detach", "-d"]);
+    bool is_files = (is_after && paths.size() > 0) || has_flag_word(options, ["--ours", "--theirs"]);
+    if (!is_files && !is_new && !is_detach && bare.size() == 1 && !is_branch(env, bare[0]) && bare[0] != "-") {
+        is_files = !is_revision(env, bare[0]);
+        if (!is_files) {
+            return fail_with("'checkout' of a commit that is not a branch has no equivalent: -switch --detach REV");
+        }
+    }
+    if (!is_files && !is_new && !is_detach && bare.size() > 1) {
+        // checkout <tree-ish> <paths>
+        is_files = is_revision(env, bare[0]) && !is_branch(env, bare[0]);
+        if (!is_files) {
+            return fail_with("too many operands for a branch");
+        }
+    }
     if (!is_files) {
         List<str> mapped = [];
         for (str word in rest) {
@@ -1418,32 +1521,17 @@ Result<List<str>, str> rewrite_checkout(Cli cli, Env env, List<str> rest) {
         }
         return shape(env, switching);
     }
-    // `checkout [<tree-ish>] [--] <paths>`, `checkout -- <paths>`
-    List<str> options = [];
-    List<str> bare = [];
-    List<str> paths = [];
-    bool is_after = false;
-    for (str word in rest) {
-        if (word == "--") {
-            is_after = true;
-        } else if (is_after) {
-            paths.push(word);
-        } else if (word.starts_with("-")) {
-            options.push(word);
-        } else {
-            bare.push(word);
-        }
-    }
     str source = "";
     if (is_after && bare.size() > 0) {
+        if (bare.size() > 1) {
+            return fail_with("too many operands");
+        }
         source = bare[0];
-    } else if (bare.size() > 1 && !has_flag_word(rest, ["-p", "--patch"])) {
+    } else if (bare.size() > 1) {
         source = bare[0];
         for (int at in 1 .. bare.size()) {
             paths.push(bare[at]);
         }
-    } else if (bare.size() > 0 && has_flag_word(rest, ["-p", "--patch"])) {
-        source = bare[0];
     } else {
         GIT_clitable.append(paths, bare);
     }
@@ -1451,64 +1539,54 @@ Result<List<str>, str> rewrite_checkout(Cli cli, Env env, List<str> rest) {
     if (!read_words(restoring, options)) {
         return fail_with(restoring.error);
     }
+    for (str one in paths) {
+        if (is_dash_word(one)) {
+            return fail_with("'" + one + "' starts with a dash, so it cannot be written as an operand");
+        }
+    }
     if (source != "") {
+        // `checkout <tree> -- f` writes the index and the work tree
         add_scalar(restoring, "from", source, true);
+        add_scalar(restoring, "staged", "", false);
+        add_scalar(restoring, "worktree", "", false);
     }
     return Result<List<str>, str>.Ok(assemble(restoring, paths));
 }
 
-/// `git reset` is `-reset` for a commit and `-restore --staged` for paths.
+/// `git reset` for a commit is `-reset`. With paths it is `-restore --staged`,
+/// which does not print the list of unstaged changes `git reset` prints, so
+/// git's own form keeps its output through the shim.
 Result<List<str>, str> rewrite_reset(Cli cli, Env env, List<str> rest) {
     List<str> options = [];
     List<str> bare = [];
-    List<str> paths = [];
     bool is_after = false;
     for (str word in rest) {
         if (word == "--") {
             is_after = true;
         } else if (is_after) {
-            paths.push(word);
-        } else if (word.starts_with("-")) {
+            return fail_with("'reset' with paths is -restore --staged, which does not list the unstaged changes");
+        } else if (is_dash_word(word)) {
             options.push(word);
         } else {
             bare.push(word);
         }
     }
-    bool is_paths = is_after || has_flag_word(options, ["-p", "--patch"]);
-    if (!is_paths && bare.size() > 0 && !is_revision(env, bare[0])) {
-        is_paths = true;
+    if (has_flag_word(options, ["-p", "--patch"]) || bare.size() > 1 || (bare.size() == 1 && !is_revision(env, bare[0]))) {
+        return fail_with("'reset' with paths is -restore --staged, which does not list the unstaged changes");
     }
-    if (!is_paths && bare.size() <= 1) {
-        List<str> tokens = ["-reset"];
-        for (str word in options) {
-            if (word == "--soft" || word == "--mixed" || word == "--hard" || word == "--keep") {
-                tokens.push("--mode");
-                tokens.push(word.substr(2, word.size()));
-            } else if (word == "-q" || word == "--quiet") {
-                tokens.push("--quiet");
-            } else {
-                return fail_with("'" + word + "' has no equivalent for -reset");
-            }
+    List<str> tokens = ["-reset"];
+    for (str word in options) {
+        if (word == "--soft" || word == "--mixed" || word == "--hard" || word == "--keep") {
+            tokens.push("--mode");
+            tokens.push(word.substr(2, word.size()));
+        } else if (word == "-q" || word == "--quiet") {
+            tokens.push("--quiet");
+        } else {
+            return fail_with("'" + word + "' has no equivalent for -reset");
         }
-        GIT_clitable.append(tokens, bare);
-        return Result<List<str>, str>.Ok(tokens);
     }
-    Rewrite restoring = Rewrite(cmd_named(cli, "restore"));
-    if (!read_words(restoring, options)) {
-        return fail_with(restoring.error);
-    }
-    add_scalar(restoring, "staged", "", false);
-    if (bare.size() > 0 && (is_after || (bare.size() > 1 && is_revision(env, bare[0])))) {
-        if (bare[0] != "HEAD") {
-            add_scalar(restoring, "from", bare[0], true);
-        }
-        for (int at in 1 .. bare.size()) {
-            paths.push(bare[at]);
-        }
-    } else {
-        GIT_clitable.append(paths, bare);
-    }
-    return Result<List<str>, str>.Ok(assemble(restoring, paths));
+    GIT_clitable.append(tokens, bare);
+    return Result<List<str>, str>.Ok(tokens);
 }
 
 // --- -migrate ------------------------------------------------------------------------

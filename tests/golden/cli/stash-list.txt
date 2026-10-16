@@ -1,0 +1,6 @@
+usage: 1git -stash-list
+
+list the stashes
+
+options:
+       --help  show this help

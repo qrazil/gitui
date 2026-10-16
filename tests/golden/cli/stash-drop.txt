@@ -1,0 +1,10 @@
+usage: 1git -stash-drop [options] [<STASH>]
+
+delete one stash
+
+arguments:
+  [<STASH>]     which stash: N or stash@{N} (default: the newest)
+
+options:
+       --help   show this help
+  --q, --quiet  print nothing

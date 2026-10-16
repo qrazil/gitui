@@ -1,0 +1,11 @@
+usage: 1git -stash-pop [options] [<STASH>]
+
+apply a stash and drop it
+
+arguments:
+  [<STASH>]             which stash: N or stash@{N} (default: the newest)
+
+options:
+       --help           show this help
+       --restore-index  also restore what was staged
+  --q, --quiet          print nothing

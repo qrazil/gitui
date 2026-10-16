@@ -1,0 +1,7 @@
+usage: 1git -remote [options]
+
+list the remotes
+
+options:
+       --help     show this help
+  --v, --verbose  show the URLs

@@ -1,0 +1,10 @@
+usage: 1git -remote-prune [options] <NAME>
+
+delete remote-tracking refs the remote no longer has
+
+arguments:
+  <NAME>          the remote
+
+options:
+       --help     show this help
+       --dry-run  only show what would be deleted

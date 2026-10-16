@@ -38,7 +38,7 @@ import all of them.
 | `diff/` | content work: xdiff, udiff, diff3, hunks, patch, blame, file log, merge, sequencer (cherry-pick, revert), rebase and its todo, stash, undo |
 | `net/` | remotes and transports: remote URLs, wire protocol, smart-HTTP fetch and push, ssh transport, pull |
 | `ui/` | the interactive client: `GIT_client` (the top), and every `GIT_ui_*` layer and overlay |
-| root | `git.m31` (command line client: `1git status`, `log`, `show`, `diff` and the change commands (`add`, `commit`, `switch`, `merge`, `rebase`, `stash`, ...) in git's grammar, `-log`-style plumbing), `mgit.m31` (interactive client), `deps`, `deps.lock` |
+| root | `git.m31` (the command line client, `1git`: `-status`, `-log`, `-show`, `-diff` and the change commands (`-add`, `-commit`, `-switch`, `-merge`, `-rebase`, `-stash`, ...) in Oro's grammar, `docs/CLI.md`; `core/GIT_clitable.m31` is its table, `core/GIT_cli.m31` its dispatch), `mgit.m31` (interactive client), `deps`, `deps.lock` |
 
 Two placements are by import graph, not by name: `GIT_client` is in `ui/` (it imports
 every `GIT_ui_*` module), and `GIT_watch` is in `core/` (it imports only ignore and
@@ -54,29 +54,32 @@ bash tests/test.sh                    # the built-in fixtures
 bash tests/test.sh <repo> [<repo>…]   # those, and each repository named
 
 bash scripts/build.sh git.m31         # the command line client -> ./1git
-./1git status -sb                     # git's own spelling: same bytes as `git status -sb`
-./1git -C ../other status --porcelain=v2 -b
-./1git log --graph --oneline --decorate --all   # git's grammar, git's bytes
-./1git log -p --stat -3 -- core/              # history simplified to the paths
-./1git log --follow --name-status -- git.m31  # renames and copies followed
-./1git show HEAD~2 --stat                     # commits, tags, trees, blobs, rev:path
-./1git diff --cached -w                       # also: A B, A..B, A...B, --stat, --name-status, -U<n>
-./1git add -A && ./1git commit -s -m "msg"    # also add -u/-f, commit --amend/--fixup, -a, -F, paths
-./1git switch -c topic origin/main            # also checkout -b, switch -, --detach, branch -vv, tag -a
-./1git restore --staged --source=HEAD~1 f    # also rm --cached, mv, reset --soft/--hard, restore -W
-./1git add -p                          # also reset -p, restore -p, checkout -p: git's prompts, y n q a d s j k g / p ?
-./1git show -c HEAD                    # merges: --cc (default for show), -c, -m, --first-parent, --diff-merges=
-./1git -c gerrit.createChangeId=true commit -m "x"   # appends Gerrit's Change-Id trailer
-./1git stash push -u -m "wip"         # also stash pop/apply/list/show/drop/branch
-./1git merge --no-ff feature          # also --squash, --ff-only, -X theirs, --abort; renames are followed
-./1git cherry-pick -x A..B            # also revert, --continue/--skip/--abort, -m 1 for merge commits
-./1git rebase -i --autosquash main    # also --onto, --root, --autostash, -x cmd, --continue/--abort
-./1git clean -fdx -n                  # also worktree add/list/remove/prune
-./1git clone --depth 1 https://host/repo.git   # also fetch/pull/push/remote/ls-remote over HTTPS and ssh, git's output
-./1git -log --max 5                   # the older `-word` grammar, unchanged
+./1git -status --format short --branch   # same bytes as `git status -sb`
+./1git --dir ../other -status --format porcelain2 --branch
+./1git -log --graph --oneline --decorate short --all   # git's bytes, our grammar
+./1git -log --patch --stat --max 3 --path core/   # history simplified to the paths
+./1git -log --follow --name-status --path git.m31  # renames and copies followed
+./1git -show HEAD~2 --stat                    # commits, tags, trees, blobs, rev:path
+./1git -diff --staged --ignore-all-space      # also: A B, A..B, A...B, --stat, --name-status, --context N
+./1git -add --all -commit --signoff --message "msg"   # several commands on one line, in order
+./1git -switch --create topic --from origin/main      # also -switch -, --detach, -branch --upstream, -tag --create
+./1git -restore --staged --from HEAD~1 f      # also -remove --keep-files, -move, -reset --mode soft|hard
+./1git -add --patch                           # also -restore --patch: git's prompts, y n q a d s j k g / p ?
+./1git -show --merge-diff combined HEAD       # merges: dense (default for show), combined, separate, first-parent
+./1git --config gerrit.createChangeId=true -commit --message "x"   # Gerrit's Change-Id trailer (or --change-id)
+./1git -stash --include-untracked --message "wip"     # also -stash-pop/-apply/-list/-show/-drop
+./1git -merge feature --fast-forward never    # also --squash, --fast-forward only, --prefer theirs, --abort
+./1git -cherry-pick --record-origin A..B      # also -revert, --continue/--skip/--abort, --mainline 1
+./1git -rebase main --interactive --autosquash   # also --onto, --root, --autostash, --exec cmd, --continue/--abort
+./1git -clean --force --directories --ignored also --dry-run   # also -worktree-add/-worktree/-worktree-remove/-worktree-prune
+./1git -clone https://host/repo.git --depth 1   # also -fetch/-pull/-push/-remote-*/-remote-refs over HTTPS and ssh, git's output
+./1git -push --to origin --track              # --for main --topic x for Gerrit; --force is with a lease
+./1git -log --help                            # every command documents itself; docs/CLI.md, docs/MIGRATING-FROM-GIT.md
+./1git -migrate 'git log --oneline -n 5'     # prints: 1git -log --oneline --max 5
 
 bash scripts/build.sh                 # mgit.m31 -> ./mgit   (-o name to rename)
 ./mgit                         # run from a repository's own top level
+./mgit ../other --mouse off    # PATH is the repository; --mouse on|off beats M31GIT_MOUSE (see --help)
 ```
 
 | file | what it is |

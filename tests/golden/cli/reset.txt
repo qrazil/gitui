@@ -1,0 +1,11 @@
+usage: 1git -reset [options] [<REV>]
+
+move the current branch to another commit
+
+arguments:
+  [<REV>]                           the commit to move to (default HEAD)
+
+options:
+       --help                       show this help
+       --mode soft|mixed|hard|keep  soft keeps index and files, mixed resets the index, hard also discards file changes, keep discards only what is safe (default mixed)
+  --q, --quiet                      print nothing

@@ -1,0 +1,10 @@
+usage: 1git -migrate [options] [<LINE>]
+
+write a git command line the 1git way
+
+arguments:
+  [<LINE>]     a git command line, in quotes: 'git log --oneline -5'
+
+options:
+       --help  show this help
+       --nul   read git's words from standard input and write ours, NUL-separated (for scripts)

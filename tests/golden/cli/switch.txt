@@ -1,0 +1,16 @@
+usage: 1git -switch [options] [<BRANCH>]
+
+change branch
+
+arguments:
+  [<BRANCH>]                the branch to switch to ('-' is the previous one)
+
+options:
+       --help               show this help
+  --c, --create NAME        create this branch and switch to it
+       --force-create NAME  create this branch, or reset it if it exists, and switch to it
+       --from REV           where the new branch starts (default: HEAD)
+  --d, --detach             switch to a commit, not to a branch
+       --discard-changes    throw local changes away
+  --t, --track              make the new branch track its start point
+  --q, --quiet              print nothing

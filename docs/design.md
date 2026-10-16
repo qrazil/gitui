@@ -344,3 +344,17 @@ m31 v0.4.0 grouped the standard library into folders (`import net.http;`,
 new naming rules: booleans start with is_/has_/did_/should_, abbreviations are
 spelled out, and short names became real ones. Nothing about the design
 changed. `RENAMES.md` lists every old public name next to its new one.
+
+
+## The command line (0.24.0)
+
+`1git` and `mgit` take Oro's args grammar (`lib/args`): one dash a command, two
+dashes an option, anything else data. The commands of `1git` are one table
+(`core/GIT_clitable.m31`): the parser declarations, the translation to the argv
+of git's grammar that the command functions take (`GIT_cli.to_git`), and the
+rewrite of git's argv into ours (`GIT_cli.from_git`, behind `-migrate` and the
+one-release transition shim) are all read from it, so they cannot drift. The
+command bodies were not touched; the new layer is the argument handling and the
+dispatch of several commands on one line. `docs/CLI.md` is the surface and its
+reasons, `docs/MIGRATING-FROM-GIT.md` the table, `tests/cli_cases.txt` one case
+per option checked both ways.

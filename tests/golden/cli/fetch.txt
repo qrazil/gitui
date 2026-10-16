@@ -1,0 +1,22 @@
+usage: 1git -fetch [options] [<REMOTE>] [<REFSPEC>...]
+
+download commits and refs from a remote
+
+arguments:
+  [<REMOTE>]              where from (default: the upstream of the current branch, else origin)
+  [<REFSPEC>...]          what to fetch (default: the remote's configured refs)
+
+options:
+       --help             show this help
+  --a, --all              fetch every remote
+  --p, --prune            delete remote-tracking refs the remote no longer has
+  --t, --tags             fetch every tag
+       --depth N          only the last N commits
+       --unshallow        make a shallow repository complete
+  --f, --force            overwrite local refs that do not fast-forward
+       --filter SPEC      a partial fetch, for example blob:none
+       --pull-request N   fetch GitHub pull request N as the branch pr/N
+       --merge-request N  fetch GitLab merge request N as the branch mr/N
+       --dry-run          show what would be fetched
+  --q, --quiet            print nothing
+  --v, --verbose          say more

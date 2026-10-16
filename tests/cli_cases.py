@@ -17,8 +17,10 @@ K options covered` at the end; the exit status is the number of failures.
 """
 import re
 import shlex
+import shutil
 import subprocess
 import sys
+import tempfile
 
 args = sys.argv[1:]
 update = False
@@ -41,6 +43,7 @@ for raw in open(path, encoding="utf-8"):
         cases.append([line, None, []])
 
 fails = 0
+norepo = tempfile.mkdtemp(prefix="cli-cases.")  # outside any repository: revisions and paths are told apart by shape only
 
 
 def fail(msg):
@@ -96,7 +99,7 @@ def migrate(git_line):
     if words and words[0] == "git":
         words = words[1:]
     data = b"".join(w.encode() + b"\0" for w in words)
-    proc = subprocess.run([one_git, "-migrate", "--nul"], input=data, capture_output=True)
+    proc = subprocess.run([one_git, "-migrate", "--nul"], input=data, capture_output=True, cwd=norepo)
     if proc.returncode != 0:
         return None, "ERROR: " + proc.stderr.decode().strip()
     return " ".join(shlex.quote(w) for w in [x.decode() for x in proc.stdout.split(b"\0")[:-1]]), ""
@@ -130,5 +133,6 @@ for command in commands:
         else:
             fail("-%s --%s has no case in %s" % (command, option, path))
 
+shutil.rmtree(norepo, ignore_errors=True)
 print("cases: %d lines, %d git spellings, %d options covered" % (len(cases), spellings, covered))
 sys.exit(min(fails, 255))

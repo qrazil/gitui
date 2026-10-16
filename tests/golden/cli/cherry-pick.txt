@@ -1,0 +1,20 @@
+usage: 1git -cherry-pick [options] [<REV>...]
+
+apply the changes of commits on the current branch
+
+arguments:
+  [<REV>...]                 the commits to apply, or ranges (a..b)
+
+options:
+       --help                show this help
+       --record-origin       add a line naming the original commit
+       --stage-only          stage the result without committing it
+       --edit on|off         open the editor on each message
+  --m, --mainline N          for a merge commit, the parent to compare against
+  --s, --signoff             add a Signed-off-by line
+       --allow-empty         keep commits that start out empty
+       --prefer ours|theirs  on a conflict, take this side
+       --continue            go on after resolving conflicts
+       --skip                leave out the commit that conflicts
+       --abort               give up and go back
+       --quit                forget the operation but keep the work tree as it is

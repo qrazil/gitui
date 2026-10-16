@@ -1,0 +1,26 @@
+usage: 1git -commit [options]
+
+record the staged changes as a commit
+
+options:
+       --help                                                show this help
+  --m, --message TEXT...                                     the message: each text is a paragraph
+  --F, --file FILE                                           read the message from a file ('-' is standard input)
+  --a, --all                                                 stage changes to tracked files first
+       --amend                                               replace the last commit
+       --edit on|off                                         open the editor on the message (default: on, unless a message is given)
+       --allow-empty                                         allow a commit that changes nothing
+       --allow-empty-message                                 allow an empty message
+       --author NAME <EMAIL>                                 commit as this author
+       --date DATE                                           use this author date
+       --reset-author                                        with --amend, take the author and date from now
+  --s, --signoff                                             add a Signed-off-by line
+       --fixup REV                                           a fixup commit for REV, for -rebase --autosquash
+       --squash REV                                          a squash commit for REV, for -rebase --autosquash
+       --reuse-message REV                                   reuse the message and author of a commit
+  --n, --skip-hooks                                          do not run the pre-commit and commit-msg hooks
+       --change-id                                           add a Gerrit Change-Id line (or set gerrit.createChangeId)
+       --cleanup strip|whitespace|verbatim|scissors|default  how the message is cleaned up
+       --dry-run                                             show what would be committed
+  --q, --quiet                                               print only errors
+       --path PATH...                                        commit only the changes to these paths (put it last)

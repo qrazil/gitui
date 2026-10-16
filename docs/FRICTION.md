@@ -570,3 +570,18 @@ This is not politeness; these are things that measurably did not go wrong.
     That is not a normal hit rate for this much bit-twiddling, and the reason
     is the two rules above: no silent overflow, and no confusion between text
     and octets.
+
+## The command line, 0.24.0 (what lib/args made hard and easy)
+
+- **Easy:** one dash a command, two dashes an option: `-add --all -commit --message x -push` needs no rule about
+  what a bare word is, and `--help` per command, usage errors with the suggestion, completions and
+  `--version` came with the module.
+- **Hard:** `lib/args` has no list of allowed values, so a choice (`--format long|short|...`) is a `value` whose
+  placeholder lists the choices and whose membership `GIT_cli` checks itself, with the same wording as the
+  module's own refusals. An error in a command prints the program's usage line, not that command's.
+- **Hard:** a value cannot start with a dash, so `--message "- item"` is `--message=- item`, and a path that starts with
+  one cannot be an operand at all (`-add -- -dash` has no spelling; the shim runs it as git).
+- **Hard:** an option that takes a list swallows the operands after it, so the operands come first
+  (`-log main --path src`); `GIT_cli.from_git` writes lists last.
+- **m31:** no `extend` on a `List`, no ternary, no literal in `.contains` (needs a declared type), `main` is a reserved name for a
+  function, and `m31c fmt` puts a list literal on one line.

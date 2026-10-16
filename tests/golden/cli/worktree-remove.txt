@@ -1,0 +1,10 @@
+usage: 1git -worktree-remove [options] <PATH>
+
+delete a work tree
+
+arguments:
+  <PATH>        the work tree
+
+options:
+       --help   show this help
+  --f, --force  delete it even with changes in it

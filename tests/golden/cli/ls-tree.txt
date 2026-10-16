@@ -1,0 +1,9 @@
+usage: 1git -ls-tree <TREE>
+
+list a tree's entries
+
+arguments:
+  <TREE>       a tree, or anything that names one: a commit, a tag, HEAD~2, v1:dir
+
+options:
+       --help  show this help

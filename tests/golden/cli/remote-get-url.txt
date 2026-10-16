@@ -1,0 +1,11 @@
+usage: 1git -remote-get-url [options] <NAME>
+
+print the URL of a remote
+
+arguments:
+  <NAME>       the remote
+
+options:
+       --help  show this help
+       --push  print the URL pushes go to
+  --a, --all   print every URL

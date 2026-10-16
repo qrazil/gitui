@@ -1,9 +1,37 @@
-# 1git: a drop-in git
+# 1git: git's repositories, protocols and output, a command line of its own
 
-Goal (the owner, 2026-10-14): "a perfect copy of git", usable day to day, so
-that `1git` can stand where `git` stands. Today it is a read-only plumbing
-client (`cat-file`, `ls-tree`, `log`, `rev-parse`, `refs`) in `lib/args`'
-grammar (`1git -log`), which no muscle memory transfers to.
+**The contract (0.24.0, the owner, 2026-10-16): repository, protocol and output
+compatibility, not argv compatibility.** "I know 1git is a drop in replacement
+but also wanted it to be new and clean ... drop in replacement is great but then
+why would anyone use our 1git over git?" So:
+
+- the **repository format** is git's: `git` and `1git` work on the same
+  repository, in either order (`git fsck --strict` is clean after every 1git
+  command, object ids are identical);
+- the **wire protocols** are git's (smart HTTP v2, ssh), so every forge works;
+- the **results** are git's: the same commits, trees, refs, index, reflog and
+  state files for the same operation, and for the read commands the same bytes
+  on a pipe (`scripts/compare_*.sh` run git 2.55 beside 1git and diff them);
+- the **command line is not git's**: it is Oro's args grammar, designed for 1git
+  (`CLI.md`). `git log --oneline -n 5` is `1git -log --oneline --max 5`
+  (`MIGRATING-FROM-GIT.md`). git's own spelling still works in 0.24.0 behind a
+  deprecation warning (the transition shim) and is removed in 0.25.0.
+
+Everything below describes behaviour. Where it quotes options, they are **git's
+spelling of the same thing**: translate with `1git -migrate 'git ...'` or the
+table in `MIGRATING-FROM-GIT.md`. The oracle scripts do exactly that
+(`scripts/lib_cli.sh`): they pass git's argv to `1git -migrate --nul`, run
+1git with the new line, and compare the output with git's.
+
+Exit status is 0, 1 (the command failed) or 2 (the line was not understood);
+git's 128 and 129 are 1. Forms of git's that were dropped on purpose are listed
+in `CLI.md` ("What is not in 1git"); the oracle runs them through the shim for
+this release and the checks go with the shim.
+
+Historical goal (2026-10-14), kept for the record: "a perfect copy of git",
+usable day to day, so that `1git` can stand where `git` stands. It was a
+read-only plumbing client in `lib/args`' grammar, then git's own grammar for the
+porcelain; 0.24.0 settled on one grammar, the clean one, with git's results.
 
 ## Scope: the essence, not the museum (owner's call, 2026-10-14)
 
@@ -53,9 +81,9 @@ nobody scripts against, abbreviated-option guessing, `git help` man pages
 
 **Deliberate departures from git's mistakes** (each documented where it
 bites, behind no flag unless a script would break):
-- one grammar: `-h/--help` everywhere, no `git help <cmd>` indirection;
-- `checkout` stays for compatibility but `switch`/`restore` are the
-  documented way; `reset` modes get plain-word aliases;
+- one grammar (Oro's): `--help` everywhere (no `-h`, no `git help <cmd>`),
+  one dash a command, two a option, several commands on a line;
+- no `checkout`: `-switch` for branches, `-restore` for files; `-reset --mode`;
 - push is `--force-with-lease` when `--force` is asked for (plain force
   needs `--force=unsafe`); `pull` never creates an accidental merge commit
   (`--ff-only` unless configured);
@@ -69,10 +97,11 @@ deliberately differ.
 
 ## Decisions
 
-- **Spelling is git's own** (`1git log`, `1git commit -m x`, `1git rev-parse
-  --short HEAD`). A drop-in cannot ask for `-log`. `lib/args` stays for our
-  own tools; `1git` gets a small git-grammar parser (subcommand, short and
-  long options, `--` and `-C <dir>`, `-c k=v`, aliases from config).
+- **Spelling is Oro's** (0.24.0, superseding the 2026-10-14 decision that it be
+  git's own): `1git -log --max 5`, `1git -commit --message x`. The command
+  functions still take git's argv; `core/GIT_cli.m31` maps the parsed line onto
+  it from one table (`core/GIT_clitable.m31`) and the same table rewrites git's
+  argv into ours (`-migrate`, the transition shim).
 - **Behaviour is pinned by the oracle**: every command ships with a
   `scripts/compare.sh` case that runs real git beside it and diffs stdout,
   stderr class and exit status, plus the repository state afterwards (`fsck

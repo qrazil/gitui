@@ -1,0 +1,9 @@
+usage: 1git -remote-remove <NAME>
+
+remove a remote and its remote-tracking refs
+
+arguments:
+  <NAME>       the remote
+
+options:
+       --help  show this help

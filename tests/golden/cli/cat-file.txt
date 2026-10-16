@@ -1,0 +1,12 @@
+usage: 1git -cat-file [options] <OBJECT>
+
+print an object's type, size or contents
+
+arguments:
+  <OBJECT>       a revision that names an object: an object name or a prefix of one, a ref, HEAD:path, ...
+
+options:
+       --help    show this help
+       --type    print the object's type word
+       --size    print the size of the object's content
+       --pretty  print the object itself (the default)

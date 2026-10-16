@@ -35,7 +35,7 @@ one_run() {
         return $?
     fi
     printf '%s\n' "$*" >> "$CLI_FALLBACKS"
-    "$bin" "$@"
+    M31GIT_SHIM_QUIET=1 "$bin" "$@"
 }
 
 # side_run <bin> <git args...>: real git as it is, 1git through one_run.

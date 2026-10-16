@@ -1,0 +1,10 @@
+usage: 1git -stash [options]
+
+put the changes away, leaving a clean work tree
+
+options:
+       --help               show this help
+  --m, --message TEXT       describe the stash
+  --u, --include-untracked  also stash untracked files
+  --k, --keep-index         leave staged changes in the work tree
+  --q, --quiet              print nothing

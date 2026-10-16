@@ -1,0 +1,19 @@
+usage: 1git -clone [options] <URL> [<DIR>]
+
+copy a repository
+
+arguments:
+  <URL>                 where it is (https://, ssh, or a path)
+  [<DIR>]               where to put it (default: named after the repository)
+
+options:
+       --help           show this help
+  --b, --branch NAME    check this branch out instead of the remote's default
+       --depth N        only the last N commits
+       --single-branch  only the history of one branch
+       --bare           no work tree, just the repository
+       --mirror         a bare copy of every ref
+  --o, --origin NAME    call the remote this instead of origin
+  --n, --skip-checkout  do not check anything out
+       --filter SPEC    a partial clone, for example blob:none
+  --q, --quiet          print nothing

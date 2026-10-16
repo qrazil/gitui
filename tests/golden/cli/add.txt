@@ -1,0 +1,16 @@
+usage: 1git -add [options] [<PATH>...]
+
+stage changes
+
+arguments:
+  [<PATH>...]               files and directories to stage ('.' is everything under here)
+
+options:
+       --help               show this help
+  --a, --all                also stage deletions and new files everywhere
+  --u, --update             stage changes to files git already tracks, add no new ones
+  --p, --patch              choose hunks to stage, interactively
+  --f, --force              add files that are ignored
+       --executable on|off  set or clear the executable bit on what is staged
+       --dry-run            show what would be staged
+  --v, --verbose            list each file staged

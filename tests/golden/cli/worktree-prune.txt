@@ -1,0 +1,9 @@
+usage: 1git -worktree-prune [options]
+
+forget work trees whose directory is gone
+
+options:
+       --help         show this help
+       --dry-run      only show what would be forgotten
+  --v, --verbose      say what is forgotten
+       --expire WHEN  only those older than this

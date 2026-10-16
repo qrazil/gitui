@@ -1,0 +1,10 @@
+usage: 1git -remote-rename <OLD> <NEW>
+
+rename a remote
+
+arguments:
+  <OLD>        the remote
+  <NEW>        its new name
+
+options:
+       --help  show this help

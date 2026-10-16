@@ -1,0 +1,32 @@
+usage: 1git -branch [options] [<PATTERN>...]
+
+list, create, rename and delete branches
+
+arguments:
+  [<PATTERN>...]               list only branches matching these
+
+options:
+       --help                  show this help
+       --create NAME           create a branch
+       --from REV              where --create starts (default: HEAD)
+       --delete NAME...        delete branches that are merged
+       --force-delete NAME...  delete branches even when they are not merged
+       --rename NAME...        rename a branch: NEW for the current one, or OLD NEW
+       --copy NAME...          copy a branch: NEW for the current one, or OLD NEW
+  --f, --force                 with --create, --rename or --copy: replace an existing branch
+       --set-upstream REF      make the current branch track this remote branch
+       --unset-upstream        stop the current branch tracking anything
+  --t, --track                 with --create, track the start point
+  --a, --all                   list local and remote branches
+  --r, --remotes               list remote branches
+  --v, --verbose               show the last commit of each branch
+  --u, --upstream              also show what each branch tracks
+       --current               print the name of the current branch
+       --contains REV          only branches that contain this commit
+       --without REV           only branches that do not contain this commit
+       --merged REV            only branches merged into this commit
+       --unmerged REV          only branches not merged into this commit
+       --points-at REV         only branches at this commit
+       --sort KEY              order by this key (refname, -refname, committerdate, ...)
+       --format FORMAT         print each branch in this format
+  --i, --ignore-case           sort and filter without regard to case

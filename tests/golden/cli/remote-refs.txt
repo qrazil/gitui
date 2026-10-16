@@ -1,0 +1,16 @@
+usage: 1git -remote-refs [options] [<REMOTE>] [<PATTERN>...]
+
+list the refs of a remote without fetching
+
+arguments:
+  [<REMOTE>]        the remote or URL (default: the upstream remote)
+  [<PATTERN>...]    only refs matching these
+
+options:
+       --help       show this help
+       --branches   only branches
+  --t, --tags       only tags
+       --only-refs  leave out HEAD and peeled tags
+       --symref     also show where symbolic refs point
+       --exit-code  exit with 2 when nothing matches
+  --q, --quiet      print nothing

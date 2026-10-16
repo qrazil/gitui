@@ -1,0 +1,14 @@
+usage: 1git -remote-add [options] <NAME> <URL>
+
+add a remote
+
+arguments:
+  <NAME>                    what to call it
+  <URL>                     where it is
+
+options:
+       --help               show this help
+  --f, --fetch              fetch it right away
+       --tags               fetch every tag
+  --t, --track BRANCH...    track only these branches
+       --mirror fetch|push  treat the remote as a mirror

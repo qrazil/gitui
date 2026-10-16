@@ -31,9 +31,9 @@ pub Result<int, term.Error> run(TUI_app.Loop loop, TUI_widget.Widget view, TUI_a
             return Result<int, term.Error>.Err(error);
         }
         case Ok(term.Session session): {
-            session.on_exit(loop.leave);
+            session.on_exit(loop.leave_sequence());
             term.Writer writer = term.writer(io.stdout());
-            writer.put(loop.enter);
+            writer.put(loop.enter_sequence());
             term.Reader reader = term.reader();
             term.Size window_size = TUI_app.screen_size();
             TUI_buffer.Buffer previous = TUI_buffer.Buffer.sized(window_size.columns, window_size.rows);

@@ -1,0 +1,68 @@
+usage: 1git [options] -<command> [...]
+
+a git client: git's repositories, protocols and output, a command line of its own
+
+commands:
+  -s, -status                  show what changed in the work tree and the index
+  -l, -log                     show the commit history
+      -show                    show commits, tags, trees and files
+  -d, -diff                    show changes between the work tree, the index and commits
+  -a, -add                     stage changes
+      -remove                  stop tracking files, and delete them
+      -move                    move or rename files and directories
+      -restore                 put files back as they are in the index or in a commit
+      -reset                   move the current branch to another commit
+  -c, -commit                  record the staged changes as a commit
+  -w, -switch                  change branch
+  -b, -branch                  list, create, rename and delete branches
+  -t, -tag                     list, create and delete tags
+      -stash                   put the changes away, leaving a clean work tree
+      -stash-list              list the stashes
+      -stash-show              show the changes in a stash
+      -stash-apply             apply a stash and keep it
+      -stash-pop               apply a stash and drop it
+      -stash-drop              delete one stash
+      -stash-clear             delete every stash
+  -m, -merge                   join another branch into the current one
+  -r, -rebase                  replay commits on top of another base
+      -cherry-pick             apply the changes of commits on the current branch
+      -revert                  make commits that undo the changes of commits
+      -clean                   delete untracked files (asks for --force or --dry-run)
+      -worktree                list the work trees of this repository
+      -worktree-add            check a branch out in another directory
+      -worktree-remove         delete a work tree
+      -worktree-prune          forget work trees whose directory is gone
+      -clone                   copy a repository
+      -init                    start a repository
+  -f, -fetch                   download commits and refs from a remote
+      -pull                    fetch, then join the upstream branch into the current one
+  -p, -push                    send commits and refs to a remote
+      -remote                  list the remotes
+      -remote-add              add a remote
+      -remote-remove           remove a remote and its remote-tracking refs
+      -remote-rename           rename a remote
+      -remote-set-url          change the URL of a remote
+      -remote-get-url          print the URL of a remote
+      -remote-show             show a remote and how branches relate
+      -remote-prune            delete remote-tracking refs the remote no longer has
+      -remote-set-head         set what the remote's HEAD is here
+      -remote-refs             list the refs of a remote without fetching
+      -cat-file                print an object's type, size or contents
+      -ls-tree                 list a tree's entries
+      -rev-parse               the object names a revision resolves to
+      -refs                    every ref in the repository, with what it points at
+      -migrate                 write a git command line the 1git way
+
+options:
+       --help                  show this help
+       --version               print the version and exit
+  --C, --dir DIR               run as if started in this directory
+  --c, --config NAME=VALUE...  set configuration for this run, like git -c
+       --git-dir DIR           the repository's git directory
+       --work-tree DIR         the work tree, when it is not next to the git directory
+       --completions SHELL     print a shell completion script (bash, zsh or fish) and exit
+
+exit status: 0 done, 1 a command failed (the commands after it did not run), 2 the line was not understood (nothing ran)
+one dash is a command, two dashes an option, anything else data: 1git -add --all -commit --message 'fix' -push
+an option's value cannot start with a dash: write --message=-x. Put an option that takes a list (--path, --message) after the operands.
+from git: 1git -migrate 'git log --oneline -5' (docs/MIGRATING-FROM-GIT.md)

@@ -1,0 +1,10 @@
+usage: 1git -remote-show [options] <NAME>
+
+show a remote and how branches relate
+
+arguments:
+  <NAME>        the remote
+
+options:
+       --help   show this help
+       --local  do not ask the remote, use what is stored here

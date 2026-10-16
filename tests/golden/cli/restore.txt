@@ -1,0 +1,16 @@
+usage: 1git -restore [options] [<PATH>...]
+
+put files back as they are in the index or in a commit
+
+arguments:
+  [<PATH>...]      files and directories to restore
+
+options:
+       --help      show this help
+       --from REV  restore from this commit (default: the index, or HEAD with --staged)
+       --staged    restore the index
+       --worktree  restore the work tree (the default unless --staged)
+       --ours      take our side of a conflict
+       --theirs    take their side of a conflict
+  --p, --patch     choose hunks to restore, interactively
+  --q, --quiet     print nothing

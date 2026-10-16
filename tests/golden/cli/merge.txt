@@ -1,0 +1,22 @@
+usage: 1git -merge [options] [<REV>]
+
+join another branch into the current one
+
+arguments:
+  [<REV>]                                     the branch or commit to merge
+
+options:
+       --help                                 show this help
+       --fast-forward allow|only|never        fast-forward when possible (the default), only that, or always make a merge commit
+       --squash                               stage the result without committing or recording a merge
+       --stage-only                           stage the result without committing it
+  --m, --message TEXT...                      the merge message: each text is a paragraph
+  --F, --file FILE                            read the merge message from a file
+       --edit on|off                          open the editor on the merge message
+       --strategy ort|ours|recursive|resolve  the merge strategy (default: ort)
+       --prefer ours|theirs                   on a conflict, take this side
+       --allow-unrelated                      merge histories that share nothing
+       --continue                             finish a merge after resolving conflicts
+       --abort                                give up the merge and go back
+       --quit                                 forget the merge but keep the work tree as it is
+  --q, --quiet                                print only errors

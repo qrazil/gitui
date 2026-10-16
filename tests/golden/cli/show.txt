@@ -1,0 +1,38 @@
+usage: 1git -show [options] [<OBJECT>...]
+
+show commits, tags, trees and files
+
+arguments:
+  [<OBJECT>...]                                               commits, tags, trees or blobs (default HEAD); REV:PATH is a file at a revision
+
+options:
+       --help                                                 show this help
+       --oneline                                              one line per commit
+       --format STYLE                                         oneline, short, medium, full, fuller, raw, or a format such as '%h %s'
+       --date STYLE                                           how dates are shown: iso, short, relative, raw, unix, rfc, format:...
+       --abbrev N                                             digits of an abbreviated commit name
+  --p, --patch                                                show the patch
+       --stat                                                 show a diffstat
+       --numstat                                              added and removed lines per file, for programs
+       --shortstat                                            only the totals line of the diffstat
+       --name-only                                            show the names of the changed files
+       --name-status                                          show the names, each with a letter for what happened
+       --raw                                                  show git's raw diff format
+       --summary                                              show created, deleted and renamed files and mode changes
+  --c, --context N                                            lines of context around each change
+  --w, --ignore-all-space                                     ignore whitespace when comparing lines
+  --b, --ignore-space-change                                  ignore changes in the amount of whitespace
+       --renames on|off                                       detect renamed files (default: diff.renames)
+       --rename-threshold PERCENT                             how similar two files must be to be a rename
+       --swap                                                 swap the two sides
+       --merge-diff separate|combined|dense|first-parent|off  how a merge commit shows its changes
+       --diff-filter KINDS                                    keep only these kinds: A C D M R T U (lower case leaves them out)
+       --word-diff plain|color|porcelain|none                 compare by words
+  --a, --text                                                 treat every file as text
+       --full-index                                           print full object names in the index lines
+  --z, --nul                                                  end each name with a NUL instead of a newline
+  --y, --side-by-side                                         lay the patch out as two columns, old and new
+       --width COLUMNS                                        columns for --side-by-side (default: the terminal)
+       --color always|never|auto                              when to use colour (default: auto)
+  --s, --header-only                                          leave out the changes
+       --path PATH...                                         only changes to these paths (put it last)

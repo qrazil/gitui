@@ -1,0 +1,20 @@
+usage: 1git -pull [options] [<REMOTE>] [<BRANCH>]
+
+fetch, then join the upstream branch into the current one
+
+arguments:
+  [<REMOTE>]                             where from (default: the upstream of the current branch)
+  [<BRANCH>]                             which branch (default: the upstream of the current branch)
+
+options:
+       --help                            show this help
+       --integrate rebase|merge|ff-only  how to join: replay your commits, make a merge, or only fast-forward (default: pull.rebase, pull.ff, else only fast-forward)
+       --autostash                       stash local changes and bring them back afterwards
+       --squash                          stage the result without committing it
+  --a, --all                             fetch every remote
+  --p, --prune                           delete remote-tracking refs the remote no longer has
+  --t, --tags                            fetch every tag
+       --depth N                         only the last N commits
+  --f, --force                           overwrite local refs that do not fast-forward
+       --dry-run                         show what would be fetched
+  --q, --quiet                           print nothing

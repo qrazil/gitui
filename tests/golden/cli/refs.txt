@@ -1,0 +1,6 @@
+usage: 1git -refs
+
+every ref in the repository, with what it points at
+
+options:
+       --help  show this help

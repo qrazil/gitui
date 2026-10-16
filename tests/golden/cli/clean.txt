@@ -1,0 +1,16 @@
+usage: 1git -clean [options] [<PATH>...]
+
+delete untracked files (asks for --force or --dry-run)
+
+arguments:
+  [<PATH>...]                only under these paths
+
+options:
+       --help                show this help
+  --f, --force               really delete
+       --dry-run             only show what would be deleted
+  --d, --directories         also delete untracked directories
+       --ignored also|only   also delete ignored files, or delete only those
+       --nested              also delete directories that are git repositories (needs --force)
+  --e, --exclude PATTERN...  keep files matching these patterns
+  --q, --quiet               print nothing

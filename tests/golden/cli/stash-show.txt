@@ -1,0 +1,14 @@
+usage: 1git -stash-show [options] [<STASH>]
+
+show the changes in a stash
+
+arguments:
+  [<STASH>]                 which stash: N or stash@{N} (default: the newest)
+
+options:
+       --help               show this help
+  --p, --patch              show the patch
+       --stat               show a diffstat
+       --name-only          show the names of the changed files
+       --name-status        show the names, each with a letter for what happened
+  --u, --include-untracked  also show the untracked files

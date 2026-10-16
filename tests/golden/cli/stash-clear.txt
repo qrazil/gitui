@@ -1,0 +1,6 @@
+usage: 1git -stash-clear
+
+delete every stash
+
+options:
+       --help  show this help
