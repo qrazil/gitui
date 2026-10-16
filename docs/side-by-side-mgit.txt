@@ -1,0 +1,34 @@
+mgit, 140 columns, the diff of parser.c (unstaged), the cursor on a changed row:
+
+╭─ main  ·  → no upstream  ·  ~1  ·  demo ─────────────────────────────────────────────────────────────────────────────────────────────────╮
+│┌diff: M  parser.c  [side by side]───────────────────────────────────────────────────────────────────────────────────────────────────────┐│
+││    parser.c  (index)                                                    parser.c  (working tree)                                       ││
+││@@ -1,15 +1,21 @@                                                                                                                       ││
+││ 1  #include <stdio.h>                                             |  1  #include <stdio.h>                                             ││
+││                                                                   +  2 +#include <errno.h>                                             ││
+││ 2                                                                 |  3                                                                 ││
+││ 3 -/* Parse a number out of a token. */                           ~  4 +/* Parse a number out of a token; sets errno on a bad digit. */││
+││ 4 -int parse_number(const char *text, int base) {                 ~  5 +int parse_number(const char *text, int radix) {                ││
+││ 5      int total = 0;                                             |  6      int total = 0;                                             ││
+││ 6      for (int i = 0; text[i] != '\0'; i++) {                    |  7      for (int i = 0; text[i] != '\0'; i++) {                    ││
+││ 7 -        total = total * base + digit(text[i]);                 ~  8 +        int value = digit(text[i]);                            ││
+││                                                                   +  9 +        if (value < 0 || value >= radix) {                     ││
+││                                                                   + 10 +            errno = EINVAL;                                    ││
+││                                                                   + 11 +            return 0;                                          ││
+││                                                                   + 12 +        }                                                      ││
+││                                                                   + 13 +        total = total * radix + value;                         ││
+││ 8      }                                                          | 14      }                                                          ││
+││ 9      return total;                                              | 15      return total;                                              ││
+││10  }                                                              | 16  }                                                              ││
+││11                                                                 | 17                                                                 ││
+││12 -static const char *HELP = "usage: parse <number> [base]; the b ~ 18 +static const char *HELP = "usage: parse <number> [base]; the ba││
+││    ase is 2, 8, 10 or 16 and defaults to ten when it is left out" ~     se is 2, 8, 10 or 16 and defaults to ten when it is omitted";  ││
+││    ;                                                              ~                                                                    ││
+││13                                                                 | 19                                                                 ││
+││14  int main(void) {                                               | 20  int main(void) {                                               ││
+││15      printf("%d\n", parse_number("42", 10));                    | 21      printf("%d\n", parse_number("42", 10));                    ││
+││… 2 unchanged lines (e: show more) …                                                                                                    ││
+│└────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘│
+│                                                                                                                                          │
+│ @ log  ? help  i info  j/k move  s stage hunk  u unstage hunk  v lines  q/esc/backspace back  D split  B blame  H history                │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯

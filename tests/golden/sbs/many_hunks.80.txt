@@ -1,0 +1,28 @@
+    a/file                                   b/file                             $
+… 1 unchanged line (e: show more) …                                             $
+@@ -2,7 +2,7 @@                                                                 $
+ 2  line 2                             |  2  line 2                             $
+ 3  line 3                             |  3  line 3                             $
+ 4  line 4                             |  4  line 4                             $
+ 5 -line 5                             ~  5 +LINE 5                             $
+ 6  line 6                             |  6  line 6                             $
+ 7  line 7                             |  7  line 7                             $
+ 8  line 8                             |  8  line 8                             $
+… 18 unchanged lines (e: show more) …                                           $
+@@ -27,8 +27,8 @@                                                               $
+27  line 27                            | 27  line 27                            $
+28  line 28                            | 28  line 28                            $
+29  line 29                            | 29  line 29                            $
+30 -line 30                            ~ 30 +LINE 30                            $
+31 -line 31                            ~ 31 +LINE 31                            $
+32  line 32                            | 32  line 32                            $
+33  line 33                            | 33  line 33                            $
+34  line 34                            | 34  line 34                            $
+… 20 unchanged lines (e: show more) …                                           $
+@@ -55,6 +55,6 @@                                                               $
+55  line 55                            | 55  line 55                            $
+56  line 56                            | 56  line 56                            $
+57  line 57                            | 57  line 57                            $
+58 -line 58                            ~ 58 +LINE 58                            $
+59  line 59                            | 59  line 59                            $
+60  line 60                            | 60  line 60                            $

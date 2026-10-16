@@ -169,6 +169,34 @@ changes and unrelated roots. They were also run against this project's own
 repositories (`log --graph --all`, `-p`, `--stat`, `--follow`, `-w`, `-U0`)
 with no difference.
 
+### An extension: `--side-by-side` (0.22.0)
+
+Git has no side-by-side diff, so this is **not** git's behaviour and never
+happens unless asked: `1git diff`, `show` and `log` without the flag print
+git's bytes, on a terminal or piped (`scripts/compare_*.sh` and
+`tests/test_sbs.sh` check both).
+
+- `--side-by-side` (`-y`, as in GNU diff; it implies `-p`) lays every file's
+  patch out as two columns, old | new, with line numbers, a gutter marker per
+  row, changed words marked inside paired lines, long lines wrapped per side,
+  and each file's ruler naming both sides (`a/x (abc1234)` | `b/x (def5678)`
+  from the `index` line). Commit headers, messages and `--stat` lines pass
+  through unchanged; a rename, mode change, binary or submodule entry keeps its
+  git lines; a combined diff (`diff --cc`) stays unified behind the line
+  `(side-by-side: combined diff shown unified)`. A file that does not fit the
+  width (under about 31 columns) stays unified too.
+- `--width=N` sets the columns, else `$COLUMNS`, else the terminal's, else 130
+  (GNU diff's default). `--no-side-by-side` undoes the flag.
+- Colour follows git: `--color=always`, `color.ui` / `color.diff` or a terminal;
+  the slots are `color.diff.meta`, `frag`, `old` and `new`, changed words in
+  bold underline on top. No syntax colours, and `--word-diff` is ignored (the
+  layout parses git's plain patch and paints it itself; the changed words of
+  a paired line are marked by the layout instead).
+- The output is held until the end (a diff is laid out whole), and a control
+  character in a line is shown as its `U+2400` symbol. Output that is not
+  valid UTF-8 as a whole is printed as git prints it, unlaid.
+- mgit's split view is the same layout (`README.md`, "Side-by-side diff").
+
 ### Change commands, batch 1 (0.13.0)
 
 `scripts/compare_write.sh` builds two identical repositories per case
@@ -537,7 +565,7 @@ Deliberate departures, and gaps:
   ~40 s at `-O0`, a 21 MB repository 7 s at `-O2`). This is an m31 library
   limit, not worked around.
 - `init` writes no templates (no sample hooks, `info/exclude`, `description`).
-- The advertised user agent is `1git/0.19.1`.
+- The advertised user agent is `1git/0.22.0`.
 
 ## Case-insensitive and Unicode-normalizing volumes (0.19.0, 0.19.1)
 

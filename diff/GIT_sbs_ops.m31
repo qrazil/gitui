@@ -1,0 +1,138 @@
+// The side-by-side input from an edit script: `GIT_sbs.FileDiff` made of the
+// very ops `GIT_xdiff.diff_text` returns and the very hunk boundaries
+// `GIT_hunks.spans` draws, so the hunks of the split view, of mgit's unified
+// view and of the patch machinery that stages them are one grouping, not three
+// that could drift. Nothing is diffed here.
+//
+//   GIT_sbs_ops.from_ops(ops, context, old_label, new_label)  -> FileDiff
+//   GIT_sbs_ops.from_bytes(old, new, context, old_label, new_label)
+//                                                          -> Option<FileDiff>
+//
+// `from_bytes` answers None for a binary pair. Unlike `GIT_hunks.line_text` (a
+// rendered `TUI_diff_view.Line` has lost its terminator) this keeps the facts
+// the split view shows: a CRLF line says so, and a last line with no newline
+// says so. A line that is not UTF-8 is drawn as its hex, as everywhere else.
+
+import text.diff;
+import diff.GIT_hunks;
+import diff.GIT_sbs;
+import diff.GIT_xdiff;
+
+// The line's text without its terminator, whether it ended in CRLF, whether it
+// had a terminator at all.
+type Split {
+    str text;
+    bool has_cr;
+    bool has_eol;
+}
+
+/// A line's text as the views draw it: no terminator, no CR, hex for a line
+/// that is not UTF-8.
+pub str text_of(bytes line) {
+    return split_line(line).text;
+}
+
+Split split_line(bytes line) {
+    int length = line.size();
+    bool has_eol = false;
+    bool has_cr = false;
+    if (length > 0 && line[length - 1] == 10) {
+        length = length - 1;
+        has_eol = true;
+        if (length > 0 && line[length - 1] == 13) {
+            length = length - 1;
+            has_cr = true;
+        }
+    }
+    bytes trimmed = line.substr(0, length);
+    match (trimmed.utf8()) {
+        case Some(str text): {
+            return Split(text, has_cr, has_eol);
+        }
+        case None: {
+            return Split("<invalid utf-8: " + trimmed.hex() + ">", has_cr, has_eol);
+        }
+    }
+}
+
+// How many lines of one side come before ops[i], for every i up to the end.
+List<int> prefix(List<diff.Op> ops, bool is_old) {
+    List<int> counts = [0; ops.size() + 1];
+    for (int i in 0 .. ops.size()) {
+        bool is_counted = false;
+        match (ops[i].kind) {
+            case Keep: {
+                is_counted = true;
+            }
+            case Remove: {
+                is_counted = is_old;
+            }
+            case Add: {
+                is_counted = !is_old;
+            }
+        }
+        if (is_counted) {
+            counts[i + 1] = counts[i] + 1;
+        } else {
+            counts[i + 1] = counts[i];
+        }
+    }
+    return counts;
+}
+
+// The first line number of a range of `count` lines that follows `before`
+// lines: git writes the line BEFORE an empty range (`-5,0` inserts after 5).
+int start_of(int before, int count) {
+    if (count > 0) {
+        return before + 1;
+    }
+    return before;
+}
+
+str range(int before, int count) {
+    return start_of(before, count).to_str() + "," + count.to_str();
+}
+
+/// The file diff of `ops` grouped with `context` lines of context.
+pub GIT_sbs.FileDiff from_ops(List<diff.Op> ops, int context, str old_label, str new_label) {
+    List<int> old_no = prefix(ops, true);
+    List<int> new_no = prefix(ops, false);
+    GIT_sbs.FileDiff file = GIT_sbs.FileDiff(old_label: old_label, new_label: new_label);
+    file.old_total = old_no[ops.size()];
+    file.new_total = new_no[ops.size()];
+    for (GIT_hunks.Span span in GIT_hunks.spans(ops, context: context)) {
+        int old_count = old_no[span.end] - old_no[span.start];
+        int new_count = new_no[span.end] - new_no[span.start];
+        str header = "@@ -" + range(old_no[span.start], old_count) + " +" + range(new_no[span.start], new_count) + " @@";
+        GIT_sbs.DHunk hunk = GIT_sbs.DHunk(start_of(old_no[span.start], old_count), old_count, start_of(new_no[span.start], new_count), new_count, header);
+        for (int i in span.start .. span.end) {
+            Split one = split_line(ops[i].line);
+            int kind = GIT_sbs.LINE_CONTEXT;
+            match (ops[i].kind) {
+                case Keep: {
+                }
+                case Add: {
+                    kind = GIT_sbs.LINE_ADD;
+                }
+                case Remove: {
+                    kind = GIT_sbs.LINE_REMOVE;
+                }
+            }
+            hunk.lines.push(GIT_sbs.DLine(kind, one.text, has_cr: one.has_cr, no_eol: !one.has_eol, op: i));
+        }
+        file.hunks.push(hunk);
+    }
+    return file;
+}
+
+/// `old` against `new` as a side-by-side input; None for a binary pair.
+pub Option<GIT_sbs.FileDiff> from_bytes(bytes old, bytes new, int context, str old_label, str new_label) {
+    match (GIT_xdiff.diff_text(old, new)) {
+        case Binary: {
+            return Option<GIT_sbs.FileDiff>.None;
+        }
+        case Lines(List<diff.Op> ops): {
+            return Option<GIT_sbs.FileDiff>.Some(from_ops(ops, context, old_label, new_label));
+        }
+    }
+}

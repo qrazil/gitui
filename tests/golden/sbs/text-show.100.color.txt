@@ -1,0 +1,50 @@
+commit 55c15db9b0779e62ebd0cf41486f9266a798cc36
+Author:     Fixture <f@example.com>
+AuthorDate: Tue Nov 14 22:13:20 2023 +0000
+Commit:     Fixture <f@example.com>
+CommitDate: Tue Nov 14 22:13:20 2023 +0000
+
+    a change
+    
+    with a body
+
+    <ESC>[1ma/big.txt (c9e9e05)<ESC>[m                         <ESC>[2m   <ESC>[m    <ESC>[1mb/big.txt (2a7116b)<ESC>[m
+<ESC>[36m@@ -1,5 +1,5 @@<ESC>[m
+<ESC>[2m 1 <ESC>[m one                                         <ESC>[2m |  1 <ESC>[m one
+<ESC>[2m 2 <ESC>[m<ESC>[31m-two<ESC>[m                                         <ESC>[2m ~  2 <ESC>[m<ESC>[32m+TWO<ESC>[m
+<ESC>[2m 3 <ESC>[m three                                       <ESC>[2m |  3 <ESC>[m three
+<ESC>[2m 4 <ESC>[m four                                        <ESC>[2m |  4 <ESC>[m four
+<ESC>[2m 5 <ESC>[m five                                        <ESC>[2m |  5 <ESC>[m five
+<ESC>[2m… 2 unchanged lines …<ESC>[m
+<ESC>[36m@@ -8,3 +8,4 @@ seven<ESC>[m
+<ESC>[2m 8 <ESC>[m eight                                       <ESC>[2m |  8 <ESC>[m eight
+<ESC>[2m 9 <ESC>[m nine                                        <ESC>[2m |  9 <ESC>[m nine
+<ESC>[2m10 <ESC>[m ten                                         <ESC>[2m | 10 <ESC>[m ten
+<ESC>[2m   <ESC>[m                                             <ESC>[2m + 11 <ESC>[m<ESC>[32m+plus<ESC>[m
+    <ESC>[1ma/bin.dat<ESC>[m                                   <ESC>[2m   <ESC>[m    <ESC>[1mb/bin.dat<ESC>[m
+<ESC>[1mBinary files a/bin.dat and b/bin.dat differ<ESC>[m
+    <ESC>[1ma/crlf.txt (0aa0f34)<ESC>[m                        <ESC>[2m   <ESC>[m    <ESC>[1mb/crlf.txt (28d493c)<ESC>[m
+<ESC>[36m@@ -1,2 +1,2 @@<ESC>[m
+<ESC>[2m 1 <ESC>[m<ESC>[31m-<ESC>[m<ESC>[31m<ESC>[1;4mx␍<ESC>[m                                          <ESC>[2m ~  1 <ESC>[m<ESC>[32m+<ESC>[m<ESC>[32m<ESC>[1;4mx<ESC>[m
+<ESC>[2m 2 <ESC>[m y                                           <ESC>[2m |  2 <ESC>[m y
+    <ESC>[1ma/f.txt (de98044)<ESC>[m                           <ESC>[2m   <ESC>[m    <ESC>[1mb/f.txt (f8f7a32)<ESC>[m
+<ESC>[36m@@ -1,3 +1,4 @@<ESC>[m
+<ESC>[2m 1 <ESC>[m a                                           <ESC>[2m |  1 <ESC>[m a
+<ESC>[2m 2 <ESC>[m<ESC>[31m-b<ESC>[m                                           <ESC>[2m ~  2 <ESC>[m<ESC>[32m+B<ESC>[m
+<ESC>[2m 3 <ESC>[m c                                           <ESC>[2m |  3 <ESC>[m c
+<ESC>[2m   <ESC>[m                                             <ESC>[2m +  4 <ESC>[m<ESC>[32m+d<ESC>[m
+<ESC>[2m   <ESC>[m                                             <ESC>[2m      <ESC>[m<ESC>[2m \ No newline at end of file<ESC>[m
+    <ESC>[1ma/link (7f66e4f)<ESC>[m                            <ESC>[2m   <ESC>[m    <ESC>[1mb/link (d6a4107)<ESC>[m
+<ESC>[36m@@ -1 +1 @@<ESC>[m
+<ESC>[2m 1 <ESC>[m<ESC>[31m-<ESC>[m<ESC>[31m<ESC>[1;4mf<ESC>[m<ESC>[31m.txt<ESC>[m                                       <ESC>[2m ~  1 <ESC>[m<ESC>[32m+<ESC>[m<ESC>[32m<ESC>[1;4mbig<ESC>[m<ESC>[32m.txt<ESC>[m
+<ESC>[2m   <ESC>[m<ESC>[2m \ No newline at end of file<ESC>[m                 <ESC>[2m      <ESC>[m<ESC>[2m \ No newline at end of file<ESC>[m
+    <ESC>[1m/dev/null<ESC>[m                                   <ESC>[2m   <ESC>[m    <ESC>[1mb/new.txt (ec3aaa7)<ESC>[m
+<ESC>[1mnew file mode 100644<ESC>[m
+<ESC>[36m@@ -0,0 +1 @@<ESC>[m
+<ESC>[2m   <ESC>[m                                             <ESC>[2m +  1 <ESC>[m<ESC>[32m+new file    with tabs and wide 日本<ESC>[m
+    <ESC>[1ms.sh<ESC>[m                                        <ESC>[2m   <ESC>[m    <ESC>[1mt.sh<ESC>[m
+<ESC>[1mold mode 100644<ESC>[m
+<ESC>[1mnew mode 100755<ESC>[m
+<ESC>[1msimilarity index 100%<ESC>[m
+<ESC>[1mrename from s.sh<ESC>[m
+<ESC>[1mrename to t.sh<ESC>[m

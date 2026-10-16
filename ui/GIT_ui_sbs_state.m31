@@ -1,0 +1,101 @@
+// What the side-by-side view remembers between frames: the preference (which
+// view, wrapped or scrolled, how much context), the diff it was built from, the
+// layout and its visual rows for the width last drawn, where the cursor and
+// the scroll are, and the syntax highlighters of the two sides. Data only, so
+// `GIT_ui_core.Core` can hold one without importing the drawing code, and a
+// scrolling overlay (the commit view, the stash preview) can own another.
+// `GIT_ui_sbs` is what reads and writes it.
+
+import text.diff;
+import diff.GIT_hunks;
+import diff.GIT_sbs;
+import ui.GIT_ui_syntax;
+
+pub const str VIEW_AUTO = "auto";
+pub const str VIEW_UNIFIED = "unified";
+pub const str VIEW_SPLIT = "split";
+/// `auto` picks side by side from this pane width up.
+pub const int AUTO_MIN_WIDTH = 120;
+/// Below this pane width a requested side-by-side view falls back to unified.
+pub const int SPLIT_MIN_WIDTH = 60;
+
+pub type SbsState {
+    /// `diff.view`: auto, unified or split. "" until the config was read.
+    pub str view = "";
+    pub bool is_wrap = true;
+    pub int hscroll = 0;
+    /// Lines of context around each hunk; `e` widens it, `E` resets it.
+    pub int context = 3;
+    /// Which side the cursor is on (and so what staging acts on).
+    pub bool is_right = true;
+    /// The edit script the view was built from, and the hunk spans mgit's
+    /// unified view uses (the default context): the staging machinery numbers
+    /// hunks and lines by these.
+    pub bool has_source = false;
+    pub List<diff.Op> ops = [];
+    pub List<GIT_hunks.Span> spans = [];
+    pub List<str> old_lines = [];
+    pub List<str> new_lines = [];
+    pub str old_label = "";
+    pub str new_label = "";
+    pub bool is_laid = false;
+    pub int laid_context = -1;
+    pub GIT_sbs.Layout layout = GIT_sbs.Layout();
+    /// Logical row of each op (-1 when it is not in the layout).
+    pub List<int> row_of_op = [];
+    pub bool is_visual = false;
+    pub int visual_width = -1;
+    pub bool visual_wrap = true;
+    pub int visual_hscroll = 0;
+    pub str visual_folds = "";
+    pub GIT_sbs.Geometry geometry = GIT_sbs.Geometry(0, 2, 0, 0, 0, 0);
+    pub List<GIT_sbs.VRow> rows = [];
+    /// First visual row of each logical row; -1 when the row is hidden (a
+    /// folded hunk's body).
+    pub List<int> first_of_row = [];
+    /// The cursor as a logical row, the unified cursor it was last synced
+    /// with, and whether it rests on a line that has no unified row to act on
+    /// (widened context).
+    pub int cursor_row = 0;
+    pub int synced = -1;
+    pub bool is_unmapped = false;
+    pub bool should_reveal = true;
+    pub int offset = 0;
+    /// The area drawn into last time, for mouse hit-testing, and whether the
+    /// side-by-side view was what was drawn.
+    pub int area_x = 0;
+    pub int area_y = 0;
+    pub int area_w = 0;
+    pub int area_h = 0;
+    pub bool is_active = false;
+    /// Syntax: `language` the highlighters are for; when `is_full` they hold
+    /// whole files (a line's index is its number - 1), else only the lines of
+    /// the hunks, in order, and `old_index`/`new_index` map numbers to them.
+    pub str language = "?";
+    pub bool is_full = false;
+    pub GIT_ui_syntax.Highlighter old_syntax = GIT_ui_syntax.Highlighter("");
+    pub GIT_ui_syntax.Highlighter new_syntax = GIT_ui_syntax.Highlighter("");
+    pub Map<int, int> old_index = {};
+    pub Map<int, int> new_index = {};
+}
+
+/// Forget everything derived from the diff (a new diff was opened); the
+/// preference stays.
+pub void SbsState.reset_source() {
+    has_source = false;
+    ops = [];
+    spans = [];
+    old_lines = [];
+    new_lines = [];
+    is_laid = false;
+    laid_context = -1;
+    layout = GIT_sbs.Layout();
+    row_of_op = [];
+    is_visual = false;
+    rows = [];
+    first_of_row = [];
+    synced = -1;
+    is_unmapped = false;
+    should_reveal = true;
+    language = "?";
+}

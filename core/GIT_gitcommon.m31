@@ -17,6 +17,7 @@ import core.GIT_config;
 import core.GIT_repository;
 import core.GIT_gitstatus;
 import core.GIT_icase;
+import diff.GIT_sbs_text;
 
 // --- output ------------------------------------------------------------------------
 
@@ -24,11 +25,16 @@ import core.GIT_icase;
 /// does git.
 pub type Out {
     pub bytes buf = [];
+    /// `--side-by-side`: when above 0, everything is held until the end and
+    /// every file's diff in it is laid out in this many columns (an m31git
+    /// extension: git has no such format; see `GIT_sbs_text`).
+    pub int sbs_width = 0;
+    pub GIT_sbs_text.Pal sbs_pal = GIT_sbs_text.Pal();
 }
 
 pub void Out.put(bytes data) {
     buf.extend(data);
-    if (buf.size() > 65536) {
+    if (buf.size() > 65536 && sbs_width == 0) {
         flush();
     }
 }
@@ -40,6 +46,15 @@ pub void Out.text(str data) {
 pub void Out.flush() {
     if (buf.size() == 0) {
         return;
+    }
+    if (sbs_width > 0) {
+        match (buf.utf8()) {
+            case Some(str body): {
+                buf = GIT_sbs_text.transform(body, sbs_width, sbs_pal).to_bytes();
+            }
+            case None: {
+            }
+        }
     }
     io.File out = io.stdout();
     match (out.write(buf)) {
@@ -791,6 +806,41 @@ pub bool spec_match(List<Spec> specs, str path) {
 }
 
 // --- terminal ----------------------------------------------------------------------------
+
+/// Columns for `--side-by-side`: `--width=N` when given (`given` above 0),
+/// else `COLUMNS`, else the terminal's width, else 130 (GNU diff's default).
+pub int sbs_columns(int given) {
+    if (given > 0) {
+        return given;
+    }
+    match (os.env("COLUMNS")) {
+        case Some(str value): {
+            match (value.parse_int()) {
+                case Some(int n): {
+                    if (n > 0) {
+                        return n;
+                    }
+                }
+                case None: {
+                }
+            }
+        }
+        case None: {
+        }
+    }
+    if (term.is_terminal(1)) {
+        match (term.size()) {
+            case Ok(term.Size size): {
+                if (size.columns > 0) {
+                    return size.columns;
+                }
+            }
+            case Err(_): {
+            }
+        }
+    }
+    return 130;
+}
 
 /// Columns for `--stat`: `COLUMNS`, the terminal's width, or 80.
 pub int columns() {

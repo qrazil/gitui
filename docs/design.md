@@ -268,6 +268,62 @@ branch `cafe` beats an object `cafe...`), and refuses what it cannot do (dates i
 oracle is `git rev-parse` / `git rev-list` over a fixture built to hit the special
 cases, plus a seeded fuzzer.
 
+## Side-by-side diff, 2026-10-15
+
+The owner asked for "v diff or vertical diff instead of the current diff": old
+and new in two columns. Decisions, with the ones that were close:
+
+- **A renderer over the existing diff, not a second one.** The layout
+  (`diff/GIT_sbs.m31`) is a pure function of hunks: no `tui`, no I/O, tested
+  with strings. Its input comes from the edit script `GIT_xdiff.diff_text`
+  returned and the spans `GIT_hunks.spans` draws (`GIT_sbs_ops`), or from git's
+  own unified text (`GIT_sbs_text`: `1git diff --side-by-side`, the stash
+  preview). Nothing in it diffs. A hunk in the split view is therefore the
+  hunk of the unified view, of `git diff`, and of the patch code that stages
+  it.
+- **One cursor.** Staging, unstaging, discarding and the visual range already
+  address `diff_view.cursor` (a row of the unified view). The split view keeps
+  its own cursor over the paired rows and writes the matching unified row into
+  that one whenever the row has a unified counterpart; which side the cursor is
+  on picks the line of a changed row (right by default: the right side selects
+  what is staged). The alternatives were a second staging path over split rows
+  (two implementations to keep equal) or restricting the split view to
+  read-only (the owner asked for staging from it). A line shown only because
+  the context was widened has no unified row; the editing commands refuse it by
+  name rather than act on a neighbour.
+- **Pairing is positional.** The i-th removal of a block sits beside the i-th
+  addition. A smarter pairing (by similarity) would make moved or reordered
+  lines look matched and disagree with the gutter's `~`; the intra-line marks
+  already say which pairs share words, and say nothing for pairs that share
+  none.
+- **Integer constants, not enums, for kinds.** The m31 release this builds with
+  has no `==` on an enum without a hand-written `eq`; row, cell and line kinds
+  are `const int`s (`GIT_sbs.ROW_PAIR`, `CELL_DEL`, ...).
+- **Width is a plan, rows are exact.** `geometry` splits N columns into two
+  sides of number, marker and text around a 3-column gutter, or refuses (a side
+  under 10 text columns). `visual` wraps (the shorter side padded) or shifts
+  both sides together; every visual row is exactly N columns, which the
+  property tests check on random files, and the buffer test checks the drawing
+  adds nothing to the text.
+- **Preference.** `diff.view = auto | unified | split`, 120 columns for auto and
+  60 as the least for any split; `D` writes the choice back to `diff.view`.
+  Git itself ignores unknown `diff.*` keys.
+- **Syntax.** Whole files, not hunks: each side's `Highlighter` is fed the old or
+  new file's lines in order, so lexer state (an open comment or string) is
+  correct for a line however far into the file it is. Only the stash preview,
+  which is git's text and has several files, highlights nothing in split mode
+  (it has one language per file but numbers repeat across files); the commit
+  view and the diff view highlight both sides.
+- **Mouse.** mgit asked for no mouse reports before. They are now on (wheel
+  scrolls, a click picks a row and, in split mode, a side), switchable off
+  (`M31GIT_MOUSE=off`, `mgit.mouse=off`); the cost is that selecting text in
+  the terminal needs Shift.
+- **Not done.** Combined diffs (merges) stay unified; the conflict view shows
+  conflict regions, not a diff, and is untouched; there is no branch-compare
+  screen in mgit to give a split view to; folds work in split mode only at 3
+  lines of context (a widened context merges hunks, so it ignores them); the
+  overlays (commit view, stash preview) scroll with the keys, not the wheel.
+
 ## What this deliberately does not decide yet
 
   - Exact keybindings (mnemonic, one key per base verb, is the only

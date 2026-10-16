@@ -40,6 +40,7 @@ import diff.GIT_patch;
 import ui.GIT_ui_core;
 import ui.GIT_ui_diff;
 import ui.GIT_ui_model;
+import ui.GIT_ui_sbs;
 import diff.GIT_xdiff;
 import io;
 import term;
@@ -76,7 +77,11 @@ pub void LinesLayer.toggle_visual() {
 
 /// j / k in the diff view: the cursor moves, and a visual range follows it.
 pub void LinesLayer.move_lines(int delta) {
-    diff_view.move(delta);
+    if (sbs.is_active) {
+        GIT_ui_sbs.move(core(), delta);
+    } else {
+        diff_view.move(delta);
+    }
     if (visual_anchor >= 0) {
         say_selection();
     }
@@ -95,11 +100,19 @@ pub void LinesLayer.back_lines() {
 /// `s` / `u` of the hunk layer, with any visual range dropped first.
 pub void LinesLayer.stage_hunk_lines() {
     visual_anchor = -1;
+    if (sbs.is_active && sbs.is_unmapped) {
+        message = "that line is only context from widening (e): move onto a changed line";
+        return;
+    }
     stage_hunk_current();
 }
 
 pub void LinesLayer.unstage_hunk_lines() {
     visual_anchor = -1;
+    if (sbs.is_active && sbs.is_unmapped) {
+        message = "that line is only context from widening (e): move onto a changed line";
+        return;
+    }
     unstage_hunk_current();
 }
 
@@ -298,6 +311,9 @@ pub Result<Picked, str> LinesLayer.pick() {
     }
     if (diff_section == "commit") {
         return Result<Picked, str>.Err("a commit's diff is read-only");
+    }
+    if (sbs.is_active && sbs.is_unmapped) {
+        return Result<Picked, str>.Err("that line is only context from widening (e): move onto a + or - line");
     }
     Sides sides = Sides([], []);
     match (sides_of(diff_section, diff_path)) {
@@ -631,8 +647,11 @@ pub void LinesLayer.draw_lines(TUI_buffer.Buffer buffer, TUI_geometry.Rect area)
     }
     str saved = diff_title;
     diff_title = saved + " [visual]";
-    draw_diff(buffer, area);
+    draw_diff(buffer, area, visual_anchor: visual_anchor);
     diff_title = saved;
+    if (sbs.is_active) {
+        return;
+    }
     TUI_widget.Block block = TUI_widget.Block(title: "diff", borders: TUI_widget.Borders.Single);
     TUI_geometry.Rect inner = block.inner(area);
     List<int> rows = selection_rows();

@@ -1,0 +1,257 @@
+// The side-by-side engine, driven from the shell: `test_sbs.sh` compares its
+// output with golden files and checks the properties below on random inputs.
+// Not part of mgit's command surface.
+//
+//   t_sbs plain <old> <new> <width> [context] [scroll <hscroll>]
+//       the layout of old against new as plain text, one visual row per line
+//       (context defaults to 3; the rows end in `$` so padding shows)
+//   t_sbs ansi <old> <new> <width>
+//       the same through the colour renderer, escapes made visible as <ESC>
+//   t_sbs prop <old> <new> <width> <context> [scroll <hscroll>]
+//       the properties: prints `ok` or one line per violation
+//   t_sbs propdir <dir> <count>
+//       the properties over r0 .. r<count-1> of `sbs_random.py`'s directory,
+//       at three widths, three contexts, wrapped and scrolled: `ok <runs>`
+//   t_sbs text <width> <diff-file> [color]
+//       `GIT_sbs_text.transform` of a unified diff on a file
+//   t_sbs marks <a> <b>
+//       the intra-line marks of two lines, as [from,to) glyph ranges
+
+import os;
+import io;
+import diff.GIT_sbs;
+import diff.GIT_sbs_ops;
+import diff.GIT_sbs_text;
+import text.diff;
+import diff.GIT_xdiff;
+
+List<str> argv = os.arguments();
+if (argv.size() < 2) {
+    print("usage: t_sbs plain|ansi|prop|text|marks ...");
+    os.exit(1);
+}
+str mode = argv[1];
+if (mode == "marks") {
+    GIT_sbs.Marks marks = GIT_sbs.intra(GIT_sbs.glyphs(argv[2], 4), GIT_sbs.glyphs(argv[3], 4));
+    print("old " + show_ranges(marks.old_marks));
+    print("new " + show_ranges(marks.new_marks));
+    return;
+}
+if (mode == "text") {
+    int total = argv[2].parse_int().or(80);
+    bytes data = read(argv[3]);
+    str body = data.utf8().or("");
+    GIT_sbs_text.Pal pal = GIT_sbs_text.Pal();
+    if (argv.size() > 4 && argv[4] == "color") {
+        pal = GIT_sbs_text.ansi_pal();
+    }
+    for (str line in GIT_sbs_text.transform_lines(GIT_sbs_text.split_lines(body), total, pal, GIT_sbs.Opts())) {
+        print(visible(line));
+    }
+    return;
+}
+if (mode == "propdir") {
+    // propdir <dir> <count>: every pair r<i>.old / r<i>.new of the directory,
+    // at three widths, three contexts and both ways of handling long lines
+    int pairs = argv[3].parse_int().or(1);
+    int runs = 0;
+    int shown = 0;
+    for (int index in 0 .. pairs) {
+        bytes before = read(argv[2] + "/r" + index.to_str() + ".old");
+        bytes after = read(argv[2] + "/r" + index.to_str() + ".new");
+        List<int> widths = [40, 75, 130];
+        List<int> spans = [0, 3, 1000000];
+        for (int width in widths) {
+            for (int span in spans) {
+                for (int way in 0 .. 2) {
+                    runs = runs + 1;
+                    List<str> found = problems(before, after, width, span, way == 0, way * 5);
+                    if (found.size() > 0 && shown < 5) {
+                        shown = shown + 1;
+                        print("r" + index.to_str() + " width " + width.to_str() + " context " + span.to_str() + " way " + way.to_str() + ": " + found[0]);
+                    }
+                }
+            }
+        }
+    }
+    if (shown == 0) {
+        print("ok " + runs.to_str());
+    }
+    return;
+}
+bytes old = read(argv[2]);
+bytes new = read(argv[3]);
+int total = argv[4].parse_int().or(100);
+int context = 3;
+if (argv.size() > 5) {
+    context = argv[5].parse_int().or(3);
+}
+bool is_wrap = true;
+int hscroll = 0;
+if (argv.size() > 7 && argv[6] == "scroll") {
+    is_wrap = false;
+    hscroll = argv[7].parse_int().or(0);
+}
+match (GIT_sbs_ops.from_bytes(old, new, context, "a/file", "b/file")) {
+    case None: {
+        print("binary");
+    }
+    case Some(GIT_sbs.FileDiff file): {
+        GIT_sbs.Layout layout = GIT_sbs.build(file, GIT_sbs.Opts(can_expand: true));
+        match (GIT_sbs.geometry(total, layout.max_number)) {
+            case None: {
+                print("too narrow");
+            }
+            case Some(GIT_sbs.Geometry g): {
+                if (mode == "plain") {
+                    for (str line in GIT_sbs.render_plain(layout, g, is_wrap, hscroll)) {
+                        print(line + "$");
+                    }
+                }
+                if (mode == "ansi") {
+                    for (GIT_sbs.VRow v in GIT_sbs.visual(layout, g, is_wrap, hscroll)) {
+                        print(visible(GIT_sbs_text.row_line(GIT_sbs.runs_of(v, g, layout.tab), GIT_sbs_text.ansi_pal())));
+                    }
+                }
+                if (mode == "prop") {
+                    List<str> found = problems(old, new, total, context, is_wrap, hscroll);
+                    if (found.size() == 0) {
+                        print("ok");
+                    }
+                    for (str line in found) {
+                        print(line);
+                    }
+                }
+            }
+        }
+    }
+}
+
+str visible(str line) {
+    return line.split("\x1b").join("<ESC>");
+}
+
+str show_ranges(List<int> ranges) {
+    List<str> parts = [];
+    int i = 0;
+    while (i + 1 < ranges.size()) {
+        parts.push("[" + ranges[i].to_str() + "," + ranges[i + 1].to_str() + ")");
+        i = i + 2;
+    }
+    return parts.join(" ");
+}
+
+// What a line of the file reads as in a cell.
+List<str> file_lines(bytes data) {
+    List<str> out = [];
+    if (data.size() == 0) {
+        return out;
+    }
+    str text = data.utf8().or("");
+    List<str> parts = text.split("\n");
+    int count = parts.size();
+    if (parts[count - 1] == "") {
+        count = count - 1;
+    }
+    for (int i in 0 .. count) {
+        str line = parts[i];
+        if (line.ends_with("\r")) {
+            line = line.substr(0, line.size() - 1);
+        }
+        out.push(line);
+    }
+    return out;
+}
+
+// Strictly increasing numbers, each line the file's line of that number, and
+// (when the layout holds the whole file) every line there. "" when fine.
+str side_problem(str name, List<str> got, List<int> numbers, List<str> want, bool is_full) {
+    if (is_full && got.size() != want.size()) {
+        return name + " has " + got.size().to_str() + " lines, the file " + want.size().to_str();
+    }
+    int last = 0;
+    for (int i in 0 .. got.size()) {
+        int number = numbers[i];
+        if (number <= last || number > want.size()) {
+            return name + " row " + i.to_str() + " has number " + number.to_str() + " after " + last.to_str();
+        }
+        if (got[i] != want[number - 1]) {
+            return name + " line " + number.to_str() + " differs from the file's";
+        }
+        if (is_full && number != i + 1) {
+            return name + " line " + number.to_str() + " is out of place";
+        }
+        last = number;
+    }
+    return "";
+}
+
+// What is wrong with the layout of old against new at this width, context and
+// mode: the two sides' lines and numbers, and the exact width of every row.
+List<str> problems(bytes old, bytes new, int total, int context, bool is_wrap, int hscroll) {
+    List<str> out = [];
+    match (GIT_sbs_ops.from_bytes(old, new, context, "a/file", "b/file")) {
+        case None: {
+            return out;
+        }
+        case Some(GIT_sbs.FileDiff file): {
+            GIT_sbs.Layout layout = GIT_sbs.build(file, GIT_sbs.Opts(can_expand: true));
+            match (GIT_sbs.geometry(total, layout.max_number)) {
+                case None: {
+                    return out;
+                }
+                case Some(GIT_sbs.Geometry g): {
+                    bool is_full = context >= 100000 && file.hunks.size() > 0;
+                    List<str> left = [];
+                    List<str> right = [];
+                    List<int> left_numbers = [];
+                    List<int> right_numbers = [];
+                    for (GIT_sbs.Row row in layout.rows) {
+                        if (row.kind != GIT_sbs.ROW_PAIR) {
+                            continue;
+                        }
+                        if (row.left.kind == GIT_sbs.CELL_CONTEXT || row.left.kind == GIT_sbs.CELL_DEL) {
+                            left.push(row.left.text);
+                            left_numbers.push(row.left.number);
+                        }
+                        if (row.right.kind == GIT_sbs.CELL_CONTEXT || row.right.kind == GIT_sbs.CELL_ADD) {
+                            right.push(row.right.text);
+                            right_numbers.push(row.right.number);
+                        }
+                    }
+                    str on_left = side_problem("left", left, left_numbers, file_lines(old), is_full);
+                    str on_right = side_problem("right", right, right_numbers, file_lines(new), is_full);
+                    if (on_left != "") {
+                        out.push(on_left);
+                    }
+                    if (on_right != "") {
+                        out.push(on_right);
+                    }
+                    List<GIT_sbs.VRow> rows = GIT_sbs.visual(layout, g, is_wrap, hscroll);
+                    for (int i in 0 .. rows.size()) {
+                        List<GIT_sbs.Run> runs = GIT_sbs.runs_of(rows[i], g, layout.tab);
+                        int width = GIT_sbs.display_width(GIT_sbs.runs_text(runs), layout.tab);
+                        if (width != g.total) {
+                            out.push("visual row " + i.to_str() + " is " + width.to_str() + " columns, not " + g.total.to_str());
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+    }
+    return out;
+}
+
+bytes read(str path) {
+    match (io.read_bytes(path)) {
+        case Ok(bytes contents): {
+            return contents;
+        }
+        case Err(io.Error error): {
+            print("cannot read " + path + ": " + error.to_str());
+            os.exit(1);
+            return [];
+        }
+    }
+}

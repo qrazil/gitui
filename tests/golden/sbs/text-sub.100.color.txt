@@ -1,0 +1,5 @@
+    <ESC>[1m/dev/null<ESC>[m                                   <ESC>[2m   <ESC>[m    <ESC>[1mb/sub (1111111)<ESC>[m
+<ESC>[1mnew file mode 160000<ESC>[m
+<ESC>[36m@@ -0,0 +1 @@<ESC>[m
+<ESC>[2m   <ESC>[m                                             <ESC>[2m +  1 <ESC>[m<ESC>[32m+Subproject commit 111111111111111111111111111<ESC>[m
+<ESC>[2m   <ESC>[m                                             <ESC>[2m +    <ESC>[m<ESC>[32m 1111111111111<ESC>[m

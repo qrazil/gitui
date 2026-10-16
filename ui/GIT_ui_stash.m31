@@ -21,6 +21,8 @@ import diff.GIT_stash;
 import ui.GIT_ui_core;
 import ui.GIT_ui_highlight;
 import ui.GIT_ui_panel;
+import ui.GIT_ui_sbs;
+import ui.GIT_ui_sbs_state;
 import term;
 import text;
 import tui.app.TUI_app;
@@ -372,6 +374,9 @@ type ListOverlay {
     // `preview` walked for syntax colours, rebuilt when the stash or the switch changes
     GIT_ui_highlight.DiffText syntax = GIT_ui_highlight.DiffText([]);
     str syntax_key = "";
+    // the preview side by side (`D`), laid out once per stash shown
+    GIT_ui_sbs_state.SbsState pane = GIT_ui_sbs_state.SbsState();
+    str pane_key = "";
 }
 
 pub TUI_app.Action ListOverlay.handle_key(term.Code code) {
@@ -386,18 +391,31 @@ pub TUI_app.Action ListOverlay.handle_key(term.Code code) {
             if (cmd == GIT_ui_core.CMD_DOWN && selected < host.stash_labels.size() - 1) {
                 selected = selected + 1;
                 scroll = 0;
+                pane.offset = 0;
             }
             if (cmd == GIT_ui_core.CMD_UP && selected > 0) {
                 selected = selected - 1;
                 scroll = 0;
+                pane.offset = 0;
+            }
+            if (cmd == GIT_ui_core.CMD_SPLIT) {
+                GIT_ui_sbs.toggle_view_for(host, pane.is_active, pane.area_w + 2);
+            }
+            if (cmd == GIT_ui_core.CMD_WRAP) {
+                GIT_ui_sbs.toggle_wrap_for(host, pane);
             }
             if (cmd == GIT_ui_core.CMD_PAGE_DOWN) {
                 scroll = scroll + 10;
+                pane.offset = pane.offset + 10;
             }
             if (cmd == GIT_ui_core.CMD_PAGE_UP) {
                 scroll = scroll - 10;
+                pane.offset = pane.offset - 10;
                 if (scroll < 0) {
                     scroll = 0;
+                }
+                if (pane.offset < 0) {
+                    pane.offset = 0;
                 }
             }
             if (cmd == GIT_ui_core.CMD_STASH_POP && has_stash(host, selected)) {
@@ -490,6 +508,18 @@ pub void ListOverlay.render(TUI_buffer.Buffer buffer, TUI_geometry.Rect area) {
     }
     TUI_geometry.Rect view = TUI_geometry.Rect(inner.x, inner.y + top, inner.width, inner.height - top);
     load_preview();
+    GIT_ui_sbs.load_preference(host);
+    pane.is_active = false;
+    if (GIT_ui_sbs.is_wanted(host.sbs.view, view.width + 2)) {
+        if (pane_key != preview_id) {
+            GIT_ui_sbs.set_text(pane, preview);
+            pane_key = preview_id;
+        }
+        if (GIT_ui_sbs.draw_pane(buffer, view, pane, "", host.is_dark)) {
+            pane.is_active = true;
+            return;
+        }
+    }
     scroll = GIT_ui_panel.clamp(scroll, preview.size(), view.height);
     str key = preview_id + ":" + host.is_syntax_on.to_str();
     if (key != syntax_key) {

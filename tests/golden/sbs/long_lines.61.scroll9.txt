@@ -1,0 +1,5 @@
+    a/file                          b/file                   $
+@@ -1,3 +1,3 @@                                              $
+ 1                            |  1                           $
+ 2 -xxxxxxxxxxxxxxxxxxxxx the ~  2 +xxxxxxxxxxxxxxxxxxxxx the$
+ 3                            |  3                           $

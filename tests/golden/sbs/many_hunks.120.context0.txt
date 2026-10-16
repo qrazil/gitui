@@ -1,0 +1,12 @@
+    a/file                                                       b/file                                                 $
+… 4 unchanged lines (e: show more) …                                                                                    $
+@@ -5,1 +5,1 @@                                                                                                         $
+ 5 -line 5                                                 ~  5 +LINE 5                                                 $
+… 24 unchanged lines (e: show more) …                                                                                   $
+@@ -30,2 +30,2 @@                                                                                                       $
+30 -line 30                                                ~ 30 +LINE 30                                                $
+31 -line 31                                                ~ 31 +LINE 31                                                $
+… 26 unchanged lines (e: show more) …                                                                                   $
+@@ -58,1 +58,1 @@                                                                                                       $
+58 -line 58                                                ~ 58 +LINE 58                                                $
+… 2 unchanged lines (e: show more) …                                                                                    $

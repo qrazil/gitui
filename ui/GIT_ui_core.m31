@@ -63,6 +63,7 @@ import term;
 import tui.app.TUI_app;
 import tui.core.TUI_buffer;
 import tui.widgets.TUI_diff_view;
+import ui.GIT_ui_sbs_state;
 import tui.core.TUI_geometry;
 import tui.widgets.TUI_jump_list;
 import tui.widgets.TUI_outline;
@@ -178,6 +179,12 @@ pub const str CMD_BASE = "base";
 pub const str CMD_UNDO = "undo";
 pub const str CMD_STAGE_FILE = "stage-file";
 pub const str CMD_VISUAL = "visual";
+pub const str CMD_SPLIT = "split";
+pub const str CMD_WIDEN = "widen";
+pub const str CMD_WIDEN_RESET = "widen-reset";
+pub const str CMD_WRAP = "wrap";
+pub const str CMD_SCROLL_LEFT = "scroll-left";
+pub const str CMD_SCROLL_RIGHT = "scroll-right";
 pub const str CMD_LINES = "lines";
 pub const str CMD_STASH = "stash";
 pub const str CMD_STASH_PUSH = "stash-push";
@@ -329,6 +336,11 @@ pub type Core {
     /// The row label the diff view's border is drawn with.
     pub str diff_title = "";
     pub TUI_diff_view.DiffView diff_view = TUI_diff_view.DiffView([]);
+    /// The two files the open diff compares, and what the side-by-side view
+    /// keeps about drawing them (`GIT_ui_sbs`).
+    pub bytes diff_old = [];
+    pub bytes diff_new = [];
+    pub GIT_ui_sbs_state.SbsState sbs = GIT_ui_sbs_state.SbsState();
     /// Which comparison `diff_view` shows -- "untracked", "unstaged",
     /// "staged" or "commit" -- and for which path. Empty while closed.
     pub str diff_section = "";
@@ -866,6 +878,14 @@ pub List<Binding> key_table() {
     table.push(Binding(SCOPE_DIFF, CMD_LINES, ["space", "enter"], "stage the selected lines (unstage them in the staged view); the line under the cursor with no range, the whole hunk on its header", "", ""));
     table.push(Binding(SCOPE_DIFF, CMD_DISCARD, ["x"], "discard the selected lines from the working tree (asks first)", "", ""));
     table.push(Binding(SCOPE_DIFF, CMD_BACK, ["q", "escape", "backspace"], "cancel the visual range, else back to the outline", "q/esc/backspace", "back"));
+    table.push(Binding(SCOPE_DIFF, CMD_SPLIT, ["D", "|"], "side-by-side or unified diff (the choice is kept in diff.view; side by side needs 60 columns, auto picks it from 120)", "D", "split"));
+    table.push(Binding(SCOPE_DIFF, CMD_LEFT, ["h", "left"], "side by side: put the cursor on the old side (what s, u and space act on in a changed row)", "", ""));
+    table.push(Binding(SCOPE_DIFF, CMD_RIGHT, ["l", "right"], "side by side: put the cursor on the new side (the default)", "", ""));
+    table.push(Binding(SCOPE_DIFF, CMD_WIDEN, ["e"], "side by side: show more unchanged lines around the hunks (3, 10, 30, 100, all)", "", ""));
+    table.push(Binding(SCOPE_DIFF, CMD_WIDEN_RESET, ["E"], "side by side: back to 3 lines of context", "", ""));
+    table.push(Binding(SCOPE_DIFF, CMD_WRAP, ["w"], "side by side: wrap long lines, or scroll both sides together", "", ""));
+    table.push(Binding(SCOPE_DIFF, CMD_SCROLL_LEFT, ["<"], "side by side, no wrap: scroll both sides left", "", ""));
+    table.push(Binding(SCOPE_DIFF, CMD_SCROLL_RIGHT, [">"], "side by side, no wrap: scroll both sides right", "", ""));
     table.push(Binding(SCOPE_DIFF, CMD_BLAME, ["B"], "blame this file", "B", "blame"));
     table.push(Binding(SCOPE_DIFF, CMD_HISTORY, ["H"], "history of this file", "H", "history"));
     // In every view.
@@ -918,6 +938,8 @@ pub List<Binding> key_table() {
     table.push(Binding(SCOPE_STASH_LIST, CMD_STASH_POP, ["p"], "pop the highlighted stash", "p", "pop"));
     table.push(Binding(SCOPE_STASH_LIST, CMD_STASH_APPLY, ["a"], "apply the highlighted stash", "a", "apply"));
     table.push(Binding(SCOPE_STASH_LIST, CMD_STASH_DROP, ["d"], "drop the highlighted stash (asks first)", "d", "drop"));
+    table.push(Binding(SCOPE_STASH_LIST, CMD_SPLIT, ["D", "|"], "side-by-side or unified diff preview (kept in diff.view; needs 60 columns)", "D", "split"));
+    table.push(Binding(SCOPE_STASH_LIST, CMD_WRAP, ["w"], "side by side: wrap long lines, or scroll both sides together", "", ""));
     table.push(Binding(SCOPE_STASH_LIST, CMD_SYNTAX, ["C"], "syntax colours on or off", "", ""));
     table.push(Binding(SCOPE_STASH_LIST, CMD_CLOSE, ["escape", "q"], "close", "esc", "close"));
     table.push(Binding(SCOPE_STASH_PROMPT, CMD_SUBMIT, ["enter"], "use what is typed", "enter", "ok"));
@@ -1029,6 +1051,8 @@ pub List<Binding> key_table() {
     table.push(Binding(SCOPE_SHOW, CMD_UP, ["k", "up"], "scroll up", "", ""));
     table.push(Binding(SCOPE_SHOW, CMD_TOP, ["g", "home"], "top", "g/G", "top/bottom"));
     table.push(Binding(SCOPE_SHOW, CMD_BOTTOM, ["G", "end"], "bottom", "", ""));
+    table.push(Binding(SCOPE_SHOW, CMD_SPLIT, ["D", "|"], "side-by-side or unified diff of the file (kept in diff.view; needs 60 columns)", "D", "split"));
+    table.push(Binding(SCOPE_SHOW, CMD_WRAP, ["w"], "side by side: wrap long lines, or scroll both sides together", "", ""));
     table.push(Binding(SCOPE_SHOW, CMD_SYNTAX, ["C"], "syntax colours on or off", "", ""));
     table.push(Binding(SCOPE_SHOW, CMD_CLOSE, ["escape", "q", "backspace"], "close", "q", "close"));
     table.push(Binding(SCOPE_UNDO, CMD_YES, ["y", "enter"], "do it", "y", "confirm"));

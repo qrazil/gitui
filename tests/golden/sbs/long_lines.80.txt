@@ -1,0 +1,13 @@
+    a/file                                   b/file                             $
+@@ -1,3 +1,3 @@                                                                 $
+ 1  short                              |  1  short                              $
+ 2 -xxxxxxxxxxxxxxxxxxxxxxxxxxxxxx the ~  2 +xxxxxxxxxxxxxxxxxxxxxxxxxxxxxx the $
+     quick brown fox jumps over the la ~     quick brown fox jumps over the lazy$
+    zy dog  the quick brown fox jumps  ~      cat  the quick brown fox jumps ove$
+    over the lazy dog  the quick brown ~     r the lazy cat  the quick brown fox$
+     fox jumps over the lazy dog  the  ~      jumps over the lazy cat  the quick$
+    quick brown fox jumps over the laz ~      brown fox jumps over the lazy cat $
+    y dog  the quick brown fox jumps o ~      the quick brown fox jumps over the$
+    ver the lazy dog  the quick brown  ~      lazy cat  the quick brown fox jump$
+    fox jumps over the lazy dog end    ~     s over the lazy cat END            $
+ 3  tail                               |  3  tail                               $

@@ -1,0 +1,50 @@
+commit 55c15db9b0779e62ebd0cf41486f9266a798cc36
+Author:     Fixture <f@example.com>
+AuthorDate: Tue Nov 14 22:13:20 2023 +0000
+Commit:     Fixture <f@example.com>
+CommitDate: Tue Nov 14 22:13:20 2023 +0000
+
+    a change
+    
+    with a body
+
+    a/big.txt (c9e9e05)                                b/big.txt (2a7116b)
+@@ -1,5 +1,5 @@
+ 1  one                                          |  1  one
+ 2 -two                                          ~  2 +TWO
+ 3  three                                        |  3  three
+ 4  four                                         |  4  four
+ 5  five                                         |  5  five
+… 2 unchanged lines …
+@@ -8,3 +8,4 @@ seven
+ 8  eight                                        |  8  eight
+ 9  nine                                         |  9  nine
+10  ten                                          | 10  ten
+                                                 + 11 +plus
+    a/bin.dat                                          b/bin.dat
+Binary files a/bin.dat and b/bin.dat differ
+    a/crlf.txt (0aa0f34)                               b/crlf.txt (28d493c)
+@@ -1,2 +1,2 @@
+ 1 -x␍                                           ~  1 +x
+ 2  y                                            |  2  y
+    a/f.txt (de98044)                                  b/f.txt (f8f7a32)
+@@ -1,3 +1,4 @@
+ 1  a                                            |  1  a
+ 2 -b                                            ~  2 +B
+ 3  c                                            |  3  c
+                                                 +  4 +d
+                                                       \ No newline at end of file
+    a/link (7f66e4f)                                   b/link (d6a4107)
+@@ -1 +1 @@
+ 1 -f.txt                                        ~  1 +big.txt
+    \ No newline at end of file                        \ No newline at end of file
+    /dev/null                                          b/new.txt (ec3aaa7)
+new file mode 100644
+@@ -0,0 +1 @@
+                                                 +  1 +new file    with tabs and wide 日本
+    s.sh                                               t.sh
+old mode 100644
+new mode 100755
+similarity index 100%
+rename from s.sh
+rename to t.sh

@@ -1,0 +1,28 @@
+    <ESC>[1ma/file<ESC>[m                                      <ESC>[2m   <ESC>[m    <ESC>[1mb/file<ESC>[m
+<ESC>[2m… 1 unchanged line (e: show more) …<ESC>[m
+<ESC>[36m@@ -2,7 +2,7 @@<ESC>[m
+<ESC>[2m 2 <ESC>[m line 2                                      <ESC>[2m |  2 <ESC>[m line 2
+<ESC>[2m 3 <ESC>[m line 3                                      <ESC>[2m |  3 <ESC>[m line 3
+<ESC>[2m 4 <ESC>[m line 4                                      <ESC>[2m |  4 <ESC>[m line 4
+<ESC>[2m 5 <ESC>[m<ESC>[31m-<ESC>[m<ESC>[31m<ESC>[1;4mline<ESC>[m<ESC>[31m 5<ESC>[m                                      <ESC>[2m ~  5 <ESC>[m<ESC>[32m+<ESC>[m<ESC>[32m<ESC>[1;4mLINE<ESC>[m<ESC>[32m 5<ESC>[m
+<ESC>[2m 6 <ESC>[m line 6                                      <ESC>[2m |  6 <ESC>[m line 6
+<ESC>[2m 7 <ESC>[m line 7                                      <ESC>[2m |  7 <ESC>[m line 7
+<ESC>[2m 8 <ESC>[m line 8                                      <ESC>[2m |  8 <ESC>[m line 8
+<ESC>[2m… 18 unchanged lines (e: show more) …<ESC>[m
+<ESC>[36m@@ -27,8 +27,8 @@<ESC>[m
+<ESC>[2m27 <ESC>[m line 27                                     <ESC>[2m | 27 <ESC>[m line 27
+<ESC>[2m28 <ESC>[m line 28                                     <ESC>[2m | 28 <ESC>[m line 28
+<ESC>[2m29 <ESC>[m line 29                                     <ESC>[2m | 29 <ESC>[m line 29
+<ESC>[2m30 <ESC>[m<ESC>[31m-<ESC>[m<ESC>[31m<ESC>[1;4mline<ESC>[m<ESC>[31m 30<ESC>[m                                     <ESC>[2m ~ 30 <ESC>[m<ESC>[32m+<ESC>[m<ESC>[32m<ESC>[1;4mLINE<ESC>[m<ESC>[32m 30<ESC>[m
+<ESC>[2m31 <ESC>[m<ESC>[31m-<ESC>[m<ESC>[31m<ESC>[1;4mline<ESC>[m<ESC>[31m 31<ESC>[m                                     <ESC>[2m ~ 31 <ESC>[m<ESC>[32m+<ESC>[m<ESC>[32m<ESC>[1;4mLINE<ESC>[m<ESC>[32m 31<ESC>[m
+<ESC>[2m32 <ESC>[m line 32                                     <ESC>[2m | 32 <ESC>[m line 32
+<ESC>[2m33 <ESC>[m line 33                                     <ESC>[2m | 33 <ESC>[m line 33
+<ESC>[2m34 <ESC>[m line 34                                     <ESC>[2m | 34 <ESC>[m line 34
+<ESC>[2m… 20 unchanged lines (e: show more) …<ESC>[m
+<ESC>[36m@@ -55,6 +55,6 @@<ESC>[m
+<ESC>[2m55 <ESC>[m line 55                                     <ESC>[2m | 55 <ESC>[m line 55
+<ESC>[2m56 <ESC>[m line 56                                     <ESC>[2m | 56 <ESC>[m line 56
+<ESC>[2m57 <ESC>[m line 57                                     <ESC>[2m | 57 <ESC>[m line 57
+<ESC>[2m58 <ESC>[m<ESC>[31m-<ESC>[m<ESC>[31m<ESC>[1;4mline<ESC>[m<ESC>[31m 58<ESC>[m                                     <ESC>[2m ~ 58 <ESC>[m<ESC>[32m+<ESC>[m<ESC>[32m<ESC>[1;4mLINE<ESC>[m<ESC>[32m 58<ESC>[m
+<ESC>[2m59 <ESC>[m line 59                                     <ESC>[2m | 59 <ESC>[m line 59
+<ESC>[2m60 <ESC>[m line 60                                     <ESC>[2m | 60 <ESC>[m line 60

@@ -95,6 +95,7 @@ import ui.GIT_ui_outline;
 import ui.GIT_ui_overview;
 import ui.GIT_ui_rebase;
 import ui.GIT_ui_remote;
+import ui.GIT_ui_sbs;
 import ui.GIT_ui_search;
 import ui.GIT_ui_sequencer;
 import ui.GIT_ui_statusline;
@@ -332,7 +333,10 @@ pub TUI_app.Action State.handle(term.Event event) {
         case Key(term.Key key): {
             return handle_key(key.code);
         }
-        case Mouse(_): {
+        case Mouse(term.Mouse mouse): {
+            if (is_diff_open && !has_overlay() && GIT_ui_sbs.handle_mouse(core(), mouse)) {
+                return TUI_app.Action.Redraw;
+            }
             return TUI_app.Action.Continue;
         }
         case Paste(_): {
@@ -460,7 +464,44 @@ TUI_app.Action State.run_diff_command(str cmd) {
     if (cmd == GIT_ui_core.CMD_HISTORY) {
         GIT_ui_filelog.open_current(core());
     }
+    run_split_command(cmd);
     return TUI_app.Action.Redraw;
+}
+
+// The side-by-side view's keys (`GIT_ui_sbs`); the ones that only mean
+// something there say so when the unified view is up.
+void State.run_split_command(str cmd) {
+    if (cmd == GIT_ui_core.CMD_SPLIT) {
+        GIT_ui_sbs.toggle_view(core());
+        return;
+    }
+    if (!sbs.is_active) {
+        if (cmd == GIT_ui_core.CMD_LEFT || cmd == GIT_ui_core.CMD_RIGHT || cmd == GIT_ui_core.CMD_WIDEN || cmd == GIT_ui_core.CMD_WIDEN_RESET || cmd == GIT_ui_core.CMD_WRAP || cmd == GIT_ui_core.CMD_SCROLL_LEFT || cmd == GIT_ui_core.CMD_SCROLL_RIGHT) {
+            message = "that is for the side-by-side view (D)";
+        }
+        return;
+    }
+    if (cmd == GIT_ui_core.CMD_LEFT) {
+        GIT_ui_sbs.focus(core(), false);
+    }
+    if (cmd == GIT_ui_core.CMD_RIGHT) {
+        GIT_ui_sbs.focus(core(), true);
+    }
+    if (cmd == GIT_ui_core.CMD_WIDEN) {
+        GIT_ui_sbs.widen(core(), false);
+    }
+    if (cmd == GIT_ui_core.CMD_WIDEN_RESET) {
+        GIT_ui_sbs.widen(core(), true);
+    }
+    if (cmd == GIT_ui_core.CMD_WRAP) {
+        GIT_ui_sbs.toggle_wrap(core());
+    }
+    if (cmd == GIT_ui_core.CMD_SCROLL_LEFT) {
+        GIT_ui_sbs.scroll_h(core(), 0 - 8);
+    }
+    if (cmd == GIT_ui_core.CMD_SCROLL_RIGHT) {
+        GIT_ui_sbs.scroll_h(core(), 8);
+    }
 }
 
 /// `name` is the key's own name: the arrow keys always move the outline

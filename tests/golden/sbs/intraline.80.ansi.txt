@@ -1,0 +1,5 @@
+    <ESC>[1ma/file<ESC>[m                            <ESC>[2m   <ESC>[m    <ESC>[1mb/file<ESC>[m
+<ESC>[36m@@ -1,2 +1,2 @@<ESC>[m
+<ESC>[2m 1 <ESC>[m<ESC>[31m-int total = compute(alpha, <ESC>[m<ESC>[31m<ESC>[1;4mbeta<ESC>[m<ESC>[31m) +<ESC>[m<ESC>[2m ~  1 <ESC>[m<ESC>[32m+int total = compute(alpha, <ESC>[m<ESC>[32m<ESC>[1;4mgamma<ESC>[m<ESC>[32m) +<ESC>[m
+<ESC>[2m   <ESC>[m<ESC>[31m  offset;<ESC>[m                          <ESC>[2m ~    <ESC>[m<ESC>[32m  offset<ESC>[m<ESC>[32m<ESC>[1;4m * 2<ESC>[m<ESC>[32m;<ESC>[m
+<ESC>[2m 2 <ESC>[m return total;                     <ESC>[2m |  2 <ESC>[m return total;

@@ -1,0 +1,5 @@
+    a/file                          b/file                   $
+@@ -1,3 +1,3 @@                                              $
+ 1      indented              |  1      indented             $
+ 2 -a   b   c                 ~  2 +a   b   cc               $
+ 3 -        deep              ~  3 +        deep             $

@@ -325,6 +325,8 @@ the top one takes every key.
 | `x` | outline | discard the path under the cursor (asks first) |
 | `d` | outline | open the hunk-level diff of the row |
 | `v` | diff | start a visual range of lines; `j`/`k` extend it, `v` or `Esc` cancels |
+| `D` (`\|`) | diff, commit view, stash list | side-by-side or unified diff; the choice is kept in `diff.view` (see "Side-by-side diff") |
+| `h` `l` / `e` `E` / `w` / `<` `>` | diff, side by side | cursor to the old / new side; show more / back to 3 lines of context; wrap long lines or scroll both sides; scroll sideways when not wrapping |
 | `Space` / `Enter` | diff | stage the selected lines (unstage them in the staged view); with no range, the line under the cursor, or the whole hunk on its header |
 | `x` | diff | discard the selected lines from the working tree (asks first, `y` confirms) |
 | `z` | outline | stash overlay: `z` push, `u` push with untracked, `k` keep the index, `m` type a message, `p` pop, `a` apply, `A` apply with `--index`, `d` drop (asks first), `b` branch from the stash, `l` list, `Esc` close |
@@ -380,6 +382,84 @@ SHA-1 **38–45 MB/s**, inflate **71–102 MB/s** of output, and **10 MB/s** of
 object content end to end (open, inflate, verify the SHA-1, parse).
 `docs/FRICTION.md` §5 takes the SHA-1 figure apart, because it is a language
 datapoint and not a git one.
+
+## Side-by-side diff (`GIT_sbs.m31`, `GIT_ui_sbs.m31`, 0.22.0)
+
+The diff view can draw old and new next to each other: old on the left, new on
+the right, a gutter between them that marks each row (`|` unchanged, `~` a
+line and its replacement, `-` only removed, `+` only added), line numbers per
+side, and a ruler on top naming each side (`path  (index)` | `path  (working
+tree)`; a commit's file says `path  (abc1234^)` | `path  (abc1234)`). It is
+the same diff, grouped into the same hunks, as the unified view: the layout
+engine takes the edit script `GIT_xdiff.diff_text` produced and the hunk
+boundaries `GIT_hunks.spans` draws, and never diffs anything itself.
+
+`docs/side-by-side.ansi` is a screenshot-like dump: `cat` it in a terminal at
+least 120 columns wide. `docs/side-by-side-mgit.txt` is mgit's screen.
+
+- **When.** `diff.view` in git config: `auto` (default) draws side by side when
+  the diff pane is at least 120 columns wide, `unified` never, `split` whenever
+  there are 60 columns. Narrower than 60 the unified view is drawn whatever
+  was asked (`D` says so). `D` flips the view and writes `unified` or `split`
+  back to `diff.view`: that is how the last choice is remembered. Where: the
+  working-tree and staged file diffs, a commit's files, the commit view
+  (blame/history `Enter`) and the stash list's preview. Binary files and
+  combined diffs have no two sides and stay as they were.
+- **Rows.** A context line is on both sides. A changed block of n removals and
+  m additions is `max(n, m)` rows: the i-th removal beside the i-th addition,
+  the shorter side blank. Paired lines have their changed words marked (bold
+  underline) from a longest common subsequence of word, space and punctuation
+  tokens; lines with no word in common are not marked at all, and very long
+  ones are trimmed to their differing middle (or skipped past 20000 glyphs).
+  A line-ending-only change shows a `U+240D` on the CRLF side. `\ No newline at
+  end of file` sits under its side. Tabs are expanded to 4 columns per line,
+  control characters are drawn as their `U+2400` symbols (a diff can never
+  send an escape sequence to the terminal), wide characters and emoji are
+  counted in columns and never cut. Long lines wrap per side, the shorter side
+  padded so rows stay aligned (`w` switches to scrolling both sides together
+  with `<` / `>` or the horizontal wheel). Unchanged stretches between hunks
+  are one row, `... 42 unchanged lines (e: show more) ...`; `e` widens every
+  hunk to 10, 30, 100 lines and then the whole file, `E` goes back to 3, and a
+  click on that row widens it.
+- **Colours.** The unified view's: red and green for removed and added, cyan hunk
+  headers, bold file headers, dim numbers and gutter, the syntax library's token
+  colours for both sides (the old file's lexer state follows the old side and the
+  new file's the new side, line by line over the whole file, so an open comment
+  is right even when only the end of it is on screen). Only the 16 palette
+  colours and attributes are used, so 16, 256 and true colour terminals look
+  the same and follow the terminal's scheme.
+- **Cursor and staging.** `j` / `k` move over the paired rows and `[` `]` `{` `}`
+  `Tab` `-` `+` work as in the unified view. The cursor is on one side (`h` / `l`,
+  the new side to begin with): on a changed row `s`, `u`, `Space`, `x` and the
+  visual range `v` act on that side's line, through the same patch code as the
+  unified view (the split view writes the matching unified row into the one
+  cursor that code reads; there is no second implementation of staging). A
+  line shown only because `e` widened the context has nothing to stage and
+  says so. The wheel scrolls both sides together; a left click puts the cursor
+  on the row and side under it, which is how a hunk is picked for `s`. Mouse
+  reports are asked for unless `M31GIT_MOUSE=off` / `mgit.mouse=off` (a terminal
+  that has them on selects text with Shift).
+- **`1git diff --side-by-side`** (`-y`, `--width=N`, `--no-side-by-side`) lays
+  git's own diff out the same way, on `diff`, `show` and `log -p`: commit
+  headers and messages pass through, each file's diff becomes rows. Width: `--width`,
+  else `$COLUMNS`, else the terminal, else 130. Colour as git's: a terminal,
+  `--color=always`, `color.diff.<slot>`; no syntax colours. Git has no such
+  format, so this is an m31git extension, opt-in; without the flag the bytes
+  are git's, as before (see `docs/GIT-COMPAT.md`).
+
+Tests (`tests/test_sbs.sh`, `bash tests/run_sbs.sh` alone): golden layouts of
+21 fixtures (pure add and delete, unequal replaced blocks, moved lines, tabs,
+wide characters, long lines wrapped and scrolled, empty and new and deleted
+files, a missing final newline on either side, CRLF, control characters,
+several hunks) in `tests/golden/sbs/`; properties on random pairs in every
+mode (the left side's lines are the old file's and the right side's the new
+file's, numbers increase and are complete when the whole file is shown, every
+row is exactly the plan's width); the pane drawn into a buffer equals the
+engine's rows, with its escape sequences at 16, 256 and true colour as
+goldens; real `git diff` output (rename, mode change, binary, symlink,
+submodule, CRLF, a merge conflict) checked against a Python oracle that shares
+no code with the layout; `1git` against that and against git's bytes; and
+`tests/pty_sbs.py` driving mgit at 160, 100, 80 and 50 columns.
 
 ## Sections, folding and the statusline
 

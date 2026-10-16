@@ -8,6 +8,8 @@ import core.GIT_pathtree;
 import ui.GIT_ui_core;
 import ui.GIT_ui_highlight;
 import ui.GIT_ui_panel;
+import ui.GIT_ui_sbs;
+import ui.GIT_ui_sbs_state;
 import date;
 import term;
 import tui.app.TUI_app;
@@ -25,6 +27,14 @@ type ShowOverlay {
     GIT_ui_highlight.DiffText syntax = GIT_ui_highlight.DiffText([]);
     bool is_syntax_ready = false;
     bool is_syntax_for_on = true;
+    // The file's two sides, for the side-by-side drawing, and its state.
+    bytes old = [];
+    bytes new = [];
+    int header_lines = 0;
+    str old_label = "";
+    str new_label = "";
+    GIT_ui_sbs_state.SbsState split = GIT_ui_sbs_state.SbsState();
+    bool is_split_built = false;
 }
 
 pub TUI_app.Action ShowOverlay.handle_key(term.Code code) {
@@ -36,20 +46,42 @@ pub TUI_app.Action ShowOverlay.handle_key(term.Code code) {
             if (cmd == GIT_ui_core.CMD_SYNTAX) {
                 host.toggle_syntax();
             }
+            if (cmd == GIT_ui_core.CMD_SPLIT) {
+                GIT_ui_sbs.toggle_view_for(host, split.is_active, split.area_w + 2);
+            }
+            if (cmd == GIT_ui_core.CMD_WRAP) {
+                GIT_ui_sbs.toggle_wrap_for(host, split);
+            }
+            // a side-by-side pane scrolls in its own rows
+            int step = 0;
             if (cmd == GIT_ui_core.CMD_DOWN) {
-                offset = offset + 1;
+                step = 1;
             }
             if (cmd == GIT_ui_core.CMD_UP) {
-                offset = offset - 1;
+                step = -1;
+            }
+            if (split.is_active) {
+                split.offset = split.offset + step;
+                if (split.offset < 0) {
+                    split.offset = 0;
+                }
+                if (cmd == GIT_ui_core.CMD_TOP) {
+                    split.offset = 0;
+                }
+                if (cmd == GIT_ui_core.CMD_BOTTOM) {
+                    split.offset = 1000000000;
+                }
+            } else {
+                offset = offset + step;
                 if (offset < 0) {
                     offset = 0;
                 }
-            }
-            if (cmd == GIT_ui_core.CMD_TOP) {
-                offset = 0;
-            }
-            if (cmd == GIT_ui_core.CMD_BOTTOM) {
-                offset = 1000000000;
+                if (cmd == GIT_ui_core.CMD_TOP) {
+                    offset = 0;
+                }
+                if (cmd == GIT_ui_core.CMD_BOTTOM) {
+                    offset = 1000000000;
+                }
             }
             return TUI_app.Action.Redraw;
         }
@@ -63,6 +95,18 @@ pub void ShowOverlay.render(TUI_buffer.Buffer buffer, TUI_geometry.Rect area) {
     TUI_geometry.Rect inner = GIT_ui_panel.frame(buffer, area, title);
     if (inner.is_empty()) {
         return;
+    }
+    GIT_ui_sbs.load_preference(host);
+    split.is_active = false;
+    if (path != "" && GIT_ui_sbs.is_wanted(host.sbs.view, inner.width + 2)) {
+        if (!is_split_built) {
+            GIT_ui_sbs.set_file(split, lines.slice(0, header_lines), old, new, old_label, new_label);
+            is_split_built = true;
+        }
+        if (GIT_ui_sbs.draw_pane(buffer, inner, split, GIT_ui_highlight.language_for_text(host.is_syntax_on, path), host.is_dark)) {
+            split.is_active = true;
+            return;
+        }
     }
     offset = GIT_ui_panel.clamp(offset, lines.size(), inner.height);
     if (!is_syntax_ready || is_syntax_for_on != host.is_syntax_on) {
@@ -177,5 +221,29 @@ bytes blob_at(str gitdir, str commit_id, str path) {
 
 /// Show `commit_id` (and its change to `path`, "" for none) over everything.
 pub void open(GIT_ui_core.Core core, str commit_id, str path) {
-    core.push_overlay(ShowOverlay(core, "commit " + commit_id.substr(0, 7), commit_lines(core.gitdir, commit_id, path), path: path));
+    List<str> lines = commit_lines(core.gitdir, commit_id, path);
+    ShowOverlay overlay = ShowOverlay(core, "commit " + commit_id.substr(0, 7), lines, path: path);
+    if (path != "") {
+        // the header is everything before the file's own "--- path" line
+        int header_end = lines.size();
+        for (int i in 0 .. lines.size()) {
+            if (lines[i] == "--- " + path && header_end == lines.size()) {
+                header_end = i;
+            }
+        }
+        overlay.header_lines = header_end;
+        match (GIT_pathtree.read_commit(core.gitdir, commit_id)) {
+            case Ok(GIT_object.Commit commit): {
+                if (commit.parents.size() > 0) {
+                    overlay.old = blob_at(core.gitdir, commit.parents[0], path);
+                }
+                overlay.new = blob_at(core.gitdir, commit_id, path);
+                overlay.old_label = path + "  (" + commit_id.substr(0, 7) + "^)";
+                overlay.new_label = path + "  (" + commit_id.substr(0, 7) + ")";
+            }
+            case Err: {
+            }
+        }
+    }
+    core.push_overlay(overlay);
 }

@@ -1,0 +1,24 @@
+    src.txt  (index)                                                               src.txt  (working tree)
+@@ -1,6 +1,6 @@
+ 1  line 1                                                                   |  1  line 1
+ 2  line 2                                                                   |  2  line 2
+ 3 -line 3                                                                   ~  3 +line 3 changed
+ 4  line 4                                                                   |  4  line 4
+ 5  line 5                                                                   |  5  line 5
+ 6  line 6                                                                   |  6  line 6
+… 5 unchanged lines (e: show more) …
+@@ -12,7 +12,6 @@
+12  line 12                                                                  | 12  line 12
+13  line 13                                                                  | 13  line 13
+14  line 14                                                                  | 14  line 14
+15 -line 15                                                                  -
+16  line 16                                                                  | 15  line 16
+17  line 17                                                                  | 16  line 17
+18  line 18                                                                  | 17  line 18
+… 7 unchanged lines (e: show more) …
+@@ -26,5 +25,5 @@
+26  line 26                                                                  | 25  line 26
+27  line 27                                                                  | 26  line 27
+28  line 28                                                                  | 27  line 28
+29 -line 29                                                                  ~ 28 +line 28 changed now
+30  line 30                                                                  | 29  line 30

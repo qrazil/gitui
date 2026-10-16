@@ -1,0 +1,957 @@
+// The side-by-side diff layout engine: a pure function from a file's hunks to
+// aligned row pairs (old on the left, new on the right), and from those to
+// fixed-width visual rows. No terminal, no `tui`, no I/O: mgit draws the rows
+// into a buffer, `1git diff --side-by-side` prints them as text, and the tests
+// compare them as strings.
+//
+// API
+// ---
+//   GIT_sbs.FileDiff, DHunk, DLine     the input: one file's diff, hunk by hunk
+//   GIT_sbs.build(file, opts)          -> Layout     logical rows (pairing)
+//   GIT_sbs.geometry(total, max_no)    -> Option<Geometry>   column plan
+//   GIT_sbs.visual(layout, g, ...)     -> List<VRow> wrapped / scrolled rows
+//   GIT_sbs.render_plain(...)          -> List<str>  every row, exact width
+//   GIT_sbs.runs_of(...)               -> List<Run>  a row as styled pieces
+//
+// --- where the input comes from -------------------------------------------------
+//
+// The engine never diffs anything. `GIT_sbs_ops.from_ops` turns the edit script
+// `GIT_xdiff.diff_text` already produced (grouped by `GIT_hunks.spans`, so a
+// hunk here is the hunk mgit's unified view and `git diff` show), and
+// `GIT_sbs_text.parse` turns git's own unified output (`1git diff`, `git stash
+// show -p`) back into the same structure. Everything below is presentation.
+//
+// --- pairing ----------------------------------------------------------------------
+//
+// A context line is shown on both sides. A changed block (the removed and added
+// lines between two context lines) of n removals and m additions becomes
+// max(n, m) rows: the i-th removal sits left of the i-th addition, and the
+// shorter side is padded with blank cells. Moved lines are not detected (the
+// diff has no such notion), they are a removal here and an addition there.
+//
+// --- text in a cell ---------------------------------------------------------------
+//
+// Cells keep the raw line (no terminator, a trailing CR removed and remembered).
+// `glyphs` turns it into what is drawn: tabs expanded to the next multiple of
+// `tab` columns of THAT line, control characters made visible (U+2400 block),
+// and one entry per grapheme cluster with its terminal width, so a wide
+// character or an emoji is never cut in half. `srcs` is each glyph's byte
+// offset in the raw line, which is how a syntax highlighter's per-byte classes
+// are mapped onto what is drawn.
+
+import text.unicode;
+
+/// Columns per tab stop.
+pub const int TAB_WIDTH = 4;
+/// The least text columns each side must have for a side-by-side layout.
+pub const int MIN_SIDE_TEXT = 10;
+/// Intra-line diffing is skipped past this many glyphs on either side.
+pub const int INTRA_MAX_GLYPHS = 20000;
+/// The token LCS table may have this many cells; beyond it the changed middle
+/// is marked whole (the common prefix and suffix are still left unmarked).
+pub const int INTRA_MAX_CELLS = 40000;
+pub const int LINE_CONTEXT = 0;
+pub const int LINE_ADD = 1;
+pub const int LINE_REMOVE = 2;
+
+/// One line of a hunk. `text` has no terminator; `has_cr` says the line ended
+/// in CRLF; `no_eol` says it is the last line of its side and has no newline
+/// (git's `\ No newline at end of file`). `op` is the line's index in the edit
+/// script it came from, -1 when there is none.
+pub type DLine {
+    pub int kind;
+    pub str text;
+    pub bool has_cr = false;
+    pub bool no_eol = false;
+    pub int op = -1;
+}
+
+/// One `@@ -a,b +c,d @@` block. `header` is the whole header line as printed.
+pub type DHunk {
+    pub int old_start;
+    pub int old_count;
+    pub int new_start;
+    pub int new_count;
+    pub str header;
+    pub List<DLine> lines = [];
+}
+
+/// One file's diff: the labels for the two sides' rulers, the extended header
+/// lines worth showing (rename, mode, binary), and the hunks. `old_total` and
+/// `new_total` are the files' line counts when known (-1 otherwise), which is
+/// what lets the engine report the unchanged lines hidden after the last hunk.
+pub type FileDiff {
+    pub str old_label = "";
+    pub str new_label = "";
+    pub List<str> meta = [];
+    pub bool is_binary = false;
+    pub bool is_combined = false;
+    pub List<DHunk> hunks = [];
+    pub int old_total = -1;
+    pub int new_total = -1;
+}
+
+pub const int CELL_EMPTY = 0;
+pub const int CELL_CONTEXT = 1;
+pub const int CELL_DEL = 2;
+pub const int CELL_ADD = 3;
+pub const int CELL_NOTE = 4;
+pub const int CELL_HEAD = 5;
+
+/// One side of a row. `number` is the 1-based line number (0 for none);
+/// `marks` are glyph ranges `[from, to)`, flattened, that differ from the
+/// paired cell.
+pub type Cell {
+    pub int kind = CELL_EMPTY;
+    pub int number = 0;
+    pub str text = "";
+    pub bool has_cr = false;
+    /// Draw a `\u{240d}` after the text: the line ending is the whole change.
+    pub bool show_cr = false;
+    pub int op = -1;
+    pub List<int> marks = [];
+}
+
+pub const int ROW_FILE = 0;
+pub const int ROW_META = 1;
+pub const int ROW_HUNK = 2;
+pub const int ROW_GAP = 3;
+pub const int ROW_PAIR = 4;
+pub const int ROW_NOTICE = 5;
+
+/// A logical row. A `Pair` has a left and a right cell; every other kind is
+/// one line of `text` across the whole width. `hunk` is the hunk a `Hunk` or
+/// `Pair` row belongs to (-1 elsewhere); `hidden` counts the unchanged lines a
+/// `Gap` stands for, from old line `old_from` and new line `new_from`.
+pub type Row {
+    pub int kind;
+    pub Cell left = Cell();
+    pub Cell right = Cell();
+    pub str text = "";
+    pub int hunk = -1;
+    pub int hidden = 0;
+    pub int old_from = 0;
+    pub int new_from = 0;
+}
+
+pub type Opts {
+    pub int tab = TAB_WIDTH;
+    pub bool is_intra = true;
+    /// The gap row advertises the `e` key.
+    pub bool can_expand = false;
+}
+
+pub type Layout {
+    pub List<Row> rows = [];
+    pub int tab = TAB_WIDTH;
+    /// The largest line number on either side, for the number column.
+    pub int max_number = 0;
+}
+
+// --- glyphs ------------------------------------------------------------------------
+
+pub type Glyphs {
+    pub List<str> syms = [];
+    pub List<int> widths = [];
+    pub List<int> srcs = [];
+}
+
+bool is_plain(str text) {
+    int length = text.size();
+    for (int i in 0 .. length) {
+        int byte_value = text.byte_at(i);
+        if (byte_value < 32 || byte_value > 126) {
+            return false;
+        }
+    }
+    return true;
+}
+
+// A control character shown as its symbol (U+2400 block), so a line of the
+// file can never reach the terminal as an escape sequence.
+str safe(str cluster) {
+    List<int> points = cluster.chars();
+    if (points.size() == 0) {
+        return cluster;
+    }
+    int first = points[0];
+    if (first < 32) {
+        return str.from_chars([0x2400 + first]);
+    }
+    if (first == 127) {
+        return str.from_chars([0x2421]);
+    }
+    if (first >= 128 && first < 160) {
+        return "\u{fffd}";
+    }
+    return cluster;
+}
+
+/// `text` as glyphs, tabs expanded to multiples of `tab`.
+pub Glyphs glyphs(str text, int tab) {
+    Glyphs out = Glyphs();
+    if (is_plain(text)) {
+        int length = text.size();
+        for (int i in 0 .. length) {
+            out.syms.push(text.substr(i, i + 1));
+            out.widths.push(1);
+            out.srcs.push(i);
+        }
+        return out;
+    }
+    int column = 0;
+    int position = 0;
+    for (str cluster in unicode.graphemes(text)) {
+        int start = position;
+        position = position + cluster.size();
+        if (cluster == "\t") {
+            int span = tab - column % tab;
+            for (int k in 0 .. span) {
+                out.syms.push(" ");
+                out.widths.push(1);
+                out.srcs.push(start);
+            }
+            column = column + span;
+            continue;
+        }
+        str shown = safe(cluster);
+        int cluster_width = unicode.width(shown);
+        out.syms.push(shown);
+        out.widths.push(cluster_width);
+        out.srcs.push(start);
+        column = column + cluster_width;
+    }
+    return out;
+}
+
+/// Columns `text` takes once drawn (tabs expanded, controls made visible).
+pub int display_width(str text, int tab) {
+    Glyphs g = glyphs(text, tab);
+    int total = 0;
+    for (int w in g.widths) {
+        total = total + w;
+    }
+    return total;
+}
+
+// --- intra-line marks ---------------------------------------------------------------
+
+type Tok {
+    str text;
+    int from;
+    int to;
+}
+
+// 0 space, 1 a word (letters, digits, underscore, anything non-ASCII), 2 any
+// other single character.
+int tok_class(str sym) {
+    int b = sym.byte_at(0);
+    if (b == 32) {
+        return 0;
+    }
+    if (b >= 128 || b == 95 || (b >= 48 && b <= 57) || (b >= 65 && b <= 90) || (b >= 97 && b <= 122)) {
+        return 1;
+    }
+    return 2;
+}
+
+List<Tok> tokens_of(Glyphs g) {
+    List<Tok> out = [];
+    int count = g.syms.size();
+    int i = 0;
+    while (i < count) {
+        int kind = tok_class(g.syms[i]);
+        int j = i + 1;
+        if (kind != 2) {
+            while (j < count && tok_class(g.syms[j]) == kind) {
+                j = j + 1;
+            }
+        }
+        List<str> parts = [];
+        for (int k in i .. j) {
+            parts.push(g.syms[k]);
+        }
+        out.push(Tok(parts.join(""), i, j));
+        i = j;
+    }
+    return out;
+}
+
+/// The glyph ranges that differ between two lines.
+pub type Marks {
+    pub List<int> old_marks = [];
+    pub List<int> new_marks = [];
+}
+
+void add_range(List<int> ranges, int from, int to) {
+    int n = ranges.size();
+    if (n >= 2 && ranges[n - 1] == from) {
+        ranges[n - 1] = to;
+        return;
+    }
+    ranges.push(from);
+    ranges.push(to);
+}
+
+bool has_word(List<Tok> toks, List<bool> matched) {
+    for (int i in 0 .. toks.size()) {
+        if (matched[i] && tok_class(toks[i].text) != 0) {
+            return true;
+        }
+    }
+    return false;
+}
+
+/// The changed spans of two paired lines, by a longest common subsequence of
+/// word / space / punctuation tokens (after trimming the common prefix and
+/// suffix). A very long line is trimmed only; beyond `INTRA_MAX_GLYPHS` there
+/// are no marks. When the two lines share no word at all the whole line is
+/// different, and marking all of it says nothing: no marks then either.
+pub Marks intra(Glyphs a, Glyphs b) {
+    Marks out = Marks();
+    if (a.syms.size() > INTRA_MAX_GLYPHS || b.syms.size() > INTRA_MAX_GLYPHS) {
+        return out;
+    }
+    List<Tok> ta = tokens_of(a);
+    List<Tok> tb = tokens_of(b);
+    int na = ta.size();
+    int nb = tb.size();
+    int least = na;
+    if (nb < least) {
+        least = nb;
+    }
+    int prefix = 0;
+    while (prefix < least && ta[prefix].text == tb[prefix].text) {
+        prefix = prefix + 1;
+    }
+    int suffix = 0;
+    while (suffix < least - prefix && ta[na - 1 - suffix].text == tb[nb - 1 - suffix].text) {
+        suffix = suffix + 1;
+    }
+    List<bool> in_a = [true; na];
+    List<bool> in_b = [true; nb];
+    int ma = na - prefix - suffix;
+    int mb = nb - prefix - suffix;
+    for (int i in 0 .. ma) {
+        in_a[prefix + i] = false;
+    }
+    for (int j in 0 .. mb) {
+        in_b[prefix + j] = false;
+    }
+    if (ma > 0 && mb > 0 && ma * mb <= INTRA_MAX_CELLS) {
+        int width = mb + 1;
+        List<int> table = [0; (ma + 1) * width];
+        int ii = ma - 1;
+        while (ii >= 0) {
+            int jj = mb - 1;
+            while (jj >= 0) {
+                if (ta[prefix + ii].text == tb[prefix + jj].text) {
+                    table[ii * width + jj] = table[(ii + 1) * width + jj + 1] + 1;
+                } else {
+                    int down = table[(ii + 1) * width + jj];
+                    int right = table[ii * width + jj + 1];
+                    if (down >= right) {
+                        table[ii * width + jj] = down;
+                    } else {
+                        table[ii * width + jj] = right;
+                    }
+                }
+                jj = jj - 1;
+            }
+            ii = ii - 1;
+        }
+        int x = 0;
+        int y = 0;
+        while (x < ma && y < mb) {
+            if (ta[prefix + x].text == tb[prefix + y].text) {
+                in_a[prefix + x] = true;
+                in_b[prefix + y] = true;
+                x = x + 1;
+                y = y + 1;
+            } else if (table[(x + 1) * width + y] >= table[x * width + y + 1]) {
+                x = x + 1;
+            } else {
+                y = y + 1;
+            }
+        }
+    }
+    if (!has_word(ta, in_a) && !has_word(tb, in_b)) {
+        return out;
+    }
+    for (int i in 0 .. na) {
+        if (!in_a[i]) {
+            add_range(out.old_marks, ta[i].from, ta[i].to);
+        }
+    }
+    for (int j in 0 .. nb) {
+        if (!in_b[j]) {
+            add_range(out.new_marks, tb[j].from, tb[j].to);
+        }
+    }
+    return out;
+}
+
+// --- building the logical rows ------------------------------------------------------
+
+int digits(int n) {
+    int count = 1;
+    int rest = n;
+    while (rest >= 10) {
+        rest = rest / 10;
+        count = count + 1;
+    }
+    return count;
+}
+
+Cell cell_of(DLine line, int number) {
+    int kind = CELL_CONTEXT;
+    if (line.kind == LINE_REMOVE) {
+        kind = CELL_DEL;
+    } else if (line.kind == LINE_ADD) {
+        kind = CELL_ADD;
+    }
+    return Cell(kind: kind, number: number, text: line.text, has_cr: line.has_cr, op: line.op);
+}
+
+const str NO_EOL = "\\ No newline at end of file";
+
+str gap_text(int hidden, bool can_expand) {
+    str noun = " unchanged lines";
+    if (hidden == 1) {
+        noun = " unchanged line";
+    }
+    str hint = "";
+    if (can_expand) {
+        hint = " (e: show more)";
+    }
+    return "\u{2026} " + hidden.to_str() + noun + hint + " \u{2026}";
+}
+
+Row pair_row(Cell left, Cell right, int hunk) {
+    return Row(ROW_PAIR, left: left, right: right, hunk: hunk);
+}
+
+/// The logical rows of one file.
+pub Layout build(FileDiff file, Opts opts) {
+    Layout out = Layout();
+    out.tab = opts.tab;
+    append(out, file, opts);
+    return out;
+}
+
+/// `build` onto an existing layout: several files one after another.
+pub void append(Layout out, FileDiff file, Opts opts) {
+    if (file.is_combined) {
+        out.rows.push(Row(ROW_NOTICE, text: "combined diff: side-by-side shows two sides, this has more; showing it unified"));
+        for (str line in file.meta) {
+            out.rows.push(Row(ROW_META, text: line));
+        }
+        return;
+    }
+    out.rows.push(Row(ROW_FILE, left: Cell(kind: CELL_HEAD, text: file.old_label), right: Cell(kind: CELL_HEAD, text: file.new_label)));
+    for (str line in file.meta) {
+        out.rows.push(Row(ROW_META, text: line));
+    }
+    if (file.is_binary) {
+        return;
+    }
+    if (file.old_total > out.max_number) {
+        out.max_number = file.old_total;
+    }
+    if (file.new_total > out.max_number) {
+        out.max_number = file.new_total;
+    }
+    int consumed_old = 0;
+    int consumed_new = 0;
+    for (int h in 0 .. file.hunks.size()) {
+        DHunk hunk = file.hunks[h];
+        int old_no = hunk.old_start;
+        if (hunk.old_count == 0) {
+            old_no = hunk.old_start + 1;
+        }
+        int new_no = hunk.new_start;
+        if (hunk.new_count == 0) {
+            new_no = hunk.new_start + 1;
+        }
+        int hidden = old_no - consumed_old - 1;
+        if (hidden > 0) {
+            out.rows.push(Row(ROW_GAP, text: gap_text(hidden, opts.can_expand), hunk: h, hidden: hidden, old_from: consumed_old + 1, new_from: consumed_new + 1));
+        }
+        out.rows.push(Row(ROW_HUNK, text: hunk.header, hunk: h));
+        int count = hunk.lines.size();
+        int i = 0;
+        while (i < count) {
+            DLine line = hunk.lines[i];
+            if (line.kind == LINE_CONTEXT) {
+                out.rows.push(pair_row(cell_of(line, old_no), cell_of(line, new_no), h));
+                old_no = old_no + 1;
+                new_no = new_no + 1;
+                i = i + 1;
+                if (line.no_eol) {
+                    out.rows.push(pair_row(Cell(kind: CELL_NOTE, text: NO_EOL), Cell(kind: CELL_NOTE, text: NO_EOL), h));
+                }
+                continue;
+            }
+            List<DLine> dels = [];
+            List<DLine> adds = [];
+            while (i < count && hunk.lines[i].kind != LINE_CONTEXT) {
+                if (hunk.lines[i].kind == LINE_REMOVE) {
+                    dels.push(hunk.lines[i]);
+                } else {
+                    adds.push(hunk.lines[i]);
+                }
+                i = i + 1;
+            }
+            int rows = dels.size();
+            if (adds.size() > rows) {
+                rows = adds.size();
+            }
+            for (int k in 0 .. rows) {
+                Cell left = Cell();
+                Cell right = Cell();
+                if (k < dels.size()) {
+                    left = cell_of(dels[k], old_no + k);
+                }
+                if (k < adds.size()) {
+                    right = cell_of(adds[k], new_no + k);
+                }
+                if (opts.is_intra && k < dels.size() && k < adds.size()) {
+                    Marks marks = intra(glyphs(left.text, opts.tab), glyphs(right.text, opts.tab));
+                    left.marks = marks.old_marks;
+                    right.marks = marks.new_marks;
+                    if (left.text == right.text && left.has_cr != right.has_cr) {
+                        // only the line ending changed: the whole line is the
+                        // change, and the CR is drawn so it can be seen
+                        left.show_cr = left.has_cr;
+                        right.show_cr = right.has_cr;
+                        left.marks = [0, glyphs(left.text, opts.tab).syms.size() + 1];
+                        right.marks = [0, glyphs(right.text, opts.tab).syms.size() + 1];
+                    }
+                }
+                out.rows.push(pair_row(left, right, h));
+            }
+            old_no = old_no + dels.size();
+            new_no = new_no + adds.size();
+            bool left_note = dels.size() > 0 && dels[dels.size() - 1].no_eol;
+            bool right_note = adds.size() > 0 && adds[adds.size() - 1].no_eol;
+            if (left_note || right_note) {
+                Cell note_left = Cell();
+                Cell note_right = Cell();
+                if (left_note) {
+                    note_left = Cell(kind: CELL_NOTE, text: NO_EOL);
+                }
+                if (right_note) {
+                    note_right = Cell(kind: CELL_NOTE, text: NO_EOL);
+                }
+                out.rows.push(pair_row(note_left, note_right, h));
+            }
+        }
+        if (old_no - 1 > out.max_number) {
+            out.max_number = old_no - 1;
+        }
+        if (new_no - 1 > out.max_number) {
+            out.max_number = new_no - 1;
+        }
+        consumed_old = old_no - 1;
+        consumed_new = new_no - 1;
+    }
+    if (file.old_total >= 0) {
+        int tail = file.old_total - consumed_old;
+        if (tail > 0 && file.hunks.size() > 0) {
+            out.rows.push(Row(ROW_GAP, text: gap_text(tail, opts.can_expand), hunk: file.hunks.size(), hidden: tail, old_from: consumed_old + 1, new_from: consumed_new + 1));
+        }
+    }
+}
+
+// --- the column plan -----------------------------------------------------------------
+
+/// How `total` columns are spent: each side is a number column, a space, a
+/// marker column and the text; between the sides a 3-column gutter holds the
+/// change marker.
+pub type Geometry {
+    pub int total;
+    pub int num_w;
+    pub int left_w;
+    pub int right_w;
+    pub int left_text;
+    pub int right_text;
+}
+
+pub const int GUTTER = 3;
+
+/// The plan for `total` columns, or None when a side would be left with fewer
+/// than `MIN_SIDE_TEXT` text columns.
+pub Option<Geometry> geometry(int total, int max_number) {
+    int num_w = digits(max_number);
+    if (num_w < 2) {
+        num_w = 2;
+    }
+    int avail = total - GUTTER;
+    int left_w = avail / 2;
+    int right_w = avail - left_w;
+    int left_text = left_w - num_w - 2;
+    int right_text = right_w - num_w - 2;
+    if (left_text < MIN_SIDE_TEXT || right_text < MIN_SIDE_TEXT) {
+        return Option<Geometry>.None;
+    }
+    return Option<Geometry>.Some(Geometry(total, num_w, left_w, right_w, left_text, right_text));
+}
+
+// --- visual rows ---------------------------------------------------------------------
+
+/// One side of one visual row: the glyphs drawn (at most the text width),
+/// which of them are marked, and the columns they take. `is_first` is false
+/// on the continuation rows of a wrapped line, which show no number.
+pub type Seg {
+    pub int kind = CELL_EMPTY;
+    pub int number = 0;
+    pub List<str> syms = [];
+    pub List<int> widths = [];
+    pub List<int> srcs = [];
+    pub List<bool> hot = [];
+    pub int cols = 0;
+    pub bool is_first = true;
+}
+
+/// One row as drawn. `row` indexes `Layout.rows`; `sub` is 0 on the first
+/// visual row of a logical row. For a non-`Pair` row `text` is the line.
+pub type VRow {
+    pub int row;
+    pub int kind;
+    pub int sub = 0;
+    pub Seg left = Seg();
+    pub Seg right = Seg();
+    pub str text = "";
+    /// The gutter marker: a space, `|`, `~`, `-` or `+`.
+    pub str mark = " ";
+}
+
+List<bool> hot_flags(Cell cell, int count) {
+    List<bool> flags = [false; count];
+    int n = cell.marks.size();
+    int m = 0;
+    while (m + 1 < n) {
+        for (int g in cell.marks[m] .. cell.marks[m + 1]) {
+            if (g < count) {
+                flags[g] = true;
+            }
+        }
+        m = m + 2;
+    }
+    return flags;
+}
+
+Seg blank_seg(bool is_first) {
+    return Seg(is_first: is_first);
+}
+
+// A path or label wider than its room keeps its END (the file name) behind an
+// ellipsis.
+Seg head_seg(Cell cell, int room, int tab) {
+    Glyphs g = glyphs(cell.text, tab);
+    int total = 0;
+    for (int w in g.widths) {
+        total = total + w;
+    }
+    Seg seg = Seg(kind: CELL_HEAD);
+    int from = 0;
+    if (total > room) {
+        seg.syms.push("\u{2026}");
+        seg.widths.push(1);
+        seg.srcs.push(0);
+        seg.hot.push(false);
+        seg.cols = 1;
+        int skip = total - room + 1;
+        int skipped = 0;
+        while (from < g.syms.size() && skipped < skip) {
+            skipped = skipped + g.widths[from];
+            from = from + 1;
+        }
+        if (skipped > skip) {
+            seg.syms.push(" ");
+            seg.widths.push(1);
+            seg.srcs.push(0);
+            seg.hot.push(false);
+            seg.cols = seg.cols + 1;
+        }
+    }
+    for (int i in from .. g.syms.size()) {
+        seg.syms.push(g.syms[i]);
+        seg.widths.push(g.widths[i]);
+        seg.srcs.push(g.srcs[i]);
+        seg.hot.push(false);
+        seg.cols = seg.cols + g.widths[i];
+    }
+    return seg;
+}
+
+/// The visual rows of one cell in `room` columns: wrapped (each piece at most
+/// `room` columns, never cutting a wide glyph) or one row starting `hscroll`
+/// columns in.
+List<Seg> segments(Cell cell, int tab, int room, bool is_wrap, int hscroll) {
+    List<Seg> out = [];
+    if (cell.kind == CELL_EMPTY) {
+        out.push(blank_seg(true));
+        return out;
+    }
+    if (cell.kind == CELL_HEAD) {
+        out.push(head_seg(cell, room, tab));
+        return out;
+    }
+    Glyphs g = glyphs(cell.text, tab);
+    if (cell.show_cr) {
+        g.syms.push("\u{240d}");
+        g.widths.push(1);
+        g.srcs.push(cell.text.size());
+    }
+    List<bool> flags = hot_flags(cell, g.syms.size());
+    int count = g.syms.size();
+    Seg current = Seg(kind: cell.kind, number: cell.number);
+    if (is_wrap) {
+        for (int i in 0 .. count) {
+            if (current.cols + g.widths[i] > room && current.syms.size() > 0) {
+                out.push(current);
+                current = Seg(kind: cell.kind, number: cell.number, is_first: false);
+            }
+            current.syms.push(g.syms[i]);
+            current.widths.push(g.widths[i]);
+            current.srcs.push(g.srcs[i]);
+            current.hot.push(flags[i]);
+            current.cols = current.cols + g.widths[i];
+        }
+        out.push(current);
+        return out;
+    }
+    int skipped = 0;
+    int i = 0;
+    while (i < count && skipped < hscroll) {
+        skipped = skipped + g.widths[i];
+        i = i + 1;
+    }
+    if (skipped > hscroll) {
+        // a wide glyph straddles the edge: its visible half is blank
+        int blank = skipped - hscroll;
+        for (int b in 0 .. blank) {
+            current.syms.push(" ");
+            current.widths.push(1);
+            current.srcs.push(g.srcs[i - 1]);
+            current.hot.push(flags[i - 1]);
+            current.cols = current.cols + 1;
+        }
+    }
+    while (i < count && current.cols + g.widths[i] <= room) {
+        current.syms.push(g.syms[i]);
+        current.widths.push(g.widths[i]);
+        current.srcs.push(g.srcs[i]);
+        current.hot.push(flags[i]);
+        current.cols = current.cols + g.widths[i];
+        i = i + 1;
+    }
+    out.push(current);
+    return out;
+}
+
+str gutter_mark(Row row) {
+    if (row.kind != ROW_PAIR) {
+        return " ";
+    }
+    int l = row.left.kind;
+    int r = row.right.kind;
+    if (l == CELL_CONTEXT) {
+        return "|";
+    }
+    if (l == CELL_DEL && r == CELL_ADD) {
+        return "~";
+    }
+    if (l == CELL_DEL) {
+        return "-";
+    }
+    if (r == CELL_ADD) {
+        return "+";
+    }
+    return " ";
+}
+
+/// Every logical row as visual rows for geometry `g`: wrapped, so both sides
+/// of a row stay aligned by padding the shorter, or (`is_wrap` false) one row
+/// each, both sides shifted `hscroll` columns together.
+pub List<VRow> visual(Layout layout, Geometry g, bool is_wrap, int hscroll) {
+    List<VRow> out = [];
+    for (int index in 0 .. layout.rows.size()) {
+        Row row = layout.rows[index];
+        if (row.kind != ROW_PAIR && row.kind != ROW_FILE) {
+            out.push(VRow(index, row.kind, text: row.text));
+            continue;
+        }
+        List<Seg> left = segments(row.left, layout.tab, g.left_text, is_wrap, hscroll);
+        List<Seg> right = segments(row.right, layout.tab, g.right_text, is_wrap, hscroll);
+        int n = left.size();
+        if (right.size() > n) {
+            n = right.size();
+        }
+        str mark = gutter_mark(row);
+        for (int k in 0 .. n) {
+            VRow v = VRow(index, row.kind, sub: k, mark: mark);
+            if (k < left.size()) {
+                v.left = left[k];
+            } else {
+                v.left = blank_seg(false);
+            }
+            if (k < right.size()) {
+                v.right = right[k];
+            } else {
+                v.right = blank_seg(false);
+            }
+            out.push(v);
+        }
+    }
+    return out;
+}
+
+// --- styled pieces and plain text -----------------------------------------------------
+
+pub const int ST_PLAIN = 0;
+pub const int ST_DIM = 1;
+pub const int ST_OLD = 2;
+pub const int ST_NEW = 3;
+pub const int ST_OLD_HOT = 4;
+pub const int ST_NEW_HOT = 5;
+pub const int ST_META = 6;
+pub const int ST_FRAG = 7;
+pub const int ST_NOTE = 8;
+pub const int ST_HEAD = 9;
+
+/// A stretch of one visual row in one style.
+pub type Run {
+    pub str text;
+    pub int style;
+}
+
+str spaces(int n) {
+    if (n <= 0) {
+        return "";
+    }
+    return " ".repeat(n);
+}
+
+str pad_left(str text, int width) {
+    return spaces(width - text.size()) + text;
+}
+
+void push_run(List<Run> out, str text, int style) {
+    if (text == "") {
+        return;
+    }
+    int n = out.size();
+    if (n > 0 && out[n - 1].style == style) {
+        out[n - 1] = Run(out[n - 1].text + text, style);
+        return;
+    }
+    out.push(Run(text, style));
+}
+
+void side_runs(List<Run> out, Seg seg, int num_w, int text_w) {
+    if (seg.kind == CELL_HEAD) {
+        push_run(out, spaces(num_w + 2), ST_PLAIN);
+        push_run(out, seg.syms.join(""), ST_HEAD);
+        push_run(out, spaces(text_w - seg.cols), ST_PLAIN);
+        return;
+    }
+    str number = "";
+    if (seg.number > 0 && seg.is_first) {
+        number = seg.number.to_str();
+    }
+    push_run(out, pad_left(number, num_w) + " ", ST_DIM);
+    int base = ST_PLAIN;
+    int hot = ST_PLAIN;
+    str marker = " ";
+    if (seg.kind == CELL_DEL) {
+        base = ST_OLD;
+        hot = ST_OLD_HOT;
+        marker = "-";
+    } else if (seg.kind == CELL_ADD) {
+        base = ST_NEW;
+        hot = ST_NEW_HOT;
+        marker = "+";
+    } else if (seg.kind == CELL_NOTE) {
+        base = ST_NOTE;
+        hot = ST_NOTE;
+    }
+    if (!seg.is_first) {
+        marker = " ";
+    }
+    push_run(out, marker, base);
+    for (int i in 0 .. seg.syms.size()) {
+        if (seg.hot[i]) {
+            push_run(out, seg.syms[i], hot);
+        } else {
+            push_run(out, seg.syms[i], base);
+        }
+    }
+    push_run(out, spaces(text_w - seg.cols), ST_PLAIN);
+}
+
+// `text` cut to `room` columns with an ellipsis, padded to exactly `room`.
+str fit_full(str text, int room, int tab) {
+    Glyphs g = glyphs(text, tab);
+    int total = 0;
+    for (int w in g.widths) {
+        total = total + w;
+    }
+    List<str> kept = [];
+    int used = 0;
+    if (total <= room) {
+        for (str s in g.syms) {
+            kept.push(s);
+        }
+        used = total;
+    } else {
+        int i = 0;
+        while (i < g.syms.size() && used + g.widths[i] <= room - 1) {
+            kept.push(g.syms[i]);
+            used = used + g.widths[i];
+            i = i + 1;
+        }
+        kept.push("\u{2026}");
+        used = used + 1;
+    }
+    return kept.join("") + spaces(room - used);
+}
+
+/// One visual row as styled runs, exactly `g.total` columns wide.
+pub List<Run> runs_of(VRow v, Geometry g, int tab) {
+    List<Run> out = [];
+    if (v.kind != ROW_PAIR && v.kind != ROW_FILE) {
+        int style = ST_PLAIN;
+        if (v.kind == ROW_HUNK) {
+            style = ST_FRAG;
+        } else if (v.kind == ROW_META) {
+            style = ST_META;
+        } else if (v.kind == ROW_GAP || v.kind == ROW_NOTICE) {
+            style = ST_DIM;
+        }
+        push_run(out, fit_full(v.text, g.total, tab), style);
+        return out;
+    }
+    side_runs(out, v.left, g.num_w, g.left_text);
+    push_run(out, " " + v.mark + " ", ST_DIM);
+    side_runs(out, v.right, g.num_w, g.right_text);
+    return out;
+}
+
+pub str runs_text(List<Run> runs) {
+    List<str> parts = [];
+    for (Run run in runs) {
+        parts.push(run.text);
+    }
+    return parts.join("");
+}
+
+/// Every visual row as plain text, each exactly `g.total` columns wide.
+pub List<str> render_plain(Layout layout, Geometry g, bool is_wrap, int hscroll) {
+    List<str> out = [];
+    for (VRow v in visual(layout, g, is_wrap, hscroll)) {
+        out.push(runs_text(runs_of(v, g, layout.tab)));
+    }
+    return out;
+}

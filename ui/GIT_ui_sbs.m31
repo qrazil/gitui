@@ -1,0 +1,1174 @@
+// The side-by-side diff view: mgit's second way to draw a diff. The layout comes
+// from `diff/GIT_sbs.m31` (pure, tested on its own); this module draws it into
+// a buffer, keeps the cursor and the scroll, and answers its keys and mouse.
+//
+// --- one cursor, two views ------------------------------------------------------------
+//
+// The side-by-side view is a renderer over the diff the unified view already
+// holds, not a second editor of it. The cursor of the unified `DiffView`
+// (`diff_view.cursor`) stays the one cursor that staging, unstaging and
+// discarding read; this module moves its own cursor over the paired rows and,
+// whenever that lands on a line that is in a unified hunk, writes the matching
+// unified row into `diff_view.cursor`. So `s`, `u`, `space` and the visual range
+// act through the same patch machinery in both views, and the side the cursor is
+// on picks the line: on the right side a changed row is its addition, on the
+// left its removal (the right side is where the cursor starts).
+//
+// A line that exists only because the context was widened (`e`) has no unified
+// row; the cursor may rest on it, and the editing commands say so instead of
+// guessing (`is_unmapped`).
+//
+// --- when it is used ------------------------------------------------------------------
+//
+// `diff.view` in the repository's (or global) git config: `auto` (the default)
+// draws side by side when the pane is at least 120 columns wide, `unified` never,
+// `split` whenever there are at least 60 columns. `D` in the diff view flips the
+// view and writes the choice back to `diff.view`, which is how the last choice is
+// remembered. Below 60 columns the unified view is drawn whatever was asked.
+
+import os;
+import term;
+import core.GIT_config;
+import diff.GIT_hunks;
+import diff.GIT_sbs;
+import diff.GIT_sbs_ops;
+import diff.GIT_sbs_text;
+import diff.GIT_xdiff;
+import text.diff;
+import tui.core.TUI_buffer;
+import tui.core.TUI_geometry;
+import tui.core.TUI_mouse;
+import tui.core.TUI_style;
+import tui.core.TUI_text;
+import tui.core.TUI_widget;
+import tui.widgets.TUI_diff_view;
+import ui.GIT_ui_core;
+import ui.GIT_ui_highlight;
+import ui.GIT_ui_sbs_state;
+import ui.GIT_ui_syntax;
+
+/// How many visual rows a wheel notch scrolls.
+pub const int WHEEL_ROWS = 3;
+
+/// Whether the terminal is asked for mouse reports (the wheel and clicks in the
+/// diff view): on unless `M31GIT_MOUSE` (or the older `GITUI_MOUSE`) or
+/// `mgit.mouse` (or `gitui.mouse`) in git config says off. With reports on the
+/// terminal's own text selection needs Shift.
+pub bool is_mouse_on(str gitdir) {
+    List<str> names = ["M31GIT_MOUSE", "GITUI_MOUSE"];
+    for (str name in names) {
+        match (os.env(name)) {
+            case Some(str value): {
+                if (value != "") {
+                    return !GIT_ui_highlight.is_off_word(value);
+                }
+            }
+            case None: {
+            }
+        }
+    }
+    List<str> sections = ["mgit", "gitui"];
+    for (str section in sections) {
+        match (GIT_config.get(gitdir, section, "", "mouse")) {
+            case Some(str value): {
+                return !GIT_ui_highlight.is_off_word(value);
+            }
+            case None: {
+            }
+        }
+    }
+    return true;
+}
+
+// --- preference ---------------------------------------------------------------------
+
+/// Read `diff.view` once.
+pub void load_preference(GIT_ui_core.Core core) {
+    if (core.sbs.view != "") {
+        return;
+    }
+    core.sbs.view = GIT_ui_sbs_state.VIEW_AUTO;
+    match (GIT_config.get(core.gitdir, "diff", "", "view")) {
+        case Some(str value): {
+            str word = value.trim().to_lower();
+            if (word == GIT_ui_sbs_state.VIEW_UNIFIED || word == GIT_ui_sbs_state.VIEW_SPLIT || word == GIT_ui_sbs_state.VIEW_AUTO) {
+                core.sbs.view = word;
+            }
+        }
+        case None: {
+        }
+    }
+}
+
+/// Is the side-by-side view wanted for a pane `width` columns wide?
+pub bool is_wanted(str view, int width) {
+    if (view == GIT_ui_sbs_state.VIEW_SPLIT) {
+        return width >= GIT_ui_sbs_state.SPLIT_MIN_WIDTH;
+    }
+    if (view == GIT_ui_sbs_state.VIEW_UNIFIED) {
+        return false;
+    }
+    return width >= GIT_ui_sbs_state.AUTO_MIN_WIDTH;
+}
+
+// `D`: flip the view and remember it.
+pub void toggle_view(GIT_ui_core.Core core) {
+    toggle_view_for(core, core.sbs.is_active, core.sbs.area_w + 2);
+}
+
+/// `D` in a scrolling pane too: `is_split` is whether the pane draws side by
+/// side now, `width` the pane's width.
+pub void toggle_view_for(GIT_ui_core.Core core, bool is_split, int width) {
+    load_preference(core);
+    str next = GIT_ui_sbs_state.VIEW_SPLIT;
+    if (is_split) {
+        next = GIT_ui_sbs_state.VIEW_UNIFIED;
+    }
+    core.sbs.view = next;
+    if (next == GIT_ui_sbs_state.VIEW_SPLIT && width < GIT_ui_sbs_state.SPLIT_MIN_WIDTH) {
+        core.message = "side by side needs a pane of " + GIT_ui_sbs_state.SPLIT_MIN_WIDTH.to_str + " columns; unified until the window is wider";
+    } else if (next == GIT_ui_sbs_state.VIEW_SPLIT) {
+        core.message = "side-by-side diff (D: back to unified)";
+    } else {
+        core.message = "unified diff (D: side by side)";
+    }
+    match (GIT_config.set(core.gitdir, "diff", "", "view", next)) {
+        case Ok(_): {
+        }
+        case Err(_): {
+        }
+    }
+    core.sbs.should_reveal = true;
+    core.sbs.synced = -1;
+}
+
+/// `w` in a scrolling pane.
+pub void toggle_wrap_for(GIT_ui_core.Core core, GIT_ui_sbs_state.SbsState pane) {
+    pane.is_wrap = !pane.is_wrap;
+    pane.hscroll = 0;
+    if (pane.is_wrap) {
+        core.message = "long lines wrap";
+    } else {
+        core.message = "long lines are cut at the edge of each side";
+    }
+}
+
+// --- the diff the view is of -------------------------------------------------------------
+
+// Build the edit script, the unified hunk spans and the files' lines once per
+// diff opened.
+void ensure_source(GIT_ui_core.Core core) {
+    GIT_ui_sbs_state.SbsState st = core.sbs;
+    if (st.has_source) {
+        return;
+    }
+    st.has_source = true;
+    st.ops = [];
+    st.spans = [];
+    st.old_lines = [];
+    st.new_lines = [];
+    match (GIT_xdiff.diff_text(core.diff_old, core.diff_new)) {
+        case Binary: {
+        }
+        case Lines(List<diff.Op> ops): {
+            st.ops = ops;
+            st.spans = GIT_hunks.spans(ops, context: GIT_hunks.DEFAULT_CONTEXT);
+            for (diff.Op op in ops) {
+                match (op.kind) {
+                    case Keep: {
+                        str text = GIT_sbs_ops.text_of(op.line);
+                        st.old_lines.push(text);
+                        st.new_lines.push(text);
+                    }
+                    case Remove: {
+                        st.old_lines.push(GIT_sbs_ops.text_of(op.line));
+                    }
+                    case Add: {
+                        st.new_lines.push(GIT_sbs_ops.text_of(op.line));
+                    }
+                }
+            }
+        }
+    }
+    st.old_label = labels(core)[0];
+    st.new_label = labels(core)[1];
+}
+
+// What each side's ruler says: the path and which revision of it.
+List<str> labels(GIT_ui_core.Core core) {
+    str path = core.diff_path.utf8().or("<non-utf8>");
+    if (core.diff_section == "unstaged") {
+        return [path + "  (index)", path + "  (working tree)"];
+    }
+    if (core.diff_section == "staged") {
+        return [path + "  (HEAD)", path + "  (index)"];
+    }
+    if (core.diff_section == "untracked") {
+        return ["/dev/null", path + "  (working tree)"];
+    }
+    if (core.diff_section == "commit" && core.diff_rev.size() >= 7) {
+        str short = core.diff_rev.substr(0, 7);
+        return [path + "  (" + short + "^)", path + "  (" + short + ")"];
+    }
+    return [path, path];
+}
+
+void index_ops(GIT_ui_sbs_state.SbsState st) {
+    st.row_of_op = [-1; st.ops.size()];
+    for (int r in 0 .. st.layout.rows.size()) {
+        GIT_sbs.Row row = st.layout.rows[r];
+        if (row.kind != GIT_sbs.ROW_PAIR) {
+            continue;
+        }
+        if (row.left.op >= 0 && row.left.op < st.row_of_op.size()) {
+            st.row_of_op[row.left.op] = r;
+        }
+        if (row.right.op >= 0 && row.right.op < st.row_of_op.size()) {
+            st.row_of_op[row.right.op] = r;
+        }
+    }
+}
+
+void ensure_layout(GIT_ui_core.Core core) {
+    GIT_ui_sbs_state.SbsState st = core.sbs;
+    ensure_source(core);
+    if (st.is_laid && st.laid_context == st.context) {
+        return;
+    }
+    GIT_sbs.FileDiff file = GIT_sbs_ops.from_ops(st.ops, st.context, st.old_label, st.new_label);
+    st.layout = GIT_sbs.build(file, GIT_sbs.Opts(can_expand: true));
+    st.is_laid = true;
+    st.laid_context = st.context;
+    st.is_visual = false;
+    st.synced = -1;
+    index_ops(st);
+}
+
+// The folded hunks, as the unified view has them: a string that changes when
+// one is folded or unfolded. Widened context ignores folds.
+str fold_key(GIT_ui_core.Core core) {
+    if (core.sbs.context != GIT_hunks.DEFAULT_CONTEXT) {
+        return "";
+    }
+    List<str> parts = [];
+    for (TUI_diff_view.Hunk hunk in core.diff_view.hunks) {
+        if (hunk.is_collapsed) {
+            parts.push("1");
+        } else {
+            parts.push("0");
+        }
+    }
+    return parts.join("");
+}
+
+// The visual rows for `width` columns, rebuilt when the width, the wrap
+// mode, the scroll, the layout or the folds changed. False when no plan fits.
+bool ensure_visual(GIT_ui_core.Core core, int width) {
+    GIT_ui_sbs_state.SbsState st = core.sbs;
+    str folds = fold_key(core);
+    if (st.is_visual && st.visual_width == width && st.visual_wrap == st.is_wrap && st.visual_hscroll == st.hscroll && st.visual_folds == folds) {
+        return true;
+    }
+    match (GIT_sbs.geometry(width, st.layout.max_number)) {
+        case None: {
+            return false;
+        }
+        case Some(GIT_sbs.Geometry g): {
+            st.geometry = g;
+        }
+    }
+    build_rows(st, width, folds);
+    return true;
+}
+
+// The lines a folded hunk hides: a row holds one line, or two when a removal
+// and an addition share it; note rows hold none.
+int lines_in_hunk(GIT_ui_sbs_state.SbsState st, int hunk) {
+    int count = 0;
+    for (GIT_sbs.Row row in st.layout.rows) {
+        if (row.kind != GIT_sbs.ROW_PAIR || row.hunk != hunk) {
+            continue;
+        }
+        if (row.left.op >= 0) {
+            count = count + 1;
+        }
+        if (row.right.op >= 0 && row.right.op != row.left.op) {
+            count = count + 1;
+        }
+    }
+    return count;
+}
+
+void build_rows(GIT_ui_sbs_state.SbsState st, int width, str folds) {
+    List<GIT_sbs.VRow> all = GIT_sbs.visual(st.layout, st.geometry, st.is_wrap, st.hscroll);
+    st.rows = [];
+    st.first_of_row = [-1; st.layout.rows.size()];
+    for (int at in 0 .. all.size()) {
+        GIT_sbs.VRow v = all[at];
+        if (folds != "" && v.kind == GIT_sbs.ROW_HUNK) {
+            int folded = st.layout.rows[v.row].hunk;
+            if (folded >= 0 && folded < folds.size() && folds.byte_at(folded) == 49) {
+                v.text = v.text + "  \u{2026} (" + lines_in_hunk(st, folded).to_str() + " lines)";
+            }
+        }
+        if (folds != "" && v.kind == GIT_sbs.ROW_PAIR) {
+            int hunk = st.layout.rows[v.row].hunk;
+            if (hunk >= 0 && hunk < folds.size() && folds.byte_at(hunk) == 49) {
+                continue;
+            }
+        }
+        if (st.first_of_row[v.row] < 0) {
+            st.first_of_row[v.row] = st.rows.size();
+        }
+        st.rows.push(v);
+    }
+    st.is_visual = true;
+    st.visual_width = width;
+    st.visual_wrap = st.is_wrap;
+    st.visual_hscroll = st.hscroll;
+    st.visual_folds = folds;
+}
+
+// --- unified cursor <-> rows -----------------------------------------------------------
+
+// The span of the default-context hunks that op `op` is in, or -1.
+int span_of_op(GIT_ui_sbs_state.SbsState st, int op) {
+    int low = 0;
+    int high = st.spans.size() - 1;
+    while (low <= high) {
+        int mid = (low + high) / 2;
+        if (op < st.spans[mid].start) {
+            high = mid - 1;
+        } else if (op >= st.spans[mid].end) {
+            low = mid + 1;
+        } else {
+            return mid;
+        }
+    }
+    return -1;
+}
+
+// The unified row of op `op`, or -1 when no unified hunk shows it.
+int unified_row_of_op(GIT_ui_core.Core core, int op) {
+    GIT_ui_sbs_state.SbsState st = core.sbs;
+    int k = span_of_op(st, op);
+    if (k < 0 || st.spans.size() != core.diff_view.hunks.size()) {
+        return -1;
+    }
+    int header = core.diff_view.header_row(k);
+    if (header < 0) {
+        return -1;
+    }
+    if (core.diff_view.hunks[k].is_collapsed) {
+        return header;
+    }
+    int line = op - st.spans[k].start;
+    if (line >= core.diff_view.hunks[k].lines.size()) {
+        return -1;
+    }
+    return header + 1 + line;
+}
+
+// Which op a cell stands for; the cell of the side the cursor is on first.
+int op_of_row(GIT_sbs.Row row, bool is_right) {
+    if (is_right) {
+        if (row.right.op >= 0) {
+            return row.right.op;
+        }
+        return row.left.op;
+    }
+    if (row.left.op >= 0) {
+        return row.left.op;
+    }
+    return row.right.op;
+}
+
+// Is the cursor on the right side of `row`, given the side it prefers?
+bool side_of_row(GIT_sbs.Row row, bool prefers_right) {
+    if (prefers_right && row.right.op >= 0) {
+        return true;
+    }
+    if (!prefers_right && row.left.op >= 0) {
+        return false;
+    }
+    if (row.right.op >= 0) {
+        return true;
+    }
+    if (row.left.op >= 0) {
+        return false;
+    }
+    return prefers_right;
+}
+
+bool is_addressable(GIT_ui_sbs_state.SbsState st, int r) {
+    GIT_sbs.Row row = st.layout.rows[r];
+    if (row.kind != GIT_sbs.ROW_PAIR && row.kind != GIT_sbs.ROW_HUNK) {
+        return false;
+    }
+    return st.first_of_row[r] >= 0;
+}
+
+// The first pair row at or after `r` (for a hunk row: the hunk's first line).
+int first_pair_after(GIT_ui_sbs_state.SbsState st, int r) {
+    int i = r;
+    while (i < st.layout.rows.size()) {
+        if (st.layout.rows[i].kind == GIT_sbs.ROW_PAIR && op_of_row(st.layout.rows[i], true) >= 0) {
+            return i;
+        }
+        i = i + 1;
+    }
+    return -1;
+}
+
+// Move the view's cursor to where the unified cursor is, when that moved
+// since the last time the two agreed.
+void pull_cursor(GIT_ui_core.Core core) {
+    GIT_ui_sbs_state.SbsState st = core.sbs;
+    core.diff_view.move(0);
+    if (st.cursor_row >= st.layout.rows.size()) {
+        st.cursor_row = st.layout.rows.size() - 1;
+    }
+    if (st.cursor_row < 0) {
+        st.cursor_row = 0;
+    }
+    if (st.synced == core.diff_view.cursor || !st.is_laid || st.layout.rows.size() == 0) {
+        return;
+    }
+    st.synced = core.diff_view.cursor;
+    st.should_reveal = true;
+    match (core.diff_view.at()) {
+        case Some(TUI_diff_view.Row at): {
+            if (at.hunk < 0 || at.hunk >= st.spans.size()) {
+                return;
+            }
+            int op = st.spans[at.hunk].start;
+            bool is_header = false;
+            match (at.kind) {
+                case Header: {
+                    is_header = true;
+                }
+                case Body: {
+                    op = op + at.line;
+                }
+            }
+            if (op < 0 || op >= st.row_of_op.size() || st.row_of_op[op] < 0) {
+                return;
+            }
+            int row = st.row_of_op[op];
+            if (is_header) {
+                while (row > 0 && st.layout.rows[row].kind != GIT_sbs.ROW_HUNK) {
+                    row = row - 1;
+                }
+            } else {
+                st.is_right = side_of_row(st.layout.rows[row], st.is_right);
+            }
+            st.cursor_row = row;
+            st.is_unmapped = false;
+        }
+        case None: {
+        }
+    }
+}
+
+// Write the view's cursor into the unified one, when it names a line the
+// unified view has.
+void push_cursor(GIT_ui_core.Core core) {
+    GIT_ui_sbs_state.SbsState st = core.sbs;
+    if (st.cursor_row < 0 || st.cursor_row >= st.layout.rows.size()) {
+        return;
+    }
+    GIT_sbs.Row row = st.layout.rows[st.cursor_row];
+    int unified = -1;
+    if (row.kind == GIT_sbs.ROW_HUNK) {
+        int at = first_pair_after(st, st.cursor_row);
+        if (at >= 0) {
+            int op = op_of_row(st.layout.rows[at], true);
+            int k = span_of_op(st, op);
+            if (k >= 0 && st.spans.size() == core.diff_view.hunks.size()) {
+                unified = core.diff_view.header_row(k);
+            }
+        }
+    } else if (row.kind == GIT_sbs.ROW_PAIR) {
+        int op = op_of_row(row, st.is_right);
+        if (op >= 0) {
+            unified = unified_row_of_op(core, op);
+        }
+    }
+    if (unified >= 0) {
+        core.diff_view.cursor = unified;
+        st.synced = unified;
+        st.is_unmapped = false;
+    } else {
+        st.is_unmapped = true;
+        st.synced = core.diff_view.cursor;
+    }
+}
+
+/// j / k: the cursor `delta` rows down or up the paired rows.
+pub void move(GIT_ui_core.Core core, int delta) {
+    GIT_ui_sbs_state.SbsState st = core.sbs;
+    pull_cursor(core);
+    int step = 1;
+    int count = delta;
+    if (delta < 0) {
+        step = -1;
+        count = 0 - delta;
+    }
+    int r = st.cursor_row;
+    for (int i in 0 .. count) {
+        int next = r + step;
+        while (next >= 0 && next < st.layout.rows.size() && !is_addressable(st, next)) {
+            next = next + step;
+        }
+        if (next < 0 || next >= st.layout.rows.size()) {
+            break;
+        }
+        r = next;
+    }
+    st.cursor_row = r;
+    if (st.layout.rows[r].kind == GIT_sbs.ROW_PAIR) {
+        st.is_right = side_of_row(st.layout.rows[r], st.is_right);
+    }
+    push_cursor(core);
+    st.should_reveal = true;
+}
+
+/// h / l: the cursor to the old (left) or new (right) side.
+pub void focus(GIT_ui_core.Core core, bool is_right) {
+    GIT_ui_sbs_state.SbsState st = core.sbs;
+    pull_cursor(core);
+    st.is_right = is_right;
+    if (st.cursor_row >= 0 && st.cursor_row < st.layout.rows.size()) {
+        GIT_sbs.Row row = st.layout.rows[st.cursor_row];
+        if (row.kind == GIT_sbs.ROW_PAIR) {
+            if (is_right && row.right.op < 0) {
+                core.message = "nothing on the new side of this row";
+            } else if (!is_right && row.left.op < 0) {
+                core.message = "nothing on the old side of this row";
+            }
+        }
+    }
+    push_cursor(core);
+}
+
+/// `w`: wrap long lines, or scroll both sides together.
+pub void toggle_wrap(GIT_ui_core.Core core) {
+    GIT_ui_sbs_state.SbsState st = core.sbs;
+    st.is_wrap = !st.is_wrap;
+    st.hscroll = 0;
+    st.should_reveal = true;
+    if (st.is_wrap) {
+        core.message = "long lines wrap";
+    } else {
+        core.message = "long lines scroll: < and > move both sides";
+    }
+}
+
+/// `<` / `>`: scroll both sides sideways (when lines do not wrap).
+pub void scroll_h(GIT_ui_core.Core core, int delta) {
+    GIT_ui_sbs_state.SbsState st = core.sbs;
+    if (st.is_wrap) {
+        core.message = "lines wrap: press w to scroll them instead";
+        return;
+    }
+    st.hscroll = st.hscroll + delta;
+    if (st.hscroll < 0) {
+        st.hscroll = 0;
+    }
+}
+
+/// `e` shows more unchanged lines around each hunk (3, 10, 30, 100, all);
+/// `E` is back to 3.
+pub void widen(GIT_ui_core.Core core, bool is_reset) {
+    GIT_ui_sbs_state.SbsState st = core.sbs;
+    ensure_source(core);
+    pull_cursor(core);
+    int next = GIT_hunks.DEFAULT_CONTEXT;
+    if (!is_reset) {
+        if (st.context < 10) {
+            next = 10;
+        } else if (st.context < 30) {
+            next = 30;
+        } else if (st.context < 100) {
+            next = 100;
+        } else {
+            next = st.ops.size() + 1;
+        }
+    }
+    int before = core.diff_view.cursor;
+    st.context = next;
+    st.is_laid = false;
+    st.is_visual = false;
+    st.synced = -1;
+    if (next > st.ops.size()) {
+        core.message = "showing the whole file (E: back to 3 lines of context)";
+    } else if (is_reset) {
+        core.message = "3 lines of context";
+    } else {
+        core.message = "context: " + next.to_str() + " lines (e: more, E: reset)";
+    }
+    core.diff_view.cursor = before;
+}
+
+// --- drawing -------------------------------------------------------------------------
+
+TUI_style.Style base_style(int kind) {
+    if (kind == GIT_sbs.CELL_DEL) {
+        return TUI_style.Style(foreground: TUI_style.Colour.Indexed(1));
+    }
+    if (kind == GIT_sbs.CELL_ADD) {
+        return TUI_style.Style(foreground: TUI_style.Colour.Indexed(2));
+    }
+    if (kind == GIT_sbs.CELL_NOTE) {
+        return TUI_style.Style(attrs: TUI_style.DIM | TUI_style.ITALIC);
+    }
+    if (kind == GIT_sbs.CELL_HEAD) {
+        return TUI_style.Style(attrs: TUI_style.BOLD);
+    }
+    return TUI_style.Style();
+}
+
+const int HOT_ATTRS = 9;
+
+// The classes of a line's bytes, or none: from the whole file when the
+// highlighters hold whole files, else from the lines of the hunks.
+List<int> classes_of(GIT_ui_sbs_state.SbsState st, bool is_old, int number) {
+    if (st.language == "" || number <= 0) {
+        return [];
+    }
+    int index = number - 1;
+    if (!st.is_full) {
+        Map<int, int> found = st.new_index;
+        if (is_old) {
+            found = st.old_index;
+        }
+        index = found.get(number).or(-1);
+    }
+    if (is_old) {
+        return st.old_syntax.classes(index);
+    }
+    return st.new_syntax.classes(index);
+}
+
+// Hunk-local highlighters: the cells of the layout in order, a side at a time.
+void feed_cells(GIT_ui_sbs_state.SbsState st) {
+    st.old_index = {};
+    st.new_index = {};
+    List<str> old_texts = [];
+    List<str> new_texts = [];
+    for (GIT_sbs.Row row in st.layout.rows) {
+        if (row.kind != GIT_sbs.ROW_PAIR) {
+            continue;
+        }
+        if (row.left.kind == GIT_sbs.CELL_CONTEXT || row.left.kind == GIT_sbs.CELL_DEL) {
+            st.old_index.set(row.left.number, old_texts.size());
+            old_texts.push(row.left.text);
+        }
+        if (row.right.kind == GIT_sbs.CELL_CONTEXT || row.right.kind == GIT_sbs.CELL_ADD) {
+            st.new_index.set(row.right.number, new_texts.size());
+            new_texts.push(row.right.text);
+        }
+    }
+    st.old_syntax = GIT_ui_highlight.highlighter_of(st.language, old_texts);
+    st.new_syntax = GIT_ui_highlight.highlighter_of(st.language, new_texts);
+}
+
+// Make the highlighters match `language`: whole files when `is_full` (and the
+// diff holds them), the diff's own lines otherwise.
+void ensure_syntax(GIT_ui_sbs_state.SbsState st, str language, bool is_full) {
+    if (st.language == language && st.is_full == is_full) {
+        return;
+    }
+    st.language = language;
+    st.is_full = is_full;
+    if (language == "") {
+        return;
+    }
+    if (is_full) {
+        st.old_syntax = GIT_ui_highlight.highlighter_of(language, st.old_lines);
+        st.new_syntax = GIT_ui_highlight.highlighter_of(language, st.new_lines);
+    } else {
+        feed_cells(st);
+    }
+}
+
+// One side of one visual row at `x`: number, marker, then the glyphs, each in
+// its syntax colour, with the changed span of a paired line in bold underline.
+void draw_seg(TUI_buffer.Buffer buffer, int x, int y, GIT_sbs.Seg seg, int num_w, int text_w, GIT_ui_sbs_state.SbsState st, bool is_dark, TUI_style.Style over) {
+    if (seg.kind == GIT_sbs.CELL_HEAD) {
+        int shown = buffer.set_str(x + num_w + 2, y, seg.syms.join(""), base_style(seg.kind).merged(over), max: text_w);
+        return;
+    }
+    if (seg.kind == GIT_sbs.CELL_EMPTY) {
+        return;
+    }
+    if (seg.number > 0 && seg.is_first) {
+        str number = seg.number.to_str();
+        buffer.set_str(x + num_w - number.size(), y, number, TUI_style.Style(attrs: TUI_style.DIM).merged(over), max: num_w);
+    }
+    TUI_style.Style base = base_style(seg.kind);
+    if (seg.is_first) {
+        if (seg.kind == GIT_sbs.CELL_DEL) {
+            buffer.set_str(x + num_w + 1, y, "-", base.merged(over), max: 1);
+        } else if (seg.kind == GIT_sbs.CELL_ADD) {
+            buffer.set_str(x + num_w + 1, y, "+", base.merged(over), max: 1);
+        }
+    }
+    List<int> classes = [];
+    if (seg.kind != GIT_sbs.CELL_NOTE) {
+        classes = classes_of(st, seg.kind == GIT_sbs.CELL_DEL, seg.number);
+    }
+    int column = x + num_w + 2;
+    int count = seg.syms.size();
+    int i = 0;
+    while (i < count) {
+        TUI_style.Style style = style_of(seg, i, classes, base, is_dark).merged(over);
+        List<str> run = [seg.syms[i]];
+        int j = i + 1;
+        while (j < count && style_of(seg, j, classes, base, is_dark).merged(over).eq(style)) {
+            run.push(seg.syms[j]);
+            j = j + 1;
+        }
+        column = column + buffer.set_str(column, y, run.join(""), style, max: x + num_w + 2 + text_w - column);
+        i = j;
+    }
+}
+
+TUI_style.Style style_of(GIT_sbs.Seg seg, int i, List<int> classes, TUI_style.Style base, bool is_dark) {
+    TUI_style.Style style = base;
+    int src = seg.srcs[i];
+    if (src < classes.size() && classes[src] != 0) {
+        style = base.merged(GIT_ui_syntax.class_style(classes[src], is_dark));
+    }
+    if (seg.hot[i]) {
+        style = style.merged(TUI_style.Style(attrs: HOT_ATTRS));
+    }
+    return style;
+}
+
+// A row across the whole width: a hunk header, a gap, a note, a header line.
+void draw_text_row(TUI_buffer.Buffer buffer, int x, int y, int width, GIT_sbs.VRow v, int tab, TUI_style.Style over) {
+    TUI_style.Style style = TUI_style.Style();
+    if (v.kind == GIT_sbs.ROW_HUNK) {
+        style = GIT_ui_highlight.kind_style(GIT_ui_highlight.KIND_HUNK);
+    } else if (v.kind == GIT_sbs.ROW_META) {
+        style = GIT_ui_highlight.kind_style(GIT_ui_highlight.KIND_HEADER);
+    } else {
+        style = TUI_style.Style(attrs: TUI_style.DIM);
+    }
+    buffer.set_str(x, y, clip(v.text, width, tab), style.merged(over), max: width);
+}
+
+// `text` as drawn (tabs expanded, controls visible), cut to `room` with an
+// ellipsis.
+str clip(str text, int room, int tab) {
+    GIT_sbs.Glyphs g = GIT_sbs.glyphs(text, tab);
+    int total = 0;
+    for (int w in g.widths) {
+        total = total + w;
+    }
+    List<str> kept = [];
+    int used = 0;
+    if (total <= room) {
+        return g.syms.join("");
+    }
+    int i = 0;
+    while (i < g.syms.size() && used + g.widths[i] <= room - 1) {
+        kept.push(g.syms[i]);
+        used = used + g.widths[i];
+        i = i + 1;
+    }
+    kept.push("\u{2026}");
+    return kept.join("");
+}
+
+// The columns of the focused half of a pair row, for the cursor.
+TUI_geometry.Rect half(int x, int y, GIT_sbs.Geometry g, bool is_right) {
+    if (is_right) {
+        return TUI_geometry.Rect(x + g.left_w + GIT_sbs.GUTTER, y, g.right_w, 1);
+    }
+    return TUI_geometry.Rect(x, y, g.left_w, 1);
+}
+
+// Is any cell of `row` an op in [low, high]?
+bool is_in_selection(GIT_sbs.Row row, int low, int high) {
+    if (low < 0 || row.kind != GIT_sbs.ROW_PAIR) {
+        return false;
+    }
+    if (row.left.op >= low && row.left.op <= high) {
+        return true;
+    }
+    return row.right.op >= low && row.right.op <= high;
+}
+
+/// Draw the visual rows from `st.offset` into `inner`. `cursor` is the logical
+/// row to mark (-1 for none); ops `low` .. `high` (-1 for none) are the visual
+/// range.
+pub void draw_rows(TUI_buffer.Buffer buffer, TUI_geometry.Rect inner, GIT_ui_sbs_state.SbsState st, bool is_dark, int cursor, int low, int high) {
+    buffer.fill(inner, " ", TUI_style.Style());
+    GIT_sbs.Geometry g = st.geometry;
+    int total = st.rows.size();
+    for (int screen in 0 .. inner.height) {
+        int index = st.offset + screen;
+        if (index >= total) {
+            break;
+        }
+        GIT_sbs.VRow v = st.rows[index];
+        int y = inner.y + screen;
+        GIT_sbs.Row row = st.layout.rows[v.row];
+        TUI_style.Style over = TUI_style.Style();
+        if (is_in_selection(row, low, high)) {
+            over = TUI_style.Style(attrs: TUI_style.REVERSE | TUI_style.BOLD);
+        }
+        if (v.kind != GIT_sbs.ROW_PAIR && v.kind != GIT_sbs.ROW_FILE) {
+            if (v.row == cursor) {
+                over = TUI_style.Style(attrs: TUI_style.REVERSE);
+                buffer.fill(TUI_geometry.Rect(inner.x, y, inner.width, 1), " ", over);
+            }
+            draw_text_row(buffer, inner.x, y, inner.width, v, st.layout.tab, over);
+            continue;
+        }
+        TUI_style.Style left_over = over;
+        TUI_style.Style right_over = over;
+        if (v.row == cursor) {
+            TUI_style.Style marked = TUI_style.Style(attrs: TUI_style.REVERSE);
+            if (side_of_row(row, st.is_right)) {
+                right_over = marked;
+                buffer.fill(half(inner.x, y, g, true), " ", marked);
+            } else {
+                left_over = marked;
+                buffer.fill(half(inner.x, y, g, false), " ", marked);
+            }
+        }
+        draw_seg(buffer, inner.x, y, v.left, g.num_w, g.left_text, st, is_dark, left_over);
+        buffer.set_str(inner.x + g.left_w + 1, y, v.mark, TUI_style.Style(attrs: TUI_style.DIM).merged(over), max: 1);
+        draw_seg(buffer, inner.x + g.left_w + GIT_sbs.GUTTER, y, v.right, g.num_w, g.right_text, st, is_dark, right_over);
+    }
+}
+
+// Visual rows the logical row `r` takes.
+int rows_of(GIT_ui_sbs_state.SbsState st, int r) {
+    int first = st.first_of_row[r];
+    if (first < 0) {
+        return 0;
+    }
+    int n = 0;
+    while (first + n < st.rows.size() && st.rows[first + n].row == r) {
+        n = n + 1;
+    }
+    return n;
+}
+
+// Keep the cursor row on screen, once per move.
+void reveal(GIT_ui_sbs_state.SbsState st, int height) {
+    if (!st.should_reveal || st.cursor_row < 0 || st.cursor_row >= st.first_of_row.size()) {
+        return;
+    }
+    st.should_reveal = false;
+    int first = st.first_of_row[st.cursor_row];
+    if (first < 0) {
+        return;
+    }
+    int last = first + rows_of(st, st.cursor_row) - 1;
+    if (first < st.offset) {
+        st.offset = first;
+    } else if (last >= st.offset + height) {
+        st.offset = last - height + 1;
+        if (st.offset > first) {
+            st.offset = first;
+        }
+    }
+}
+
+void clamp_offset(GIT_ui_sbs_state.SbsState st, int height) {
+    int most = st.rows.size() - height;
+    if (most < 0) {
+        most = 0;
+    }
+    if (st.offset > most) {
+        st.offset = most;
+    }
+    if (st.offset < 0) {
+        st.offset = 0;
+    }
+}
+
+// The ops of the unified visual range's two ends, -1 when there is none.
+List<int> selection_ops(GIT_ui_core.Core core, int anchor) {
+    GIT_ui_sbs_state.SbsState st = core.sbs;
+    if (anchor < 0) {
+        return [-1, -1];
+    }
+    int a = anchor;
+    int b = core.diff_view.cursor;
+    if (a > b) {
+        int swap = a;
+        a = b;
+        b = swap;
+    }
+    int low = -1;
+    int high = -1;
+    for (int k in 0 .. core.diff_view.hunks.size()) {
+        if (k >= st.spans.size()) {
+            break;
+        }
+        int header = core.diff_view.header_row(k);
+        int lines = core.diff_view.hunks[k].visible_lines();
+        for (int j in 0 .. lines) {
+            int row = header + 1 + j;
+            if (row >= a && row <= b) {
+                int op = st.spans[k].start + j;
+                if (low < 0) {
+                    low = op;
+                }
+                high = op;
+            }
+        }
+    }
+    return [low, high];
+}
+
+/// The diff view's body, side by side, when that is the view in use. False
+/// (and nothing drawn) when it is not wanted, there is no room for it, or the
+/// diff is binary: the caller draws the unified view then. `visual_anchor` is
+/// the unified visual range's start (-1 for none).
+pub bool try_draw(GIT_ui_core.Core core, TUI_buffer.Buffer buffer, TUI_geometry.Rect area, int visual_anchor) {
+    GIT_ui_sbs_state.SbsState st = core.sbs;
+    st.is_active = false;
+    load_preference(core);
+    TUI_widget.Block block = TUI_widget.Block(title: "diff: " + core.diff_title + "  [side by side]", borders: TUI_widget.Borders.Single);
+    TUI_geometry.Rect inner = block.inner(area);
+    st.area_x = inner.x;
+    st.area_y = inner.y;
+    st.area_w = inner.width;
+    st.area_h = inner.height;
+    if (core.is_diff_binary || !is_wanted(st.view, area.width) || inner.is_empty()) {
+        return false;
+    }
+    ensure_layout(core);
+    if (st.ops.size() == 0 && (core.diff_old.size() > 0 || core.diff_new.size() > 0)) {
+        return false;
+    }
+    if (!ensure_visual(core, inner.width)) {
+        return false;
+    }
+    block.render(buffer, area);
+    st.is_active = true;
+    pull_cursor(core);
+    ensure_syntax(st, GIT_ui_highlight.language_for(core.is_syntax_on, core.diff_path), true);
+    reveal(st, inner.height);
+    clamp_offset(st, inner.height);
+    List<int> picked = selection_ops(core, visual_anchor);
+    draw_rows(buffer, inner, st, core.is_dark, st.cursor_row, picked[0], picked[1]);
+    return true;
+}
+
+// --- mouse ---------------------------------------------------------------------------
+
+/// A mouse report over the diff view. The wheel scrolls both sides together;
+/// a left press puts the cursor on the row (and side) under it, which is how a
+/// hunk is picked to stage; a press on a gap row widens the context. True when
+/// the screen should be redrawn.
+pub bool handle_mouse(GIT_ui_core.Core core, term.Mouse mouse) {
+    GIT_ui_sbs_state.SbsState st = core.sbs;
+    int x = mouse.col - 1;
+    int y = mouse.row - 1;
+    if (!st.is_active) {
+        return handle_unified_mouse(core, mouse);
+    }
+    match (mouse.kind) {
+        case ScrollUp: {
+            st.offset = st.offset - WHEEL_ROWS;
+            clamp_offset(st, st.area_h);
+            return true;
+        }
+        case ScrollDown: {
+            st.offset = st.offset + WHEEL_ROWS;
+            clamp_offset(st, st.area_h);
+            return true;
+        }
+        case ScrollLeft: {
+            scroll_h(core, 0 - 4);
+            return true;
+        }
+        case ScrollRight: {
+            scroll_h(core, 4);
+            return true;
+        }
+        case Down(int button): {
+            if (button != 0 || x < st.area_x || x >= st.area_x + st.area_w || y < st.area_y || y >= st.area_y + st.area_h) {
+                return false;
+            }
+            int index = st.offset + y - st.area_y;
+            if (index >= st.rows.size()) {
+                return false;
+            }
+            int r = st.rows[index].row;
+            GIT_sbs.Row row = st.layout.rows[r];
+            if (row.kind == GIT_sbs.ROW_GAP) {
+                widen(core, false);
+                return true;
+            }
+            if (!is_addressable(st, r)) {
+                return false;
+            }
+            pull_cursor(core);
+            st.cursor_row = r;
+            if (row.kind == GIT_sbs.ROW_PAIR) {
+                bool wants_right = x - st.area_x >= st.geometry.left_w + 1;
+                st.is_right = side_of_row(row, wants_right);
+            }
+            push_cursor(core);
+            return true;
+        }
+        case Drag(int button): {
+            return false;
+        }
+        case Up(int button): {
+            return false;
+        }
+        case Moved: {
+            return false;
+        }
+    }
+}
+
+// The unified view's own mouse: the wheel moves the cursor, a press picks a row.
+bool handle_unified_mouse(GIT_ui_core.Core core, term.Mouse mouse) {
+    int x = mouse.col - 1;
+    int y = mouse.row - 1;
+    GIT_ui_sbs_state.SbsState st = core.sbs;
+    TUI_geometry.Rect area = TUI_geometry.Rect(st.area_x, st.area_y, st.area_w, st.area_h);
+    TUI_mouse.Response response = TUI_mouse.Response.Ignored;
+    match (mouse.kind) {
+        case ScrollUp: {
+            response = core.diff_view.handle_mouse(TUI_mouse.Gesture(TUI_mouse.Kind.ScrollUp, x, y), area);
+        }
+        case ScrollDown: {
+            response = core.diff_view.handle_mouse(TUI_mouse.Gesture(TUI_mouse.Kind.ScrollDown, x, y), area);
+        }
+        case Down(int button): {
+            if (button == 0) {
+                response = core.diff_view.handle_mouse(TUI_mouse.Gesture(TUI_mouse.Kind.Press, x, y, button: button), area);
+            }
+        }
+        case ScrollLeft: {
+        }
+        case ScrollRight: {
+        }
+        case Drag(int button): {
+        }
+        case Up(int button): {
+        }
+        case Moved: {
+        }
+    }
+    match (response) {
+        case Ignored: {
+            return false;
+        }
+        case Changed: {
+            return true;
+        }
+        case Activated: {
+            return true;
+        }
+    }
+}
+
+// --- panes: the commit view and the stash preview ---------------------------------------
+
+/// Lay `lines` (git's unified text: a commit header, then file diffs) out for
+/// a scrolling pane.
+pub void set_text(GIT_ui_sbs_state.SbsState st, List<str> lines) {
+    GIT_sbs.Layout layout = GIT_sbs.Layout();
+    for (GIT_sbs_text.Piece piece in GIT_sbs_text.parse(lines)) {
+        if (!piece.is_file) {
+            for (str line in piece.raw) {
+                layout.rows.push(GIT_sbs.Row(GIT_sbs.ROW_META, text: line));
+            }
+        } else {
+            GIT_sbs.append(layout, piece.file, GIT_sbs.Opts());
+        }
+    }
+    st.layout = layout;
+    st.is_laid = true;
+    st.is_visual = false;
+    st.has_source = false;
+    st.offset = 0;
+    st.language = "?";
+}
+
+/// Lay out `header` lines and then one file diff of `old` against `new` for a
+/// scrolling pane (the commit view): whole files are what the highlighters read.
+pub void set_file(GIT_ui_sbs_state.SbsState st, List<str> header, bytes old, bytes new, str old_label, str new_label) {
+    GIT_sbs.Layout layout = GIT_sbs.Layout();
+    for (str line in header) {
+        layout.rows.push(GIT_sbs.Row(GIT_sbs.ROW_META, text: line));
+    }
+    st.old_lines = [];
+    st.new_lines = [];
+    st.ops = [];
+    match (GIT_xdiff.diff_text(old, new)) {
+        case Binary: {
+            layout.rows.push(GIT_sbs.Row(GIT_sbs.ROW_NOTICE, text: "(binary file)"));
+        }
+        case Lines(List<diff.Op> ops): {
+            st.ops = ops;
+            for (diff.Op op in ops) {
+                match (op.kind) {
+                    case Keep: {
+                        str text = GIT_sbs_ops.text_of(op.line);
+                        st.old_lines.push(text);
+                        st.new_lines.push(text);
+                    }
+                    case Remove: {
+                        st.old_lines.push(GIT_sbs_ops.text_of(op.line));
+                    }
+                    case Add: {
+                        st.new_lines.push(GIT_sbs_ops.text_of(op.line));
+                    }
+                }
+            }
+            GIT_sbs.FileDiff file = GIT_sbs_ops.from_ops(ops, GIT_hunks.DEFAULT_CONTEXT, old_label, new_label);
+            if (file.hunks.size() == 0) {
+                layout.rows.push(GIT_sbs.Row(GIT_sbs.ROW_NOTICE, text: "(no change to this file)"));
+            } else {
+                GIT_sbs.append(layout, file, GIT_sbs.Opts());
+            }
+        }
+    }
+    st.layout = layout;
+    st.is_laid = true;
+    st.is_visual = false;
+    st.has_source = true;
+    st.offset = 0;
+    st.language = "?";
+}
+
+/// Draw a pane's rows into `inner` (no cursor); false when `inner` is too
+/// narrow for a side-by-side layout.
+pub bool draw_pane(TUI_buffer.Buffer buffer, TUI_geometry.Rect inner, GIT_ui_sbs_state.SbsState st, str language, bool is_dark) {
+    if (!st.is_laid || inner.is_empty()) {
+        return false;
+    }
+    if (!st.is_visual || st.visual_width != inner.width || st.visual_wrap != st.is_wrap || st.visual_hscroll != st.hscroll) {
+        match (GIT_sbs.geometry(inner.width, st.layout.max_number)) {
+            case None: {
+                return false;
+            }
+            case Some(GIT_sbs.Geometry g): {
+                st.geometry = g;
+            }
+        }
+        build_rows(st, inner.width, "");
+    }
+    st.area_x = inner.x;
+    st.area_y = inner.y;
+    st.area_w = inner.width;
+    st.area_h = inner.height;
+    ensure_syntax(st, language, st.has_source);
+    clamp_offset(st, inner.height);
+    draw_rows(buffer, inner, st, is_dark, -1, -1, -1);
+    return true;
+}

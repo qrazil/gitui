@@ -1,0 +1,11 @@
+(side-by-side: combined diff shown unified)
+diff --cc c.txt
+index c376d89,45cf141..0000000
+--- a/c.txt
++++ b/c.txt
+@@@ -1,1 -1,1 +1,5 @@@
+++<<<<<<< HEAD
+ +right
+++=======
++ left
+++>>>>>>> other

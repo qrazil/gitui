@@ -14,6 +14,7 @@ import ui.GIT_ui_core;
 import ui.GIT_ui_highlight;
 import ui.GIT_ui_model;
 import ui.GIT_ui_outline;
+import ui.GIT_ui_sbs;
 import tui.core.TUI_buffer;
 import tui.widgets.TUI_diff_view;
 import tui.core.TUI_geometry;
@@ -130,6 +131,9 @@ pub void DiffLayer.open_diff(str title, bytes old, bytes new) {
             diff_view = TUI_diff_view.DiffView(hunks);
         }
     }
+    diff_old = old;
+    diff_new = new;
+    sbs.reset_source();
     is_diff_open = true;
     message = "";
 }
@@ -141,6 +145,10 @@ pub void DiffLayer.close_diff() {
     is_diff_open = false;
     is_diff_binary = false;
     diff_view = TUI_diff_view.DiffView([]);
+    diff_old = [];
+    diff_new = [];
+    sbs.reset_source();
+    sbs.is_active = false;
     diff_section = "";
     diff_path = [];
     diff_rev = "";
@@ -361,7 +369,10 @@ pub bool DiffLayer.did_drop_index_entry(bytes relative_path, str said) {
 /// wording, `is_diff_binary`) or `diff_view` itself -- a `DiffView` whose
 /// `at()`/`move()` already give hunk- and line-granular addressing, even
 /// though nothing in this change acts on that address yet.
-pub void DiffLayer.draw_diff(TUI_buffer.Buffer buffer, TUI_geometry.Rect area) {
+pub void DiffLayer.draw_diff(TUI_buffer.Buffer buffer, TUI_geometry.Rect area, int visual_anchor = -1) {
+    if (GIT_ui_sbs.try_draw(core(), buffer, area, visual_anchor)) {
+        return;
+    }
     TUI_widget.Block block = TUI_widget.Block(title: "diff: " + diff_title, borders: TUI_widget.Borders.Single);
     block.render(buffer, area);
     TUI_geometry.Rect inner = block.inner(area);

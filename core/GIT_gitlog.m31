@@ -3100,6 +3100,7 @@ pub int run(str start, List<str> overrides, List<str> argv, bool is_show) {
     }
     bool is_color = dopts.is_color;
     GIT_gitcommon.Out out = GIT_gitcommon.Out();
+    GIT_gitdiffcmd.attach_sbs(out, settings);
     List<GIT_gitcommon.Spec> specs = GIT_gitcommon.parse_specs(opts.paths, ctx.prefix);
     if (is_show) {
         if (rev_words.size() == 0) {

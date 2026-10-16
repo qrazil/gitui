@@ -1,0 +1,5 @@
+    a/file                                   b/file                             $
+@@ -1,3 +1,3 @@                                                                 $
+ 1  plain                              |  1  plain                              $
+ 2 -bad ␛[31mred␛[0m here              ~  2 +bad ␛[32mgreen␛[0m here            $
+ 3  bell ␇ and del ␡                   |  3  bell ␇ and del ␡                   $

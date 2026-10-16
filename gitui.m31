@@ -47,6 +47,7 @@ import tui.core.TUI_geometry;
 import ui.GIT_client;
 import ui.GIT_ui_autorefresh;
 import ui.GIT_ui_loop;
+import ui.GIT_ui_sbs;
 
 List<str> argv = os.arguments();
 str path = ".";
@@ -69,7 +70,7 @@ if (!term.is_terminal(0)) {
 }
 GIT_client.State state = GIT_client.State.open(git_directory, path);
 state.reload();
-TUI_app.Loop loop = TUI_app.Loop();
+TUI_app.Loop loop = TUI_app.Loop(should_report_mouse: GIT_ui_sbs.is_mouse_on(git_directory));
 GIT_ui_autorefresh.AutoRefresh refresher = GIT_ui_autorefresh.open(state.core());
 bool is_running = true;
 while (is_running) {

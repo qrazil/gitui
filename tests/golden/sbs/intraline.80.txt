@@ -1,0 +1,5 @@
+    a/file                                   b/file                             $
+@@ -1,2 +1,2 @@                                                                 $
+ 1 -int total = compute(alpha, beta) + ~  1 +int total = compute(alpha, gamma) +$
+     offset;                           ~      offset * 2;                       $
+ 2  return total;                      |  2  return total;                      $

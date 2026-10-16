@@ -17,6 +17,7 @@ import core.GIT_gitstore;
 import ui.GIT_ui_highlight;
 import diff.GIT_gitdiff;
 import diff.GIT_combine;
+import diff.GIT_sbs_text;
 
 /// The merge mode a name stands for (`--diff-merges=<name>`, `log.diffMerges`),
 /// or -1 when there is no such mode (or it is not implemented).
@@ -286,6 +287,30 @@ pub int parse_diff_option(GIT_gitdiff.DOpts opts, List<str> args, int index, Set
         settings.color = "never";
         return 1;
     }
+    if (arg == "--side-by-side" || arg == "-y") {
+        settings.is_sbs = true;
+        opts.is_patch = true;
+        settings.is_no_output = false;
+        return 1;
+    }
+    if (arg == "--no-side-by-side") {
+        settings.is_sbs = false;
+        return 1;
+    }
+    if (arg.starts_with("--width=")) {
+        match (arg.substr(8, arg.size()).parse_int()) {
+            case Some(int columns): {
+                if (columns > 0) {
+                    settings.sbs_width = columns;
+                    return 1;
+                }
+            }
+            case None: {
+            }
+        }
+        io.eprint("error: option `width' expects a positive number");
+        return -1;
+    }
     if (arg == "--no-ext-diff" || arg == "--ext-diff" || arg == "--no-textconv" || arg == "--textconv" || arg == "--minimal" || arg == "--patience" || arg == "--histogram" || arg == "--indent-heuristic" || arg == "--no-indent-heuristic" || arg == "--no-color-moved" || arg == "--ita-visible-in-index") {
         return 1;
     }
@@ -347,6 +372,27 @@ pub type Settings {
     pub int merges_default = 2;
     // "" none, else always / never / auto
     pub str color = "";
+    // --side-by-side / -y (an m31git extension) and --width=N for it
+    pub bool is_sbs = false;
+    pub int sbs_width = 0;
+    // the colours the layout is painted with (empty without colour)
+    pub GIT_sbs_text.Pal sbs_pal = GIT_sbs_text.Pal();
+}
+
+/// The side-by-side painter for git's `color.diff.*` palette.
+pub GIT_sbs_text.Pal sbs_pal_of(GIT_gitdiff.Pal pal) {
+    if (!pal.is_on) {
+        return GIT_sbs_text.Pal();
+    }
+    return GIT_sbs_text.Pal(dim: "\x1b[2m", old: pal.old, new: pal.new, old_hot: pal.old + "\x1b[1;4m", new_hot: pal.new + "\x1b[1;4m", meta: pal.meta, frag: pal.frag, note: "\x1b[2m", head: pal.meta, reset: pal.reset);
+}
+
+/// Put `settings`' side-by-side request on `out` (nothing when not asked).
+pub void attach_sbs(GIT_gitcommon.Out out, Settings settings) {
+    if (settings.is_sbs) {
+        out.sbs_width = GIT_gitcommon.sbs_columns(settings.sbs_width);
+        out.sbs_pal = settings.sbs_pal;
+    }
 }
 
 /// `-M<n>`: a digit string, with or without `%`, as a score out of 60000.
@@ -423,6 +469,13 @@ pub GIT_gitdiff.DOpts finish_options(GIT_gitcommon.Ctx ctx, GIT_gitdiff.DOpts op
     if (is_color && GIT_gitcommon.is_tty() && GIT_ui_highlight.is_enabled(ctx.gitdir)) {
         opts.is_syntax = true;
         opts.is_dark = GIT_ui_highlight.is_dark_terminal();
+    }
+    if (settings.is_sbs) {
+        // the layout parses git's plain output and paints it itself
+        settings.sbs_pal = sbs_pal_of(opts.pal);
+        opts.pal = GIT_gitdiff.palette(ctx, false);
+        opts.is_syntax = false;
+        opts.word_diff = "";
     }
     return opts;
 }
@@ -763,6 +816,7 @@ pub int run(str start, List<str> overrides, List<str> argv) {
     }
     items = GIT_gitdiff.apply_filter(items, opts);
     GIT_gitcommon.Out out = GIT_gitcommon.Out();
+    attach_sbs(out, settings);
     bool has = false;
     if (opts.is_exit_code) {
         has = GIT_gitdiff.has_changes(repo, items, opts);

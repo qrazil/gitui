@@ -1,0 +1,100 @@
+// The side-by-side pane drawn into a `TUI_buffer.Buffer`, checked against the
+// engine's own plain-text rows: the drawing may add colour but must not move a
+// character. Not part of mgit's command surface.
+//
+//   t_sbs_ui <old> <new> <width> <height> [path]
+//       prints the buffer, then `same` or the first row that differs from
+//       `GIT_sbs.render_plain` (compared without trailing spaces); `path` picks
+//       the syntax language; with `ANSI=16|256|true` in the environment the
+//       frame is also printed as the escape sequences a terminal of that
+//       colour depth would get, and `STYLES=1` prints each cell's style
+
+import os;
+import io;
+import diff.GIT_sbs;
+import diff.GIT_sbs_ops;
+import tui.core.TUI_buffer;
+import tui.core.TUI_geometry;
+import tui.core.TUI_style;
+import tui.app.TUI_diff;
+import ui.GIT_ui_highlight;
+import ui.GIT_ui_sbs;
+import ui.GIT_ui_sbs_state;
+
+List<str> argv = os.arguments();
+bytes old = read(argv[1]);
+bytes new = read(argv[2]);
+int width = argv[3].parse_int().or(100);
+int height = argv[4].parse_int().or(30);
+str path = "";
+if (argv.size() > 5) {
+    path = argv[5];
+}
+GIT_ui_sbs_state.SbsState st = GIT_ui_sbs_state.SbsState();
+GIT_ui_sbs.set_file(st, [], old, new, "a/file", "b/file");
+TUI_buffer.Buffer buffer = TUI_buffer.Buffer.sized(width, height);
+TUI_geometry.Rect inner = TUI_geometry.Rect(0, 0, width, height);
+str language = GIT_ui_highlight.language_for_text(true, path);
+if (!GIT_ui_sbs.draw_pane(buffer, inner, st, language, true)) {
+    print("too narrow");
+    return;
+}
+List<str> want = GIT_sbs.render_plain(st.layout, st.geometry, st.is_wrap, st.hscroll);
+int bad = 0;
+for (int y in 0 .. height) {
+    str got = rtrim(buffer.row_text(y));
+    str expect = "";
+    if (y < want.size()) {
+        expect = rtrim(want[y]);
+    }
+    print(got);
+    if (got != expect && bad == 0) {
+        bad = y + 1;
+        print("row " + y.to_str() + " should be [" + expect + "]");
+    }
+}
+if (bad == 0) {
+    print("same");
+}
+str depth_word = os.env("ANSI").or("");
+if (depth_word != "") {
+    TUI_style.Depth depth = TUI_style.Depth.Ansi16;
+    if (depth_word == "256") {
+        depth = TUI_style.Depth.Ansi256;
+    } else if (depth_word == "true") {
+        depth = TUI_style.Depth.TrueColour;
+    }
+    for (str line in TUI_diff.show(TUI_diff.full(buffer, depth)).split("\n")) {
+        print(line);
+    }
+}
+if (os.env("STYLES").or("") == "1") {
+    for (int y in 0 .. height) {
+        List<str> codes = [];
+        for (int x in 0 .. width) {
+            codes.push(buffer.style_at(x, y).to_str());
+        }
+        print("style " + y.to_str() + " " + codes.join(","));
+    }
+}
+
+str rtrim(str text) {
+    int end = text.size();
+    while (end > 0 && text.byte_at(end - 1) == 32) {
+        end = end - 1;
+    }
+    return text.substr(0, end);
+}
+
+bytes read(str path) {
+    match (io.read_bytes(path)) {
+        case Ok(bytes contents): {
+            return contents;
+        }
+        case Err(io.Error error): {
+            print("cannot read " + path + ": " + error.to_str());
+            os.exit(1);
+            return [];
+        }
+    }
+}

@@ -1,0 +1,466 @@
+// Side-by-side from git's own unified output, as text: what `1git diff
+// --side-by-side` and `1git show --side-by-side` print, and what mgit's stash
+// preview (`git stash show -p`'s text) is drawn from.
+//
+//   GIT_sbs_text.parse(lines)                 -> List<Piece>
+//   GIT_sbs_text.transform(text, total, pal)  -> str
+//
+// `parse` walks the lines of a diff and sorts them into pieces: a file's diff
+// (`diff --git`, its extended header lines, its hunks, parsed by the counts in
+// each `@@` header so a content line that reads `--- x` is a line, not a
+// header) and everything else (a commit's header and message, `--stat`),
+// which `transform` passes through byte for byte. A combined diff
+// (`diff --cc`) keeps its unified form behind a one-line notice. A file that
+// cannot be laid out in `total` columns is left unified too.
+//
+// The text parsed is the plain output; the colours of the result are put on
+// afterwards, from `Pal`, never read back.
+//
+// An extension: git itself has no side-by-side format. Nothing here runs unless
+// `--side-by-side` (or `-y`) is given.
+
+import diff.GIT_sbs;
+
+/// A run of lines: one file's diff (`is_file`, with `file` parsed) or text to
+/// pass through. `raw` is always the lines as read.
+pub type Piece {
+    pub bool is_file;
+    pub List<str> raw;
+    pub GIT_sbs.FileDiff file = GIT_sbs.FileDiff();
+}
+
+/// The escape sequences for each style; every one empty without colour.
+pub type Pal {
+    pub str dim = "";
+    pub str old = "";
+    pub str new = "";
+    pub str old_hot = "";
+    pub str new_hot = "";
+    pub str meta = "";
+    pub str frag = "";
+    pub str note = "";
+    pub str head = "";
+    pub str reset = "";
+}
+
+/// git's default colours (`color.diff.*`) with the changed spans of a paired
+/// line in bold underline.
+pub Pal ansi_pal() {
+    return Pal(dim: "\x1b[2m", old: "\x1b[31m", new: "\x1b[32m", old_hot: "\x1b[31m\x1b[1;4m", new_hot: "\x1b[32m\x1b[1;4m", meta: "\x1b[1m", frag: "\x1b[36m", note: "\x1b[2m", head: "\x1b[1m", reset: "\x1b[m");
+}
+
+bool is_file_start(str line) {
+    return line.starts_with("diff --git ") || line.starts_with("diff --cc ") || line.starts_with("diff --combined ");
+}
+
+// `a,b` or `a` (count 1) as [start, count].
+Option<List<int>> parse_range(str text) {
+    List<str> parts = text.split(",");
+    if (parts.size() == 1) {
+        match (parts[0].parse_int()) {
+            case Some(int start): {
+                return Option<List<int>>.Some([start, 1]);
+            }
+            case None: {
+                return Option<List<int>>.None;
+            }
+        }
+    }
+    if (parts.size() == 2) {
+        match (parts[0].parse_int()) {
+            case Some(int start): {
+                match (parts[1].parse_int()) {
+                    case Some(int count): {
+                        return Option<List<int>>.Some([start, count]);
+                    }
+                    case None: {
+                    }
+                }
+            }
+            case None: {
+            }
+        }
+    }
+    return Option<List<int>>.None;
+}
+
+Option<GIT_sbs.DHunk> parse_hunk_header(str line) {
+    if (!line.starts_with("@@ -")) {
+        return Option<GIT_sbs.DHunk>.None;
+    }
+    str rest = line.substr(4, line.size());
+    match (rest.index_of(" +")) {
+        case Some(int plus): {
+            str left = rest.substr(0, plus);
+            str after = rest.substr(plus + 2, rest.size());
+            match (after.index_of(" @@")) {
+                case Some(int stop): {
+                    str right = after.substr(0, stop);
+                    match (parse_range(left)) {
+                        case Some(List<int> old_range): {
+                            match (parse_range(right)) {
+                                case Some(List<int> new_range): {
+                                    return Option<GIT_sbs.DHunk>.Some(GIT_sbs.DHunk(old_range[0], old_range[1], new_range[0], new_range[1], line));
+                                }
+                                case None: {
+                                }
+                            }
+                        }
+                        case None: {
+                        }
+                    }
+                }
+                case None: {
+                }
+            }
+        }
+        case None: {
+        }
+    }
+    return Option<GIT_sbs.DHunk>.None;
+}
+
+bool is_zero_id(str id) {
+    for (int i in 0 .. id.size()) {
+        if (id.byte_at(i) != 48) {
+            return false;
+        }
+    }
+    return true;
+}
+
+// `---`/`+++` paths end in a tab when the name has a space.
+str header_path(str line) {
+    str text = line.substr(4, line.size());
+    match (text.index_of("\t")) {
+        case Some(int tab): {
+            return text.substr(0, tab);
+        }
+        case None: {
+            return text;
+        }
+    }
+}
+
+str with_id(str label, str id) {
+    if (id == "" || is_zero_id(id)) {
+        return label;
+    }
+    return label + " (" + id + ")";
+}
+
+// The two paths of a `diff --git a/x b/x` line when no `---`/`+++` follows.
+List<str> paths_of_git_line(str line) {
+    str rest = line.substr(11, line.size());
+    int size = rest.size();
+    if (size % 2 == 1) {
+        int mid = size / 2;
+        str left = rest.substr(0, mid);
+        str right = rest.substr(mid + 1, size);
+        return [left, right];
+    }
+    return [rest, rest];
+}
+
+/// Parse one file's diff starting at `lines[start]` (a `diff --git`/`--cc`
+/// line); answers the file and the index of the first line after it.
+GIT_sbs.FileDiff parse_file(List<str> lines, int start, List<int> end) {
+    int n = lines.size();
+    str first = lines[start];
+    GIT_sbs.FileDiff file = GIT_sbs.FileDiff();
+    int i = start + 1;
+    if (!first.starts_with("diff --git ")) {
+        file.is_combined = true;
+        file.meta.push(first);
+        while (i < n && lines[i] != "" && !is_file_start(lines[i]) && !lines[i].starts_with("commit ")) {
+            file.meta.push(lines[i]);
+            i = i + 1;
+        }
+        end[0] = i;
+        return file;
+    }
+    List<str> git_paths = paths_of_git_line(first);
+    str old_path = "";
+    str new_path = "";
+    str rename_from = "";
+    str rename_to = "";
+    str old_id = "";
+    str new_id = "";
+    bool has_header_paths = false;
+    while (i < n) {
+        str line = lines[i];
+        if (line.starts_with("@@ ") || is_file_start(line)) {
+            break;
+        }
+        if (line.starts_with("index ")) {
+            str ids = line.substr(6, line.size());
+            match (ids.index_of(" ")) {
+                case Some(int space): {
+                    ids = ids.substr(0, space);
+                }
+                case None: {
+                }
+            }
+            match (ids.index_of("..")) {
+                case Some(int dots): {
+                    old_id = ids.substr(0, dots);
+                    new_id = ids.substr(dots + 2, ids.size());
+                }
+                case None: {
+                }
+            }
+        } else if (line.starts_with("--- ")) {
+            old_path = header_path(line);
+            has_header_paths = true;
+        } else if (line.starts_with("+++ ")) {
+            new_path = header_path(line);
+        } else if (line.starts_with("Binary files ")) {
+            file.is_binary = true;
+            file.meta.push(line);
+        } else if (line == "GIT binary patch") {
+            file.is_binary = true;
+            file.meta.push("GIT binary patch (not shown)");
+            i = i + 1;
+            while (i < n && !is_file_start(lines[i])) {
+                if (lines[i] == "") {
+                    if (i + 1 < n && (lines[i + 1].starts_with("literal ") || lines[i + 1].starts_with("delta "))) {
+                        i = i + 1;
+                        continue;
+                    }
+                    break;
+                }
+                i = i + 1;
+            }
+            continue;
+        } else if (line.starts_with("rename from ")) {
+            rename_from = line.substr(12, line.size());
+            file.meta.push(line);
+        } else if (line.starts_with("rename to ")) {
+            rename_to = line.substr(10, line.size());
+            file.meta.push(line);
+        } else if (line.starts_with("old mode ") || line.starts_with("new mode ") || line.starts_with("deleted file mode ") || line.starts_with("new file mode ") || line.starts_with("similarity index ") || line.starts_with("dissimilarity index ") || line.starts_with("copy from ") || line.starts_with("copy to ") || line.starts_with("Submodule ")) {
+            file.meta.push(line);
+        } else {
+            break;
+        }
+        i = i + 1;
+    }
+    if (has_header_paths) {
+        file.old_label = with_id(old_path, old_id);
+        file.new_label = with_id(new_path, new_id);
+    } else if (rename_from != "") {
+        file.old_label = rename_from;
+        file.new_label = rename_to;
+    } else {
+        file.old_label = git_paths[0];
+        file.new_label = git_paths[1];
+    }
+    while (i < n) {
+        match (parse_hunk_header(lines[i])) {
+            case Some(GIT_sbs.DHunk hunk): {
+                i = i + 1;
+                int left = hunk.old_count;
+                int right = hunk.new_count;
+                while (i < n && (left > 0 || right > 0)) {
+                    str body = lines[i];
+                    if (body.starts_with("\\")) {
+                        int count = hunk.lines.size();
+                        if (count > 0) {
+                            hunk.lines[count - 1].no_eol = true;
+                        }
+                        i = i + 1;
+                        continue;
+                    }
+                    str marker = " ";
+                    str text = "";
+                    if (body.size() > 0) {
+                        marker = body.substr(0, 1);
+                        text = body.substr(1, body.size());
+                    }
+                    int kind = GIT_sbs.LINE_CONTEXT;
+                    if (marker == "-") {
+                        kind = GIT_sbs.LINE_REMOVE;
+                        left = left - 1;
+                    } else if (marker == "+") {
+                        kind = GIT_sbs.LINE_ADD;
+                        right = right - 1;
+                    } else if (marker == " ") {
+                        left = left - 1;
+                        right = right - 1;
+                    } else {
+                        break;
+                    }
+                    bool has_cr = false;
+                    if (text.ends_with("\r")) {
+                        text = text.substr(0, text.size() - 1);
+                        has_cr = true;
+                    }
+                    hunk.lines.push(GIT_sbs.DLine(kind, text, has_cr: has_cr));
+                    i = i + 1;
+                }
+                while (i < n && lines[i].starts_with("\\")) {
+                    int count = hunk.lines.size();
+                    if (count > 0) {
+                        hunk.lines[count - 1].no_eol = true;
+                    }
+                    i = i + 1;
+                }
+                file.hunks.push(hunk);
+            }
+            case None: {
+                break;
+            }
+        }
+    }
+    end[0] = i;
+    return file;
+}
+
+/// Sort `lines` into file diffs and pass-through text.
+pub List<Piece> parse(List<str> lines) {
+    List<Piece> out = [];
+    int n = lines.size();
+    int i = 0;
+    List<str> pending = [];
+    List<int> end = [0];
+    while (i < n) {
+        if (is_file_start(lines[i])) {
+            if (pending.size() > 0) {
+                out.push(Piece(false, pending));
+                pending = [];
+            }
+            GIT_sbs.FileDiff file = parse_file(lines, i, end);
+            List<str> raw = [];
+            for (int k in i .. end[0]) {
+                raw.push(lines[k]);
+            }
+            Piece piece = Piece(true, raw);
+            piece.file = file;
+            out.push(piece);
+            i = end[0];
+        } else {
+            pending.push(lines[i]);
+            i = i + 1;
+        }
+    }
+    if (pending.size() > 0) {
+        out.push(Piece(false, pending));
+    }
+    return out;
+}
+
+/// `text` split into lines without their newlines; a final newline does not
+/// make an empty last line.
+pub List<str> split_lines(str text) {
+    List<str> parts = text.split("\n");
+    if (parts.size() > 0 && parts[parts.size() - 1] == "") {
+        parts.pop();
+    }
+    return parts;
+}
+
+str escape_of(Pal pal, int style) {
+    if (style == GIT_sbs.ST_DIM) {
+        return pal.dim;
+    }
+    if (style == GIT_sbs.ST_OLD) {
+        return pal.old;
+    }
+    if (style == GIT_sbs.ST_NEW) {
+        return pal.new;
+    }
+    if (style == GIT_sbs.ST_OLD_HOT) {
+        return pal.old_hot;
+    }
+    if (style == GIT_sbs.ST_NEW_HOT) {
+        return pal.new_hot;
+    }
+    if (style == GIT_sbs.ST_META) {
+        return pal.meta;
+    }
+    if (style == GIT_sbs.ST_FRAG) {
+        return pal.frag;
+    }
+    if (style == GIT_sbs.ST_NOTE) {
+        return pal.note;
+    }
+    if (style == GIT_sbs.ST_HEAD) {
+        return pal.head;
+    }
+    return "";
+}
+
+/// One visual row as a line of text: styled by `pal`, trailing blank padding
+/// dropped.
+pub str row_line(List<GIT_sbs.Run> runs, Pal pal) {
+    List<GIT_sbs.Run> kept = [];
+    for (GIT_sbs.Run run in runs) {
+        kept.push(run);
+    }
+    while (kept.size() > 0 && kept[kept.size() - 1].text.trim() == "" && kept[kept.size() - 1].text.size() > 0 && !kept[kept.size() - 1].text.contains("\t")) {
+        kept.pop();
+    }
+    if (kept.size() > 0) {
+        str last = kept[kept.size() - 1].text;
+        int end = last.size();
+        while (end > 0 && last.byte_at(end - 1) == 32) {
+            end = end - 1;
+        }
+        kept[kept.size() - 1] = GIT_sbs.Run(last.substr(0, end), kept[kept.size() - 1].style);
+    }
+    List<str> parts = [];
+    for (GIT_sbs.Run run in kept) {
+        str escape = escape_of(pal, run.style);
+        if (escape == "") {
+            parts.push(run.text);
+        } else {
+            parts.push(escape + run.text + pal.reset);
+        }
+    }
+    return parts.join("");
+}
+
+/// The lines of `text` with every file's diff laid out side by side in
+/// `total` columns (text passes through unchanged). Wrapped long lines.
+pub List<str> transform_lines(List<str> lines, int total, Pal pal, GIT_sbs.Opts opts) {
+    List<str> out = [];
+    for (Piece piece in parse(lines)) {
+        if (!piece.is_file) {
+            for (str line in piece.raw) {
+                out.push(line);
+            }
+            continue;
+        }
+        if (piece.file.is_combined) {
+            out.push("(side-by-side: combined diff shown unified)");
+            for (str line in piece.raw) {
+                out.push(line);
+            }
+            continue;
+        }
+        GIT_sbs.Layout layout = GIT_sbs.build(piece.file, opts);
+        match (GIT_sbs.geometry(total, layout.max_number)) {
+            case Some(GIT_sbs.Geometry g): {
+                for (GIT_sbs.VRow v in GIT_sbs.visual(layout, g, true, 0)) {
+                    out.push(row_line(GIT_sbs.runs_of(v, g, layout.tab), pal));
+                }
+            }
+            case None: {
+                for (str line in piece.raw) {
+                    out.push(line);
+                }
+            }
+        }
+    }
+    return out;
+}
+
+/// `transform_lines` over text with newline-terminated lines.
+pub str transform(str text, int total, Pal pal) {
+    List<str> lines = split_lines(text);
+    List<str> out = transform_lines(lines, total, pal, GIT_sbs.Opts());
+    if (out.size() == 0) {
+        return "";
+    }
+    return out.join("\n") + "\n";
+}
