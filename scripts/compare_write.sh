@@ -23,6 +23,9 @@
 # a real difference: the object ids must be IDENTICAL. stderr is not compared
 # (hints are shorter on purpose); its presence is shown on a failure.
 set -uo pipefail
+
+# shellcheck source=lib_cli.sh
+. "$(cd "$(dirname "$0")" && pwd)/lib_cli.sh"
 # sed -i that BSD sed (macOS) also takes (it wants a suffix; GNU takes none)
 sedi() { local f="${@: -1}"; sed "${@:1:$#-1}" "$f" > "$f.sedi" && mv "$f.sedi" "$f"; }
 
@@ -284,8 +287,9 @@ run_side() {
         eval "$setup" > /dev/null 2>&1
         T=$(mktemp -d)
         G() {
-            "$bin" "$@" > "$T/o" 2> "$T/e"
+            side_run "$bin" "$@" > "$T/o" 2> "$T/e"
             local rc=$?
+            rc=$(norm_rc $rc)
             { local shown="$*"; printf '$ %s\n' "${shown//--change-id /}"; cat "$T/o"; printf 'rc=%s\n' "$rc"; } >> "$log"
             { printf '$ %s\n' "$*"; cat "$T/e"; } >> "$log.err"
             return $rc

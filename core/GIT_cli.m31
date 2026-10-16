@@ -1,0 +1,1637 @@
+// The command line of `1git`: Oro's grammar (`lib/args`), a table of commands
+// (`GIT_clitable`), and the mapping from the parsed line onto the command
+// functions, which still take git's argv.
+//
+//   1git [--dir DIR] [--config K=V...] -<command> [options] [operands] [-<command> ...]
+//
+//   * `build` declares the parser from the table: `--help` per command, the
+//     usage errors of lib/args, shell completions.
+//   * `to_git` turns one parsed command into the argv of git's grammar that the
+//     command function takes (`GIT_gitlog.run`, `GIT_gitadd.run_add`, ...). The
+//     whole line is turned before the first command runs, so a mistake in the
+//     third is found before the first has done anything.
+//   * `from_git` is the same table read the other way: git's argv rewritten
+//     into ours. It is what `1git -migrate` prints, and what the transition
+//     shim runs for one release when the first word is a git command.
+//
+// Several commands on one line run in the order typed and stop at the first
+// failure. A command that fails makes the program exit 1; a command line that
+// was not understood exits 2 and nothing has run.
+//
+// docs/CLI.md is the design, docs/MIGRATING-FROM-GIT.md the table.
+
+import args;
+import io;
+import os;
+import fs;
+import text;
+import core.GIT_clitable;
+import core.GIT_hash;
+import core.GIT_repository;
+import core.GIT_config;
+import core.GIT_icase;
+import core.GIT_revparse;
+import core.GIT_gitcommon;
+import core.GIT_gitstatus;
+import core.GIT_gitdiffcmd;
+import core.GIT_gitlog;
+import core.GIT_gitadd;
+import core.GIT_gitcommit;
+import core.GIT_gitbranch;
+import core.GIT_githistory;
+import core.GIT_plumbing;
+import net.GIT_transport;
+import net.GIT_gitfetch;
+import net.GIT_gitclone;
+import net.GIT_gitpush;
+import net.GIT_gitpull;
+import net.GIT_gitremote;
+
+/// The parser, each command's own parser (for the usage line of an error that
+/// only the program can see), and the table both were made from.
+pub type Cli {
+    pub args.Parser top;
+    pub Map<str, args.Parser> parsers;
+    pub List<GIT_clitable.Cmd> cmds;
+}
+
+/// Where commands run and the settings every one of them is given.
+pub type Env {
+    pub str cwd;
+    pub List<str> overrides;
+}
+
+/// One command of the line, ready to run: git's argv for it, or why not.
+pub type Job {
+    pub GIT_clitable.Cmd cmd;
+    pub args.Parsed parsed;
+    pub List<str> argv = [];
+    pub str error = "";
+}
+
+pub const str PROG = "1git";
+
+/// `1git 0.24.0`, from the one place the version is written down.
+pub str version_line() {
+    return PROG + " " + GIT_transport.AGENT.substr(5, GIT_transport.AGENT.size());
+}
+
+// --- the parser ---------------------------------------------------------------
+
+pub Cli build() {
+    args.Parser top = args.Parser(PROG, summary: "a git client: git's repositories, protocols and output, a command line of its own");
+    top.version = version_line();
+    top.epilog = "exit status: 0 done, 1 a command failed (the commands after it did not run), 2 the line was not understood (nothing ran)\n" +
+        "one dash is a command, two dashes an option, anything else data: 1git -add --all -commit --message 'fix' -push\n" +
+        "an option's value cannot start with a dash: write --message=-x. Put an option that takes a list (--path, --message) after the operands.\n" +
+        "from git: 1git -migrate 'git log --oneline -5' (docs/MIGRATING-FROM-GIT.md)";
+    top.value("dir", short: "C", help: "run as if started in this directory", placeholder: "DIR");
+    top.values("config", short: "c", help: "set configuration for this run, like git -c", placeholder: "NAME=VALUE");
+    top.value("git-dir", help: "the repository's git directory", placeholder: "DIR");
+    top.value("work-tree", help: "the work tree, when it is not next to the git directory", placeholder: "DIR");
+    top.completions();
+    Map<str, args.Parser> parsers = {};
+    List<GIT_clitable.Cmd> cmds = GIT_clitable.table();
+    for (GIT_clitable.Cmd cmd in cmds) {
+        args.Parser sub = top.command(cmd.word, cmd.summary, short: cmd.short);
+        declare(sub, cmd);
+        parsers.set(cmd.word, sub);
+    }
+    return Cli(top, parsers, cmds);
+}
+
+void declare(args.Parser sub, GIT_clitable.Cmd cmd) {
+    for (GIT_clitable.Spec spec in cmd.specs) {
+        if (spec.kind == "pos") {
+            sub.positional(spec.name, help: spec.help, placeholder: spec.placeholder);
+        } else if (spec.kind == "opt") {
+            sub.optional(spec.name, spec.default, help: spec.help, placeholder: spec.placeholder);
+        } else if (spec.kind == "tail") {
+            sub.tail(spec.name, help: spec.help, placeholder: spec.placeholder);
+        }
+    }
+    for (GIT_clitable.Spec spec in cmd.specs) {
+        if (spec.kind == "flag") {
+            sub.flag(spec.name, short: spec.short, help: spec.help);
+        } else if (spec.kind == "value") {
+            sub.value(spec.name, short: spec.short, help: spec.help, placeholder: spec.placeholder, default: spec.default);
+        } else if (spec.kind == "choice") {
+            sub.value(spec.name, short: spec.short, help: spec.help, placeholder: GIT_clitable.choice_keys(spec.choices).join("|"), default: spec.default);
+        } else if (spec.kind == "int") {
+            sub.integer(spec.name, short: spec.short, help: spec.help, placeholder: spec.placeholder, default: spec.default);
+        } else if (spec.kind == "values") {
+            sub.values(spec.name, short: spec.short, help: spec.help, placeholder: spec.placeholder);
+        }
+    }
+}
+
+// --- the line, in git's grammar ---------------------------------------------------
+
+/// A template's tokens with the value put in: `-m {}` and `x` give `-m`, `x`.
+List<str> fill(str template, str value) {
+    List<str> out = [];
+    for (str token in template.split(" ")) {
+        out.push(text.replace(token, "{}", value));
+    }
+    return out;
+}
+
+/// The git tokens of a chosen value, after an empty first element; or, for a
+/// value that is not one of the choices, just the complaint.
+pub List<str> choice_tokens(GIT_clitable.Spec spec, str value) {
+    List<str> keys = GIT_clitable.choice_keys(spec.choices);
+    if (!keys.contains(value)) {
+        return ["'--" + spec.name + "' needs one of " + keys.join(", ") + ", and got '" + value + "'"];
+    }
+    List<str> out = [""];
+    if (!spec.choices.contains("=")) {
+        GIT_clitable.append(out, fill(spec.emit, value));
+        return out;
+    }
+    for (str entry in spec.choices.split(",")) {
+        int at = entry.index_of("=").or(0);
+        if (entry.substr(0, at) == value) {
+            GIT_clitable.append(out, entry.substr(at + 1, entry.size()).split(" "));
+            return out;
+        }
+    }
+    return ["'--" + spec.name + "': no spelling for '" + value + "'"];
+}
+
+int count_given(args.Parsed parsed, List<str> names) {
+    int total = 0;
+    for (str name in names) {
+        if (parsed.is_given(name)) {
+            total = total + 1;
+        }
+    }
+    return total;
+}
+
+/// The git argv for one parsed command, or `error` set.
+pub Job to_git(GIT_clitable.Cmd cmd, args.Parsed parsed, Env env) {
+    Job job = Job(cmd, parsed);
+    List<str> opts = [];
+    List<str> words = [];
+    List<str> after = [];
+    for (GIT_clitable.Spec spec in cmd.specs) {
+        if (spec.kind == "pos") {
+            words.push(parsed.positional(spec.name));
+        } else if (spec.kind == "opt") {
+            if (parsed.is_given(spec.name)) {
+                words.push(parsed.optional(spec.name));
+            }
+        } else if (spec.kind == "tail") {
+            if (spec.name == "paths") {
+                GIT_clitable.append(after, parsed.tail(spec.name));
+            } else {
+                GIT_clitable.append(words, parsed.tail(spec.name));
+            }
+        } else if (!parsed.is_given(spec.name)) {
+            continue;
+        } else if (spec.emit.starts_with("@") && spec.emit != "@path") {
+            continue;
+        } else if (spec.kind == "flag") {
+            GIT_clitable.append(opts, spec.emit.split(" "));
+        } else if (spec.kind == "value") {
+            GIT_clitable.append(opts, fill(spec.emit, parsed.value(spec.name).or("")));
+        } else if (spec.kind == "int") {
+            GIT_clitable.append(opts, fill(spec.emit, parsed.integer(spec.name).or(0).to_str()));
+        } else if (spec.kind == "choice") {
+            List<str> chosen = choice_tokens(spec, parsed.value(spec.name).or(""));
+            if (chosen[0] != "") {
+                job.error = chosen[0];
+                return job;
+            }
+            for (int index in 1 .. chosen.size()) {
+                opts.push(chosen[index]);
+            }
+        } else if (spec.kind == "values") {
+            List<str> elements = parsed.values(spec.name);
+            if (spec.emit == "@path") {
+                GIT_clitable.append(after, elements);
+            } else if (spec.emit.contains("{}")) {
+                for (str element in elements) {
+                    GIT_clitable.append(opts, fill(spec.emit, element));
+                }
+            } else {
+                GIT_clitable.append(opts, spec.emit.split(" "));
+                GIT_clitable.append(opts, elements);
+            }
+        }
+    }
+    job.error = adjust(cmd, parsed, env, opts, words, after);
+    if (job.error != "") {
+        return job;
+    }
+    List<str> argv = [];
+    if (cmd.sub != "") {
+        argv.push(cmd.sub);
+    }
+    GIT_clitable.append(argv, opts);
+    GIT_clitable.append(argv, words);
+    if (after.size() > 0) {
+        argv.push("--");
+        GIT_clitable.append(argv, after);
+    }
+    job.argv = argv;
+    return job;
+}
+
+/// The default remote for a command that has to name one to git: what the
+/// current branch tracks, then `remote.pushDefault` (for a push), then origin.
+str default_remote(Env env, bool is_push) {
+    GIT_gitcommon.Opened opened = GIT_gitcommon.open(env.cwd, env.overrides);
+    if (opened.ok) {
+        match (GIT_gitfetch.resolve(opened.ctx, "", is_push)) {
+            case Ok(GIT_gitfetch.Remote found): {
+                if (found.is_named) {
+                    return found.name;
+                }
+            }
+            case Err(str reason): {
+            }
+        }
+    }
+    return "origin";
+}
+
+/// What the table cannot say: operands that depend on options, and the
+/// refusals for combinations that make no sense. Returns the complaint.
+str adjust(GIT_clitable.Cmd cmd, args.Parsed parsed, Env env, List<str> opts, List<str> words, List<str> after) {
+    str word = cmd.word;
+    if (word == "switch") {
+        bool has_create = parsed.is_given("create") || parsed.is_given("force-create");
+        if (parsed.is_given("create") && parsed.is_given("force-create")) {
+            return "choose one of '--create' and '--force-create'";
+        }
+        if (parsed.is_given("from") && !has_create) {
+            return "'--from' says where a new branch starts, so it needs '--create' or '--force-create'";
+        }
+        if (has_create && parsed.is_given("branch")) {
+            return "with '--create' the start point is '--from', not an operand: -switch --create NAME --from REV";
+        }
+        if (has_create && parsed.is_given("from")) {
+            words.push(parsed.value("from").or(""));
+        }
+        if (!has_create && !parsed.is_given("branch") && !parsed.is_flag_set("detach")) {
+            return "-switch needs a branch to switch to, or '--create NAME'";
+        }
+    } else if (word == "branch") {
+        List<str> modes = ["create", "delete", "force-delete", "rename", "copy", "set-upstream", "unset-upstream", "current"];
+        int chosen = count_given(parsed, modes);
+        if (chosen > 1) {
+            return "choose one of '--create', '--delete', '--force-delete', '--rename', '--copy', '--set-upstream', '--unset-upstream', '--current'";
+        }
+        if (parsed.is_given("from") && !parsed.is_given("create")) {
+            return "'--from' says where a new branch starts, so it needs '--create'";
+        }
+        if (chosen > 0 && words.size() > 0) {
+            return "a pattern is for listing; with an action name the branch in '--create NAME', '--delete NAME...' and so on";
+        }
+        if (parsed.is_given("create")) {
+            words.push(parsed.value("create").or(""));
+            if (parsed.is_given("from")) {
+                words.push(parsed.value("from").or(""));
+            }
+        } else if (words.size() > 0) {
+            opts.push("--list");
+        }
+    } else if (word == "tag") {
+        List<str> modes = ["create", "delete"];
+        if (count_given(parsed, modes) > 1) {
+            return "choose one of '--create' and '--delete'";
+        }
+        if (parsed.is_given("from") && !parsed.is_given("create")) {
+            return "'--from' says what a new tag points at, so it needs '--create'";
+        }
+        List<str> needs_create = ["message", "file", "annotate"];
+        if (count_given(parsed, needs_create) > 0 && !parsed.is_given("create")) {
+            return "'--message', '--file' and '--annotate' write a tag, so they need '--create NAME'";
+        }
+        if (count_given(parsed, modes) > 0 && words.size() > 0) {
+            return "a pattern is for listing; with an action name the tag in '--create NAME' or '--delete NAME...'";
+        }
+        if (parsed.is_given("create")) {
+            words.push(parsed.value("create").or(""));
+            if (parsed.is_given("from")) {
+                words.push(parsed.value("from").or(""));
+            }
+        } else if (words.size() > 0) {
+            opts.push("-l");
+        }
+    } else if (word == "push") {
+        List<str> refs = [];
+        GIT_clitable.append(refs, words);
+        str remote = parsed.value("to").or("");
+        if (parsed.is_given("topic") && !parsed.is_given("for")) {
+            return "'--topic' is a Gerrit topic, so it needs '--for BRANCH'";
+        }
+        if (parsed.is_given("for")) {
+            if (refs.size() > 1) {
+                return "'--for' reviews one commit: name at most one revision";
+            }
+            str source = "HEAD";
+            if (refs.size() == 1) {
+                source = refs[0];
+            }
+            str target = "refs/for/" + parsed.value("for").or("");
+            if (parsed.is_given("topic")) {
+                target = target + "%topic=" + parsed.value("topic").or("");
+            }
+            refs = [source + ":" + target];
+        }
+        if (parsed.is_flag_set("delete") && refs.size() == 0) {
+            return "'--delete' needs the refs to delete";
+        }
+        if (parsed.is_flag_set("force") && parsed.is_flag_set("overwrite")) {
+            return "choose one of '--force' (checked) and '--overwrite' (unchecked)";
+        }
+        if (remote == "" && refs.size() > 0) {
+            remote = default_remote(env, true);
+        }
+        words.clear();
+        if (remote != "") {
+            words.push(remote);
+        }
+        GIT_clitable.append(words, refs);
+    } else if (word == "fetch") {
+        List<str> extra = [];
+        if (parsed.is_given("pull-request")) {
+            str number = parsed.integer("pull-request").or(0).to_str();
+            extra.push("+refs/pull/" + number + "/head:refs/heads/pr/" + number);
+        }
+        if (parsed.is_given("merge-request")) {
+            str number = parsed.integer("merge-request").or(0).to_str();
+            extra.push("+refs/merge-requests/" + number + "/head:refs/heads/mr/" + number);
+        }
+        if (extra.size() > 0) {
+            if (!parsed.is_given("remote")) {
+                words.insert(0, default_remote(env, false));
+            }
+            GIT_clitable.append(words, extra);
+        }
+    } else if (word == "clean") {
+        if (parsed.is_flag_set("nested")) {
+            if (!parsed.is_flag_set("force")) {
+                return "'--nested' deletes whole repositories, so it needs '--force' as well";
+            }
+            opts.push("-f");
+        }
+    } else if (word == "worktree-add") {
+        if (parsed.is_given("branch") && parsed.is_given("reset-branch")) {
+            return "choose one of '--branch' and '--reset-branch'";
+        }
+        if (parsed.is_given("from")) {
+            words.push(parsed.value("from").or(""));
+        }
+    } else if (word == "merge") {
+        if (count_given(parsed, ["continue", "abort", "quit"]) == 0 && !parsed.is_given("branch")) {
+            return "-merge needs the branch or commit to merge";
+        }
+    } else if (word == "cherry-pick" || word == "revert") {
+        if (count_given(parsed, ["continue", "skip", "abort", "quit"]) == 0 && words.size() == 0) {
+            return "-" + word + " needs the commits to work on";
+        }
+    }
+    return "";
+}
+
+// --- running -----------------------------------------------------------------------
+
+/// The directory commands run in and the settings given to every one: git
+/// works on the physical directory (getcwd), so a work tree reached through a
+/// link (macOS: /tmp, /var) is recorded by its real path. `.` first, not
+/// `$PWD`: a parent that does not export it leaves a stale one, and every
+/// command then ran in the parent's directory.
+pub Env environment(Option<str> dir, List<str> config, Option<str> git_dir, Option<str> work_tree) {
+    str cwd = os.env("PWD").or("/");
+    match (fs.realpath(".")) {
+        case Ok(str here): {
+            cwd = here;
+        }
+        case Err(io.Error unknown): {
+            match (fs.realpath(cwd)) {
+                case Ok(str real): {
+                    cwd = real;
+                }
+                case Err(io.Error failed): {
+                }
+            }
+        }
+    }
+    List<str> overrides = [];
+    match (dir) {
+        case Some(str given): {
+            cwd = GIT_gitstatus.resolve_dir(cwd, given);
+        }
+        case None: {
+        }
+    }
+    for (str entry in config) {
+        overrides.push(entry);
+    }
+    match (git_dir) {
+        case Some(str given): {
+            overrides.push("--git-dir=" + GIT_gitstatus.resolve_dir(cwd, given));
+        }
+        case None: {
+        }
+    }
+    match (work_tree) {
+        case Some(str given): {
+            overrides.push("--work-tree=" + GIT_gitstatus.resolve_dir(cwd, given));
+        }
+        case None: {
+        }
+    }
+    return Env(cwd, overrides);
+}
+
+/// With `core.precomposeunicode` (macOS), git makes every argument NFC before
+/// the command sees it (`precompose_argv_prefix`).
+List<str> precomposed(Env env, List<str> argv) {
+    if (!GIT_icase.is_macos()) {
+        return argv;
+    }
+    bool is_on = false;
+    str root = GIT_gitstatus.find_root(env.cwd);
+    str gitdir = "";
+    if (root != "") {
+        gitdir = GIT_repository.find(root);
+    }
+    match (GIT_config.effective(gitdir).get("core", "", "precomposeunicode")) {
+        case Some(str value): {
+            is_on = GIT_gitstatus.bool_value(value, false);
+        }
+        case None: {
+        }
+    }
+    for (str entry in env.overrides) {
+        if (entry.to_lower().starts_with("core.precomposeunicode=")) {
+            is_on = GIT_gitstatus.bool_value(entry.substr(23, entry.size()), false);
+        }
+    }
+    if (!is_on) {
+        return argv;
+    }
+    List<str> out = [];
+    for (str word in argv) {
+        out.push(GIT_icase.nfc(word));
+    }
+    return out;
+}
+
+/// The command function for a command of git's grammar. `argv` is what follows
+/// the command's own word (for `stash`, `remote` and `worktree` it starts with
+/// the subcommand). Returns the function's own exit status.
+pub int run_git(str git, Env env, List<str> argv) {
+    str cwd = env.cwd;
+    List<str> overrides = env.overrides;
+    List<str> given = precomposed(env, argv);
+    if (git == "status") {
+        return GIT_gitstatus.run(cwd, overrides, given);
+    }
+    if (git == "log" || git == "show") {
+        return GIT_gitlog.run(cwd, overrides, given, git == "show");
+    }
+    if (git == "diff") {
+        return GIT_gitdiffcmd.run(cwd, overrides, given);
+    }
+    if (git == "add") {
+        return GIT_gitadd.run_add(cwd, overrides, given);
+    }
+    if (git == "rm") {
+        return GIT_gitadd.run_rm(cwd, overrides, given);
+    }
+    if (git == "mv") {
+        return GIT_gitadd.run_mv(cwd, overrides, given);
+    }
+    if (git == "restore") {
+        return GIT_gitadd.run_restore(cwd, overrides, given);
+    }
+    if (git == "reset") {
+        return GIT_gitcommit.run_reset(cwd, overrides, given);
+    }
+    if (git == "commit") {
+        return GIT_gitcommit.run_commit(cwd, overrides, given);
+    }
+    if (git == "switch") {
+        return GIT_gitbranch.run_switch(cwd, overrides, given);
+    }
+    if (git == "checkout") {
+        return GIT_gitbranch.run_checkout(cwd, overrides, given);
+    }
+    if (git == "branch") {
+        return GIT_gitbranch.run_branch(cwd, overrides, given);
+    }
+    if (git == "tag") {
+        return GIT_gitbranch.run_tag(cwd, overrides, given);
+    }
+    if (git == "clone") {
+        return GIT_gitclone.run_clone(cwd, overrides, given);
+    }
+    if (git == "init") {
+        return GIT_gitclone.run_init(cwd, overrides, given);
+    }
+    if (git == "remote") {
+        return GIT_gitremote.run_remote(cwd, overrides, given);
+    }
+    if (git == "ls-remote") {
+        return GIT_gitremote.run_ls_remote(cwd, overrides, given);
+    }
+    if (git == "pull") {
+        return GIT_gitpull.run_pull(cwd, overrides, given);
+    }
+    if (git == "push") {
+        return GIT_gitpush.run_push(cwd, overrides, given);
+    }
+    if (git == "fetch") {
+        return GIT_gitfetch.run_fetch(cwd, overrides, given);
+    }
+    // stash, cherry-pick, revert, merge, rebase, clean, worktree
+    return GIT_githistory.run(git, cwd, overrides, given);
+}
+
+/// `cat-file`, `ls-tree`, `rev-parse` and `refs`: the plumbing, over the git
+/// directory given by `--git-dir` or found from here.
+int run_plumbing(Job job, Env env) {
+    str git_directory = "";
+    for (str entry in env.overrides) {
+        if (entry.starts_with("--git-dir=")) {
+            git_directory = entry.substr(10, entry.size());
+        }
+    }
+    if (git_directory == "") {
+        git_directory = GIT_repository.find(env.cwd);
+        if (git_directory == "") {
+            io.eprint(PROG + ": not a git repository (or any parent up to /): no .git directory");
+            return 128;
+        }
+    }
+    str refusal = GIT_hash.refusal(git_directory);
+    if (refusal != "") {
+        io.eprint("fatal: " + refusal);
+        return 128;
+    }
+    args.Parsed parsed = job.parsed;
+    if (job.cmd.word == "cat-file") {
+        return GIT_plumbing.cat_file(git_directory, parsed.positional("object"), parsed.is_flag_set("type"), parsed.is_flag_set("size"));
+    }
+    if (job.cmd.word == "ls-tree") {
+        return GIT_plumbing.ls_tree(git_directory, parsed.positional("tree"));
+    }
+    if (job.cmd.word == "rev-parse") {
+        return GIT_plumbing.rev_parse(git_directory, parsed.positional("rev"));
+    }
+    return GIT_plumbing.list_refs(git_directory);
+}
+
+/// Run one job; the command function's status, or 0.
+int execute(Job job, Env env) {
+    str word = job.cmd.word;
+    if (word == "migrate") {
+        return migrate_command(job.parsed, env);
+    }
+    if (word == "cat-file" || word == "ls-tree" || word == "rev-parse" || word == "refs") {
+        return run_plumbing(job, env);
+    }
+    return run_git(job.cmd.git, env, job.argv);
+}
+
+/// Run the commands of a parsed line, in order, stopping at the first that
+/// fails. 0, 1 (a command failed) or 2 (a command line mistake only the table
+/// can see, before anything ran).
+pub int run_line(Cli cli, args.Parsed parsed) {
+    Env env = environment(parsed.value("dir"), parsed.values("config"), parsed.value("git-dir"), parsed.value("work-tree"));
+    List<Job> jobs = [];
+    for (args.Parsed one in parsed.commands()) {
+        GIT_clitable.Cmd found = cli.cmds[0];
+        for (GIT_clitable.Cmd candidate in cli.cmds) {
+            if (candidate.word == one.word()) {
+                found = candidate;
+            }
+        }
+        Job job = to_git(found, one, env);
+        if (job.error != "") {
+            io.eprint(PROG + " -" + found.word + ": " + job.error);
+            match (cli.parsers.get(found.word)) {
+                case Some(args.Parser own): {
+                    io.eprint(own.usage());
+                }
+                case None: {
+                }
+            }
+            io.eprint("try '" + PROG + " -" + found.word + " --help' for more information");
+            return 2;
+        }
+        jobs.push(job);
+    }
+    for (Job job in jobs) {
+        int status = execute(job, env);
+        if (status != 0) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
+// --- the entry point ---------------------------------------------------------------
+
+/// The whole program: `argv` is the command line without the program's name.
+pub int start(List<str> argv) {
+    List<str> line = argv;
+    Cli cli = build();
+    if (is_git_style(argv)) {
+        Env probe = environment(Option<str>.None, [], Option<str>.None, Option<str>.None);
+        match (from_git(cli, probe, argv)) {
+            case Ok(List<str> rewritten): {
+                io.eprint(PROG + ": git-style arguments are deprecated; use '" + PROG + " " + shell_line(rewritten) + "' (see " + PROG + " --help)");
+                line = rewritten;
+            }
+            case Err(str reason): {
+                io.eprint(PROG + ": git-style arguments are deprecated, and this line has no equivalent in the new command line (" + reason + "); running it as git would, for this release only");
+                return run_legacy(argv);
+            }
+        }
+    }
+    args.Parsed parsed = cli.top.parse_or_exit(line, status: 2);
+    return run_line(cli, parsed);
+}
+
+/// A line the old way, for the one release that still runs them when there is
+/// no rewrite: the command function with git's own argv and exit status.
+int run_legacy(List<str> argv) {
+    int index = 0;
+    str dir = "";
+    List<str> config = [];
+    str git_dir = "";
+    str work_tree = "";
+    while (index < argv.size()) {
+        str word = argv[index];
+        if (word == "-C" && index + 1 < argv.size()) {
+            if (dir == "" || argv[index + 1].starts_with("/")) {
+                dir = argv[index + 1];
+            } else {
+                dir = dir + "/" + argv[index + 1];
+            }
+            index = index + 2;
+        } else if (word == "-c" && index + 1 < argv.size()) {
+            config.push(argv[index + 1]);
+            index = index + 2;
+        } else if (word == "--git-dir" && index + 1 < argv.size()) {
+            git_dir = argv[index + 1];
+            index = index + 2;
+        } else if (word.starts_with("--git-dir=")) {
+            git_dir = word.substr(10, word.size());
+            index = index + 1;
+        } else if (word == "--work-tree" && index + 1 < argv.size()) {
+            work_tree = argv[index + 1];
+            index = index + 2;
+        } else if (word.starts_with("--work-tree=")) {
+            work_tree = word.substr(12, word.size());
+            index = index + 1;
+        } else if (is_ignored_global(word)) {
+            index = index + 1;
+        } else {
+            break;
+        }
+    }
+    Option<str> dir_option = Option<str>.None;
+    if (dir != "") {
+        dir_option = Option<str>.Some(dir);
+    }
+    Option<str> git_dir_option = Option<str>.None;
+    if (git_dir != "") {
+        git_dir_option = Option<str>.Some(git_dir);
+    }
+    Option<str> work_tree_option = Option<str>.None;
+    if (work_tree != "") {
+        work_tree_option = Option<str>.Some(work_tree);
+    }
+    Env env = environment(dir_option, config, git_dir_option, work_tree_option);
+    str git = argv[index];
+    return run_git(git, env, argv.slice(index + 1, argv.size()));
+}
+
+bool is_ignored_global(str word) {
+    return word == "--no-pager" || word == "--no-optional-locks" || word == "--no-replace-objects" || word == "-p" || word == "--paginate";
+}
+
+/// The words of git that are commands of 1git.
+/// Is `word` one of the comma-separated `choices`?
+bool is_in(str word, str choices) {
+    return ("," + choices + ",").contains("," + word + ",");
+}
+
+List<str> git_words() {
+    return ["status", "log", "show", "diff", "add", "rm", "mv", "restore", "reset", "commit", "switch", "checkout", "branch", "tag", "stash", "cherry-pick", "revert", "merge", "rebase", "clean", "worktree", "clone", "init", "fetch", "pull", "push", "remote", "ls-remote", "cat-file", "ls-tree", "rev-parse"];
+}
+
+/// The index of the git command in `argv` once git's own leading options
+/// (`-C dir`, `-c k=v`, `--git-dir`, ...) are skipped, or -1. A line is git's
+/// when that word is a bare word that is a git command: exactly the case lib/args
+/// refuses as "is a command, so it is written with a dash".
+int git_word_at(List<str> argv) {
+    int index = 0;
+    while (index < argv.size()) {
+        str word = argv[index];
+        if ((word == "-C" || word == "-c" || word == "--git-dir" || word == "--work-tree") && index + 1 < argv.size()) {
+            index = index + 2;
+        } else if (word.starts_with("--git-dir=") || word.starts_with("--work-tree=") || is_ignored_global(word)) {
+            index = index + 1;
+        } else {
+            break;
+        }
+    }
+    if (index < argv.size() && git_words().contains(argv[index])) {
+        return index;
+    }
+    return -1;
+}
+
+pub bool is_git_style(List<str> argv) {
+    return git_word_at(argv) >= 0;
+}
+
+/// Words made safe for a shell: unchanged when they are plain.
+pub str shell_word(str word) {
+    if (word == "") {
+        return "''";
+    }
+    bool is_plain = true;
+    for (int c in word.chars()) {
+        bool is_safe = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_' || c == '-' || c == '.' || c == '/' || c == ',' || c == ':' || c == '=' || c == '@' || c == '%' || c == '+' || c == '^' || c == '~';
+        if (!is_safe) {
+            is_plain = false;
+        }
+    }
+    if (is_plain) {
+        return word;
+    }
+    return "'" + text.replace(word, "'", "'\\''") + "'";
+}
+
+pub str shell_line(List<str> words) {
+    List<str> quoted = [];
+    for (str word in words) {
+        quoted.push(shell_word(word));
+    }
+    return quoted.join(" ");
+}
+
+// --- git's argv, rewritten as ours -----------------------------------------------------
+
+/// What `match_option` found: which option of the command, what value it was
+/// given (a choice's key), and how many of git's words it used.
+type Hit {
+    GIT_clitable.Spec spec;
+    str value;
+    int used;
+}
+
+bool is_digits(str word) {
+    if (word == "") {
+        return false;
+    }
+    for (int c in word.chars()) {
+        if (c < '0' || c > '9') {
+            return false;
+        }
+    }
+    return true;
+}
+
+/// One spelling of git's, against the words at `index`: the value and the
+/// words used, as `[value, used]`, or empty. A one-word template with `{}`
+/// takes its value attached (`-U3`, `--max-count=5`) and, when it ends in `=`,
+/// as the next word too; a two-word one (`-n {}`) takes the next word.
+List<str> match_template(str form, List<str> words, int index) {
+    str word = words[index];
+    List<str> parts = form.split(" ");
+    if (parts.size() == 1) {
+        str template = parts[0];
+        match (template.index_of("{}")) {
+            case Some(int at): {
+                str before = template.substr(0, at);
+                str after = template.substr(at + 2, template.size());
+                if (word.starts_with(before) && word.size() > before.size()) {
+                    str value = word.substr(before.size(), word.size());
+                    if (after != "" && value.ends_with(after)) {
+                        value = value.substr(0, value.size() - after.size());
+                    }
+                    if (before == "-" && !is_digits(value)) {
+                        return [];
+                    }
+                    return [value, "1"];
+                }
+                if (before.ends_with("=") && word == before.substr(0, before.size() - 1) && index + 1 < words.size()) {
+                    return [words[index + 1], "2"];
+                }
+            }
+            case None: {
+            }
+        }
+        return [];
+    }
+    if (parts.size() == 2 && parts[1] == "{}") {
+        if (word == parts[0] && index + 1 < words.size()) {
+            return [words[index + 1], "2"];
+        }
+        if (parts[0].size() == 2 && word.starts_with(parts[0]) && word.size() > 2) {
+            return [word.substr(2, word.size()), "1"];
+        }
+    }
+    return [];
+}
+
+List<str> forms_of(GIT_clitable.Spec spec) {
+    List<str> forms = [];
+    if (spec.emit != "" && !spec.emit.starts_with("@")) {
+        forms.push(spec.emit);
+    }
+    if (spec.alias != "") {
+        GIT_clitable.append(forms, spec.alias.split(","));
+    }
+    return forms;
+}
+
+Option<Hit> match_option(GIT_clitable.Cmd cmd, List<str> words, int index) {
+    str word = words[index];
+    for (GIT_clitable.Spec spec in cmd.specs) {
+        if (spec.kind == "pos" || spec.kind == "opt" || spec.kind == "tail") {
+            continue;
+        }
+        if (spec.kind == "choice" && spec.choices.contains("=")) {
+            for (str entry in spec.choices.split(",")) {
+                int at = entry.index_of("=").or(0);
+                if (entry.substr(at + 1, entry.size()) == word) {
+                    return Option<Hit>.Some(Hit(spec, entry.substr(0, at), 1));
+                }
+            }
+            continue;
+        }
+        for (str form in forms_of(spec)) {
+            if (spec.kind == "flag" || (spec.kind == "values" && !form.contains("{}"))) {
+                if (form == word) {
+                    return Option<Hit>.Some(Hit(spec, "", 1));
+                }
+            } else {
+                List<str> found = match_template(form, words, index);
+                if (found.size() == 2) {
+                    return Option<Hit>.Some(Hit(spec, found[0], found[1].parse_int().or(1)));
+                }
+            }
+        }
+    }
+    return Option<Hit>.None;
+}
+
+/// What is collected while git's words are read: the options as our words
+/// (scalars first, lists last: a list swallows every operand after it), and
+/// the operands.
+type Rewrite {
+    GIT_clitable.Cmd cmd;
+    List<str> scalars = [];
+    List<str> list_names = [];
+    Map<str, List<str>> list_values = {};
+    List<str> seen = [];
+    List<str> words = [];
+    List<str> after = [];
+    str error = "";
+    int forces = 0;
+}
+
+str option_text(str name) {
+    return "--" + name;
+}
+
+void add_scalar(Rewrite work, str name, str value, bool has_value) {
+    if (!has_value) {
+        if (!work.seen.contains(name)) {
+            work.scalars.push(option_text(name));
+            work.seen.push(name);
+        }
+        return;
+    }
+    if (value.starts_with("-") && value != "-" && !is_digits(value.substr(1, value.size()))) {
+        work.scalars.push(option_text(name) + "=" + value);
+    } else {
+        work.scalars.push(option_text(name));
+        work.scalars.push(value);
+    }
+}
+
+void add_list(Rewrite work, str name, List<str> elements) {
+    if (!work.list_names.contains(name)) {
+        work.list_names.push(name);
+        work.list_values.set(name, []);
+    }
+    List<str> held = work.list_values.get(name).or([]);
+    GIT_clitable.append(held, elements);
+    work.list_values.set(name, held);
+}
+
+void apply_hit(Rewrite work, Hit hit, List<str> words, int index) {
+    GIT_clitable.Spec spec = hit.spec;
+    if (spec.kind == "flag") {
+        add_scalar(work, spec.name, "", false);
+    } else if (spec.kind == "values") {
+        if (spec.emit.contains("{}")) {
+            add_list(work, spec.name, [hit.value]);
+        } else {
+            // the flag form (`-d a b`): the words that follow, up to the next option
+            List<str> taken = [];
+            int next = index + 1;
+            while (next < words.size() && !words[next].starts_with("-")) {
+                taken.push(words[next]);
+                next = next + 1;
+            }
+            add_list(work, spec.name, taken);
+            hit.used = next - index;
+        }
+    } else if (spec.kind == "int") {
+        str number = hit.value;
+        if (number.ends_with("%")) {
+            number = number.substr(0, number.size() - 1);
+        }
+        add_scalar(work, spec.name, number, true);
+    } else {
+        add_scalar(work, spec.name, hit.value, true);
+    }
+}
+
+bool is_dash_word(str word) {
+    return word.starts_with("-") && word != "-";
+}
+
+/// Read git's words after the command word into `work`. Returns false (with
+/// `work.error`) for an option the new interface does not have.
+bool read_words(Rewrite work, List<str> words) {
+    int index = 0;
+    while (index < words.size()) {
+        str word = words[index];
+        if (word == "--") {
+            int rest = index + 1;
+            while (rest < words.size()) {
+                work.after.push(words[rest]);
+                rest = rest + 1;
+            }
+            return true;
+        }
+        if (!is_dash_word(word)) {
+            work.words.push(word);
+            index = index + 1;
+            continue;
+        }
+        if ((work.cmd.word == "branch" || work.cmd.word == "tag") && (word == "-l" || word == "--list")) {
+            work.seen.push("list");
+            index = index + 1;
+            continue;
+        }
+        Option<Hit> found = match_option(work.cmd, words, index);
+        match (found) {
+            case Some(Hit hit): {
+                if (hit.spec.name == "force" && hit.spec.kind == "flag") {
+                    work.forces = work.forces + 1;
+                }
+                apply_hit(work, hit, words, index);
+                index = index + hit.used;
+                continue;
+            }
+            case None: {
+            }
+        }
+        if (is_digits(word.substr(1, word.size()))) {
+            work.words.push(word);
+            index = index + 1;
+            continue;
+        }
+        // a cluster of short switches: -sb, -am
+        if (!word.starts_with("--") && word.size() > 2) {
+            List<str> spread = [];
+            int at = 1;
+            while (at < word.size()) {
+                spread.push("-" + word.substr(at, at + 1));
+                at = at + 1;
+            }
+            bool is_all_known = true;
+            int position = 0;
+            // a last switch that takes a value is read with one after it
+            List<str> probe = [];
+            GIT_clitable.append(probe, spread);
+            probe.push("x");
+            while (position < spread.size()) {
+                Option<Hit> piece = match_option(work.cmd, probe, position);
+                match (piece) {
+                    case Some(Hit single): {
+                        bool is_switch = single.spec.kind == "flag" || (single.spec.kind == "choice" && single.spec.choices.contains("="));
+                        if (!is_switch && position < spread.size() - 1) {
+                            is_all_known = false;
+                        }
+                    }
+                    case None: {
+                        is_all_known = false;
+                    }
+                }
+                position = position + 1;
+            }
+            if (is_all_known) {
+                List<str> expanded = [];
+                GIT_clitable.append(expanded, spread);
+                int after_cluster = index + 1;
+                while (after_cluster < words.size()) {
+                    expanded.push(words[after_cluster]);
+                    after_cluster = after_cluster + 1;
+                }
+                return read_words(work, expanded);
+            }
+        }
+        work.error = "'" + word + "' has no equivalent for -" + work.cmd.word;
+        return false;
+    }
+    return true;
+}
+
+/// A revision, or a path? A word is a revision when it names one in the
+/// repository here; one that is a file and no revision is a path.
+bool is_revision(Env env, str word) {
+    if (word.contains("..") || word.starts_with("^") || word.contains("~") || word.contains("@{")) {
+        return true;
+    }
+    str root = GIT_gitstatus.find_root(env.cwd);
+    if (root == "") {
+        return true;
+    }
+    str gitdir = GIT_repository.find(root);
+    if (gitdir == "") {
+        return true;
+    }
+    match (GIT_revparse.object_id(gitdir, word)) {
+        case Ok(_): {
+            return true;
+        }
+        case Err(_): {
+        }
+    }
+    str here = fs.join(env.cwd, word);
+    if (fs.is_file(here) || fs.is_directory(here)) {
+        return false;
+    }
+    return true;
+}
+
+/// The new line from what was read: scalar options, the operands, then the
+/// list options.
+List<str> assemble(Rewrite work, List<str> operands) {
+    List<str> out = ["-" + work.cmd.word];
+    GIT_clitable.append(out, work.scalars);
+    GIT_clitable.append(out, operands);
+    for (str name in work.list_names) {
+        out.push(option_text(name));
+        GIT_clitable.append(out, work.list_values.get(name).or([]));
+    }
+    return out;
+}
+
+GIT_clitable.Cmd cmd_named(Cli cli, str word) {
+    for (GIT_clitable.Cmd candidate in cli.cmds) {
+        if (candidate.word == word) {
+            return candidate;
+        }
+    }
+    trap("GIT_cli: no command called " + word);
+}
+
+bool has_flag_word(List<str> words, List<str> names) {
+    for (str word in words) {
+        if (word == "--") {
+            return false;
+        }
+        if (names.contains(word)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+/// Was this scalar option read?
+bool scalars_have(Rewrite work, str name) {
+    for (str token in work.scalars) {
+        if (token == "--" + name || token.starts_with("--" + name + "=")) {
+            return true;
+        }
+    }
+    return false;
+}
+
+bool cmd_has_tail(GIT_clitable.Cmd cmd, str name) {
+    for (GIT_clitable.Spec spec in cmd.specs) {
+        if (spec.kind == "tail" && spec.name == name) {
+            return true;
+        }
+    }
+    return false;
+}
+
+/// git's argv, rewritten as ours: `[-log, --oneline, --max, 5]`, with the
+/// global options first. The error is the reason a line has no equivalent.
+pub Result<List<str>, str> from_git(Cli cli, Env env, List<str> argv) {
+    List<str> head = [];
+    List<str> configs = [];
+    str dir = "";
+    int index = 0;
+    while (index < argv.size()) {
+        str word = argv[index];
+        if (word == "-C" && index + 1 < argv.size()) {
+            head.push("--dir");
+            head.push(argv[index + 1]);
+            dir = argv[index + 1];
+            index = index + 2;
+        } else if (word == "-c" && index + 1 < argv.size()) {
+            configs.push(argv[index + 1]);
+            index = index + 2;
+        } else if (word == "--git-dir" && index + 1 < argv.size()) {
+            head.push("--git-dir=" + argv[index + 1]);
+            index = index + 2;
+        } else if (word.starts_with("--git-dir=")) {
+            head.push(word);
+            index = index + 1;
+        } else if (word == "--work-tree" && index + 1 < argv.size()) {
+            head.push("--work-tree=" + argv[index + 1]);
+            index = index + 2;
+        } else if (word.starts_with("--work-tree=")) {
+            head.push(word);
+            index = index + 1;
+        } else if (is_ignored_global(word)) {
+            index = index + 1;
+        } else {
+            break;
+        }
+    }
+    if (configs.size() > 0) {
+        head.push("--config");
+        GIT_clitable.append(head, configs);
+    }
+    if (index >= argv.size()) {
+        return Result<List<str>, str>.Err("no command");
+    }
+    str git = argv[index];
+    List<str> rest = argv.slice(index + 1, argv.size());
+    // `-C dir` is where the revisions and paths of the line are looked for
+    Env here = env;
+    if (dir != "") {
+        here = Env(GIT_gitstatus.resolve_dir(env.cwd, dir), env.overrides);
+    }
+    match (rewrite_command(cli, here, git, rest)) {
+        case Ok(List<str> line): {
+            List<str> full = [];
+            GIT_clitable.append(full, head);
+            GIT_clitable.append(full, line);
+            return Result<List<str>, str>.Ok(full);
+        }
+        case Err(str reason): {
+            return Result<List<str>, str>.Err(reason);
+        }
+    }
+}
+
+Result<List<str>, str> fail_with(str reason) {
+    return Result<List<str>, str>.Err(reason);
+}
+
+/// The subcommand `git stash`, `remote` and `worktree` take as their first
+/// bare word (after a leading `-v`), and the other words. Empty for none.
+List<List<str>> split_subcommand(List<str> rest) {
+    int at = 0;
+    while (at < rest.size() && (rest[at] == "-v" || rest[at] == "--verbose")) {
+        at = at + 1;
+    }
+    if (at >= rest.size() || rest[at].starts_with("-")) {
+        return [[""], rest];
+    }
+    List<str> others = [];
+    for (int index in 0 .. rest.size()) {
+        if (index != at) {
+            others.push(rest[index]);
+        }
+    }
+    return [[rest[at]], others];
+}
+
+Result<List<str>, str> rewrite_command(Cli cli, Env env, str git, List<str> rest) {
+    str word = git;
+    List<str> words = rest;
+    if (git == "stash" || git == "remote" || git == "worktree") {
+        List<List<str>> split = split_subcommand(rest);
+        str sub = split[0][0];
+        words = split[1];
+        if (sub == "") {
+            word = git;
+        } else if (git == "stash") {
+            if (sub == "push") {
+                word = "stash";
+            } else if (sub == "save") {
+                // `stash save msg`: the words are the message
+                word = "stash";
+                List<str> kept = [];
+                List<str> message = [];
+                for (str piece in words) {
+                    if (piece.starts_with("-")) {
+                        kept.push(piece);
+                    } else {
+                        message.push(piece);
+                    }
+                }
+                words = kept;
+                if (message.size() > 0) {
+                    words.push("--message=" + message.join(" "));
+                }
+            } else if (is_in(sub, "list,show,apply,pop,drop,clear")) {
+                word = "stash-" + sub;
+            } else {
+                return fail_with("'stash " + sub + "' is not in 1git");
+            }
+        } else if (git == "remote") {
+            if (sub == "rm") {
+                sub = "remove";
+            }
+            if (!is_in(sub, "add,remove,rename,set-url,get-url,show,prune,set-head")) {
+                return fail_with("'remote " + sub + "' is not in 1git");
+            }
+            word = "remote-" + sub;
+        } else {
+            if (sub == "list") {
+                word = "worktree";
+            } else if (is_in(sub, "add,remove,prune")) {
+                word = "worktree-" + sub;
+            } else {
+                return fail_with("'worktree " + sub + "' is not in 1git");
+            }
+        }
+    } else if (git == "ls-remote") {
+        word = "remote-refs";
+    } else if (git == "rm") {
+        word = "remove";
+    } else if (git == "mv") {
+        word = "move";
+    } else if (git == "checkout") {
+        return rewrite_checkout(cli, env, rest);
+    } else if (git == "reset") {
+        return rewrite_reset(cli, env, rest);
+    }
+    Rewrite work = Rewrite(cmd_named(cli, word));
+    if (!read_words(work, words)) {
+        return fail_with(work.error);
+    }
+    return shape(env, work);
+}
+
+/// Put the operands the line had where the command's own grammar wants them.
+Result<List<str>, str> shape(Env env, Rewrite work) {
+    GIT_clitable.Cmd cmd = work.cmd;
+    str word = cmd.word;
+    List<str> operands = [];
+    List<str> every = work.words;
+    if (word == "log" || word == "show" || word == "diff") {
+        // before `--` a word is a revision when it names one, else a path
+        List<str> paths = [];
+        for (str one in every) {
+            if (paths.size() == 0 && (word == "show" || is_revision(env, one))) {
+                operands.push(one);
+            } else {
+                paths.push(one);
+            }
+        }
+        GIT_clitable.append(paths, work.after);
+        if (paths.size() > 0) {
+            add_list(work, "path", paths);
+        }
+    } else if (word == "switch") {
+        if (scalars_have(work, "create") || scalars_have(work, "force-create")) {
+            if (every.size() > 1) {
+                return fail_with("too many operands");
+            }
+            if (every.size() == 1) {
+                add_scalar(work, "from", every[0], true);
+            }
+        } else {
+            GIT_clitable.append(operands, every);
+        }
+    } else if (word == "branch") {
+        bool has_mode = scalars_have(work, "set-upstream") || scalars_have(work, "unset-upstream") || scalars_have(work, "current") || work.list_names.contains("delete") || work.list_names.contains("force-delete") || work.list_names.contains("rename") || work.list_names.contains("copy");
+        bool is_list = work.seen.contains("list") || work.seen.contains("all") || work.seen.contains("remotes") || work.seen.contains("verbose") || work.seen.contains("upstream") || scalars_have(work, "contains") || scalars_have(work, "without") || scalars_have(work, "merged") || scalars_have(work, "unmerged") || scalars_have(work, "points-at");
+        if (!has_mode && !is_list && every.size() > 0) {
+            if (every.size() > 2) {
+                return fail_with("too many operands");
+            }
+            add_scalar(work, "create", every[0], true);
+            if (every.size() == 2) {
+                add_scalar(work, "from", every[1], true);
+            }
+        } else {
+            GIT_clitable.append(operands, every);
+        }
+    } else if (word == "tag") {
+        bool is_list = work.seen.contains("list") || scalars_have(work, "contains") || scalars_have(work, "without") || scalars_have(work, "merged") || scalars_have(work, "unmerged") || scalars_have(work, "points-at") || scalars_have(work, "lines");
+        if (work.list_names.contains("delete") || is_list) {
+            GIT_clitable.append(operands, every);
+        } else if (every.size() > 0) {
+            if (every.size() > 2) {
+                return fail_with("too many operands");
+            }
+            add_scalar(work, "create", every[0], true);
+            if (every.size() == 2) {
+                add_scalar(work, "from", every[1], true);
+            }
+        }
+    } else if (word == "push") {
+        if (every.size() > 0) {
+            add_scalar(work, "to", every[0], true);
+            for (int at in 1 .. every.size()) {
+                operands.push(every[at]);
+            }
+        }
+        // HEAD:refs/for/BRANCH[%topic=T] is --for BRANCH --topic T
+        if (operands.size() == 1 && operands[0].starts_with("HEAD:refs/for/")) {
+            str target = operands[0].substr(14, operands[0].size());
+            str topic = "";
+            match (target.index_of("%topic=")) {
+                case Some(int at): {
+                    topic = target.substr(at + 7, target.size());
+                    target = target.substr(0, at);
+                }
+                case None: {
+                }
+            }
+            add_scalar(work, "for", target, true);
+            if (topic != "") {
+                add_scalar(work, "topic", topic, true);
+            }
+            operands = [];
+        }
+    } else if (word == "worktree-add") {
+        if (every.size() > 2) {
+            return fail_with("too many operands");
+        }
+        if (every.size() > 0) {
+            operands.push(every[0]);
+        }
+        if (every.size() == 2) {
+            add_scalar(work, "from", every[1], true);
+        }
+    } else if (word == "commit") {
+        List<str> paths = [];
+        GIT_clitable.append(paths, every);
+        GIT_clitable.append(paths, work.after);
+        if (paths.size() > 0) {
+            add_list(work, "path", paths);
+        }
+    } else if (word == "clean") {
+        GIT_clitable.append(operands, every);
+        GIT_clitable.append(operands, work.after);
+        if (work.forces > 1) {
+            add_scalar(work, "nested", "", false);
+        }
+    } else {
+        GIT_clitable.append(operands, every);
+        GIT_clitable.append(operands, work.after);
+    }
+    return Result<List<str>, str>.Ok(assemble(work, operands));
+}
+
+/// `git checkout` is two commands of 1git: `-switch` for branches, `-restore`
+/// for files.
+Result<List<str>, str> rewrite_checkout(Cli cli, Env env, List<str> rest) {
+    bool is_files = has_flag_word(rest, ["--ours", "--theirs", "-p", "--patch"]) || rest.contains("--");
+    if (!is_files) {
+        List<str> mapped = [];
+        for (str word in rest) {
+            if (word == "-b") {
+                mapped.push("-c");
+            } else if (word == "-B") {
+                mapped.push("-C");
+            } else if (word == "-d") {
+                mapped.push("--detach");
+            } else {
+                mapped.push(word);
+            }
+        }
+        Rewrite switching = Rewrite(cmd_named(cli, "switch"));
+        if (!read_words(switching, mapped)) {
+            return fail_with(switching.error);
+        }
+        return shape(env, switching);
+    }
+    // `checkout [<tree-ish>] [--] <paths>`, `checkout -- <paths>`
+    List<str> options = [];
+    List<str> bare = [];
+    List<str> paths = [];
+    bool is_after = false;
+    for (str word in rest) {
+        if (word == "--") {
+            is_after = true;
+        } else if (is_after) {
+            paths.push(word);
+        } else if (word.starts_with("-")) {
+            options.push(word);
+        } else {
+            bare.push(word);
+        }
+    }
+    str source = "";
+    if (is_after && bare.size() > 0) {
+        source = bare[0];
+    } else if (bare.size() > 1 && !has_flag_word(rest, ["-p", "--patch"])) {
+        source = bare[0];
+        for (int at in 1 .. bare.size()) {
+            paths.push(bare[at]);
+        }
+    } else if (bare.size() > 0 && has_flag_word(rest, ["-p", "--patch"])) {
+        source = bare[0];
+    } else {
+        GIT_clitable.append(paths, bare);
+    }
+    Rewrite restoring = Rewrite(cmd_named(cli, "restore"));
+    if (!read_words(restoring, options)) {
+        return fail_with(restoring.error);
+    }
+    if (source != "") {
+        add_scalar(restoring, "from", source, true);
+    }
+    return Result<List<str>, str>.Ok(assemble(restoring, paths));
+}
+
+/// `git reset` is `-reset` for a commit and `-restore --staged` for paths.
+Result<List<str>, str> rewrite_reset(Cli cli, Env env, List<str> rest) {
+    List<str> options = [];
+    List<str> bare = [];
+    List<str> paths = [];
+    bool is_after = false;
+    for (str word in rest) {
+        if (word == "--") {
+            is_after = true;
+        } else if (is_after) {
+            paths.push(word);
+        } else if (word.starts_with("-")) {
+            options.push(word);
+        } else {
+            bare.push(word);
+        }
+    }
+    bool is_paths = is_after || has_flag_word(options, ["-p", "--patch"]);
+    if (!is_paths && bare.size() > 0 && !is_revision(env, bare[0])) {
+        is_paths = true;
+    }
+    if (!is_paths && bare.size() <= 1) {
+        List<str> tokens = ["-reset"];
+        for (str word in options) {
+            if (word == "--soft" || word == "--mixed" || word == "--hard" || word == "--keep") {
+                tokens.push("--mode");
+                tokens.push(word.substr(2, word.size()));
+            } else if (word == "-q" || word == "--quiet") {
+                tokens.push("--quiet");
+            } else {
+                return fail_with("'" + word + "' has no equivalent for -reset");
+            }
+        }
+        GIT_clitable.append(tokens, bare);
+        return Result<List<str>, str>.Ok(tokens);
+    }
+    Rewrite restoring = Rewrite(cmd_named(cli, "restore"));
+    if (!read_words(restoring, options)) {
+        return fail_with(restoring.error);
+    }
+    add_scalar(restoring, "staged", "", false);
+    if (bare.size() > 0 && (is_after || (bare.size() > 1 && is_revision(env, bare[0])))) {
+        if (bare[0] != "HEAD") {
+            add_scalar(restoring, "from", bare[0], true);
+        }
+        for (int at in 1 .. bare.size()) {
+            paths.push(bare[at]);
+        }
+    } else {
+        GIT_clitable.append(paths, bare);
+    }
+    return Result<List<str>, str>.Ok(assemble(restoring, paths));
+}
+
+// --- -migrate ------------------------------------------------------------------------
+
+/// Split a line the way a shell does, for single and double quotes and a
+/// backslash.
+pub List<str> shell_split(str line) {
+    List<str> out = [];
+    str current = "";
+    bool is_started = false;
+    int quote = 0;
+    List<int> chars = line.chars();
+    int index = 0;
+    while (index < chars.size()) {
+        int c = chars[index];
+        if (quote == 0 && (c == ' ' || c == '\t' || c == '\n')) {
+            if (is_started) {
+                out.push(current);
+                current = "";
+                is_started = false;
+            }
+        } else if (quote == 0 && c == '\'') {
+            quote = 1;
+            is_started = true;
+        } else if (quote == 0 && c == '"') {
+            quote = 2;
+            is_started = true;
+        } else if (quote == 1 && c == '\'') {
+            quote = 0;
+        } else if (quote == 2 && c == '"') {
+            quote = 0;
+        } else if (quote != 1 && c == '\\' && index + 1 < chars.size()) {
+            index = index + 1;
+            current = current + str.from_chars([chars[index]]);
+            is_started = true;
+        } else {
+            current = current + str.from_chars([c]);
+            is_started = true;
+        }
+        index = index + 1;
+    }
+    if (is_started) {
+        out.push(current);
+    }
+    return out;
+}
+
+/// The NUL-separated words on standard input.
+List<str> nul_words() {
+    List<str> words = [];
+    match (io.stdin().read_all()) {
+        case Ok(bytes data): {
+            bytes current = [];
+            for (int octet in data) {
+                if (octet == 0) {
+                    words.push(current.utf8().or(""));
+                    current = [];
+                } else {
+                    current.push(octet);
+                }
+            }
+            if (current.size() > 0) {
+                words.push(current.utf8().or(""));
+            }
+        }
+        case Err(io.Error failed): {
+            io.eprint(PROG + ": cannot read standard input: " + failed.to_str());
+        }
+    }
+    return words;
+}
+
+/// `-migrate`: a git line in, the 1git line out. With `--nul`, git's words come
+/// NUL-separated on standard input and ours go out NUL-separated on standard
+/// output, for scripts.
+int migrate_command(args.Parsed parsed, Env env) {
+    List<str> words = [];
+    bool is_nul = parsed.is_flag_set("nul");
+    if (is_nul) {
+        words = nul_words();
+    } else {
+        words = shell_split(parsed.optional("line"));
+    }
+    if (words.size() > 0 && (words[0] == "git" || words[0] == "1git")) {
+        words = words.slice(1, words.size());
+    }
+    if (words.size() == 0) {
+        io.eprint(PROG + ": -migrate needs a git command line: " + PROG + " -migrate 'git log --oneline -5'");
+        return 1;
+    }
+    if (git_word_at(words) < 0) {
+        io.eprint(PROG + ": '" + words[0] + "' is not a git command 1git has");
+        return 1;
+    }
+    Cli cli = build();
+    match (from_git(cli, env, words)) {
+        case Ok(List<str> rewritten): {
+            if (is_nul) {
+                bytes out = [];
+                for (str word in rewritten) {
+                    out.extend(word.to_bytes());
+                    out.push(0);
+                }
+                match (io.stdout().write(out)) {
+                    case Ok(_): {
+                    }
+                    case Err(_): {
+                        return 1;
+                    }
+                }
+            } else {
+                print(PROG + " " + shell_line(rewritten));
+            }
+            return 0;
+        }
+        case Err(str reason): {
+            io.eprint(PROG + ": " + reason);
+            return 1;
+        }
+    }
+}

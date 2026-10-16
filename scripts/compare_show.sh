@@ -11,6 +11,9 @@
 # Nothing here writes outside <workdir>. `git` is the oracle.
 set -uo pipefail
 
+# shellcheck source=lib_cli.sh
+. "$(cd "$(dirname "$0")" && pwd)/lib_cli.sh"
+
 OURS=$(cd "$(dirname "$1")" && pwd)/$(basename "$1")
 HERE=$(cd "$(dirname "$0")" && pwd)
 WORK=${2:-$(mktemp -d)}
@@ -33,8 +36,8 @@ compare() {
     shift 2
     n=$((n + 1))
     git -C "$repo" "$@" > "$WORK/want" 2> "$WORK/want.err"; local want_rc=$?
-    "$OURS" -C "$repo" "$@" > "$WORK/got" 2> "$WORK/got.err"; local got_rc=$?
-    if ! cmp -s "$WORK/want" "$WORK/got" || [ $want_rc -ne $got_rc ]; then
+    one_run "$OURS" -C "$repo" "$@" > "$WORK/got" 2> "$WORK/got.err"; local got_rc=$?
+    if ! cmp -s "$WORK/want" "$WORK/got" || [ "$(norm_rc $want_rc)" -ne "$(norm_rc $got_rc)" ]; then
         printf '\033[31mdiffer\033[0m %s: %s\n' "$label" "$*"
         printf '       exit: git %s, 1git %s\n' "$want_rc" "$got_rc"
         diff <(sed 's/$/$/' "$WORK/want" | cat -v) <(sed 's/$/$/' "$WORK/got" | cat -v) | head -12 | sed 's/^/       /'
@@ -212,6 +215,9 @@ compare linear-sub "$WORK/fx/linear/src" show --name-only HEAD
 compare linear-sub "$WORK/fx/linear/src" show HEAD -- .
 compare linear-sub "$WORK/fx/linear/src" show HEAD:main.c
 
+if [ "$(fallback_count)" -ne 0 ]; then
+    echo "show: $(fallback_count) of the forms ran through the transition shim (options 1git's command line no longer has)"
+fi
 if [ "$bad" -eq 0 ]; then
     echo "show: all $n forms byte-identical to git"
     exit 0

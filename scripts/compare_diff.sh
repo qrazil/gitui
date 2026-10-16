@@ -12,6 +12,9 @@
 # ending changes, binary changes, a rename in the index). Nothing here writes
 # outside <workdir>. `git` is the oracle; there is no expected-output file.
 set -uo pipefail
+
+# shellcheck source=lib_cli.sh
+. "$(cd "$(dirname "$0")" && pwd)/lib_cli.sh"
 # sed -i that BSD sed (macOS) also takes (it wants a suffix; GNU takes none)
 sedi() { local f="${@: -1}"; sed "${@:1:$#-1}" "$f" > "$f.sedi" && mv "$f.sedi" "$f"; }
 
@@ -33,8 +36,8 @@ compare() {
     shift 2
     n=$((n + 1))
     git -C "$repo" "$@" > "$WORK/want" 2> "$WORK/want.err"; local want_rc=$?
-    "$OURS" -C "$repo" "$@" > "$WORK/got" 2> "$WORK/got.err"; local got_rc=$?
-    if ! cmp -s "$WORK/want" "$WORK/got" || [ $want_rc -ne $got_rc ]; then
+    one_run "$OURS" -C "$repo" "$@" > "$WORK/got" 2> "$WORK/got.err"; local got_rc=$?
+    if ! cmp -s "$WORK/want" "$WORK/got" || [ "$(norm_rc $want_rc)" -ne "$(norm_rc $got_rc)" ]; then
         printf '\033[31mdiffer\033[0m %s: %s\n' "$label" "$*"
         printf '       exit: git %s, 1git %s\n' "$want_rc" "$got_rc"
         diff <(sed 's/$/$/' "$WORK/want" | cat -v) <(sed 's/$/$/' "$WORK/got" | cat -v) | head -12 | sed 's/^/       /'
@@ -371,6 +374,9 @@ compare history-config "$fixtures_dir/unicode" diff --raw HEAD~2 HEAD
 compare history-config "$fixtures_dir/unicode" diff -z --name-status HEAD~2 HEAD
 compare history-config "$fixtures_dir/unicode" diff -z --stat HEAD~2 HEAD
 
+if [ "$(fallback_count)" -ne 0 ]; then
+    echo "diff: $(fallback_count) of the forms ran through the transition shim (options 1git's command line no longer has)"
+fi
 if [ "$bad" -eq 0 ]; then
     echo "diff: all $n forms byte-identical to git"
     exit 0

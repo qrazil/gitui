@@ -33,7 +33,9 @@ check() { # check <label> <our-output-file> <git-output-file>
     fi
 }
 
-ours() { ( cd "$REPO" && "$OURS" --git-dir "$(cd "$REPO" && git rev-parse --absolute-git-dir)" "$@" ); }
+# core.abbrev is pinned on both sides: git derives a length from how many objects
+# a repository has (see the header of git.m31 in 0.23 and before).
+ours() { ( cd "$REPO" && "$OURS" --git-dir "$(cd "$REPO" && git rev-parse --absolute-git-dir)" --config core.abbrev=7 log.decorate=false "$@" ); }
 
 # --- rev-parse ----------------------------------------------------------------
 

@@ -1,0 +1,58 @@
+// The command line of `1git`, as a unit: read lines of our grammar on standard
+// input (words separated by spaces, single quotes for a word with spaces) and
+// print the argv of git's grammar each one becomes, or the complaint.
+//
+//   echo "-log --oneline --max 5 --path src" | t_cli     ->  git log --oneline --max-count=5 -- src
+//
+// `tests/test_cli.sh` feeds it `tests/cli_cases.txt`; the other direction
+// (git's argv rewritten as ours) is `1git -migrate`.
+
+import io;
+import os;
+import args;
+import core.GIT_cli;
+import core.GIT_clitable;
+
+str one_line(GIT_cli.Cli cli, GIT_cli.Env env, List<str> words) {
+    match (cli.top.parse(words)) {
+        case Ok(args.Parsed parsed): {
+            List<str> out = [];
+            for (args.Parsed command in parsed.commands()) {
+                GIT_clitable.Cmd found = cli.cmds[0];
+                for (GIT_clitable.Cmd candidate in cli.cmds) {
+                    if (candidate.word == command.word()) {
+                        found = candidate;
+                    }
+                }
+                GIT_cli.Job job = GIT_cli.to_git(found, command, env);
+                if (job.error != "") {
+                    return "error: " + job.error;
+                }
+                List<str> argv = ["git", found.git];
+                GIT_clitable.append(argv, job.argv);
+                out.push(GIT_cli.shell_line(argv));
+            }
+            return out.join(" ;; ");
+        }
+        case Err(args.UsageError failure): {
+            return "usage: " + failure.to_str();
+        }
+    }
+}
+
+GIT_cli.Cli cli = GIT_cli.build();
+GIT_cli.Env env = GIT_cli.environment(Option<str>.None, [], Option<str>.None, Option<str>.None);
+match (io.stdin().read_all()) {
+    case Ok(bytes data): {
+        str all = data.utf8().or("");
+        for (str line in all.split("\n")) {
+            if (line == "") {
+                continue;
+            }
+            print(one_line(cli, env, GIT_cli.shell_split(line)));
+        }
+    }
+    case Err(io.Error failed): {
+        io.eprint("t_cli: " + failed.to_str());
+    }
+}

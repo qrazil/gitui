@@ -1,0 +1,430 @@
+# The command line of 1git, one case per option: the line in our grammar, the
+# argv of git's grammar it is handed to the command function as (`=`), and the
+# spellings git has for it that `1git -migrate` and the transition shim rewrite
+# into the line above (`<`). tests/test_cli.sh runs all three ways and checks
+# that every option of every command's --help is in here.
+#
+#   -log --max 5          what the user types
+#   = log --max-count=5   what the command function receives
+#   < git log -n 5        a git spelling, rewritten to the first line
+#
+# Words are shell-quoted.
+
+# --- status
+-status
+= git status
+-status --format short --branch
+= git status --short --branch
+< git status -sb
+-status --format porcelain2 --nul --branch
+= git status --porcelain=v2 --branch -z
+< git status --porcelain=v2 -z -b
+-status --format porcelain
+= git status --porcelain
+< git status --porcelain=v1
+-status --format long
+= git status --long
+-status --untracked all
+= git status -uall
+< git status -u
+< git status --untracked-files=all
+-status --untracked no --ignored matching
+= git status -uno --ignored=matching
+-status --untracked normal --ignored traditional
+= git status -unormal --ignored
+-status --ignored traditional
+= git status --ignored
+< git status --ignored
+-status --renames off --stash
+= git status --no-renames --show-stash
+-status --renames on
+= git status --renames
+< git status -M
+-status src docs
+= git status -- src docs
+
+# --- log
+-log
+= git log
+-log --max 5 --skip 2 --oneline --graph --all --first-parent
+= git log --max-count=5 --skip=2 --oneline --graph --all --first-parent
+< git log -n5 --skip=2 --oneline --graph --all --first-parent
+< git log -5 --skip 2 --oneline --graph --all --first-parent
+-log --merges only --reverse --order topo --follow --only-given
+= git log --merges --reverse --topo-order --follow --no-walk
+-log --merges exclude --order date
+= git log --no-merges --date-order
+< git log --no-merges --date-order
+-log --order author-date
+= git log --author-date-order
+-log --author alice --committer bob --since 2.weeks.ago --until yesterday
+= git log --author=alice --committer=bob --since=2.weeks.ago --until=yesterday
+< git log --author alice --committer=bob --after=2.weeks.ago --before yesterday
+-log --touches needle --ignore-case --match fixed --invert-grep --all-match
+= git log -Sneedle -i -F --invert-grep --all-match
+< git log -S needle -i --fixed-strings --invert-grep --all-match
+-log --match extended
+= git log -E
+-log --match basic
+= git log --basic-regexp
+-log --format '%h %s' --decorate full --date iso --abbrev 10 --header-only
+= git log '--format=%h %s' --decorate=full --date=iso --abbrev=10 -s
+< git log --pretty='%h %s' --decorate=full --date=iso --abbrev=10 --no-patch
+-log --decorate short
+= git log --decorate=short
+-log --decorate off
+= git log --decorate=no
+< git log --no-decorate
+-log --patch --stat --numstat --shortstat --name-only --raw --summary
+= git log -p --stat --numstat --shortstat --name-only --raw --summary
+-log --name-status --context 5
+= git log --name-status -U5
+< git log --name-status -U 5
+-log --ignore-all-space --ignore-space-change --renames off
+= git log -w -b --no-renames
+< git log -w -b --no-renames
+-log --rename-threshold 60 --swap --merge-diff combined
+= git log -M60% -R -c
+< git log -M60 -R -c
+-log --merge-diff separate
+= git log -m
+-log --merge-diff dense
+= git log --cc
+-log --merge-diff first-parent
+= git log --diff-merges=first-parent
+-log --merge-diff off
+= git log --no-diff-merges
+-log --diff-filter AM --word-diff plain
+= git log --diff-filter=AM --word-diff=plain
+-log --word-diff color --text --full-index --nul
+= git log --word-diff=color -a --full-index -z
+< git log --color-words -a --full-index -z
+-log --side-by-side --width 100 --color always
+= git log -y --width=100 --color=always
+< git log --side-by-side --width=100 --color
+-log --color never
+= git log --color=never
+-log --color auto
+= git log --color=auto
+-log main ^topic v1..v2 --grep fix feat --path src docs
+= git log --grep=fix --grep=feat main ^topic v1..v2 -- src docs
+
+# --- show
+-show
+= git show
+-show v1 HEAD:a.txt --oneline --format short --date iso --abbrev 8 --header-only --path a.txt
+= git show --oneline --format=short --date=iso --abbrev=8 -s v1 HEAD:a.txt -- a.txt
+-show --patch --stat --context 1 --color always
+= git show -p --stat -U1 --color=always
+-show --numstat --shortstat --name-only --name-status --raw --summary
+= git show --numstat --shortstat --name-only --name-status --raw --summary
+-show --ignore-all-space --ignore-space-change --renames on --rename-threshold 40 --swap
+= git show -w -b --renames -M40% -R
+-show --merge-diff dense --diff-filter AD --word-diff porcelain --text --full-index --nul
+= git show --cc --diff-filter=AD --word-diff=porcelain -a --full-index -z
+-show --side-by-side --width 120
+= git show -y --width=120
+
+# --- diff
+-diff
+= git diff
+-diff --staged --stat
+= git diff --staged --stat
+< git diff --cached --stat
+-diff main topic --exit-code --path src
+= git diff --exit-code main topic -- src
+-diff HEAD~1 --quiet
+= git diff --quiet HEAD~1
+< git diff -q HEAD~1
+-diff --name-only --name-status --numstat
+= git diff --numstat --name-only --name-status
+
+# --- add
+-add .
+= git add -- .
+-add --all
+= git add -A
+< git add --all
+-add --update --patch --force --executable on --dry-run --verbose a b
+= git add -u -p -f --chmod=+x -n -v -- a b
+< git add -u -p -f --chmod=+x -n -v a b
+-add --executable off x
+= git add --chmod=-x -- x
+
+# --- remove, move, restore, reset
+-remove --keep-files --recursive --force --dry-run --quiet --missing-ok dir
+= git rm --cached -r -f -n -q --ignore-unmatch -- dir
+< git rm --cached -r -f -n -q --ignore-unmatch dir
+-move --force --dry-run --skip-errors --verbose a b
+= git mv -f -n -k -v -- a b
+-restore --from HEAD~1 --staged --worktree --quiet f
+= git restore --source=HEAD~1 --staged --worktree -q -- f
+< git restore -s HEAD~1 -S -W -q f
+-restore --ours g
+= git restore --ours -- g
+-restore --theirs --patch g
+= git restore --theirs -p -- g
+-reset
+= git reset
+-reset --mode hard HEAD~2 --quiet
+= git reset --hard -q HEAD~2
+< git reset --hard -q HEAD~2
+-reset --mode soft
+= git reset --soft
+-reset --mode mixed
+= git reset --mixed
+-reset --mode keep main
+= git reset --keep main
+
+# --- commit
+-commit --message 'one' 'two' --path a b
+= git commit -m one -m two -- a b
+< git commit -m one -m two -- a b
+< git commit -m one -m two a b
+-commit --file msg.txt --all --amend --edit off --allow-empty --allow-empty-message
+= git commit -F msg.txt -a --amend --no-edit --allow-empty --allow-empty-message
+< git commit -F msg.txt -a --amend --no-edit --allow-empty --allow-empty-message
+-commit --all --message x
+= git commit -m x -a
+< git commit -am x
+-commit --edit on --author 'A <a@x>' --date 'yesterday' --reset-author --signoff
+= git commit --edit '--author=A <a@x>' --date=yesterday --reset-author -s
+-commit --fixup HEAD~2 --reuse-message HEAD --skip-hooks --change-id --cleanup strip
+= git commit --fixup=HEAD~2 -C HEAD -n --change-id --cleanup=strip
+< git commit --fixup=HEAD~2 -C HEAD --no-verify --change-id --cleanup=strip
+-commit --squash HEAD~1 --dry-run --quiet
+= git commit --squash=HEAD~1 --dry-run -q
+
+# --- switch, branch, tag
+-switch main
+= git switch main
+< git checkout main
+-switch --create feat --from main --track
+= git switch -c feat --track main
+< git switch -c feat --track main
+< git checkout -b feat --track main
+-switch --force-create feat --detach --quiet
+= git switch -C feat --detach -q
+-switch --discard-changes other
+= git switch -f other
+< git checkout -f other
+-switch -
+= git switch -
+-branch
+= git branch
+-branch --all --remotes --verbose --ignore-case
+= git branch -a -r -v -i
+-branch --upstream --current
+= git branch -vv --show-current
+-branch 'feat/*' --verbose
+= git branch -v --list 'feat/*'
+< git branch -v -l 'feat/*'
+-branch --create new --from main --track --force
+= git branch -f --track new main
+< git branch -t -f new main
+-branch --delete a b
+= git branch -d a b
+-branch --force-delete a
+= git branch -D a
+< git branch -D a
+-branch --rename old new
+= git branch -m old new
+-branch --copy old new
+= git branch -c old new
+-branch --set-upstream origin/main
+= git branch --set-upstream-to=origin/main
+< git branch -u origin/main
+-branch --unset-upstream
+= git branch --unset-upstream
+-branch --contains abc --without def --merged main --unmerged topic --points-at HEAD
+= git branch --contains=abc --no-contains=def --merged=main --no-merged=topic --points-at=HEAD
+-branch --sort=-committerdate --format '%(refname:short)'
+= git branch --sort=-committerdate '--format=%(refname:short)'
+-tag
+= git tag
+-tag 'v*' --lines 2
+= git tag -n2 -l 'v*'
+< git tag -l -n2 'v*'
+-tag --create v1 --from HEAD~1 --message 'rel' 'notes'
+= git tag -m rel -m notes v1 HEAD~1
+< git tag -m rel -m notes v1 HEAD~1
+-tag --create v2 --file notes.txt --annotate --force
+= git tag -F notes.txt -a -f v2
+-tag --delete v1 v2
+= git tag -d v1 v2
+-tag --contains abc --without def --merged main --unmerged topic --points-at HEAD --ignore-case
+= git tag --contains=abc --no-contains=def --merged=main --no-merged=topic --points-at=HEAD -i
+-tag --sort version:refname --format '%(refname)'
+= git tag --sort=version:refname '--format=%(refname)'
+
+# --- stash
+-stash
+= git stash push
+-stash --message wip --include-untracked --keep-index --quiet
+= git stash push -m wip -u --keep-index -q
+< git stash push -m wip -u --keep-index -q
+< git stash -m wip -u -k -q
+-stash-list
+= git stash list
+-stash-show 1 --patch --stat --name-only --name-status --include-untracked
+= git stash show -p --stat --name-only --name-status -u 1
+-stash-apply 2 --restore-index --quiet
+= git stash apply --index -q 2
+-stash-pop --restore-index
+= git stash pop --index
+-stash-pop
+= git stash pop
+-stash-pop 1 --quiet
+= git stash pop -q 1
+-stash-drop 0 --quiet
+= git stash drop -q 0
+-stash-clear
+= git stash clear
+
+# --- merge, rebase, cherry-pick, revert, clean, worktree
+-merge feature --fast-forward only --squash --stage-only --message 'merge' --edit off
+= git merge --ff-only --squash --no-commit -m merge --no-edit feature
+< git merge --ff-only --squash --no-commit -m merge --no-edit feature
+-merge topic --fast-forward never --file m.txt --edit on --strategy ours --prefer theirs
+= git merge --no-ff -F m.txt --edit -s ours -X theirs topic
+-merge topic --fast-forward allow --allow-unrelated --quiet
+= git merge --ff --allow-unrelated-histories -q topic
+-merge --continue
+= git merge --continue
+-merge --abort
+= git merge --abort
+-merge --quit
+= git merge --quit
+-rebase main topic --onto base --root --interactive --autosquash --autostash --keep-base --update-refs --replay --exec 'make' 'make test' --quiet
+= git rebase --onto=base --root -i --autosquash --autostash --keep-base --update-refs --force-rebase -x make -x 'make test' -q main topic
+-rebase --continue
+= git rebase --continue
+-rebase --skip
+= git rebase --skip
+-rebase --abort
+= git rebase --abort
+-rebase --quit
+= git rebase --quit
+-rebase --edit-todo
+= git rebase --edit-todo
+-rebase --show-current-patch
+= git rebase --show-current-patch
+-cherry-pick a b --record-origin --stage-only --edit off --mainline 1 --signoff --allow-empty --prefer ours
+= git cherry-pick -x -n --no-edit -m 1 -s --allow-empty -X ours a b
+-cherry-pick --continue
+= git cherry-pick --continue
+-cherry-pick --skip
+= git cherry-pick --skip
+-cherry-pick --abort
+= git cherry-pick --abort
+-cherry-pick --quit
+= git cherry-pick --quit
+-revert a --stage-only --edit on --mainline 2 --signoff --allow-empty --prefer theirs
+= git revert -n --edit -m 2 -s --allow-empty -X theirs a
+-revert --continue
+= git revert --continue
+-revert --skip
+= git revert --skip
+-revert --abort
+= git revert --abort
+-revert --quit
+= git revert --quit
+-clean --force --dry-run --directories --ignored also --exclude '*.o' '*.a' --quiet src
+= git clean -f -n -d -x -e '*.o' -e '*.a' -q -- src
+< git clean -f -n -d -x -e '*.o' -e '*.a' -q src
+-clean --force --nested --ignored only
+= git clean -f -X -f
+< git clean -ffX
+-worktree
+= git worktree list
+-worktree --porcelain --verbose --nul
+= git worktree list --porcelain -v -z
+-worktree-add ../w --from main --branch b --detach --force --quiet
+= git worktree add -b b --detach -f -q ../w main
+< git worktree add -b b --detach -f -q ../w main
+-worktree-add ../w2 --reset-branch b2
+= git worktree add -B b2 ../w2
+-worktree-remove ../w --force
+= git worktree remove -f ../w
+-worktree-prune --dry-run --verbose --expire now
+= git worktree prune -n -v --expire=now
+
+# --- clone, init, fetch, pull, push, remote
+-clone https://x/r.git dir --branch main --depth 1 --single-branch --bare --origin up --skip-checkout --filter blob:none --quiet
+= git clone --branch=main --depth=1 --single-branch --bare --origin=up --no-checkout --filter=blob:none -q https://x/r.git dir
+< git clone -b main --depth 1 --single-branch --bare -o up -n --filter=blob:none -q https://x/r.git dir
+-clone u --mirror
+= git clone --mirror u
+-init
+= git init
+-init d --bare --branch main --object-format sha256 --quiet
+= git init --bare --initial-branch=main --object-format=sha256 -q d
+< git init -b main --bare --object-format=sha256 -q d
+-fetch
+= git fetch
+-fetch origin 'refs/heads/*:refs/remotes/o/*' --all --prune --tags --depth 3 --unshallow --force --filter blob:none --dry-run --quiet --verbose
+= git fetch --all -p --tags --depth=3 --unshallow -f --filter=blob:none --dry-run -q -v origin 'refs/heads/*:refs/remotes/o/*'
+-fetch --pull-request 7
+= git fetch origin +refs/pull/7/head:refs/heads/pr/7
+-fetch up --merge-request 9
+= git fetch up +refs/merge-requests/9/head:refs/heads/mr/9
+-pull
+= git pull
+-pull origin main --integrate rebase --autostash --squash --all --prune --tags --depth 2 --force --dry-run --quiet
+= git pull --rebase --autostash --squash --all -p --tags --depth=2 -f --dry-run -q origin main
+< git pull --rebase --autostash --squash --all -p --tags --depth=2 -f --dry-run -q origin main
+-pull --integrate merge
+= git pull --rebase=false
+-pull --integrate ff-only
+= git pull --ff-only
+-push
+= git push
+-push --to origin main --track
+= git push --set-upstream origin main
+< git push -u origin main
+-push --to up --force --delete old
+= git push --force --delete up old
+-push --overwrite --all --tags --follow-tags --atomic --option ci.skip --quiet --verbose --dry-run
+= git push --force=unsafe --all --tags --follow-tags --atomic -o ci.skip --dry-run -q -v
+-push --for main --topic t1
+= git push origin HEAD:refs/for/main%topic=t1
+< git push origin HEAD:refs/for/main%topic=t1
+-push topic --for main --to gerrit
+= git push gerrit topic:refs/for/main
+-remote
+= git remote
+-remote --verbose
+= git remote -v
+-remote-add up https://x/r.git --fetch --tags --track main dev --mirror push
+= git remote add -f --tags -t main -t dev --mirror=push up https://x/r.git
+-remote-add up2 u --mirror fetch
+= git remote add --mirror=fetch up2 u
+-remote-remove up
+= git remote remove up
+< git remote rm up
+-remote-rename up down
+= git remote rename up down
+-remote-set-url up u2 --push --add --delete
+= git remote set-url --push --add --delete up u2
+-remote-get-url up --push --all
+= git remote get-url --push --all up
+-remote-show up --local
+= git remote show -n up
+-remote-prune up --dry-run
+= git remote prune --dry-run up
+-remote-set-head up main
+= git remote set-head up main
+-remote-set-head up --auto --delete
+= git remote set-head --auto --delete up
+-remote-refs origin 'refs/heads/*' --branches --tags --only-refs --symref --exit-code --quiet
+= git ls-remote --heads --tags --refs --symref --exit-code -q origin 'refs/heads/*'
+
+# --- plumbing
+-cat-file HEAD --type --size --pretty
+= git cat-file -t -s -p HEAD
+-ls-tree HEAD
+= git ls-tree HEAD
+-rev-parse HEAD~2
+= git rev-parse HEAD~2
+-refs
+= git refs

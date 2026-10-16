@@ -1,0 +1,223 @@
+// The plumbing of `1git`: `-cat-file`, `-ls-tree`, `-rev-parse` and `-refs`,
+// over loose objects and packfiles, in SHA-1 and SHA-256 repositories. Their
+// output is git's, octet for octet (`scripts/compare.sh` diffs it against the
+// real `git`).
+
+import io;
+import os;
+import core.GIT_object;
+import core.GIT_refs;
+import core.GIT_revparse;
+
+// --- the commands ------------------------------------------------------------
+
+pub int cat_file(str git_directory, str spec, bool is_type, bool is_size) {
+    str id = "";
+    match (GIT_revparse.object_id(git_directory, spec)) {
+        case Ok(str resolved): {
+            id = resolved;
+        }
+        case Err(GIT_revparse.Error error): {
+            io.eprint(spec + ": " + error.to_str());
+            return 1;
+        }
+    }
+    match (GIT_object.read(git_directory, id)) {
+        case Ok(GIT_object.Object object): {
+            if (is_type) {
+                say(object.kind());
+                return 0;
+            }
+            if (is_size) {
+                say(object.raw.size().to_str());
+                return 0;
+            }
+            match (object.body) {
+                case Tree(List<GIT_object.Entry> entries): {
+                    write(tree_text(entries));
+                }
+                case Blob: {
+                    write(object.raw);
+                }
+                case Commit: {
+                    write(object.raw);
+                }
+                case Tag: {
+                    write(object.raw);
+                }
+            }
+            return 0;
+        }
+        case Err(GIT_object.Error error): {
+            io.eprint(error.to_str());
+            return 1;
+        }
+    }
+}
+
+pub int ls_tree(str git_directory, str spec) {
+    // `git ls-tree` takes a tree-ish, so a commit means its tree and a tag is
+    // followed first: `GIT_revparse.tree_id` does both.
+    match (GIT_revparse.tree_id(git_directory, spec)) {
+        case Ok(str id): {
+            match (GIT_object.read(git_directory, id)) {
+                case Ok(GIT_object.Object object): {
+                    match (object.body) {
+                        case Tree(List<GIT_object.Entry> entries): {
+                            write(tree_text(entries));
+                            return 0;
+                        }
+                        case Commit: {
+                            io.eprint("not a tree object: " + spec);
+                            return 1;
+                        }
+                        case Blob: {
+                            io.eprint("not a tree object: " + spec);
+                            return 1;
+                        }
+                        case Tag: {
+                            io.eprint("not a tree object: " + spec);
+                            return 1;
+                        }
+                    }
+                }
+                case Err(GIT_object.Error error): {
+                    io.eprint(error.to_str());
+                    return 1;
+                }
+            }
+        }
+        case Err(GIT_revparse.Error error): {
+            io.eprint(spec + ": " + error.to_str());
+            return 1;
+        }
+    }
+}
+
+pub int rev_parse(str git_directory, str spec) {
+    match (GIT_revparse.rev_lines(git_directory, spec)) {
+        case Ok(List<str> names): {
+            for (str name in names) {
+                say(name);
+            }
+            return 0;
+        }
+        case Err(GIT_revparse.Error error): {
+            io.eprint(spec + ": " + error.to_str());
+            return 1;
+        }
+    }
+}
+
+pub int list_refs(str git_directory) {
+    match (GIT_refs.all(git_directory)) {
+        case Ok(List<GIT_refs.Ref> ref_list): {
+            for (GIT_refs.Ref one in ref_list) {
+                say(one.id + " " + one.name);
+            }
+            return 0;
+        }
+        case Err(GIT_refs.Error error): {
+            io.eprint(error.to_str());
+            return 1;
+        }
+    }
+}
+
+// --- formatting ---------------------------------------------------------------
+
+// `git ls-tree` and `git cat-file -p` on a tree print the same four fields:
+// the six-digit mode, the type word, the object name, a TAB, and the name --
+// quoted if it needs it, which is why this builds `bytes` and not a `str`.
+bytes tree_text(List<GIT_object.Entry> entries) {
+    bytes output = [];
+    for (GIT_object.Entry entry in entries) {
+        output.extend((entry.mode_text() + " " + entry.type_word() + " " + entry.id + "\t").to_bytes());
+        output.extend(quoted(entry.name));
+        output.push('\n');
+    }
+    return output;
+}
+
+// git's `quote_c_style`, which is what `core.quotePath` turns on and which
+// is on by default.
+//
+// A name with nothing unusual in it is printed as it is. One containing a
+// control character, a quote, a backslash, DEL, or any octet from 0x80 up is
+// wrapped in double quotes and escaped C-style: the seven named escapes where
+// there is one, a three-digit octal otherwise. So a UTF-8 name comes out as
+// `"caf\303\251.txt"` -- the octets, not the characters, because git has no
+// more idea than this does what encoding a path is in.
+bytes quoted(bytes name) {
+    bool is_needed = false;
+    for (int byte_value in name) {
+        if (byte_value < ' ' || byte_value == '"' || byte_value == '\\' || byte_value >= 127) {
+            is_needed = true;
+        }
+    }
+    if (!is_needed) {
+        return name;
+    }
+    bytes output = [];
+    output.push('"');
+    for (int byte_value in name) {
+        if (byte_value == 7) {
+            escape(output, 97);
+        } else if (byte_value == 8) {
+            escape(output, 98);
+        } else if (byte_value == '\t') {
+            escape(output, 116);
+        } else if (byte_value == '\n') {
+            escape(output, 110);
+        } else if (byte_value == 11) {
+            escape(output, 118);
+        } else if (byte_value == 12) {
+            escape(output, 102);
+        } else if (byte_value == '\r') {
+            escape(output, 114);
+        } else if (byte_value == '"' || byte_value == '\\') {
+            escape(output, byte_value);
+        } else if (byte_value < ' ' || byte_value >= 127) {
+            output.push('\\');
+            output.push(48 + (byte_value >> 6 & 7));
+            output.push(48 + (byte_value >> 3 & 7));
+            output.push(48 + (byte_value & 7));
+        } else {
+            output.push(byte_value);
+        }
+    }
+    output.push('"');
+    return output;
+}
+
+void escape(bytes output, int byte_value) {
+    output.push('\\');
+    output.push(byte_value);
+}
+
+// --- plumbing ------------------------------------------------------------------
+
+void say(str message) {
+    write((message + "\n").to_bytes());
+}
+
+void write(bytes data) {
+    // `io.stdout()` afresh on every call, for the same reason `dispatch`
+    // takes its parser as a parameter: a `File` held in a top-level local is
+    // invisible inside a function, and the alternative was threading one
+    // through every function that can print. It is safe -- closing a standard
+    // stream's `File` marks that `File` closed and leaves the descriptor
+    // alone (`lib/io.m31`, `File.release`).
+    io.File out = io.stdout();
+    match (out.write(data)) {
+        case Ok: {
+        }
+        case Err: {
+            // Standard output that will take no more is the end of the
+            // program, not something to report through it -- a closed pipe is
+            // the ordinary case, and git exits quietly on one too.
+            os.exit(0);
+        }
+    }
+}
+

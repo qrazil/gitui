@@ -24,6 +24,9 @@
 # (hints are shorter on purpose); its presence is shown on a failure.
 set -uo pipefail
 
+# shellcheck source=lib_cli.sh
+. "$(cd "$(dirname "$0")" && pwd)/lib_cli.sh"
+
 OURS=$(cd "$(dirname "$1")" && pwd)/$(basename "$1")
 HERE=$(cd "$(dirname "$0")" && pwd)
 WORK=${2:-$(mktemp -d)}
@@ -256,8 +259,9 @@ run_side() {
         eval "$setup" > /dev/null 2>&1
         T=$(mktemp -d)
         G() {
-            "$bin" "$@" > "$T/o" 2> "$T/e"
+            side_run "$bin" "$@" > "$T/o" 2> "$T/e"
             local rc=$?
+            rc=$(norm_rc $rc)
             { local shown="$*"; printf '$ %s\n' "${shown//--change-id /}"; cat "$T/o"; printf 'rc=%s\n' "$rc"; } >> "$log"
             { printf '$ %s\n' "$*"; cat "$T/e"; } >> "$log.err"
             return $rc
@@ -441,7 +445,7 @@ probe_case_only() {
         return
     fi
     rm -rf "$d"; mkdir -p "$d"
-    if (cd "$d" && "$OURS" init -q . > /dev/null 2>&1 && [ "$(git config --local core.ignorecase)" = true ]); then
+    if (cd "$d" && one_run "$OURS" init -q . > /dev/null 2>&1 && [ "$(git config --local core.ignorecase)" = true ]); then
         echo A.txt
     else
         echo moved.txt

@@ -1,0 +1,616 @@
+// The command-line surface of `1git`, as data: every command, its options and
+// operands, and how each one is spelled in git's own grammar. One table feeds
+// three consumers, so they cannot drift apart:
+//
+//   * the parser declarations (`GIT_cli.build`): `--help`, usage errors,
+//     completions;
+//   * the translation to git's argv, which the command functions still take
+//     (`GIT_cli.to_git`);
+//   * the transition shim and `-migrate`, which rewrite git's argv into ours
+//     (`GIT_cli.from_git`).
+//
+// One line per option or operand: the kind, the name, any number of
+// `key=value` attributes, and the help text last, all separated by `|`.
+//
+//   kind   flag     a switch
+//          value    one str
+//          choice   one str out of `c=`
+//          int      one whole number
+//          values   a greedy list
+//          pos      a required operand      opt   an optional one (`d=`)
+//          tail     zero or more operands
+//   s=     the one-letter short (`--n`)
+//   p=     the placeholder in the help (a choice shows its keys)
+//   d=     the default, as it would be typed, shown by the help
+//   e=     what is handed to git's grammar: tokens separated by a space, `{}`
+//          stands for the value (`--max-count={}`, `-m {}`). A `values` option
+//          with a `{}` applies it to every element, without one it emits the
+//          tokens once and then the elements. `@path` collects the elements
+//          after git's `--`; other `@name`s are handled by name in GIT_cli.
+//   a=     spellings git has for the same thing, read only when git's argv is
+//          rewritten: templates separated by `,` (`-n {},-n{},-{}`)
+//   c=     `a,b,c`, or `a=tok,b=tok`: the token each choice is emitted as (a
+//          key listed twice: the first is emitted, the others only recognised)
+//
+// docs/CLI.md is the prose; this is what it is checked against.
+
+/// One option or operand.
+pub type Spec {
+    pub str kind;
+    pub str name;
+    pub str short = "";
+    pub str emit = "";
+    pub str alias = "";
+    pub str choices = "";
+    pub str default = "";
+    pub str placeholder = "";
+    pub str help = "";
+}
+
+/// One command: `word` is what follows the dash, `git` the command function
+/// it runs, `sub` the word after `git` that picks a subcommand ("" for none).
+pub type Cmd {
+    pub str word;
+    pub str short;
+    pub str git;
+    pub str sub;
+    pub str summary;
+    pub List<Spec> specs;
+}
+
+/// A table line, as a Spec.
+pub Spec parse_line(str line) {
+    List<str> parts = line.split("|");
+    Spec spec = Spec(parts[0], parts[1]);
+    for (int index in 2 .. parts.size() - 1) {
+        str part = parts[index];
+        int at = part.index_of("=").or(0);
+        str key = part.substr(0, at);
+        str value = part.substr(at + 1, part.size());
+        if (key == "s") {
+            spec.short = value;
+        } else if (key == "e") {
+            spec.emit = value;
+        } else if (key == "a") {
+            spec.alias = value;
+        } else if (key == "c") {
+            spec.choices = value;
+        } else if (key == "d") {
+            spec.default = value;
+        } else if (key == "p") {
+            spec.placeholder = value;
+        } else {
+            trap("clitable: unknown attribute '" + key + "' in: " + line);
+        }
+    }
+    spec.help = parts[parts.size() - 1];
+    return spec;
+}
+
+/// The keys a `c=` list offers, in order, each once.
+pub List<str> choice_keys(str choices) {
+    List<str> keys = [];
+    for (str entry in choices.split(",")) {
+        str key = entry;
+        match (entry.index_of("=")) {
+            case Some(int at): {
+                key = entry.substr(0, at);
+            }
+            case None: {
+            }
+        }
+        if (!keys.contains(key)) {
+            keys.push(key);
+        }
+    }
+    return keys;
+}
+
+/// `target` with every element of `more` added: lists have no `extend`.
+pub void append(List<str> target, List<str> more) {
+    for (str item in more) {
+        target.push(item);
+    }
+}
+
+List<Spec> specs_of(List<str> lines) {
+    List<Spec> out = [];
+    for (str line in lines) {
+        out.push(parse_line(line));
+    }
+    return out;
+}
+
+Cmd make(str word, str short, str git, str sub, str summary, List<str> lines) {
+    return Cmd(word, short, git, sub, summary, specs_of(lines));
+}
+
+// What `log`, `show` and `diff` share: how the changes themselves are printed.
+List<str> diff_lines() {
+    return [
+        "flag|patch|s=p|e=-p|a=--patch,-u|show the patch",
+        "flag|stat|e=--stat|show a diffstat",
+        "flag|numstat|e=--numstat|added and removed lines per file, for programs",
+        "flag|shortstat|e=--shortstat|only the totals line of the diffstat",
+        "flag|name-only|e=--name-only|show the names of the changed files",
+        "flag|name-status|e=--name-status|show the names, each with a letter for what happened",
+        "flag|raw|e=--raw|show git's raw diff format",
+        "flag|summary|e=--summary|show created, deleted and renamed files and mode changes",
+        "int|context|s=c|p=N|e=-U{}|a=--unified={},-U {}|lines of context around each change",
+        "flag|ignore-all-space|s=w|e=-w|a=--ignore-all-space|ignore whitespace when comparing lines",
+        "flag|ignore-space-change|s=b|e=-b|a=--ignore-space-change|ignore changes in the amount of whitespace",
+        "choice|renames|c=on=--renames,off=--no-renames,on=-M,on=--find-renames|detect renamed files (default: diff.renames)",
+        "int|rename-threshold|p=PERCENT|e=-M{}%|a=-M{},--find-renames={}|how similar two files must be to be a rename",
+        "flag|swap|e=-R|swap the two sides",
+        "choice|merge-diff|c=separate=-m,combined=-c,dense=--cc,first-parent=--diff-merges=first-parent,first-parent=--dd,separate=--diff-merges=separate,combined=--diff-merges=combined,dense=--diff-merges=dense-combined,off=--no-diff-merges,off=--diff-merges=off|how a merge commit shows its changes",
+        "value|diff-filter|p=KINDS|e=--diff-filter={}|keep only these kinds: A C D M R T U (lower case leaves them out)",
+        "choice|word-diff|c=plain=--word-diff=plain,color=--word-diff=color,porcelain=--word-diff=porcelain,none=--word-diff=none,plain=--word-diff,color=--color-words|compare by words",
+        "flag|text|s=a|e=-a|a=--text|treat every file as text",
+        "flag|full-index|e=--full-index|print full object names in the index lines",
+        "flag|nul|s=z|e=-z|end each name with a NUL instead of a newline",
+        "flag|side-by-side|s=y|e=-y|a=--side-by-side|lay the patch out as two columns, old and new",
+        "int|width|p=COLUMNS|e=--width={}|columns for --side-by-side (default: the terminal)",
+        "choice|color|c=always=--color=always,never=--color=never,auto=--color=auto,always=--color,never=--no-color|when to use colour (default: auto)",
+    ];
+}
+
+/// All of 1git's commands, in the order `--help` lists them: look, change,
+/// history, talk to a forge, then the plumbing.
+pub List<Cmd> table() {
+    List<Cmd> cmds = [];
+    // --- look ----------------------------------------------------------------
+    cmds.push(make("status", "s", "status", "", "show what changed in the work tree and the index", [
+        "tail|paths|p=PATH|only report these paths",
+        "choice|format|s=f|c=long=--long,short=--short,porcelain=--porcelain,porcelain2=--porcelain=v2,short=-s,porcelain=--porcelain=v1,porcelain=--porcelain=1,porcelain2=--porcelain=2|d=long|the layout: long, short, or a stable one for programs",
+        "flag|branch|s=b|e=--branch|a=-b|show the branch in the short layout",
+        "flag|nul|s=z|e=-z|a=--null|end each entry with a NUL (with the porcelain layouts)",
+        "choice|untracked|s=u|c=all=-uall,normal=-unormal,no=-uno,all=--untracked-files=all,normal=--untracked-files=normal,no=--untracked-files=no,all=--untracked-files,all=-u|how untracked files are shown (default: normal, or status.showUntrackedFiles)",
+        "choice|ignored|c=traditional=--ignored,matching=--ignored=matching,traditional=--ignored=traditional,no=--ignored=no|also show ignored files",
+        "choice|renames|c=on=--renames,off=--no-renames,on=-M|detect renamed files (default: status.renames)",
+        "flag|stash|e=--show-stash|show how many stashes there are",
+    ]));
+    List<str> log_lines = [
+        "tail|revisions|p=REV|where to start: branches, tags, commits, ranges (a..b), ^excluded",
+        "int|max|s=n|p=N|e=--max-count={}|a=-n {},-n{},--max-count {},-{}|stop after this many commits",
+        "int|skip|p=N|e=--skip={}|skip this many commits first",
+        "flag|oneline|e=--oneline|one line per commit",
+        "flag|graph|e=--graph|draw the history as a graph",
+        "flag|all|e=--all|start from every ref",
+        "flag|first-parent|e=--first-parent|follow only the first parent of merges",
+        "choice|merges|c=only=--merges,exclude=--no-merges|show only merge commits, or leave them out",
+        "flag|reverse|e=--reverse|oldest first",
+        "choice|order|c=topo=--topo-order,date=--date-order,author-date=--author-date-order|never show a commit before its children (default: commit date)",
+        "flag|follow|e=--follow|follow a single file across renames",
+        "flag|only-given|e=--no-walk|show just the named commits, not their ancestors",
+        "value|author|p=PATTERN|e=--author={}|commits whose author matches",
+        "value|committer|p=PATTERN|e=--committer={}|commits whose committer matches",
+        "value|since|p=DATE|e=--since={}|a=--since {},--after={},--after {}|commits newer than this date",
+        "value|until|p=DATE|e=--until={}|a=--until {},--before={},--before {}|commits older than this date",
+        "value|touches|p=TEXT|e=-S{}|a=-S {}|commits that add or remove this text",
+        "flag|ignore-case|s=i|e=-i|a=--regexp-ignore-case|match --author, --committer and --grep without regard to case",
+        "choice|match|c=extended=-E,fixed=-F,basic=--basic-regexp,extended=--extended-regexp,fixed=--fixed-strings|how patterns are read (default: basic)",
+        "flag|invert-grep|e=--invert-grep|commits whose message does not match --grep",
+        "flag|all-match|e=--all-match|commits matching every --grep, not just one",
+        "value|format|p=STYLE|e=--format={}|a=--pretty={},--format {},--pretty {}|oneline, short, medium, full, fuller, raw, or a format such as '%h %s'",
+        "choice|decorate|c=short=--decorate=short,full=--decorate=full,off=--decorate=no,short=--decorate,off=--no-decorate|show the refs that point at a commit",
+        "value|date|p=STYLE|e=--date={}|how dates are shown: iso, short, relative, raw, unix, rfc, format:...",
+        "int|abbrev|p=N|e=--abbrev={}|digits of an abbreviated commit name",
+        "flag|header-only|s=s|e=-s|a=--no-patch|leave out the changes",
+    ];
+    append(log_lines, diff_lines());
+    log_lines.push("values|grep|p=PATTERN|e=--grep={}|commits whose message matches any of these (put it after the revisions)");
+    log_lines.push("values|path|p=PATH|e=@path|only commits that touch these paths (put it last)");
+    cmds.push(make("log", "l", "log", "", "show the commit history", log_lines));
+    List<str> show_lines = [
+        "tail|objects|p=OBJECT|commits, tags, trees or blobs (default HEAD); REV:PATH is a file at a revision",
+        "flag|oneline|e=--oneline|one line per commit",
+        "value|format|p=STYLE|e=--format={}|a=--pretty={},--format {},--pretty {}|oneline, short, medium, full, fuller, raw, or a format such as '%h %s'",
+        "value|date|p=STYLE|e=--date={}|how dates are shown: iso, short, relative, raw, unix, rfc, format:...",
+        "int|abbrev|p=N|e=--abbrev={}|digits of an abbreviated commit name",
+        "flag|header-only|s=s|e=-s|a=--no-patch|leave out the changes",
+    ];
+    append(show_lines, diff_lines());
+    show_lines.push("values|path|p=PATH|e=@path|only changes to these paths (put it last)");
+    cmds.push(make("show", "", "show", "", "show commits, tags, trees and files", show_lines));
+    List<str> diff_cmd_lines = [
+        "tail|revisions|p=REV|none: work tree against index; one: work tree against it; two, or a..b: between them",
+        "flag|staged|e=--staged|a=--cached|compare the index against HEAD (or against the revision)",
+        "flag|exit-code|e=--exit-code|exit with 1 when there are differences",
+        "flag|quiet|s=q|e=--quiet|a=-q|print nothing, and exit with 1 when there are differences",
+    ];
+    append(diff_cmd_lines, diff_lines());
+    diff_cmd_lines.push("values|path|p=PATH|e=@path|only changes to these paths (put it last)");
+    cmds.push(make("diff", "d", "diff", "", "show changes between the work tree, the index and commits", diff_cmd_lines));
+
+    // --- change --------------------------------------------------------------
+    cmds.push(make("add", "a", "add", "", "stage changes", [
+        "tail|paths|p=PATH|files and directories to stage ('.' is everything under here)",
+        "flag|all|s=a|e=-A|a=--all|also stage deletions and new files everywhere",
+        "flag|update|s=u|e=-u|a=--update|stage changes to files git already tracks, add no new ones",
+        "flag|patch|s=p|e=-p|a=--patch|choose hunks to stage, interactively",
+        "flag|force|s=f|e=-f|a=--force|add files that are ignored",
+        "choice|executable|c=on=--chmod=+x,off=--chmod=-x|set or clear the executable bit on what is staged",
+        "flag|dry-run|e=-n|a=--dry-run|show what would be staged",
+        "flag|verbose|s=v|e=-v|a=--verbose|list each file staged",
+    ]));
+    cmds.push(make("remove", "", "rm", "", "stop tracking files, and delete them", [
+        "tail|paths|p=PATH|files to remove",
+        "flag|keep-files|e=--cached|remove from the index only, keep the files",
+        "flag|recursive|s=r|e=-r|allow directories",
+        "flag|force|s=f|e=-f|a=--force|remove files that have changes",
+        "flag|dry-run|e=-n|a=--dry-run|show what would be removed",
+        "flag|quiet|s=q|e=-q|a=--quiet|print nothing",
+        "flag|missing-ok|e=--ignore-unmatch|succeed when nothing matches",
+    ]));
+    cmds.push(make("move", "", "mv", "", "move or rename files and directories", [
+        "tail|paths|p=PATH|one or more sources, then the destination",
+        "flag|force|s=f|e=-f|a=--force|overwrite an existing destination",
+        "flag|dry-run|e=-n|a=--dry-run|show what would be moved",
+        "flag|skip-errors|s=k|e=-k|skip sources that cannot be moved",
+        "flag|verbose|s=v|e=-v|a=--verbose|list each file moved",
+    ]));
+    cmds.push(make("restore", "", "restore", "", "put files back as they are in the index or in a commit", [
+        "tail|paths|p=PATH|files and directories to restore",
+        "value|from|p=REV|e=--source={}|a=-s {},--source {}|restore from this commit (default: the index, or HEAD with --staged)",
+        "flag|staged|e=--staged|a=-S|restore the index",
+        "flag|worktree|e=--worktree|a=-W|restore the work tree (the default unless --staged)",
+        "flag|ours|e=--ours|take our side of a conflict",
+        "flag|theirs|e=--theirs|take their side of a conflict",
+        "flag|patch|s=p|e=-p|a=--patch|choose hunks to restore, interactively",
+        "flag|quiet|s=q|e=-q|a=--quiet|print nothing",
+    ]));
+    cmds.push(make("reset", "", "reset", "", "move the current branch to another commit", [
+        "opt|target|p=REV|d=HEAD|the commit to move to",
+        "choice|mode|e=--{}|c=soft,mixed,hard,keep|d=mixed|soft keeps index and files, mixed resets the index, hard also discards file changes, keep discards only what is safe",
+        "flag|quiet|s=q|e=-q|a=--quiet|print nothing",
+    ]));
+    cmds.push(make("commit", "c", "commit", "", "record the staged changes as a commit", [
+        "values|message|s=m|p=TEXT|e=-m {}|a=--message={},--message {}|the message: each text is a paragraph",
+        "value|file|s=F|p=FILE|e=-F {}|a=--file={},--file {}|read the message from a file ('-' is standard input)",
+        "flag|all|s=a|e=-a|a=--all|stage changes to tracked files first",
+        "flag|amend|e=--amend|replace the last commit",
+        "choice|edit|c=on=--edit,off=--no-edit,on=-e|open the editor on the message (default: on, unless a message is given)",
+        "flag|allow-empty|e=--allow-empty|allow a commit that changes nothing",
+        "flag|allow-empty-message|e=--allow-empty-message|allow an empty message",
+        "value|author|p=NAME <EMAIL>|e=--author={}|commit as this author",
+        "value|date|p=DATE|e=--date={}|use this author date",
+        "flag|reset-author|e=--reset-author|with --amend, take the author and date from now",
+        "flag|signoff|s=s|e=-s|a=--signoff|add a Signed-off-by line",
+        "value|fixup|p=REV|e=--fixup={}|a fixup commit for REV, for -rebase --autosquash",
+        "value|squash|p=REV|e=--squash={}|a squash commit for REV, for -rebase --autosquash",
+        "value|reuse-message|p=REV|e=-C {}|a=--reuse-message={},--reuse-message {}|reuse the message and author of a commit",
+        "flag|skip-hooks|s=n|e=-n|a=--no-verify|do not run the pre-commit and commit-msg hooks",
+        "flag|change-id|e=--change-id|add a Gerrit Change-Id line (or set gerrit.createChangeId)",
+        "choice|cleanup|e=--cleanup={}|c=strip,whitespace,verbatim,scissors,default|how the message is cleaned up",
+        "flag|dry-run|e=--dry-run|show what would be committed",
+        "flag|quiet|s=q|e=-q|a=--quiet|print only errors",
+        "values|path|p=PATH|e=@path|commit only the changes to these paths (put it last)",
+    ]));
+    cmds.push(make("switch", "w", "switch", "", "change branch", [
+        "opt|branch|p=BRANCH|the branch to switch to ('-' is the previous one)",
+        "value|create|s=c|p=NAME|e=-c {}|a=--create={},--create {}|create this branch and switch to it",
+        "value|force-create|p=NAME|e=-C {}|a=--force-create={},--force-create {}|create this branch, or reset it if it exists, and switch to it",
+        "value|from|p=REV|e=@from|where the new branch starts (default: HEAD)",
+        "flag|detach|s=d|e=--detach|switch to a commit, not to a branch",
+        "flag|discard-changes|e=-f|a=--force,--discard-changes|throw local changes away",
+        "flag|track|s=t|e=--track|a=-t|make the new branch track its start point",
+        "flag|quiet|s=q|e=-q|a=--quiet|print nothing",
+    ]));
+    cmds.push(make("branch", "b", "branch", "", "list, create, rename and delete branches", [
+        "tail|patterns|p=PATTERN|list only branches matching these",
+        "value|create|p=NAME|e=@create|create a branch",
+        "value|from|p=REV|e=@from|where --create starts (default: HEAD)",
+        "values|delete|p=NAME|e=-d|delete branches that are merged",
+        "values|force-delete|p=NAME|e=-D|delete branches even when they are not merged",
+        "values|rename|p=NAME|e=-m|rename a branch: NEW for the current one, or OLD NEW",
+        "values|copy|p=NAME|e=-c|copy a branch: NEW for the current one, or OLD NEW",
+        "flag|force|s=f|e=-f|a=--force|with --create, --rename or --copy: replace an existing branch",
+        "value|set-upstream|p=REF|e=--set-upstream-to={}|a=-u {},--set-upstream-to {}|make the current branch track this remote branch",
+        "flag|unset-upstream|e=--unset-upstream|stop the current branch tracking anything",
+        "flag|track|s=t|e=--track|a=-t|with --create, track the start point",
+        "flag|all|s=a|e=-a|a=--all|list local and remote branches",
+        "flag|remotes|s=r|e=-r|a=--remotes|list remote branches",
+        "flag|verbose|s=v|e=-v|a=--verbose|show the last commit of each branch",
+        "flag|upstream|s=u|e=-vv|also show what each branch tracks",
+        "flag|current|e=--show-current|print the name of the current branch",
+        "value|contains|p=REV|e=--contains={}|a=--contains {}|only branches that contain this commit",
+        "value|without|p=REV|e=--no-contains={}|a=--no-contains {}|only branches that do not contain this commit",
+        "value|merged|p=REV|e=--merged={}|a=--merged {}|only branches merged into this commit",
+        "value|unmerged|p=REV|e=--no-merged={}|a=--no-merged {}|only branches not merged into this commit",
+        "value|points-at|p=REV|e=--points-at={}|a=--points-at {}|only branches at this commit",
+        "value|sort|p=KEY|e=--sort={}|order by this key (refname, -refname, committerdate, ...)",
+        "value|format|p=FORMAT|e=--format={}|print each branch in this format",
+        "flag|ignore-case|s=i|e=-i|a=--ignore-case|sort and filter without regard to case",
+    ]));
+    cmds.push(make("tag", "t", "tag", "", "list, create and delete tags", [
+        "tail|patterns|p=PATTERN|list only tags matching these",
+        "value|create|p=NAME|e=@create|create a tag",
+        "value|from|p=REV|e=@from|what --create tags (default: HEAD)",
+        "values|message|s=m|p=TEXT|e=-m {}|a=--message={}|an annotated tag with this message: each text is a paragraph",
+        "value|file|s=F|p=FILE|e=-F {}|a=--file={}|an annotated tag with the message read from a file",
+        "flag|annotate|s=a|e=-a|a=--annotate|an annotated tag, with the message from the editor",
+        "values|delete|p=NAME|e=-d|delete tags",
+        "flag|force|s=f|e=-f|a=--force|replace an existing tag",
+        "value|contains|p=REV|e=--contains={}|a=--contains {}|only tags that contain this commit",
+        "value|without|p=REV|e=--no-contains={}|a=--no-contains {}|only tags that do not contain this commit",
+        "value|merged|p=REV|e=--merged={}|a=--merged {}|only tags merged into this commit",
+        "value|unmerged|p=REV|e=--no-merged={}|a=--no-merged {}|only tags not merged into this commit",
+        "value|points-at|p=REV|e=--points-at={}|a=--points-at {}|only tags at this commit",
+        "value|sort|p=KEY|e=--sort={}|order by this key (refname, -refname, version:refname, ...)",
+        "value|format|p=FORMAT|e=--format={}|print each tag in this format",
+        "int|lines|s=n|p=N|e=-n{}|with the list, show this many lines of each annotation",
+        "flag|ignore-case|s=i|e=-i|a=--ignore-case|sort and filter without regard to case",
+    ]));
+    cmds.push(make("stash", "", "stash", "push", "put the changes away, leaving a clean work tree", [
+        "value|message|s=m|p=TEXT|e=-m {}|a=--message={},--message {}|describe the stash",
+        "flag|include-untracked|s=u|e=-u|a=--include-untracked|also stash untracked files",
+        "flag|keep-index|s=k|e=--keep-index|a=-k|leave staged changes in the work tree",
+        "flag|quiet|s=q|e=-q|a=--quiet|print nothing",
+    ]));
+    cmds.push(make("stash-list", "", "stash", "list", "list the stashes", []));
+    cmds.push(make("stash-show", "", "stash", "show", "show the changes in a stash", [
+        "opt|entry|p=STASH|which stash: N or stash@{N} (default: the newest)",
+        "flag|patch|s=p|e=-p|a=--patch|show the patch",
+        "flag|stat|e=--stat|show a diffstat",
+        "flag|name-only|e=--name-only|show the names of the changed files",
+        "flag|name-status|e=--name-status|show the names, each with a letter for what happened",
+        "flag|include-untracked|s=u|e=-u|a=--include-untracked|also show the untracked files",
+    ]));
+    cmds.push(make("stash-apply", "", "stash", "apply", "apply a stash and keep it", [
+        "opt|entry|p=STASH|which stash: N or stash@{N} (default: the newest)",
+        "flag|restore-index|e=--index|also restore what was staged",
+        "flag|quiet|s=q|e=-q|a=--quiet|print nothing",
+    ]));
+    cmds.push(make("stash-pop", "", "stash", "pop", "apply a stash and drop it", [
+        "opt|entry|p=STASH|which stash: N or stash@{N} (default: the newest)",
+        "flag|restore-index|e=--index|also restore what was staged",
+        "flag|quiet|s=q|e=-q|a=--quiet|print nothing",
+    ]));
+    cmds.push(make("stash-drop", "", "stash", "drop", "delete one stash", [
+        "opt|entry|p=STASH|which stash: N or stash@{N} (default: the newest)",
+        "flag|quiet|s=q|e=-q|a=--quiet|print nothing",
+    ]));
+    cmds.push(make("stash-clear", "", "stash", "clear", "delete every stash", []));
+
+    // --- history ---------------------------------------------------------------
+    cmds.push(make("merge", "m", "merge", "", "join another branch into the current one", [
+        "opt|branch|p=REV|the branch or commit to merge",
+        "choice|fast-forward|c=allow=--ff,only=--ff-only,never=--no-ff|fast-forward when possible (the default), only that, or always make a merge commit",
+        "flag|squash|e=--squash|stage the result without committing or recording a merge",
+        "flag|stage-only|e=--no-commit|stage the result without committing it",
+        "values|message|s=m|p=TEXT|e=-m {}|a=--message={}|the merge message: each text is a paragraph",
+        "value|file|s=F|p=FILE|e=-F {}|a=--file={}|read the merge message from a file",
+        "choice|edit|c=on=--edit,off=--no-edit|open the editor on the merge message",
+        "choice|strategy|e=-s {}|a=--strategy={}|c=ort,ours,recursive,resolve|the merge strategy (default: ort)",
+        "choice|prefer|e=-X {}|a=--strategy-option={}|c=ours,theirs|on a conflict, take this side",
+        "flag|allow-unrelated|e=--allow-unrelated-histories|merge histories that share nothing",
+        "flag|continue|e=--continue|finish a merge after resolving conflicts",
+        "flag|abort|e=--abort|give up the merge and go back",
+        "flag|quit|e=--quit|forget the merge but keep the work tree as it is",
+        "flag|quiet|s=q|e=-q|a=--quiet|print only errors",
+    ]));
+    cmds.push(make("rebase", "r", "rebase", "", "replay commits on top of another base", [
+        "opt|upstream|p=REV|the new base (default: the upstream of the current branch)",
+        "opt|branch|p=REV|the branch to rebase (default: the current one)",
+        "value|onto|p=REV|e=--onto={}|put the commits on this base instead of UPSTREAM",
+        "flag|root|e=--root|rebase every commit, including the first",
+        "flag|interactive|s=i|e=-i|a=--interactive|edit the list of commits first",
+        "flag|autosquash|e=--autosquash|fold fixup! and squash! commits into their targets",
+        "flag|autostash|e=--autostash|stash local changes and bring them back afterwards",
+        "flag|keep-base|e=--keep-base|keep the fork point, whatever UPSTREAM is now",
+        "flag|update-refs|e=--update-refs|move branches that point into the rebased commits",
+        "flag|replay|e=--force-rebase|a=-f,--no-ff|replay the commits even when nothing changes",
+        "values|exec|s=x|p=COMMAND|e=-x {}|a=--exec={}|run this command after each commit",
+        "flag|continue|e=--continue|go on after resolving conflicts",
+        "flag|skip|e=--skip|leave out the commit that conflicts",
+        "flag|abort|e=--abort|give up and go back",
+        "flag|quit|e=--quit|forget the rebase but keep the work tree as it is",
+        "flag|edit-todo|e=--edit-todo|edit the list of commits that remain",
+        "flag|show-current-patch|e=--show-current-patch|show the commit being applied",
+        "flag|quiet|s=q|e=-q|a=--quiet|print only errors",
+    ]));
+    cmds.push(make("cherry-pick", "", "cherry-pick", "", "apply the changes of commits on the current branch", [
+        "tail|revisions|p=REV|the commits to apply, or ranges (a..b)",
+        "flag|record-origin|e=-x|add a line naming the original commit",
+        "flag|stage-only|e=-n|a=--no-commit|stage the result without committing it",
+        "choice|edit|c=on=--edit,off=--no-edit|open the editor on each message",
+        "int|mainline|s=m|p=N|e=-m {}|a=--mainline={}|for a merge commit, the parent to compare against",
+        "flag|signoff|s=s|e=-s|a=--signoff|add a Signed-off-by line",
+        "flag|allow-empty|e=--allow-empty|keep commits that start out empty",
+        "choice|prefer|e=-X {}|a=--strategy-option={}|c=ours,theirs|on a conflict, take this side",
+        "flag|continue|e=--continue|go on after resolving conflicts",
+        "flag|skip|e=--skip|leave out the commit that conflicts",
+        "flag|abort|e=--abort|give up and go back",
+        "flag|quit|e=--quit|forget the operation but keep the work tree as it is",
+    ]));
+    cmds.push(make("revert", "", "revert", "", "make commits that undo the changes of commits", [
+        "tail|revisions|p=REV|the commits to undo, or ranges (a..b)",
+        "flag|stage-only|e=-n|a=--no-commit|stage the result without committing it",
+        "choice|edit|c=on=--edit,off=--no-edit|open the editor on each message",
+        "int|mainline|s=m|p=N|e=-m {}|a=--mainline={}|for a merge commit, the parent to keep",
+        "flag|signoff|s=s|e=-s|a=--signoff|add a Signed-off-by line",
+        "flag|allow-empty|e=--allow-empty|keep commits that start out empty",
+        "choice|prefer|e=-X {}|a=--strategy-option={}|c=ours,theirs|on a conflict, take this side",
+        "flag|continue|e=--continue|go on after resolving conflicts",
+        "flag|skip|e=--skip|leave out the commit that conflicts",
+        "flag|abort|e=--abort|give up and go back",
+        "flag|quit|e=--quit|forget the operation but keep the work tree as it is",
+    ]));
+    cmds.push(make("clean", "", "clean", "", "delete untracked files (asks for --force or --dry-run)", [
+        "tail|paths|p=PATH|only under these paths",
+        "flag|force|s=f|e=-f|a=--force|really delete",
+        "flag|dry-run|e=-n|a=--dry-run|only show what would be deleted",
+        "flag|directories|s=d|e=-d|also delete untracked directories",
+        "choice|ignored|c=also=-x,only=-X|also delete ignored files, or delete only those",
+        "flag|nested|e=@nested|also delete directories that are git repositories (needs --force)",
+        "values|exclude|s=e|p=PATTERN|e=-e {}|a=--exclude={}|keep files matching these patterns",
+        "flag|quiet|s=q|e=-q|a=--quiet|print nothing",
+    ]));
+    cmds.push(make("worktree", "", "worktree", "list", "list the work trees of this repository", [
+        "flag|porcelain|e=--porcelain|a stable layout for programs",
+        "flag|verbose|s=v|e=-v|a=--verbose|show more",
+        "flag|nul|s=z|e=-z|end each field with a NUL (with --porcelain)",
+    ]));
+    cmds.push(make("worktree-add", "", "worktree", "add", "check a branch out in another directory", [
+        "pos|path|p=PATH|where to put the work tree",
+        "value|from|p=REV|e=@from|what to check out (default: HEAD)",
+        "value|branch|s=b|p=NAME|e=-b {}|create this branch there",
+        "value|reset-branch|p=NAME|e=-B {}|create this branch there, or reset it if it exists",
+        "flag|detach|s=d|e=--detach|check out a commit, not a branch",
+        "flag|force|s=f|e=-f|a=--force|allow a branch that is checked out elsewhere",
+        "flag|quiet|s=q|e=-q|a=--quiet|print nothing",
+    ]));
+    cmds.push(make("worktree-remove", "", "worktree", "remove", "delete a work tree", [
+        "pos|path|p=PATH|the work tree",
+        "flag|force|s=f|e=-f|a=--force|delete it even with changes in it",
+    ]));
+    cmds.push(make("worktree-prune", "", "worktree", "prune", "forget work trees whose directory is gone", [
+        "flag|dry-run|e=-n|a=--dry-run|only show what would be forgotten",
+        "flag|verbose|s=v|e=-v|a=--verbose|say what is forgotten",
+        "value|expire|p=WHEN|e=--expire={}|only those older than this",
+    ]));
+
+    // --- talk to a forge -----------------------------------------------------------
+    cmds.push(make("clone", "", "clone", "", "copy a repository", [
+        "pos|url|p=URL|where it is (https://, ssh, or a path)",
+        "opt|directory|p=DIR|where to put it (default: named after the repository)",
+        "value|branch|s=b|p=NAME|e=--branch={}|a=-b {},--branch {}|check this branch out instead of the remote's default",
+        "int|depth|p=N|e=--depth={}|only the last N commits",
+        "flag|single-branch|e=--single-branch|only the history of one branch",
+        "flag|bare|e=--bare|no work tree, just the repository",
+        "flag|mirror|e=--mirror|a bare copy of every ref",
+        "value|origin|s=o|p=NAME|e=--origin={}|a=-o {},--origin {}|call the remote this instead of origin",
+        "flag|skip-checkout|s=n|e=--no-checkout|a=-n|do not check anything out",
+        "value|filter|p=SPEC|e=--filter={}|a partial clone, for example blob:none",
+        "flag|quiet|s=q|e=-q|a=--quiet|print nothing",
+    ]));
+    cmds.push(make("init", "", "init", "", "start a repository", [
+        "opt|directory|p=DIR|where (default: here)",
+        "flag|bare|e=--bare|no work tree, just the repository",
+        "value|branch|s=b|p=NAME|e=--initial-branch={}|a=-b {},--initial-branch {}|name the first branch this",
+        "choice|object-format|e=--object-format={}|c=sha1,sha256|the hash the repository uses",
+        "flag|quiet|s=q|e=-q|a=--quiet|print nothing",
+    ]));
+    cmds.push(make("fetch", "f", "fetch", "", "download commits and refs from a remote", [
+        "opt|remote|p=REMOTE|where from (default: the upstream of the current branch, else origin)",
+        "tail|refspecs|p=REFSPEC|what to fetch (default: the remote's configured refs)",
+        "flag|all|s=a|e=--all|fetch every remote",
+        "flag|prune|s=p|e=-p|a=--prune|delete remote-tracking refs the remote no longer has",
+        "flag|tags|s=t|e=--tags|a=-t|fetch every tag",
+        "int|depth|p=N|e=--depth={}|only the last N commits",
+        "flag|unshallow|e=--unshallow|make a shallow repository complete",
+        "flag|force|s=f|e=-f|a=--force|overwrite local refs that do not fast-forward",
+        "value|filter|p=SPEC|e=--filter={}|a partial fetch, for example blob:none",
+        "int|pull-request|p=N|e=@pull|fetch GitHub pull request N as the branch pr/N",
+        "int|merge-request|p=N|e=@merge|fetch GitLab merge request N as the branch mr/N",
+        "flag|dry-run|e=--dry-run|show what would be fetched",
+        "flag|quiet|s=q|e=-q|a=--quiet|print nothing",
+        "flag|verbose|s=v|e=-v|a=--verbose|say more",
+    ]));
+    cmds.push(make("pull", "", "pull", "", "fetch, then join the upstream branch into the current one", [
+        "opt|remote|p=REMOTE|where from (default: the upstream of the current branch)",
+        "opt|branch|p=BRANCH|which branch (default: the upstream of the current branch)",
+        "choice|integrate|c=rebase=--rebase,merge=--rebase=false,ff-only=--ff-only,rebase=--rebase=true|how to join: replay your commits, make a merge, or only fast-forward (default: pull.rebase, pull.ff, else only fast-forward)",
+        "flag|autostash|e=--autostash|stash local changes and bring them back afterwards",
+        "flag|squash|e=--squash|stage the result without committing it",
+        "flag|all|s=a|e=--all|fetch every remote",
+        "flag|prune|s=p|e=-p|a=--prune|delete remote-tracking refs the remote no longer has",
+        "flag|tags|s=t|e=--tags|a=-t|fetch every tag",
+        "int|depth|p=N|e=--depth={}|only the last N commits",
+        "flag|force|s=f|e=-f|a=--force|overwrite local refs that do not fast-forward",
+        "flag|dry-run|e=--dry-run|show what would be fetched",
+        "flag|quiet|s=q|e=-q|a=--quiet|print nothing",
+    ]));
+    cmds.push(make("push", "p", "push", "", "send commits and refs to a remote", [
+        "tail|refs|p=REF|what to send: a branch, SRC:DST, or a tag (default: the current branch)",
+        "value|to|p=REMOTE|e=@to|where to send it (default: the upstream remote, else origin)",
+        "value|for|p=BRANCH|e=@for|ask Gerrit for review of the commit, as refs/for/BRANCH",
+        "value|topic|p=NAME|e=@topic|with --for, the Gerrit topic",
+        "flag|track|s=t|e=--set-upstream|a=-u|make the pushed branch track its remote counterpart",
+        "flag|force|s=f|e=--force|a=-f,--force-with-lease|overwrite the remote branch, but only if it is where you last saw it",
+        "flag|overwrite|e=--force=unsafe|overwrite the remote branch whatever is on it",
+        "flag|delete|e=--delete|a=-d|delete these refs on the remote",
+        "flag|all|s=a|e=--all|a=--branches|send every branch",
+        "flag|tags|e=--tags|send every tag",
+        "flag|follow-tags|e=--follow-tags|also send the annotated tags that point at what is sent",
+        "flag|atomic|e=--atomic|all or none of the refs",
+        "values|option|s=o|p=TEXT|e=-o {}|a=--push-option={}|a push option for the server",
+        "flag|dry-run|e=--dry-run|a=-n|show what would be sent",
+        "flag|quiet|s=q|e=-q|a=--quiet|print nothing",
+        "flag|verbose|s=v|e=-v|a=--verbose|say more",
+    ]));
+    cmds.push(make("remote", "", "remote", "", "list the remotes", [
+        "flag|verbose|s=v|e=-v|a=--verbose|show the URLs",
+    ]));
+    cmds.push(make("remote-add", "", "remote", "add", "add a remote", [
+        "pos|name|p=NAME|what to call it",
+        "pos|url|p=URL|where it is",
+        "flag|fetch|s=f|e=-f|a=--fetch|fetch it right away",
+        "flag|tags|e=--tags|fetch every tag",
+        "values|track|s=t|p=BRANCH|e=-t {}|a=--track={}|track only these branches",
+        "choice|mirror|c=fetch=--mirror=fetch,push=--mirror=push|treat the remote as a mirror",
+    ]));
+    cmds.push(make("remote-remove", "", "remote", "remove", "remove a remote and its remote-tracking refs", [
+        "pos|name|p=NAME|the remote",
+    ]));
+    cmds.push(make("remote-rename", "", "remote", "rename", "rename a remote", [
+        "pos|name|p=OLD|the remote",
+        "pos|new-name|p=NEW|its new name",
+    ]));
+    cmds.push(make("remote-set-url", "", "remote", "set-url", "change the URL of a remote", [
+        "pos|name|p=NAME|the remote",
+        "pos|url|p=URL|the new URL",
+        "flag|push|e=--push|change the URL pushes go to",
+        "flag|add|e=--add|add a URL instead of replacing",
+        "flag|delete|e=--delete|delete the URLs that match instead of replacing",
+    ]));
+    cmds.push(make("remote-get-url", "", "remote", "get-url", "print the URL of a remote", [
+        "pos|name|p=NAME|the remote",
+        "flag|push|e=--push|print the URL pushes go to",
+        "flag|all|s=a|e=--all|print every URL",
+    ]));
+    cmds.push(make("remote-show", "", "remote", "show", "show a remote and how branches relate", [
+        "pos|name|p=NAME|the remote",
+        "flag|local|e=-n|do not ask the remote, use what is stored here",
+    ]));
+    cmds.push(make("remote-prune", "", "remote", "prune", "delete remote-tracking refs the remote no longer has", [
+        "pos|name|p=NAME|the remote",
+        "flag|dry-run|e=--dry-run|a=-n|only show what would be deleted",
+    ]));
+    cmds.push(make("remote-set-head", "", "remote", "set-head", "set what the remote's HEAD is here", [
+        "pos|name|p=NAME|the remote",
+        "opt|branch|p=BRANCH|the branch",
+        "flag|auto|s=a|e=--auto|a=-a|ask the remote",
+        "flag|delete|s=d|e=--delete|a=-d|delete it",
+    ]));
+    cmds.push(make("remote-refs", "", "ls-remote", "", "list the refs of a remote without fetching", [
+        "opt|remote|p=REMOTE|the remote or URL (default: the upstream remote)",
+        "tail|patterns|p=PATTERN|only refs matching these",
+        "flag|branches|e=--heads|a=-h,--branches|only branches",
+        "flag|tags|s=t|e=--tags|a=-t|only tags",
+        "flag|only-refs|e=--refs|leave out HEAD and peeled tags",
+        "flag|symref|e=--symref|also show where symbolic refs point",
+        "flag|exit-code|e=--exit-code|exit with 2 when nothing matches",
+        "flag|quiet|s=q|e=-q|a=--quiet|print nothing",
+    ]));
+
+    // --- plumbing -------------------------------------------------------------------
+    cmds.push(make("cat-file", "", "cat-file", "", "print an object's type, size or contents", [
+        "pos|object|p=OBJECT|a revision that names an object: an object name or a prefix of one, a ref, HEAD:path, ...",
+        "flag|type|e=-t|print the object's type word",
+        "flag|size|e=-s|print the size of the object's content",
+        "flag|pretty|e=-p|print the object itself (the default)",
+    ]));
+    cmds.push(make("ls-tree", "", "ls-tree", "", "list a tree's entries", [
+        "pos|tree|p=TREE|a tree, or anything that names one: a commit, a tag, HEAD~2, v1:dir",
+    ]));
+    cmds.push(make("rev-parse", "", "rev-parse", "", "the object names a revision resolves to", [
+        "pos|rev|p=REV|a revision: a ref, an object name, HEAD~2, main^{tree}, v1:path, A..B, ...",
+    ]));
+    cmds.push(make("refs", "", "refs", "", "every ref in the repository, with what it points at", []));
+    cmds.push(make("migrate", "", "migrate", "", "write a git command line the 1git way", [
+        "opt|line|p=LINE|a git command line, in quotes: 'git log --oneline -5'",
+        "flag|nul|read git's words from standard input and write ours, NUL-separated (for scripts)",
+    ]));
+    return cmds;
+}

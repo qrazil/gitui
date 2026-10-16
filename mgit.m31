@@ -5,9 +5,14 @@
 // commit's follow-ups; and a synced jump list, toggled on demand.
 //
 //   bash scripts/build.sh                  # -> ./mgit
-//   ./mgit [path]                      # default: "."
+//   ./mgit [PATH] [--mouse on|off]     # PATH default: "."
+//   ./mgit --help | --version | --completions bash|zsh|fish
 //
-// `path` is where the repository is, exactly like `git status` run from
+// The command line is Oro's grammar (`lib/args`), like `1git`'s: two dashes
+// are an option, anything else is data. There is no `--no-mouse`: that spelling
+// is refused by the grammar, so the switch is a value, `--mouse off`.
+//
+// `PATH` is where the repository is, exactly like `git status` run from
 // that directory -- it is not walked up through parents the way `1git`'s
 // own `--git-dir` discovery is (`GIT_repository.find` still walks up to *find*
 // `.git`, but the working tree this client reads and writes is `path`
@@ -41,6 +46,8 @@ import os;
 import core.GIT_hash;
 import core.GIT_repository;
 import term;
+import args;
+import net.GIT_transport;
 import tui.app.TUI_app;
 import tui.core.TUI_buffer;
 import tui.core.TUI_geometry;
@@ -49,28 +56,41 @@ import ui.GIT_ui_autorefresh;
 import ui.GIT_ui_loop;
 import ui.GIT_ui_sbs;
 
+args.Parser parser = args.Parser("mgit", summary: "an interactive git client for the terminal: one outline of changes, staging and commits; branches, merges, rebases, stashes");
+parser.version = "mgit " + GIT_transport.AGENT.substr(5, GIT_transport.AGENT.size());
+parser.epilog = "the mouse is on unless the environment (M31GIT_MOUSE=off) or git config (mgit.mouse = off) says otherwise; --mouse overrides both\n" +
+    "a terminal is needed: mgit reads the keyboard. Press ? inside for the keys.";
+parser.optional("path", ".", help: "where the repository's work tree is (run it from the top level)", placeholder: "PATH");
+parser.value("mouse", help: "mouse reports: on for the wheel and clicks, off to keep the terminal's own text selection", placeholder: "on|off");
+parser.completions();
 List<str> argv = os.arguments();
-str path = ".";
-if (argv.size() > 1) {
-    path = argv[1];
+args.Parsed parsed = parser.parse_or_exit(argv.slice(1, argv.size()), status: 2);
+str path = parsed.optional("path");
+str mouse_choice = parsed.value("mouse").or("");
+if (mouse_choice != "" && mouse_choice != "on" && mouse_choice != "off") {
+    parser.fail("'--mouse' needs one of on, off, and got '" + mouse_choice + "'", status: 2);
 }
 str git_directory = GIT_repository.find(path);
 if (git_directory == "") {
     io.eprint("mgit: not a git repository (or any parent up to /): no .git directory");
-    return;
+    os.exit(1);
 }
 str refusal = GIT_hash.refusal(git_directory);
 if (refusal != "") {
     io.eprint("mgit: " + refusal);
-    return;
+    os.exit(1);
 }
 if (!term.is_terminal(0)) {
     io.eprint("mgit: standard input is not a terminal");
-    return;
+    os.exit(1);
 }
 GIT_client.State state = GIT_client.State.open(git_directory, path);
 state.reload();
-TUI_app.Loop loop = TUI_app.Loop(should_report_mouse: GIT_ui_sbs.is_mouse_on(git_directory));
+bool is_mouse = GIT_ui_sbs.is_mouse_on(git_directory);
+if (mouse_choice != "") {
+    is_mouse = mouse_choice == "on";
+}
+TUI_app.Loop loop = TUI_app.Loop(should_report_mouse: is_mouse);
 GIT_ui_autorefresh.AutoRefresh refresher = GIT_ui_autorefresh.open(state.core());
 bool is_running = true;
 while (is_running) {

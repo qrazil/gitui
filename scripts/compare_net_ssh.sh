@@ -7,6 +7,9 @@
 #
 #   bash scripts/compare_net_ssh.sh <1git-binary> [workdir]
 set -uo pipefail
+
+# shellcheck source=lib_cli.sh
+. "$(cd "$(dirname "$0")" && pwd)/lib_cli.sh"
 OURS=$(cd "$(dirname "$1")" && pwd)/$(basename "$1")
 WORK=${2:-$(mktemp -d)}
 mkdir -p "$WORK"; WORK=$(cd "$WORK" && pwd)
@@ -71,7 +74,7 @@ run() { # <label> <script using G and $URL>
             if [ "$side" = git ]; then
                 G() { GIT_SSH_COMMAND="$GIT_SSH_COMMAND" git "$@"; }
             else
-                G() { HOME=$HOMEDIR "$OURS" "$@"; }
+                G() { HOME=$HOMEDIR one_run "$OURS" "$@"; }
             fi
             : > "$WORK/log-$side"
             eval "$2" >> "$WORK/log-$side" 2>&1

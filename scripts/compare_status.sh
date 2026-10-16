@@ -15,6 +15,9 @@
 # expected-output file to drift.
 set -uo pipefail
 
+# shellcheck source=lib_cli.sh
+. "$(cd "$(dirname "$0")" && pwd)/lib_cli.sh"
+
 OURS=$(cd "$(dirname "$1")" && pwd)/$(basename "$1")
 WORK=${2:-$(mktemp -d)}
 mkdir -p "$WORK"
@@ -51,8 +54,8 @@ compare() {
     shift 2
     n=$((n + 1))
     g -C "$repo" status "$@" > "$WORK/want" 2> "$WORK/want.err"; local want_rc=$?
-    "$OURS" -C "$repo" status "$@" > "$WORK/got" 2> "$WORK/got.err"; local got_rc=$?
-    if ! cmp -s "$WORK/want" "$WORK/got" || [ $want_rc -ne $got_rc ]; then
+    one_run "$OURS" -C "$repo" status "$@" > "$WORK/got" 2> "$WORK/got.err"; local got_rc=$?
+    if ! cmp -s "$WORK/want" "$WORK/got" || [ "$(norm_rc $want_rc)" -ne "$(norm_rc $got_rc)" ]; then
         printf '\033[31mdiffer\033[0m %s: status %s\n' "$label" "$*"
         printf '       exit: git %s, 1git %s\n' "$want_rc" "$got_rc"
         diff <(sed 's/$/$/' "$WORK/want" | cat -v) <(sed 's/$/$/' "$WORK/got" | cat -v) | head -12 | sed 's/^/       /'
@@ -254,8 +257,8 @@ for args in "" "-s" "-sb" "--porcelain" "-s ."; do
     # shellcheck disable=SC2086
     ( cd "$r/dir" && g status $args ) > "$WORK/want" 2>&1; want_rc=$?
     # shellcheck disable=SC2086
-    ( cd "$r/dir" && "$OURS" status $args ) > "$WORK/got" 2>&1; got_rc=$?
-    if ! cmp -s "$WORK/want" "$WORK/got" || [ $want_rc -ne $got_rc ]; then
+    ( cd "$r/dir" && one_run "$OURS" status $args ) > "$WORK/got" 2>&1; got_rc=$?
+    if ! cmp -s "$WORK/want" "$WORK/got" || [ "$(norm_rc $want_rc)" -ne "$(norm_rc $got_rc)" ]; then
         printf '\033[31mdiffer\033[0m subdir (cwd dir): status %s\n' "$args"
         diff <(sed 's/$/$/' "$WORK/want" | cat -v) <(sed 's/$/$/' "$WORK/got" | cat -v) | head -12 | sed 's/^/       /'
         bad=$((bad + 1))
@@ -270,13 +273,14 @@ compare config-short "$r" --long
 # not a repository: only the exit status
 n=$((n + 1))
 mkdir -p "$WORK/nowhere"
-( cd "$WORK/nowhere" && GIT_CEILING_DIRECTORIES=$WORK "$OURS" status ) >/dev/null 2>&1; got_rc=$?
-if [ $got_rc -ne 128 ]; then
-    printf '\033[31mdiffer\033[0m outside a repository: exit %s, git says 128\n' "$got_rc"
+( cd "$WORK/nowhere" && GIT_CEILING_DIRECTORIES=$WORK one_run "$OURS" status ) >/dev/null 2>&1; got_rc=$?
+if [ $got_rc -ne 1 ]; then
+    printf '\033[31mdiffer\033[0m outside a repository: exit %s, git says 128 (1git: 1)\n' "$got_rc"
     bad=$((bad + 1))
 fi
 
 if [ $bad -eq 0 ]; then
     echo "     $n status comparisons against git, all identical"
+    [ "$(fallback_count)" -eq 0 ] || echo "     ($(fallback_count) of them through the transition shim: forms 1git's command line no longer has)"
 fi
 exit $bad

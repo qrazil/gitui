@@ -19,6 +19,9 @@
 # config, reflogs, shallow file, FETCH_HEAD, object ids and work tree, and the
 # remote's refs and `fsck`. Credentials are throwaway values of this script.
 set -uo pipefail
+
+# shellcheck source=lib_cli.sh
+. "$(cd "$(dirname "$0")" && pwd)/lib_cli.sh"
 exec 2> >(grep -v 'templates not found' >&2)
 
 OURS=$(cd "$(dirname "$1")" && pwd)/$(basename "$1")
@@ -208,8 +211,9 @@ run_side() {
         mkdir -p "$PUSHER/.git/hooks"
         T=$(mktemp -d)
         G() {
-            "$bin" "$@" > "$T/o" 2> "$T/e"
+            side_run "$bin" "$@" > "$T/o" 2> "$T/e"
             local rc=$?
+            rc=$(norm_rc $rc)
             sed -i.bak '/templates not found/d' "$T/e"; rm -f "$T/e.bak"
             { printf '$ %s\n' "$*"; cat "$T/o"; printf 'rc=%s\n' "$rc"; } >> "$log"
             { printf '$ %s\n' "$*"; cat "$T/e"; } >> "$log.err"
