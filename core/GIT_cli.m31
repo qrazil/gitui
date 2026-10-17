@@ -71,7 +71,7 @@ pub type Job {
 
 pub const str PROG = "1git";
 
-/// `0.24.0`, from the one place the version is written down.
+/// `0.25.0`, from the one place the version is written down.
 pub str version_line() {
     return GIT_transport.AGENT.substr(5, GIT_transport.AGENT.size);
 }

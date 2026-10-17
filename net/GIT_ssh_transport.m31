@@ -238,7 +238,7 @@ pub type Target {
     pub bool is_hashed;
 }
 
-const str AGENT = "1git/0.24.0";
+const str AGENT = "1git/0.25.0";
 const str DEFAULT_KEY = "id_ed25519";
 
 str home_directory() {

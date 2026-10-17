@@ -594,7 +594,7 @@ Deliberate departures, and gaps:
   ~40 s at `-O0`, a 21 MB repository 7 s at `-O2`). This is an m31 library
   limit, not worked around.
 - `init` writes no templates (no sample hooks, `info/exclude`, `description`).
-- The advertised user agent is `1git/0.24.0`.
+- The advertised user agent is `1git/0.25.0`.
 
 ## Case-insensitive and Unicode-normalizing volumes (0.19.0, 0.19.1)
 
