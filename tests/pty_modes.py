@@ -68,7 +68,6 @@ for k, v in (
     ("GIT_COMMITTER_EMAIL", "fixture@example.com"),
     ("GIT_AUTHOR_DATE", "1700000000 +0000"),
     ("GIT_COMMITTER_DATE", "1700000000 +0000"),
-    ("LC_ALL", "C.UTF-8"),
 ):
     GIT_ENV[k] = v
 for k in ("GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_EDITOR", "VISUAL", "EDITOR"):
@@ -76,7 +75,6 @@ for k in ("GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_EDITOR", "VISUAL", 
 
 CLIENT_ENV = dict(os.environ)
 CLIENT_ENV["TERM"] = "xterm"
-CLIENT_ENV["LC_ALL"] = "C.UTF-8"
 for k in ("GIT_AUTHOR_NAME", "GIT_COMMITTER_NAME"):
     CLIENT_ENV[k] = "Client"
 for k in ("GIT_AUTHOR_EMAIL", "GIT_COMMITTER_EMAIL"):
@@ -443,6 +441,45 @@ def tour(binpath, fx, rows, cols, root, repaints):
         if repaints:
             same_as_full_redraw(t, label + " palette")
         t.send("\x1b")
+        # the other views that draw file text, names and messages
+        t.send("1")
+        t.send("/plain\r")
+        t.send("B")
+        structure(t, label + " blame", 0, is_overlay=True)
+        if repaints:
+            same_as_full_redraw(t, label + " blame")
+        t.send("q")
+        t.send("H")
+        structure(t, label + " file history", 0, is_overlay=True)
+        t.send("\r")
+        structure(t, label + " the commit view", 0, is_overlay=True)
+        if repaints:
+            same_as_full_redraw(t, label + " the commit view")
+        t.send("q")
+        t.send("q")
+        t.send("@")
+        structure(t, label + " command log", 0, is_overlay=True)
+        t.send("\x1b")
+        t.send("i")
+        structure(t, label + " overview", 0, is_overlay=True)
+        if repaints:
+            same_as_full_redraw(t, label + " overview")
+        t.send("\x1b")
+        t.send("4")
+        t.send("b")
+        t.send("/")
+        structure(t, label + " branch picker", 3, is_overlay=True)
+        if repaints:
+            same_as_full_redraw(t, label + " branch picker")
+        t.send("\x1b")
+        t.send("\x1b")
+        # sideways scrolling of an outline that has wide characters in it
+        t.send("3")
+        t.send("lll")
+        structure(t, label + " history scrolled sideways", 2)
+        if repaints:
+            same_as_full_redraw(t, label + " history scrolled sideways")
+        t.send("hhh")
         t.send("2")
         structure(t, label + " commit panel", 1)
         if repaints:
@@ -537,6 +574,18 @@ def behaviour(binpath, root):
         # q quits
         rc = t.quit()
         check("q quits from a mode", rc == 0, "rc=%r" % rc)
+    finally:
+        t.kill()
+
+    # --- the palette can quit, and can start the editor ---------------------------------------------
+    fx = build_simple(root, "paletterun")
+    t = Term(binpath, fx, 24, 80)
+    try:
+        t.send(":")
+        t.send("Everywhere: quit")
+        t.send("\r")
+        time.sleep(0.6)
+        check("quit from the palette ends the program", not t.is_alive() and t.proc.returncode == 0, "alive=%r rc=%r" % (t.is_alive(), t.proc.returncode))
     finally:
         t.kill()
 
