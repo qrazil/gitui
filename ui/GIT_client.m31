@@ -566,11 +566,21 @@ void State.run_entry(GIT_ui_keymap.Entry entry, str arg) {
         message = entry.label + ": open a diff first (d on a file)";
         return;
     }
+    TUI_app.Action action = TUI_app.Action.Continue;
     if (entry.scope == GIT_ui_core.SCOPE_GLOBAL) {
-        run_global_command(entry.cmd, arg);
-        return;
+        action = run_global_command(entry.cmd, arg);
+    } else {
+        action = run_in_mode(entry.scope, entry.cmd, arg);
     }
-    run_in_mode(entry.scope, entry.cmd, arg);
+    match (action) {
+        case Quit: {
+            is_quit_wanted = true;
+        }
+        case Continue: {
+        }
+        case Redraw: {
+        }
+    }
 }
 
 /// A key goes to the overlay on top of the stack if there is one -- it takes
@@ -586,6 +596,10 @@ pub TUI_app.Action State.handle_key(term.Code code) {
         GIT_ui_core.Overlay top = overlays[overlays.size() - 1];
         TUI_app.Action action = top.handle_key(code);
         settle();
+        if (is_quit_wanted) {
+            is_quit_wanted = false;
+            return TUI_app.Action.Quit;
+        }
         if (is_editor_wanted && rebase_edit_path != "") {
             return TUI_app.Action.Quit;
         }

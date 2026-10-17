@@ -402,6 +402,10 @@ pub type Core {
     /// the editor ran since the view last read it (see `GIT_ui_merge`).
     pub str resolve_edit_path = "";
     pub bool is_resolve_dirty = false;
+    /// Set by an action the command palette ran that ends the loop (quit, or
+    /// `$EDITOR` wanting the terminal): the palette's picker has already closed
+    /// when it runs, so `State.handle_key` returns `Quit` for it afterwards.
+    pub bool is_quit_wanted = false;
     /// The current mode (`GIT_ui_modes`): which full-screen view has the keys.
     pub str ui_mode = "status";
     /// The outline row each mode's cursor was on when it was left, by mode.

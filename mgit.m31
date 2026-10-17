@@ -61,7 +61,7 @@ import ui.GIT_ui_sbs;
 
 args.Parser parser = args.Parser("mgit", summary: "an interactive git client for the terminal: one outline of changes, staging and commits; branches, merges, rebases, stashes");
 parser.version = GIT_transport.AGENT.substr(5, GIT_transport.AGENT.size);
-parser.epilog = "the mouse is on unless the environment (M31GIT_MOUSE=off) or git config (mgit.mouse = off) says otherwise; --mouse overrides both\n" + "a terminal is needed: mgit reads the keyboard. Press ? inside for the keys.";
+parser.epilog = "the mouse is on unless the environment (M31GIT_MOUSE=off) or git config (mgit.mouse = off) says otherwise; --mouse overrides both\n" + "a terminal is needed: mgit reads the keyboard. Tab changes mode (Status, Commit, History, Branches, Stash), ? lists the keys of the one you are in, : opens a palette of every action.";
 parser.optional("path", ".", help: "where the repository's work tree is (run it from the top level)", placeholder: "PATH");
 parser.value("mouse", help: "mouse reports: on for the wheel and clicks, off to keep the terminal's own text selection", placeholder: "on|off");
 parser.completions();
