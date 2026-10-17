@@ -104,6 +104,7 @@ bash scripts/build.sh                 # mgit.m31 -> ./mgit   (-o name to rename)
 | `GIT_ui_core.m31` | the shared `Core`, the `Overlay` interface (`handle_key`, `render`, `hints`), **the key table** that drives dispatch, the footer and `?` alike, and the command-log ring buffer |
 | `GIT_ui_model.m31` | the pure model: outline rows, commit-file diffs, commit template, editor choice |
 | `GIT_ui_outline.m31`, `GIT_ui_diff.m31`, `GIT_ui_commit.m31`, `GIT_ui_branch.m31`, `GIT_ui_remote.m31` | one layer per concern (stage/unstage/discard/stage-all, hunk staging, commit and amend, branches, push and pull), each embedding the one below it, plus that concern's overlays |
+| `GIT_ui_modes.m31`, `GIT_ui_keymap.m31`, `GIT_ui_modeview.m31`, `GIT_ui_scrub.m31` | the modes (`docs/MGIT-MODES.md`): the order, the sections each shows and the tab bar for a width; the one table of what each mode, view and flow state offers, from which the bottom row, `?` help and command palette are generated; the tab bar, hint row and Commit panel drawing; and the last pass over a finished frame that removes control characters from cells |
 | `GIT_ui_sections.m31`, `GIT_ui_statusline.m31`, `GIT_ui_overview.m31` | the pure section model (`[`/`]`, `{`/`}`, Tab, `-`/`+`, the persisted fold list), the pure statusline (facts, segments, fitting a width, the overview lines), and the `i` overview overlay that opens the pickers and lists |
 | `GIT_ui_help.m31`, `GIT_ui_log.m31`, `GIT_ui_search.m31`, `GIT_ui_picker.m31`, `GIT_ui_panel.m31` | the `?` key help, the `@` command log, `/` search, the reusable fuzzy-filter picker, and the shared frame/clamp drawing helpers |
 | `GIT_pathtree.m31` | a commit's tree as a lookup: `read_commit`, `entry_at(tree, path)`, `blob` |
@@ -133,6 +134,7 @@ bash scripts/build.sh                 # mgit.m31 -> ./mgit   (-o name to rename)
 | `tests/oracles/oracle_*.py` | the oracles: `hashlib`, `zlib`, and a from-scratch format reader |
 | `tests/t_sections.m31`, `tests/pty_sections.py` | the section model and statusline text, and the section keys, folds, hunk folds, statusline and overview under a pty |
 | `tests/t_highlight.m31`, `tests/pty_highlight.py` | the syntax colouring: pure line styling, and the SGR colours, scrolling and switches under a pty |
+| `tests/t_modes.m31`, `tests/pty_modes.py` | the modes: the key map's invariants (no key bound twice in a mode, nothing lost, every action in the palette, the hint row fitting every width including wide characters), and a tour of every mode at 80x24, 120x40 and 40x12 through `pyte` that checks the tab bar, the hint row on the last row, nothing past the last column and incremental updates against a full redraw (skipped without `pyte`) |
 | `tests/pty_e2e.py`, `tests/pty_blame_undo.py` | drive `mgit` under a real pty against disposable fixtures, real `git` as the oracle (the second file: blame, history, undo, tags, ahead/behind, `push -u`, auto-refresh) |
 | `scripts/compare.sh` | every command beside the real `git`, compared octet for octet |
 | `scripts/compare_status.sh` | `1git status` beside the real `git status` on disposable fixtures: ~20 forms each, bytes and exit status |
@@ -179,18 +181,19 @@ tree, commit), ref writing (`update`, `update_symbolic`, compare-and-swap),
 and working-tree status, all checked against real git in disposable
 fixtures (`test_write.sh`).
 
-The interactive client (`mgit.m31`, `docs/design.md`'s locked design):
-a collapsible outline of untracked files, unstaged changes, staged changes
-and recent commits; whole-file staging and unstaging (`s`/`u`); a hunk-level
+The interactive client (`mgit.m31`, `docs/design.md`'s locked design, split into
+five full-screen modes since 0.25.0, `docs/MGIT-MODES.md`):
+a collapsible outline of untracked files, unstaged changes, staged changes,
+recent commits, branches and stashes, one mode each; whole-file staging and unstaging (`s`/`u`); a hunk-level
 diff view (`d` on a staged/unstaged/untracked row; `Enter` directly on one
 of a commit's own changed files, below) with an addressable cursor; a
 commit, via a message file at `COMMIT_EDITMSG` read back and refused if
-empty (`c` opens a which-key overlay: `e` launches `$EDITOR` (`vi` if unset)
+empty (`c` goes to the Commit mode: `e` launches `$EDITOR` (`vi` if unset)
 on the message file, falling back to writing the template and naming the
-path if no editor can be launched at all; `f` finishes; `a` aborts -- see
+path if no editor can be launched at all; `f` finishes; `a` discards the draft -- see
 `GIT_client.m31`'s own header, "launching `$EDITOR`, and the terminal handoff
 that takes", for how the terminal is handed to the editor and back); a
-persistent footer of the base commands; and a synced jump list toggled with
+bottom row of the current mode's keys; and a synced jump list toggled with
 `J`; and hunk-level staging from inside that diff view -- `s` on a hunk of
 an unstaged diff stages exactly that hunk (`git add -p`'s "y"), `u` on a
 hunk of a staged diff unstages exactly that hunk (`git reset -p`), the file
@@ -306,61 +309,77 @@ in `tests/pty_blame_undo.py`.
 
 ## Keys
 
-One table (`GIT_ui_core.key_table`) is the source for key dispatch, the
-footer and the `?` overlay, so they cannot disagree. Overlays form a stack;
-the top one takes every key.
+`mgit` is five full-screen modes: **1 Status** (review and stage), **2 Commit**,
+**3 History**, **4 Branches** (with push and pull) and **5 Stash**. `Tab` /
+`Shift-Tab` cycle them, `1`-`5` jump, a click on the tab bar switches, and the
+bottom row lists only the keys of the mode you are in; `?` shows that mode's
+help and `:` (or `Ctrl-P`) opens a palette of every action of every mode.
+A merge, cherry-pick, revert or rebase under way is a state, not a mode: its
+way out leads the bottom row in every mode and what it forbids is refused
+with the reason. `docs/MGIT-MODES.md` has the keys of each mode, the flows, the
+palette, and how to add an action.
+
+Two tables are the source for key dispatch, the bottom row, the `?` help and
+the palette, so they cannot disagree: `GIT_ui_core.key_table` binds a key to a
+command, `GIT_ui_keymap.entries` says which modes offer it and under what label.
+Overlays form a stack; the top one takes every key. The "where" column below
+names the mode a key lives in; a key pressed in a mode that does not offer it
+says where it moved to.
 
 | key | where | does |
 |---|---|---|
-| `j` `k` / arrows | outline, diff | move the cursor |
-| `h` `l` | outline | scroll sideways |
+| `j` `k` / arrows | outline modes, diff | move the cursor |
+| `h` `l` | outline modes | scroll sideways |
 | `[` / `]` | outline | the previous / next section header (`[` from inside a section goes to its own header first) |
 | `{` / `}` | outline | the previous / next row at this depth or shallower: the next commit from a commit, the next file from a file, the next section from a header |
-| `Tab` | outline | fold or unfold the row; on a leaf, fold its section and move onto it |
+| `Tab` / `Shift-Tab` / `1`-`5` | everywhere | the next / previous mode, wrapping; jump to a mode (`Tab` used to fold: `Space` does now) |
+| `:` / `Ctrl-P` | everywhere | the command palette: every action of every mode, filtered as you type |
+| `Space` | outline modes | fold or unfold the row; on a leaf, fold its section and move onto it |
 | `-` / `+` (`=`) | outline | fold every section / unfold every section (commits stay folded: `Enter` opens one) |
 | `[` / `]` | diff | the previous / next hunk |
 | `{` / `}` | diff | open the previous / next file of the list the diff came from (the same working-tree section, or the same commit's files) |
-| `Tab` / `-` / `+` | diff | fold or unfold the hunk under the cursor / every hunk (a folded hunk shows its header and how many lines it hides; `s`, `u` and `Space` on its header still act on the whole hunk) |
+| `f` / `-` / `+` | diff | fold or unfold the hunk under the cursor / every hunk (a folded hunk shows its header and how many lines it hides; `s`, `u` and `Space` on its header still act on the whole hunk) |
 | `i` | everywhere | the overview: branch, upstream with ahead/behind, stashes, change counts, operation under way and path, one per line; `Enter` opens the matching picker or list (see "Sections, folding and the statusline") |
-| `Enter` | outline | fold or unfold; on a commit's file, open its diff; on the last row, load more commits |
-| `s` / `u` | outline, diff | stage / unstage the file, or the hunk in a diff |
-| `S` / `U` | outline | stage everything / unstage everything |
-| `x` | outline | discard the path under the cursor (asks first) |
-| `d` | outline | open the hunk-level diff of the row |
+| `Enter` | outline modes | fold or unfold; on a commit's file, open its diff; on the last row, load more commits; in Branches switch to the branch; in Stash open the list at the stash |
+| `s` / `u` | Status, diff | stage / unstage the file, or the hunk in a diff |
+| `S` / `U` | Status | stage everything / unstage everything |
+| `x` | Status | discard the path under the cursor (asks first) |
+| `d` | Status | open the hunk-level diff of the row |
 | `v` | diff | start a visual range of lines; `j`/`k` extend it, `v` or `Esc` cancels |
 | `D` (`\|`) | diff, commit view, stash list | side-by-side or unified diff; the choice is kept in `diff.view` (see "Side-by-side diff") |
 | `h` `l` / `e` `E` / `w` / `<` `>` | diff, side by side | cursor to the old / new side; show more / back to 3 lines of context; wrap long lines or scroll both sides; scroll sideways when not wrapping |
 | `Space` / `Enter` | diff | stage the selected lines (unstage them in the staged view); with no range, the line under the cursor, or the whole hunk on its header |
 | `x` | diff | discard the selected lines from the working tree (asks first, `y` confirms) |
-| `z` | outline | stash overlay: `z` push, `u` push with untracked, `k` keep the index, `m` type a message, `p` pop, `a` apply, `A` apply with `--index`, `d` drop (asks first), `b` branch from the stash, `l` list, `Esc` close |
+| `z` | Stash | stash overlay: `z` push, `u` push with untracked, `k` keep the index, `m` type a message, `p` pop, `a` apply, `A` apply with `--index`, `d` drop (asks first), `b` branch from the stash, `l` list, `Esc` close |
 | `j` `k` `J` `K` / `p` `a` `d` | stash list | move / page; pop, apply, drop the highlighted stash |
-| `c` | outline | commit overlay: `e` edit, `f` finish, `A` amend, `a` abort |
-| `b` | outline | branch overlay: `c` check out, `/` fuzzy-pick a branch, `n` new, `a` abort |
-| `m` | outline | merge overlay: `f` merge (fast-forward when possible), `n` always make a merge commit, `o` fast-forward only, each fuzzy-picking a branch; while merging `c` continue (commit), `a` abort (asks first) |
-| `r` | outline | rebase menu: `r` onto a branch you pick (its upstream first), `i` interactively (todo editor first), `h` interactively from the commit under the cursor, `o` `--onto` (new base, then the branch to cut at), `s` / `a` toggle `--autosquash` / `--autostash` (they follow `rebase.autoSquash` / `rebase.autoStash` until toggled); while a rebase is under way the same key opens `c` continue, `s` skip, `a` abort (asks first), `q` quit, `e` edit the todo |
+| `c` | Status | go to the Commit mode (`2`); there `e` edit the message in `$EDITOR` and commit, `f` finish with the message on disk, `A` amend, `a` discard the draft |
+| `b` | Branches | branch overlay: `c` check out, `/` fuzzy-pick a branch, `n` new, `a` abort |
+| `m` | Branches (anywhere while merging) | merge overlay: `f` merge (fast-forward when possible), `n` always make a merge commit, `o` fast-forward only, each fuzzy-picking a branch; while merging `c` continue (commit), `a` abort (asks first) |
+| `r` | History, Branches (anywhere while rebasing) | rebase menu: `r` onto a branch you pick (its upstream first), `i` interactively (todo editor first), `h` interactively from the commit under the cursor, `o` `--onto` (new base, then the branch to cut at), `s` / `a` toggle `--autosquash` / `--autostash` (they follow `rebase.autoSquash` / `rebase.autoStash` until toggled); while a rebase is under way the same key opens `c` continue, `s` skip, `a` abort (asks first), `q` quit, `e` edit the todo |
 | `j` `k` `p` `r` `e` `s` `f` `d` `J` `K` `E` `Enter` `Esc` | todo editor | move; set the verb of the line (pick, reword, edit, squash, fixup, drop); move the line down / up; `E` edits the whole list in `$EDITOR` (the only way to add `exec` and `break`); `Enter` starts the rebase (or saves the list mid-rebase), `Esc` cancels. A list that starts with squash or fixup is refused |
 | `y` `r` | pull, after a diverged fetch | merge / rebase the fetched branch; `pull.rebase=true` (or `branch.<n>.rebase`) rebases without asking, `interactive` opens the todo editor |
-| `A` / `V` | outline | cherry-pick / revert the commit under the cursor (a Commits row, or a Branches row for that branch's tip): `p` now, `x` cherry-pick `-x`, `n` `-n` (apply, do not commit), `k` keep a pick that comes out empty, `r` type a range (`A..B` or commits; `R` with `-x`), `1` / `2` a merge commit against its first / second parent |
+| `A` / `V` | History, Branches (anywhere while one is under way) | cherry-pick / revert the commit under the cursor (a Commits row, or a Branches row for that branch's tip): `p` now, `x` cherry-pick `-x`, `n` `-n` (apply, do not commit), `k` keep a pick that comes out empty, `r` type a range (`A..B` or commits; `R` with `-x`), `1` / `2` a merge commit against its first / second parent |
 | `c` `s` `a` `q` | `A` / `V` while a pick or revert is under way | continue (commit the resolved step), skip it, abort (asks first), quit (forget the state, keep the files) |
 | `Enter` | outline, on an unmerged path | open the resolution view |
 | `a` `b` `B` `z` | resolution view | take ours / theirs / both / the base for the conflict under the cursor (`z` undoes) |
 | `j` `k` / `n` `p` | resolution view | next / previous conflict |
 | `e` | resolution view | open the file in `$EDITOR`, then re-read it |
 | `s` | resolution view | stage the file as it is |
-| `P` / `F` | outline | push / pull which-key, `p` runs it |
-| `B` | outline, diff | blame the file under the cursor (at HEAD, or at the commit when it is one of a commit's files): short id (`^` marks a root-commit line), author, date, line number, text. `j`/`k`/`g`/`G` move, `Enter` opens the line's commit with its change to the file, `,` re-blames at that commit's parent, `Backspace` goes back, `q` closes. Untracked files are refused |
-| `H` | outline, diff | history of the file under the cursor (`git log -- path`, newest first, up to 500); `Enter` shows a commit, `B` blames as of it |
-| `Z` | outline | undo the last HEAD move from the reflog, after showing it (`y`/`Enter` does it, `Esc` cancels); `r` switches to redo, `z` back to undo. Worktree changes and stashes are not undoable; a dirty file in the way refuses |
-| `T` | outline | tags: `n` lightweight, `a` annotated (name, then message), `d` delete (type `y`). New tags point at HEAD, or at the commit row the cursor was on |
+| `P` / `F` | Branches | push / pull which-key, `p` runs it |
+| `B` | Status, History, diff | blame the file under the cursor (at HEAD, or at the commit when it is one of a commit's files): short id (`^` marks a root-commit line), author, date, line number, text. `j`/`k`/`g`/`G` move, `Enter` opens the line's commit with its change to the file, `,` re-blames at that commit's parent, `Backspace` goes back, `q` closes. Untracked files are refused |
+| `H` | Status, History, diff | history of the file under the cursor (`git log -- path`, newest first, up to 500); `Enter` shows a commit, `B` blames as of it |
+| `Z` | History | undo the last HEAD move from the reflog, after showing it (`y`/`Enter` does it, `Esc` cancels); `r` switches to redo, `z` back to undo. Worktree changes and stashes are not undoable; a dirty file in the way refuses |
+| `T` | Branches | tags: `n` lightweight, `a` annotated (name, then message), `d` delete (type `y`). New tags point at HEAD, or at the commit row the cursor was on |
 | `u` | push menu (`P`) | push and set `origin/<branch>` as the upstream (`git push -u`); every push also moves `refs/remotes/origin/<branch>` ("update by push") |
 | `/` | outline (log included) | search; smart-case: all lower case ignores case, a capital matches exactly. `Enter` runs it, `Esc` cancels |
 | `n` / `N` | outline (log included) | next / previous match, wrapping |
 | `g` / `R` | outline | re-read the repository |
 | `J` / `w` | outline | show the jump list / give it the keys |
 | `@` | everywhere | command log: every write the client made (`add`, `update-ref`, `checkout`, ...), newest at the bottom; `j`/`k`/`g`/`G` scroll |
-| `?` | everywhere | key help for every scope, generated from the key table |
+| `?` | everywhere | the help for the mode you are in, grouped, with the reference of every menu below it; generated from the key map |
 | `C` | outline, diff, and the blame, commit, stash and resolve views | syntax colours on or off for the session (see "Syntax highlighting") |
-| `q` / `Esc` | outline | quit (in a diff or overlay: close it) |
+| `q` | outline modes | quit (in a diff or overlay: close it) |
+| `Esc` | outline modes | back to Status; from Status quit (in a diff or overlay: close it) |
 
 The branch picker (`GIT_ui_picker.open(core, purpose, title, items)`) is
 generic: type to filter (contiguous matches rank before scattered

@@ -3,6 +3,32 @@
 Each release's changes in one place (the details are in `README.md` and
 `docs/GIT-COMPAT.md`).
 
+## 0.25.0
+
+- **mgit is five modes, not one screen of every key** (`docs/MGIT-MODES.md`):
+  1 Status, 2 Commit, 3 History, 4 Branches, 5 Stash. `Tab` / `Shift-Tab` cycle
+  them (a click on the tab bar and `1`-`5` jump), the last row lists only the keys
+  of the mode you are in, `?` is that mode's help, and `:` / `Ctrl-P` is a command
+  palette of every action of every mode. A merge, cherry-pick, revert or rebase
+  under way is named in every mode, its way out leads the bottom row, and what it
+  forbids is refused with the reason. One table (`ui/GIT_ui_keymap.m31`) drives the
+  bottom row, the help, the palette and the tests.
+- Keys keep their letters and live in the mode where they make sense; pressing one
+  in another mode says where it moved. Changed on purpose: `Tab` is the mode key,
+  so folding is `Space` (`f` for a hunk in a diff); `Esc` goes back to Status (and
+  quits from it); `c` goes to the Commit mode, whose `a` discards the draft (`Esc`
+  no longer does).
+- The screen has no border any more: the tab bar is the first row, the hint row the
+  last. The statusline moved under the tab bar.
+- **Rendering fixes.** A tab, carriage return or escape in a diffed file, a file
+  name, a branch name or a commit message reached the terminal raw and moved the
+  cursor under the layout, leaving stale cells behind; text is now shown with tabs
+  expanded and control characters as their U+2400 symbols, and a last pass over
+  every frame removes any that are left. `tests/pty_modes.py` compares incremental
+  screens against a full repaint, cell by cell, over wide, emoji, combining-mark,
+  tabbed and over-long names at 80x24, 120x40 and 40x12 (it needs `pyte`).
+- Version 0.25.0.
+
 ## 0.24.0
 
 - **Breaking: 1git and mgit have a command line of their own** (`docs/CLI.md`):

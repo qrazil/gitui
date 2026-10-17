@@ -206,3 +206,8 @@ unless `M31GIT_MOUSE=off` or `mgit.mouse = off` says otherwise; `--mouse`
 overrides both. It is a value because Oro refuses `--no-mouse`. Exit status: 0
 after a normal quit, 1 when there is no repository or no terminal, 2 for a
 command line that is not understood.
+
+Inside, `mgit` is five full-screen modes (1 Status, 2 Commit, 3 History,
+4 Branches, 5 Stash): `Tab` / `Shift-Tab` / `1`-`5` move between them, the bottom
+row lists the keys of the mode you are in, `?` is that mode's help and `:` (or
+`Ctrl-P`) a palette of every action. See `docs/MGIT-MODES.md`.
