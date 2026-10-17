@@ -1,8 +1,11 @@
-// The interactive client -- `docs/design.md`'s locked design, built: one
-// scrollable, collapsible outline of untracked files, unstaged changes,
-// staged changes and recent commits; whole-file staging and unstaging; a
-// commit; a persistent footer of the base commands; a which-key overlay for
-// commit's follow-ups; and a synced jump list, toggled on demand.
+// The interactive client -- `docs/design.md`'s locked design, built, and since
+// 0.25.0 split into five full-screen modes (`docs/MGIT-MODES.md`): Status,
+// Commit, History, Branches and Stash, cycled with Tab, each with its own keys
+// on a one-line hint row at the bottom, a help (`?`) and a command palette
+// (`:`) generated from one table. Each is a scrollable, collapsible outline
+// (or, for Commit, a panel) of what the mode is about; whole-file and hunk
+// staging and unstaging; a commit; which-key menus for the follow-ups; and a
+// synced jump list, toggled on demand.
 //
 //   bash scripts/build.sh                  # -> ./mgit
 //   ./mgit [PATH] [--mouse on|off]     # PATH default: "."

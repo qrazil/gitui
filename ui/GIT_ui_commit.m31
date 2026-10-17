@@ -1,4 +1,4 @@
-// The commit layer: the commit overlay (`c`), the message file and the
+// The commit layer: what the Commit mode does (`c` starts it), the message file and the
 // `$EDITOR` handoff that starts, `git commit --amend`, and writing the commit.
 //
 // See `GIT_client.m31`'s header, "launching `$EDITOR`, and the terminal
@@ -24,13 +24,15 @@ pub type CommitLayer {
     pub GIT_ui_lines.LinesLayer;
 }
 
-/// `c`: open the commit overlay.
-pub void CommitLayer.open_commit() {
+/// `c`: start a commit -- the caller then switches to the Commit mode, which
+/// is where `e`, `f`, `A` and `a` live. False, with the reason in `message`,
+/// while a cherry-pick, revert or rebase is under way.
+pub bool CommitLayer.begin_commit() {
     if (is_blocked_by_sequence("commit")) {
-        return;
+        return false;
     }
     is_amending = false;
-    push_overlay(CommitOverlay(this));
+    return true;
 }
 
 /// Write the commit-message template at `commit_message_path`, unless something
@@ -67,6 +69,34 @@ pub void CommitLayer.edit_message() {
     }
     is_editor_wanted = true;
     message = "launching editor...";
+}
+
+/// `a` in the Commit mode: throw the draft away -- after asking, naming what
+/// goes (the draft's first line, and the amend), when there is anything to lose.
+pub void CommitLayer.confirm_abort() {
+    str lost = "";
+    match (io.read(commit_message_path)) {
+        case Ok(str raw): {
+            str stripped = GIT_ui_model.strip_comment_lines(raw);
+            if (stripped != "") {
+                lost = "the draft message \"" + stripped.split("\n")[0] + "\"";
+            }
+        }
+        case Err(_): {
+        }
+    }
+    if (is_amending) {
+        if (lost != "") {
+            lost = lost + " and the amend";
+        } else {
+            lost = "the amend of HEAD";
+        }
+    }
+    if (lost == "") {
+        abort_commit();
+        return;
+    }
+    push_overlay(DraftConfirm(this, lost));
 }
 
 pub void CommitLayer.abort_commit() {
@@ -336,59 +366,36 @@ pub void CommitLayer.finish_commit() {
     reload();
 }
 
-// --- the overlay ------------------------------------------------------------------
+// --- discarding the draft asks first ----------------------------------------------
 
-/// The commit which-key: `e` edit the message in `$EDITOR`, `f` finish, `A`
-/// amend HEAD, `a`/`Escape` abort. Every other key is swallowed.
-type CommitOverlay {
+type DraftConfirm {
     CommitLayer host;
+    str what;
 }
 
-pub TUI_app.Action CommitOverlay.handle_key(term.Code code) {
-    match (GIT_ui_core.lookup(GIT_ui_core.SCOPE_COMMIT, code)) {
+/// `y` discards; every other key keeps the draft (as for a discarded file: a
+/// prompt that acts on one exact key cannot be fallen into by a stray one).
+pub TUI_app.Action DraftConfirm.handle_key(term.Code code) {
+    host.pop_overlay();
+    match (GIT_ui_core.lookup(GIT_ui_core.SCOPE_CONFIRM, code)) {
         case Some(str cmd): {
-            if (cmd == GIT_ui_core.CMD_EDIT) {
-                host.edit_message();
-                // `Quit` unwinds `TUI_app.Loop.run`'s own `Session`, which is
-                // what actually leaves raw mode and the alternate screen --
-                // see `edit_message`'s own header. `mgit.m31`'s driver reads
-                // `is_editor_wanted` on the way out and calls `Loop.run` again
-                // once `launch_editor` is done.
-                if (host.is_editor_wanted) {
-                    return TUI_app.Action.Quit;
-                }
-                return TUI_app.Action.Redraw;
-            }
-            if (cmd == GIT_ui_core.CMD_FINISH) {
-                host.finish_commit();
-                return TUI_app.Action.Redraw;
-            }
-            if (cmd == GIT_ui_core.CMD_ABORT) {
+            if (cmd == GIT_ui_core.CMD_YES) {
                 host.abort_commit();
-                return TUI_app.Action.Redraw;
-            }
-            if (cmd == GIT_ui_core.CMD_AMEND) {
-                host.start_amend();
                 return TUI_app.Action.Redraw;
             }
         }
         case None: {
         }
     }
-    return TUI_app.Action.Continue;
+    host.say("kept the draft");
+    return TUI_app.Action.Redraw;
 }
 
-pub void CommitOverlay.render(TUI_buffer.Buffer buffer, TUI_geometry.Rect area) {
-    str title = "commit";
-    str finish = "finish: write the commit";
-    if (host.is_amending) {
-        title = "amend HEAD";
-        finish = "finish: replace HEAD with the amended commit";
-    }
-    TUI_menu.WhichKey which_key = TUI_menu.WhichKey(title, [TUI_menu.Item("e", "edit message in $EDITOR (" + host.commit_message_path + ")"), TUI_menu.Item("f", finish), TUI_menu.Item("A", "amend HEAD: its message prefilled, its parents and author kept"), TUI_menu.Item("a", "abort")]);
+pub void DraftConfirm.render(TUI_buffer.Buffer buffer, TUI_geometry.Rect area) {
+    TUI_menu.WhichKey which_key = TUI_menu.WhichKey("discard " + what + "?", [TUI_menu.Item("y", "yes, discard"), TUI_menu.Item("any other key", "no, keep it")]);
     which_key.render(buffer, area);
 }
 
-pub List<GIT_ui_core.Hint> CommitOverlay.hints() {
-    return GIT_ui_core.hints_for(GIT_ui_core.SCOPE_COMMIT);
+pub List<GIT_ui_core.Hint> DraftConfirm.hints() {
+    return GIT_ui_core.hints_for(GIT_ui_core.SCOPE_CONFIRM);
 }

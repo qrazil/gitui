@@ -1,0 +1,562 @@
+// What each mode offers: one table, `entries()`, saying for every mode and
+// state which action is available, under what label, in which help group and
+// at what hint priority. The key row at the bottom of the screen, the `?`
+// help, the command palette and the tests are all generated from it, so there
+// is no second copy to drift.
+//
+// The KEYS are not in this table. A key is bound once, in
+// `GIT_ui_core.key_table()`, to a command id within a scope; an `Entry` here
+// refers to that binding by `(scope, cmd)` and `keys_of` reads the key names
+// out of it. Rebind a key there and every hint, help line and palette row
+// follows; add an action by adding a binding there and an `Entry` here (see
+// docs/MGIT-MODES.md, "How to add an action").
+//
+// --- the dimensions ------------------------------------------------------------
+//
+//   modes   which modes the action is in: "*" or a comma list ("history,branches")
+//   view    "doc"  the mode's own document (the outline, or the Commit panel)
+//           "diff" the hunk diff that replaces the document in Status and History
+//           "any"  both
+//   when    the flow state it applies to. "" always; "idle" no merge, rebase,
+//           cherry-pick or revert under way; "noseq" idle or only a merge;
+//           "merge", "sequence", "rebase" exactly that flow.
+//   priority  0: help and palette only. 1..: the order of the hint row, most
+//           likely first; a narrow terminal drops the highest numbers first.
+//
+// A mode shows a key only if an Entry says so; a key bound in the table but
+// not offered in the current mode is refused with "moved to ..." (see
+// `GIT_ui_core.Core.notified`). Every binding of the base scopes appears in
+// at least one Entry (a unit test checks it), so nothing is lost.
+
+import ui.GIT_ui_core;
+import ui.GIT_ui_modes;
+import tui.core.TUI_text;
+
+pub const str VIEW_DOC = "doc";
+pub const str VIEW_DIFF = "diff";
+pub const str VIEW_ANY = "any";
+pub const str FLOW_NONE = "";
+pub const str FLOW_MERGE = "merge";
+pub const str FLOW_SEQUENCE = "sequence";
+pub const str FLOW_REBASE = "rebase";
+/// How many hints a mode offers at most on the bottom row, before the width
+/// decides how many of them fit.
+pub const int HINT_MAX = 8;
+
+pub type Entry {
+    pub str modes;
+    pub str view;
+    pub str scope;
+    pub str cmd;
+    pub str label;
+    pub str group;
+    pub int priority;
+    pub str when = "";
+    /// What to show for the keys when the binding's first key alone would
+    /// mislead ("[/]", "1-5"); "" means the first key's own name. The hint row
+    /// only: the help and the palette list every key.
+    pub str keys_text = "";
+}
+
+/// Whether `entry` is offered in `mode`.
+pub bool Entry.is_in(str mode) {
+    if (modes == "*") {
+        return true;
+    }
+    return ("," + modes + ",").contains("," + mode + ",");
+}
+
+/// The first mode of the entry, for naming where it lives.
+pub str Entry.home() {
+    if (modes == "*") {
+        return "*";
+    }
+    return modes.split(",")[0];
+}
+
+/// How many modes the entry is in (a "*" entry counts as all of them).
+pub int Entry.mode_count() {
+    if (modes == "*") {
+        return GIT_ui_modes.ids().size();
+    }
+    return modes.split(",").size();
+}
+
+/// Whether the entry applies in view `v` ("doc" or "diff").
+pub bool Entry.is_in_view(str wanted) {
+    return view == VIEW_ANY || view == wanted;
+}
+
+/// Whether the entry applies in flow state `flow`.
+pub bool Entry.is_when(str flow) {
+    if (when == "") {
+        return true;
+    }
+    if (when == "idle") {
+        return flow == FLOW_NONE;
+    }
+    if (when == "noseq") {
+        return flow == FLOW_NONE || flow == FLOW_MERGE;
+    }
+    return when == flow;
+}
+
+/// Whether the entry is the way out of one particular flow.
+pub bool Entry.is_flow_only() {
+    return when == FLOW_MERGE || when == FLOW_SEQUENCE || when == FLOW_REBASE;
+}
+
+/// The key names bound to the entry in the key table (`term.Code.to_str()`
+/// spellings), [] if the table has no such binding.
+pub List<str> Entry.keys() {
+    for (GIT_ui_core.Binding binding in GIT_ui_core.key_table()) {
+        if (binding.scope == scope && binding.cmd == cmd) {
+            return binding.keys;
+        }
+    }
+    return [];
+}
+
+/// The keys as a person reads them: "s", "Enter", "j/k", "1-5".
+pub str Entry.shown_keys() {
+    if (keys_text != "") {
+        return keys_text;
+    }
+    List<str> names = keys();
+    if (names.size() == 0) {
+        return "?";
+    }
+    return key_label(names[0]);
+}
+
+/// Every key of the binding for the help and the palette, "j / ↓",
+/// "q / Esc / Bksp" -- `keys_text` is only for the one-line hint row.
+pub str Entry.all_keys() {
+    List<str> out = [];
+    for (str name in keys()) {
+        out.push(key_label(name));
+    }
+    return out.join(" / ");
+}
+
+/// Where an entry lives, for the palette: the mode's name, "Everywhere" for a
+/// "*" entry, the names joined for two modes, "Most modes" for more.
+pub str Entry.where() {
+    if (modes == "*") {
+        return "Everywhere";
+    }
+    List<str> names = [];
+    for (str id in modes.split(",")) {
+        names.push(GIT_ui_modes.title(id));
+    }
+    if (names.size() > 2) {
+        return "Most modes";
+    }
+    return names.join("/");
+}
+
+Entry row(str modes, str view, str scope, str cmd, str label, str group, int priority, str when = "", str keys_text = "") {
+    return Entry(modes, view, scope, cmd, label, group, priority, when: when, keys_text: keys_text);
+}
+
+const str OUTLINE_MODES = "status,history,branches,stash";
+
+/// The table. A function, like `key_table`: m31 has no module-level mutable
+/// state and this is built a handful of times per keypress at most.
+pub List<Entry> entries() {
+    List<Entry> table = [];
+    str scope_outline = GIT_ui_core.SCOPE_OUTLINE;
+    str scope_diff = GIT_ui_core.SCOPE_DIFF;
+    str scope_global = GIT_ui_core.SCOPE_GLOBAL;
+    str scope_commit = GIT_ui_core.SCOPE_COMMIT;
+    // --- everywhere --------------------------------------------------------------
+    table.push(row("*", VIEW_ANY, scope_global, GIT_ui_core.CMD_MODE_NEXT, "mode", "Modes", 5));
+    table.push(row("*", VIEW_ANY, scope_global, GIT_ui_core.CMD_MODE_PREV, "previous mode", "Modes", 0, keys_text: "Shift-Tab"));
+    table.push(row("*", VIEW_ANY, scope_global, GIT_ui_core.CMD_MODE_GOTO, "jump to a mode", "Modes", 0, keys_text: "1-5"));
+    table.push(row("*", VIEW_ANY, scope_global, GIT_ui_core.CMD_PALETTE, "commands", "Modes", 7));
+    table.push(row("*", VIEW_ANY, scope_global, GIT_ui_core.CMD_HELP, "help for this mode", "Modes", 0));
+    table.push(row("*", VIEW_ANY, scope_global, GIT_ui_core.CMD_LOG, "command log", "Everywhere", 0));
+    table.push(row("*", VIEW_ANY, scope_global, GIT_ui_core.CMD_OVERVIEW, "overview", "Everywhere", 0));
+    table.push(row("*", VIEW_ANY, scope_global, GIT_ui_core.CMD_SYNTAX, "syntax colours", "Everywhere", 0));
+    table.push(row("*", VIEW_DOC, scope_outline, GIT_ui_core.CMD_REFRESH, "refresh", "Everywhere", 0));
+    table.push(row("*", VIEW_DOC, scope_outline, GIT_ui_core.CMD_QUIT, "quit", "Everywhere", 9));
+    table.push(row("*", VIEW_DOC, scope_outline, GIT_ui_core.CMD_LEAVE, "back to Status (quit from it)", "Everywhere", 0));
+    // --- moving in an outline ----------------------------------------------------
+    table.push(row(OUTLINE_MODES, VIEW_DOC, scope_outline, GIT_ui_core.CMD_DOWN, "move down", "Move", 0));
+    table.push(row(OUTLINE_MODES, VIEW_DOC, scope_outline, GIT_ui_core.CMD_UP, "move up", "Move", 0));
+    table.push(row(OUTLINE_MODES, VIEW_DOC, scope_outline, GIT_ui_core.CMD_RIGHT, "scroll right", "Move", 0));
+    table.push(row(OUTLINE_MODES, VIEW_DOC, scope_outline, GIT_ui_core.CMD_LEFT, "scroll left", "Move", 0));
+    table.push(row(OUTLINE_MODES, VIEW_DOC, scope_outline, GIT_ui_core.CMD_SECTION_PREVIOUS, "previous section", "Move", 0));
+    table.push(row(OUTLINE_MODES, VIEW_DOC, scope_outline, GIT_ui_core.CMD_SECTION_NEXT, "next section", "Move", 0));
+    table.push(row(OUTLINE_MODES, VIEW_DOC, scope_outline, GIT_ui_core.CMD_SIBLING_PREVIOUS, "previous row at this depth", "Move", 0));
+    table.push(row(OUTLINE_MODES, VIEW_DOC, scope_outline, GIT_ui_core.CMD_SIBLING_NEXT, "next row at this depth", "Move", 0));
+    table.push(row(OUTLINE_MODES, VIEW_DOC, scope_outline, GIT_ui_core.CMD_FOLD, "fold or unfold", "View", 0));
+    table.push(row(OUTLINE_MODES, VIEW_DOC, scope_outline, GIT_ui_core.CMD_FOLD_ALL, "fold all", "View", 0));
+    table.push(row(OUTLINE_MODES, VIEW_DOC, scope_outline, GIT_ui_core.CMD_UNFOLD_ALL, "unfold all", "View", 0));
+    table.push(row(OUTLINE_MODES, VIEW_DOC, scope_outline, GIT_ui_core.CMD_JUMP, "jump list", "View", 0));
+    table.push(row(OUTLINE_MODES, VIEW_DOC, scope_outline, GIT_ui_core.CMD_FOCUS, "jump list focus", "View", 0));
+    table.push(row(OUTLINE_MODES, VIEW_DOC, scope_outline, GIT_ui_core.CMD_SEARCH, "search", "Search", 8));
+    table.push(row(OUTLINE_MODES, VIEW_DOC, scope_outline, GIT_ui_core.CMD_NEXT, "next match", "Search", 0));
+    table.push(row(OUTLINE_MODES, VIEW_DOC, scope_outline, GIT_ui_core.CMD_PREVIOUS, "previous match", "Search", 0));
+    // --- Status ------------------------------------------------------------------
+    table.push(row("status", VIEW_DOC, scope_outline, GIT_ui_core.CMD_STAGE, "stage", "Stage", 1));
+    table.push(row("status", VIEW_DOC, scope_outline, GIT_ui_core.CMD_UNSTAGE, "unstage", "Stage", 2));
+    table.push(row("status", VIEW_DOC, scope_outline, GIT_ui_core.CMD_DIFF, "diff", "Review", 3));
+    table.push(row("history", VIEW_DOC, scope_outline, GIT_ui_core.CMD_DIFF, "diff of the file", "Review", 0));
+    table.push(row("status", VIEW_DOC, scope_outline, GIT_ui_core.CMD_COMMIT, "commit", "Commit", 4, when: "noseq"));
+    table.push(row("status", VIEW_DOC, scope_outline, GIT_ui_core.CMD_DISCARD, "discard", "Stage", 8));
+    table.push(row("status", VIEW_DOC, scope_outline, GIT_ui_core.CMD_STAGE_ALL, "stage all", "Stage", 0));
+    table.push(row("status", VIEW_DOC, scope_outline, GIT_ui_core.CMD_UNSTAGE_ALL, "unstage all", "Stage", 0));
+    table.push(row("status,history", VIEW_DOC, scope_outline, GIT_ui_core.CMD_BLAME, "blame the file", "Review", 0));
+    table.push(row("status,history", VIEW_DOC, scope_outline, GIT_ui_core.CMD_HISTORY, "history of the file", "Review", 0));
+    table.push(row("status", VIEW_DOC, scope_outline, GIT_ui_core.CMD_TOGGLE, "open or fold", "Review", 0));
+    // --- Commit ------------------------------------------------------------------
+    table.push(row("commit", VIEW_DOC, scope_commit, GIT_ui_core.CMD_EDIT, "write message", "Commit", 1, when: "noseq"));
+    table.push(row("commit", VIEW_DOC, scope_commit, GIT_ui_core.CMD_FINISH, "commit staged", "Commit", 2, when: "noseq"));
+    table.push(row("commit", VIEW_DOC, scope_commit, GIT_ui_core.CMD_AMEND, "amend HEAD", "Commit", 3, when: "noseq"));
+    table.push(row("commit", VIEW_DOC, scope_commit, GIT_ui_core.CMD_ABORT, "discard draft", "Commit", 4));
+    // --- History -----------------------------------------------------------------
+    table.push(row("history", VIEW_DOC, scope_outline, GIT_ui_core.CMD_TOGGLE, "open", "History", 1));
+    table.push(row("history", VIEW_DOC, scope_outline, GIT_ui_core.CMD_PICK, "cherry-pick", "History", 2, when: "idle"));
+    table.push(row("history", VIEW_DOC, scope_outline, GIT_ui_core.CMD_REVERT, "revert", "History", 3, when: "idle"));
+    // On a branch row they act on the branch's tip.
+    table.push(row("branches", VIEW_DOC, scope_outline, GIT_ui_core.CMD_PICK, "cherry-pick the branch tip", "Branch", 0, when: "idle"));
+    table.push(row("branches", VIEW_DOC, scope_outline, GIT_ui_core.CMD_REVERT, "revert the branch tip", "Branch", 0, when: "idle"));
+    table.push(row("history,branches", VIEW_DOC, scope_outline, GIT_ui_core.CMD_REBASE, "rebase", "History", 4, when: "idle"));
+    table.push(row("history", VIEW_DOC, scope_outline, GIT_ui_core.CMD_UNDO, "undo HEAD move", "History", 5, when: "idle"));
+    // --- Branches ----------------------------------------------------------------
+    table.push(row("branches", VIEW_DOC, scope_outline, GIT_ui_core.CMD_TOGGLE, "switch to the branch", "Branch", 1, when: "idle"));
+    table.push(row("branches", VIEW_DOC, scope_outline, GIT_ui_core.CMD_BRANCH, "branch menu", "Branch", 2, when: "idle"));
+    table.push(row("branches", VIEW_DOC, scope_outline, GIT_ui_core.CMD_MERGE, "merge", "Branch", 3, when: "idle"));
+    table.push(row("branches", VIEW_DOC, scope_outline, GIT_ui_core.CMD_PULL, "pull", "Sync", 6, when: "idle"));
+    table.push(row("branches", VIEW_DOC, scope_outline, GIT_ui_core.CMD_PUSH, "push", "Sync", 7));
+    table.push(row("branches", VIEW_DOC, scope_outline, GIT_ui_core.CMD_TAGS, "tags", "Branch", 0));
+    // --- Stash -------------------------------------------------------------------
+    table.push(row("stash", VIEW_DOC, scope_outline, GIT_ui_core.CMD_STASH, "stash menu", "Stash", 1));
+    table.push(row("stash", VIEW_DOC, scope_outline, GIT_ui_core.CMD_TOGGLE, "list with diff", "Stash", 2));
+    // --- flows: what the same keys mean while something is under way ------------------
+    table.push(row("*", VIEW_DOC, scope_outline, GIT_ui_core.CMD_MERGE, "merge: continue or abort", "Flow", 1, when: FLOW_MERGE));
+    table.push(row("*", VIEW_DOC, scope_outline, GIT_ui_core.CMD_PICK, "cherry-pick / revert: continue, skip, abort", "Flow", 1, when: FLOW_SEQUENCE, keys_text: "A/V"));
+    table.push(row("*", VIEW_DOC, scope_outline, GIT_ui_core.CMD_REVERT, "cherry-pick / revert: continue, skip, abort", "Flow", 0, when: FLOW_SEQUENCE));
+    table.push(row("*", VIEW_DOC, scope_outline, GIT_ui_core.CMD_REBASE, "rebase: continue, skip, abort, edit", "Flow", 1, when: FLOW_REBASE));
+    // --- the diff view -----------------------------------------------------------
+    table.push(row("status", VIEW_DIFF, scope_diff, GIT_ui_core.CMD_STAGE, "stage hunk", "Stage", 1));
+    table.push(row("status", VIEW_DIFF, scope_diff, GIT_ui_core.CMD_UNSTAGE, "unstage hunk", "Stage", 2));
+    table.push(row("status", VIEW_DIFF, scope_diff, GIT_ui_core.CMD_VISUAL, "select lines", "Stage", 3));
+    table.push(row("status", VIEW_DIFF, scope_diff, GIT_ui_core.CMD_LINES, "stage or unstage the selected lines", "Stage", 0));
+    table.push(row("status", VIEW_DIFF, scope_diff, GIT_ui_core.CMD_DISCARD, "discard the selected lines", "Stage", 8));
+    table.push(row("status,history", VIEW_DIFF, scope_diff, GIT_ui_core.CMD_SPLIT, "side by side", "View", 4));
+    table.push(row("status,history", VIEW_DIFF, scope_diff, GIT_ui_core.CMD_BACK, "back", "Move", 5));
+    table.push(row("status,history", VIEW_DIFF, scope_diff, GIT_ui_core.CMD_DOWN, "move down", "Move", 0));
+    table.push(row("status,history", VIEW_DIFF, scope_diff, GIT_ui_core.CMD_UP, "move up", "Move", 0));
+    table.push(row("status,history", VIEW_DIFF, scope_diff, GIT_ui_core.CMD_SECTION_PREVIOUS, "previous hunk", "Move", 6, keys_text: "[/]"));
+    table.push(row("status,history", VIEW_DIFF, scope_diff, GIT_ui_core.CMD_SECTION_NEXT, "next hunk", "Move", 0));
+    table.push(row("status,history", VIEW_DIFF, scope_diff, GIT_ui_core.CMD_SIBLING_PREVIOUS, "previous file", "Move", 0, keys_text: "{/}"));
+    table.push(row("status,history", VIEW_DIFF, scope_diff, GIT_ui_core.CMD_SIBLING_NEXT, "next file", "Move", 0));
+    table.push(row("status,history", VIEW_DIFF, scope_diff, GIT_ui_core.CMD_FOLD, "fold hunk", "View", 0));
+    table.push(row("status,history", VIEW_DIFF, scope_diff, GIT_ui_core.CMD_FOLD_ALL, "fold all hunks", "View", 0));
+    table.push(row("status,history", VIEW_DIFF, scope_diff, GIT_ui_core.CMD_UNFOLD_ALL, "unfold all hunks", "View", 0));
+    table.push(row("status,history", VIEW_DIFF, scope_diff, GIT_ui_core.CMD_BLAME, "blame the file", "Review", 0));
+    table.push(row("status,history", VIEW_DIFF, scope_diff, GIT_ui_core.CMD_HISTORY, "history of the file", "Review", 0));
+    table.push(row("status,history", VIEW_DIFF, scope_diff, GIT_ui_core.CMD_LEFT, "side by side: old side", "Side by side", 0));
+    table.push(row("status,history", VIEW_DIFF, scope_diff, GIT_ui_core.CMD_RIGHT, "side by side: new side", "Side by side", 0));
+    table.push(row("status,history", VIEW_DIFF, scope_diff, GIT_ui_core.CMD_WIDEN, "side by side: more context", "Side by side", 0));
+    table.push(row("status,history", VIEW_DIFF, scope_diff, GIT_ui_core.CMD_WIDEN_RESET, "side by side: 3 lines of context", "Side by side", 0));
+    table.push(row("status,history", VIEW_DIFF, scope_diff, GIT_ui_core.CMD_WRAP, "side by side: wrap or scroll", "Side by side", 0));
+    table.push(row("status,history", VIEW_DIFF, scope_diff, GIT_ui_core.CMD_SCROLL_LEFT, "side by side: scroll left", "Side by side", 0, keys_text: "</>"));
+    table.push(row("status,history", VIEW_DIFF, scope_diff, GIT_ui_core.CMD_SCROLL_RIGHT, "side by side: scroll right", "Side by side", 0));
+    return table;
+}
+
+/// A key name as it is shown: "enter" is "Enter", "escape" "Esc", the arrows
+/// are arrows, a letter is itself.
+pub str key_label(str name) {
+    if (name == "enter") {
+        return "Enter";
+    }
+    if (name == "escape") {
+        return "Esc";
+    }
+    if (name == "tab") {
+        return "Tab";
+    }
+    if (name == "back-tab") {
+        return "Shift-Tab";
+    }
+    if (name == "space") {
+        return "Space";
+    }
+    if (name == "backspace") {
+        return "Bksp";
+    }
+    if (name == "up") {
+        return "\u{2191}";
+    }
+    if (name == "down") {
+        return "\u{2193}";
+    }
+    if (name == "left") {
+        return "\u{2190}";
+    }
+    if (name == "right") {
+        return "\u{2192}";
+    }
+    return name;
+}
+
+/// The flow state name for the three booleans `Core` keeps; a rebase beats a
+/// sequence beats a merge, as in the banner.
+pub str flow_of(bool is_merging, bool is_sequencing, bool is_rebasing) {
+    if (is_rebasing) {
+        return FLOW_REBASE;
+    }
+    if (is_sequencing) {
+        return FLOW_SEQUENCE;
+    }
+    if (is_merging) {
+        return FLOW_MERGE;
+    }
+    return FLOW_NONE;
+}
+
+/// The scopes whose bindings the base of `mode` in `view` answers, in lookup
+/// order: the mode's own, then the outline's (movement, search, quit, ...).
+pub List<str> scopes_for(str mode, str view) {
+    if (view == VIEW_DIFF) {
+        return [GIT_ui_core.SCOPE_DIFF];
+    }
+    if (mode == GIT_ui_modes.COMMIT) {
+        return [GIT_ui_core.SCOPE_COMMIT, GIT_ui_core.SCOPE_OUTLINE];
+    }
+    return [GIT_ui_core.SCOPE_OUTLINE];
+}
+
+/// The entry that answers `(scope, cmd)` in `mode` and `view` right now:
+/// the state-matching one if there is one.
+pub Option<Entry> find(str mode, str view, str scope, str cmd, str flow) {
+    Option<Entry> loose = Option<Entry>.None;
+    for (Entry entry in entries()) {
+        if (entry.scope == scope && entry.cmd == cmd && entry.is_in(mode) && entry.is_in_view(view)) {
+            if (entry.is_when(flow)) {
+                return Option<Entry>.Some(entry);
+            }
+            // Not for this state: an action of the idle modes still runs (and
+            // refuses, with its reason), but the way out of a flow that is not
+            // under way is not an action at all.
+            if (!entry.is_flow_only() && !loose.is_some()) {
+                loose = Option<Entry>.Some(entry);
+            }
+        }
+    }
+    return loose;
+}
+
+/// The entry that offers `(scope, cmd)` in some OTHER mode, for the
+/// "moved to" notice; None when it belongs to most of the modes (a key that
+/// is merely absent from the Commit mode's panel is not worth a notice).
+pub Option<Entry> moved_to(str mode, str view, str scope, str cmd) {
+    for (Entry entry in entries()) {
+        if (entry.scope == scope && entry.cmd == cmd && entry.is_in_view(view) && !entry.is_in(mode) && entry.mode_count() <= 2) {
+            return Option<Entry>.Some(entry);
+        }
+    }
+    return Option<Entry>.None;
+}
+
+/// The hint row's entries for `mode`, `view` and `flow`: those with a
+/// priority, most likely first, one per command.
+pub List<Entry> hint_entries(str mode, str view, str flow) {
+    List<Entry> picked = [];
+    for (Entry entry in entries()) {
+        if (entry.priority > 0 && entry.is_in(mode) && entry.is_in_view(view) && entry.is_when(flow)) {
+            picked.push(entry);
+        }
+    }
+    // Stable insertion sort by priority; on a tie the way out of a flow comes
+    // first, then the table's order.
+    for (int index in 1 .. picked.size()) {
+        int place = index;
+        while (place > 0 && is_before(picked[place], picked[place - 1])) {
+            Entry held = picked[place];
+            picked[place] = picked[place - 1];
+            picked[place - 1] = held;
+            place = place - 1;
+        }
+    }
+    List<Entry> out = [];
+    for (Entry entry in picked) {
+        if (out.size() < HINT_MAX) {
+            out.push(entry);
+        }
+    }
+    return out;
+}
+
+bool is_before(Entry first, Entry second) {
+    if (first.priority != second.priority) {
+        return first.priority < second.priority;
+    }
+    return first.group == "Flow" && second.group != "Flow";
+}
+
+/// The hint row for a width: the hints of `hint_entries` that fit, in order,
+/// and a final "? more" (the help key). The lowest-priority hints are the ones
+/// dropped, so the row degrades from the right.
+pub List<GIT_ui_core.Hint> hint_row(str mode, str view, str flow, int width) {
+    List<GIT_ui_core.Hint> all = [];
+    for (Entry entry in hint_entries(mode, view, flow)) {
+        all.push(GIT_ui_core.Hint(entry.shown_keys(), entry.label));
+    }
+    return fit(all, width, true);
+}
+
+/// The columns a hint takes: keys, a space, the label.
+pub int hint_width(GIT_ui_core.Hint hint) {
+    return TUI_text.width(hint.keys) + 1 + TUI_text.width(hint.label);
+}
+
+/// `hints` cut to `width` columns, in order, with a leading space and two
+/// between hints (the way `State.footer_spans` draws them). With `is_more` a
+/// final `? more` is always kept; it is what tells a person the row is not
+/// everything.
+pub List<GIT_ui_core.Hint> fit(List<GIT_ui_core.Hint> hints, int width, bool is_more) {
+    List<GIT_ui_core.Hint> out = [];
+    GIT_ui_core.Hint more = GIT_ui_core.Hint("?", "more");
+    int budget = width - 1;
+    int gap = 0;
+    if (is_more) {
+        budget = budget - hint_width(more);
+        gap = 2;
+    }
+    int used = 0;
+    for (GIT_ui_core.Hint hint in hints) {
+        int need = hint_width(hint);
+        if (out.size() > 0) {
+            need = need + 2;
+        }
+        if (used + need > budget - gap) {
+            break;
+        }
+        used = used + need;
+        out.push(hint);
+    }
+    if (is_more) {
+        out.push(more);
+    }
+    return out;
+}
+
+/// The columns `fit`'s result takes when drawn: a leading space, two between.
+pub int row_width(List<GIT_ui_core.Hint> hints) {
+    int total = 1;
+    for (int index in 0 .. hints.size()) {
+        total = total + hint_width(hints[index]);
+        if (index > 0) {
+            total = total + 2;
+        }
+    }
+    return total;
+}
+
+/// The help for `mode` in `view` and `flow`: a heading per group, then a line
+/// per entry in that group, "keys  label". Public so a test reads it without a
+/// screen.
+pub List<str> help_lines(str mode, str view, str flow) {
+    List<str> groups = [];
+    for (Entry entry in entries()) {
+        if (entry.is_in(mode) && entry.is_in_view(view) && entry.is_when(flow) && !groups.contains(entry.group)) {
+            groups.push(entry.group);
+        }
+    }
+    // The mode's own actions first, then movement, folding and search, then the
+    // keys every mode shares.
+    List<str> ordered = [];
+    for (int rank in 1 .. 4) {
+        for (str group in groups) {
+            if (group_rank(group) == rank) {
+                ordered.push(group);
+            }
+        }
+    }
+    List<str> out = [];
+    out.push(GIT_ui_modes.title(mode) + " mode" + view_suffix(view) + flow_suffix(flow));
+    for (str group in ordered) {
+        out.push("");
+        out.push(group);
+        for (Entry entry in entries()) {
+            if (entry.group == group && entry.is_in(mode) && entry.is_in_view(view) && entry.is_when(flow)) {
+                out.push("  " + TUI_text.pad(entry.all_keys(), 18, TUI_text.Align.Left) + entry.label);
+            }
+        }
+    }
+    return out;
+}
+
+int group_rank(str group) {
+    if (group == "Modes" || group == "Everywhere") {
+        return 3;
+    }
+    if (group == "Move" || group == "View" || group == "Search" || group == "Side by side") {
+        return 2;
+    }
+    return 1;
+}
+
+str view_suffix(str view) {
+    if (view == VIEW_DIFF) {
+        return ", diff view";
+    }
+    return "";
+}
+
+str flow_suffix(str flow) {
+    if (flow == FLOW_NONE) {
+        return "";
+    }
+    return " (" + flow + " under way)";
+}
+
+/// One row of the command palette: its text and the entry it runs.
+pub type PaletteItem {
+    pub str text;
+    pub Entry entry;
+    /// The key name the action is run with ("3" for "go to History"), "" otherwise.
+    pub str arg = "";
+}
+
+/// Every action of every mode, once each: "Status: stage   [s]". Ordered by
+/// the entry's first mode (tab order, "Everywhere" last), then by the table.
+/// The cursor keys (group "Move") are not actions anyone would look up and
+/// are left out; the flow variants of an action are the same action and are
+/// listed once.
+pub List<PaletteItem> palette_items() {
+    List<PaletteItem> out = [];
+    List<str> seen = [];
+    List<str> order = GIT_ui_modes.ids();
+    order.push("*");
+    for (str mode in order) {
+        for (Entry entry in entries()) {
+            if (entry.home() != mode || entry.group == "Move") {
+                continue;
+            }
+            str id = entry.home() + "|" + entry.view + "|" + entry.scope + "|" + entry.cmd;
+            if (seen.contains(id)) {
+                continue;
+            }
+            seen.push(id);
+            str suffix = "";
+            if (entry.view == VIEW_DIFF) {
+                suffix = " (diff)";
+            }
+            if (entry.cmd == GIT_ui_core.CMD_MODE_GOTO) {
+                List<str> all_modes = GIT_ui_modes.ids();
+                for (int index in 0 .. all_modes.size()) {
+                    out.push(PaletteItem("Go to " + GIT_ui_modes.title(all_modes[index]) + "   [" + (index + 1).to_str() + "]", entry, arg: (index + 1).to_str()));
+                }
+                continue;
+            }
+            out.push(PaletteItem(entry.where() + ": " + entry.label + suffix + "   [" + entry.all_keys() + "]", entry));
+        }
+    }
+    return out;
+}

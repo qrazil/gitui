@@ -31,10 +31,12 @@
 //
 // --- the key table ----------------------------------------------------------
 //
-// `key_table()` is the one place a key is bound. Dispatch (`lookup`), the
-// footer (`hints_for`) and the `?` help overlay (`bindings_in`) all read it,
-// so the footer cannot advertise a key that does nothing, and a new binding
-// shows up in the help overlay without anyone remembering to add it there.
+// `key_table()` is the one place a key is bound. Dispatch (`lookup`), an
+// overlay's hint row (`hints_for`) and the reference part of the `?` help
+// (`bindings_in`) all read it, so a hint cannot advertise a key that does
+// nothing. Which MODE offers a binding, under what label and at what hint
+// priority, is `GIT_ui_keymap`'s table, built on top of this one; the modes
+// themselves are `GIT_ui_modes` (docs/MGIT-MODES.md).
 //
 // --- the command log --------------------------------------------------------
 //
@@ -57,6 +59,7 @@ import diff.GIT_sequencer;
 import diff.GIT_stash;
 import core.GIT_status;
 import ui.GIT_ui_merge_model;
+import ui.GIT_ui_modes;
 import ui.GIT_ui_model;
 import ui.GIT_ui_sections;
 import ui.GIT_ui_statusline;
@@ -102,6 +105,12 @@ pub const str SCOPE_REBASE_TODO = "rebase-todo";
 pub const str SCOPE_PULL_ASK = "pull-ask";
 pub const str SCOPE_OVERVIEW = "overview";
 pub const str CMD_QUIT = "quit";
+/// Esc at the base: leave to the Status mode, or quit from it.
+pub const str CMD_LEAVE = "leave";
+pub const str CMD_MODE_NEXT = "mode-next";
+pub const str CMD_MODE_PREV = "mode-prev";
+pub const str CMD_MODE_GOTO = "mode-goto";
+pub const str CMD_PALETTE = "palette";
 pub const str CMD_DOWN = "down";
 pub const str CMD_UP = "up";
 pub const str CMD_LEFT = "left";
@@ -226,6 +235,8 @@ pub const str CMD_PUSH_LIBRARY = "push-library";
 pub const str CMD_REMOTE_BRANCH = "remote-branch";
 /// What `pick_purpose` says a finished remote-ref picker was for.
 pub const str PICK_REMOTE_REF = "remote-ref";
+/// The command palette's picker.
+pub const str PICK_PALETTE = "palette";
 /// What `pick_purpose` says a finished `GIT_ui_picker` was for.
 pub const str PICK_CHECKOUT = "checkout";
 pub const str PICK_REMOTE_CHECKOUT = "remote-checkout";
@@ -249,8 +260,10 @@ pub type Hint {
 
 /// One row of the key table. `keys` are `term.Code.to_str()` names ("j",
 /// "enter", "escape", "S"); `help` is the sentence the help overlay shows;
-/// `footer_keys`/`footer_label` are what the one-line footer shows, with
-/// `footer_keys == ""` meaning "help overlay only".
+/// `footer_keys`/`footer_label` are what an OVERLAY's hint row shows, with
+/// `footer_keys == ""` meaning "help overlay only". The base scopes (outline,
+/// diff, commit, everywhere) leave them empty: the hint row of a mode is
+/// generated from `GIT_ui_keymap`, which also says which modes offer each key.
 pub type Binding {
     pub str scope;
     pub str cmd;
@@ -389,6 +402,21 @@ pub type Core {
     /// the editor ran since the view last read it (see `GIT_ui_merge`).
     pub str resolve_edit_path = "";
     pub bool is_resolve_dirty = false;
+    /// The current mode (`GIT_ui_modes`): which full-screen view has the keys.
+    pub str ui_mode = "status";
+    /// The outline row each mode's cursor was on when it was left, by mode.
+    pub Map<str, str> mode_cursor = {};
+    /// The keys whose "moved to ..." notice has been shown this session.
+    pub Map<str, bool> notified = {};
+    /// Where the last frame put the mode's body and the tab bar (absolute
+    /// cells), for the mouse.
+    pub int body_x = 0;
+    pub int body_y = 0;
+    pub int body_w = 0;
+    pub int body_h = 0;
+    pub int tab_x = 0;
+    pub int tab_y = 0;
+    pub int tab_w = 0;
 }
 
 pub void Core.push_overlay(Overlay overlay) {
@@ -422,24 +450,14 @@ pub bool Core.has_overlay() {
     return overlays.size() > 0;
 }
 
-/// The keys the footer should show right now: the top overlay's, else the
-/// everywhere keys (`?` help, `@` log) and then the current view's. The
-/// everywhere keys come first because the footer is one row: on a narrow
-/// terminal it is the end that is cut off, and `?` is how a user finds the
-/// rest.
+/// The keys of the overlay on top, for the hint row; empty with none open --
+/// then it is the current mode's row, from `GIT_ui_keymap` (which this layer
+/// cannot import: the table is built on top of the key table below).
 pub List<Hint> Core.active_hints() {
     if (overlays.size() > 0) {
         return overlays[overlays.size() - 1].hints();
     }
-    List<Hint> out = hints_for(SCOPE_GLOBAL);
-    List<Hint> view = hints_for(SCOPE_OUTLINE);
-    if (is_diff_open) {
-        view = hints_for(SCOPE_DIFF);
-    }
-    for (Hint hint in view) {
-        out.push(hint);
-    }
-    return out;
+    return [];
 }
 
 /// The logging hook: record one write operation, one line. Called by the ops
@@ -747,19 +765,51 @@ pub void Core.reload() {
         }
     }
     refresh();
-    outline = GIT_ui_model.build_outline(last_status, log, commit_changes_cache, collapsed, paths, file_diffs, branch_rows, stashes: stash_labels);
-    List<TUI_outline.Node> merge_roots = GIT_ui_merge_model.merge_roots(last_status, is_merging, collapsed, paths, sequence_word, sequence_left);
-    if (merge_roots.size() > 0) {
-        for (TUI_outline.Node node in outline.roots) {
-            merge_roots.push(node);
-        }
-        outline.roots = merge_roots;
-    }
+    rebuild_outline();
     if (keep_id != "") {
         outline.did_select_id(keep_id);
     }
     jump.sync_from(outline);
     jump.follow(outline);
+}
+
+/// Make `target` the current mode: remember the cursor row of the one being
+/// left (by id), cut the outline for the new one and put its cursor back. The
+/// repository is not re-read. A diff must already be closed (`State.go_mode`
+/// does that); anything that needs another mode's rows -- the overview's
+/// "Changes" -- calls this first.
+pub void Core.enter_mode(str target) {
+    if (target == ui_mode || target == "") {
+        return;
+    }
+    match (outline.current()) {
+        case Some(TUI_outline.Row row): {
+            mode_cursor.set(ui_mode, row.node.id);
+        }
+        case None: {
+        }
+    }
+    ui_mode = target;
+    rebuild_outline();
+    str keep = mode_cursor.get(ui_mode).or("");
+    if (keep != "") {
+        outline.did_select_id(keep);
+    }
+    jump.sync_from(outline);
+    jump.follow(outline);
+}
+
+/// Build the outline again from what `refresh` last read: every section, the
+/// conflict banners in front, cut down to what the current mode shows. The
+/// cursor goes back to the top; the caller restores it.
+pub void Core.rebuild_outline() {
+    TUI_outline.Outline whole = GIT_ui_model.build_outline(last_status, log, commit_changes_cache, collapsed, paths, file_diffs, branch_rows, stashes: stash_labels);
+    List<TUI_outline.Node> roots = GIT_ui_merge_model.merge_roots(last_status, is_merging, collapsed, paths, sequence_word, sequence_left);
+    for (TUI_outline.Node node in whole.roots) {
+        roots.push(node);
+    }
+    whole.roots = GIT_ui_modes.roots_for(ui_mode, roots);
+    outline = whole;
 }
 
 /// `tip`'s first message line, for a branch row's label -- `""` if the commit
@@ -847,61 +897,62 @@ pub void Core.set_editor_paths() {
 pub List<Binding> key_table() {
     List<Binding> table = [];
     // The document: the outline.
-    table.push(Binding(SCOPE_OUTLINE, CMD_DOWN, ["j", "down"], "move the cursor down (steps the jump list when it has focus)", "j/k", "move"));
+    table.push(Binding(SCOPE_OUTLINE, CMD_DOWN, ["j", "down"], "move the cursor down (steps the jump list when it has focus)", "", ""));
     table.push(Binding(SCOPE_OUTLINE, CMD_UP, ["k", "up"], "move the cursor up", "", ""));
-    table.push(Binding(SCOPE_OUTLINE, CMD_RIGHT, ["l", "right"], "scroll the outline right", "h/l", "scroll"));
+    table.push(Binding(SCOPE_OUTLINE, CMD_RIGHT, ["l", "right"], "scroll the outline right", "", ""));
     table.push(Binding(SCOPE_OUTLINE, CMD_LEFT, ["h", "left"], "scroll the outline left", "", ""));
     table.push(Binding(SCOPE_OUTLINE, CMD_SECTION_PREVIOUS, ["["], "jump to the previous section header (first to the top of this section)", "", ""));
     table.push(Binding(SCOPE_OUTLINE, CMD_SECTION_NEXT, ["]"], "jump to the next section header", "", ""));
     table.push(Binding(SCOPE_OUTLINE, CMD_SIBLING_PREVIOUS, ["{"], "jump to the previous row at this depth or shallower (the previous commit, file or section)", "", ""));
     table.push(Binding(SCOPE_OUTLINE, CMD_SIBLING_NEXT, ["}"], "jump to the next row at this depth or shallower", "", ""));
-    table.push(Binding(SCOPE_OUTLINE, CMD_FOLD, ["tab"], "fold or unfold the row; on a leaf fold its section and move to it", "", ""));
+    table.push(Binding(SCOPE_OUTLINE, CMD_FOLD, ["space"], "fold or unfold the row; on a leaf fold its section and move to it", "", ""));
     table.push(Binding(SCOPE_OUTLINE, CMD_FOLD_ALL, ["-"], "fold every section", "", ""));
     table.push(Binding(SCOPE_OUTLINE, CMD_UNFOLD_ALL, ["+", "="], "unfold every section (commits stay as they are: Enter opens one)", "", ""));
-    table.push(Binding(SCOPE_OUTLINE, CMD_TOGGLE, ["enter"], "fold or unfold the row; open a commit's file diff; load more commits", "enter", "toggle"));
-    table.push(Binding(SCOPE_OUTLINE, CMD_STAGE, ["s"], "stage the file under the cursor", "s", "stage"));
-    table.push(Binding(SCOPE_OUTLINE, CMD_UNSTAGE, ["u"], "unstage the file under the cursor", "u", "unstage"));
-    table.push(Binding(SCOPE_OUTLINE, CMD_STAGE_ALL, ["S"], "stage everything: every unstaged and untracked file", "S", "stage all"));
-    table.push(Binding(SCOPE_OUTLINE, CMD_UNSTAGE_ALL, ["U"], "unstage everything", "U", "unstage all"));
-    table.push(Binding(SCOPE_OUTLINE, CMD_DIFF, ["d"], "open the hunk-level diff of the row", "d", "diff"));
-    table.push(Binding(SCOPE_OUTLINE, CMD_DISCARD, ["x"], "discard the changes to the file under the cursor (asks first)", "x", "discard"));
-    table.push(Binding(SCOPE_OUTLINE, CMD_COMMIT, ["c"], "commit: the commit overlay (edit message, finish, amend)", "c", "commit"));
-    table.push(Binding(SCOPE_OUTLINE, CMD_BRANCH, ["b"], "branch: check out, new branch", "b", "branch"));
-    table.push(Binding(SCOPE_OUTLINE, CMD_PUSH, ["P"], "push the current branch to origin (fast-forward only)", "P", "push"));
-    table.push(Binding(SCOPE_OUTLINE, CMD_PULL, ["F"], "pull the current branch from origin (fast-forward only)", "F", "pull"));
-    table.push(Binding(SCOPE_OUTLINE, CMD_STASH, ["z"], "stash: push, pop, apply, drop, list (the stash under the cursor in the Stashes section, else the newest)", "z", "stash"));
-    table.push(Binding(SCOPE_OUTLINE, CMD_BLAME, ["B"], "blame the file under the cursor: who last changed each line", "B", "blame"));
-    table.push(Binding(SCOPE_OUTLINE, CMD_HISTORY, ["H"], "history of the file under the cursor (git log -- path)", "H", "history"));
-    table.push(Binding(SCOPE_OUTLINE, CMD_UNDO, ["Z"], "undo the last HEAD move from the reflog (asks first; redo from there)", "Z", "undo"));
-    table.push(Binding(SCOPE_OUTLINE, CMD_TAGS, ["T"], "tags: list, create (lightweight or annotated), delete", "T", "tags"));
+    table.push(Binding(SCOPE_OUTLINE, CMD_TOGGLE, ["enter"], "fold or unfold the row; open a commit's file diff; load more commits", "", ""));
+    table.push(Binding(SCOPE_OUTLINE, CMD_STAGE, ["s"], "stage the file under the cursor", "", ""));
+    table.push(Binding(SCOPE_OUTLINE, CMD_UNSTAGE, ["u"], "unstage the file under the cursor", "", ""));
+    table.push(Binding(SCOPE_OUTLINE, CMD_STAGE_ALL, ["S"], "stage everything: every unstaged and untracked file", "", ""));
+    table.push(Binding(SCOPE_OUTLINE, CMD_UNSTAGE_ALL, ["U"], "unstage everything", "", ""));
+    table.push(Binding(SCOPE_OUTLINE, CMD_DIFF, ["d"], "open the hunk-level diff of the row", "", ""));
+    table.push(Binding(SCOPE_OUTLINE, CMD_DISCARD, ["x"], "discard the changes to the file under the cursor (asks first)", "", ""));
+    table.push(Binding(SCOPE_OUTLINE, CMD_COMMIT, ["c"], "commit: the commit overlay (edit message, finish, amend)", "", ""));
+    table.push(Binding(SCOPE_OUTLINE, CMD_BRANCH, ["b"], "branch: check out, new branch", "", ""));
+    table.push(Binding(SCOPE_OUTLINE, CMD_PUSH, ["P"], "push the current branch to origin (fast-forward only)", "", ""));
+    table.push(Binding(SCOPE_OUTLINE, CMD_PULL, ["F"], "pull the current branch from origin (fast-forward only)", "", ""));
+    table.push(Binding(SCOPE_OUTLINE, CMD_STASH, ["z"], "stash: push, pop, apply, drop, list (the stash under the cursor in the Stashes section, else the newest)", "", ""));
+    table.push(Binding(SCOPE_OUTLINE, CMD_BLAME, ["B"], "blame the file under the cursor: who last changed each line", "", ""));
+    table.push(Binding(SCOPE_OUTLINE, CMD_HISTORY, ["H"], "history of the file under the cursor (git log -- path)", "", ""));
+    table.push(Binding(SCOPE_OUTLINE, CMD_UNDO, ["Z"], "undo the last HEAD move from the reflog (asks first; redo from there)", "", ""));
+    table.push(Binding(SCOPE_OUTLINE, CMD_TAGS, ["T"], "tags: list, create (lightweight or annotated), delete", "", ""));
     table.push(Binding(SCOPE_OUTLINE, CMD_JUMP, ["J"], "show or hide the jump list", "", ""));
     table.push(Binding(SCOPE_OUTLINE, CMD_FOCUS, ["w"], "give the jump list the keys, or take them back", "", ""));
-    table.push(Binding(SCOPE_OUTLINE, CMD_SEARCH, ["/"], "search the outline and the log (smart-case: lower case ignores case)", "/", "search"));
-    table.push(Binding(SCOPE_OUTLINE, CMD_NEXT, ["n"], "next search match", "n/N", "next"));
+    table.push(Binding(SCOPE_OUTLINE, CMD_SEARCH, ["/"], "search the outline and the log (smart-case: lower case ignores case)", "", ""));
+    table.push(Binding(SCOPE_OUTLINE, CMD_NEXT, ["n"], "next search match", "", ""));
     table.push(Binding(SCOPE_OUTLINE, CMD_PREVIOUS, ["N"], "previous search match", "", ""));
-    table.push(Binding(SCOPE_OUTLINE, CMD_MERGE, ["m"], "merge: a branch into the current one, continue or abort a merge, resolve conflicts (Enter on an unmerged path)", "m", "merge"));
-    table.push(Binding(SCOPE_OUTLINE, CMD_PICK, ["A"], "cherry-pick the commit under the cursor (menu: now, -x, -n, a range); while one is under way: continue, skip, abort", "A", "pick"));
-    table.push(Binding(SCOPE_OUTLINE, CMD_REVERT, ["V"], "revert the commit under the cursor (menu: now, -n, a range); while one is under way: continue, skip, abort", "V", "revert"));
-    table.push(Binding(SCOPE_OUTLINE, CMD_REBASE, ["r"], "rebase the current branch (menu: onto a branch, interactively, from the commit under the cursor, --onto); while one is under way: continue, skip, abort, quit, edit the todo list", "r", "rebase"));
-    table.push(Binding(SCOPE_OUTLINE, CMD_REFRESH, ["g", "R"], "re-read the repository", "g", "refresh"));
-    table.push(Binding(SCOPE_OUTLINE, CMD_QUIT, ["q", "escape"], "quit", "q", "quit"));
+    table.push(Binding(SCOPE_OUTLINE, CMD_MERGE, ["m"], "merge: a branch into the current one, continue or abort a merge, resolve conflicts (Enter on an unmerged path)", "", ""));
+    table.push(Binding(SCOPE_OUTLINE, CMD_PICK, ["A"], "cherry-pick the commit under the cursor (menu: now, -x, -n, a range); while one is under way: continue, skip, abort", "", ""));
+    table.push(Binding(SCOPE_OUTLINE, CMD_REVERT, ["V"], "revert the commit under the cursor (menu: now, -n, a range); while one is under way: continue, skip, abort", "", ""));
+    table.push(Binding(SCOPE_OUTLINE, CMD_REBASE, ["r"], "rebase the current branch (menu: onto a branch, interactively, from the commit under the cursor, --onto); while one is under way: continue, skip, abort, quit, edit the todo list", "", ""));
+    table.push(Binding(SCOPE_OUTLINE, CMD_REFRESH, ["g", "R"], "re-read the repository", "", ""));
+    table.push(Binding(SCOPE_OUTLINE, CMD_QUIT, ["q"], "quit", "", ""));
+    table.push(Binding(SCOPE_OUTLINE, CMD_LEAVE, ["escape"], "back to the Status mode; quit from the Status mode", "", ""));
     // The document: the diff view.
-    table.push(Binding(SCOPE_DIFF, CMD_DOWN, ["j", "down"], "move the diff cursor down", "j/k", "move"));
+    table.push(Binding(SCOPE_DIFF, CMD_DOWN, ["j", "down"], "move the diff cursor down", "", ""));
     table.push(Binding(SCOPE_DIFF, CMD_UP, ["k", "up"], "move the diff cursor up", "", ""));
     table.push(Binding(SCOPE_DIFF, CMD_SECTION_PREVIOUS, ["["], "jump to the previous hunk (first to the top of this one)", "", ""));
     table.push(Binding(SCOPE_DIFF, CMD_SECTION_NEXT, ["]"], "jump to the next hunk", "", ""));
     table.push(Binding(SCOPE_DIFF, CMD_SIBLING_PREVIOUS, ["{"], "open the previous file of this list (staged, unstaged, untracked or the commit's)", "", ""));
     table.push(Binding(SCOPE_DIFF, CMD_SIBLING_NEXT, ["}"], "open the next file of this list", "", ""));
-    table.push(Binding(SCOPE_DIFF, CMD_FOLD, ["tab"], "fold or unfold the hunk under the cursor", "", ""));
+    table.push(Binding(SCOPE_DIFF, CMD_FOLD, ["f"], "fold or unfold the hunk under the cursor", "", ""));
     table.push(Binding(SCOPE_DIFF, CMD_FOLD_ALL, ["-"], "fold every hunk", "", ""));
     table.push(Binding(SCOPE_DIFF, CMD_UNFOLD_ALL, ["+", "="], "unfold every hunk", "", ""));
-    table.push(Binding(SCOPE_DIFF, CMD_STAGE, ["s"], "stage the hunk under the cursor", "s", "stage hunk"));
-    table.push(Binding(SCOPE_DIFF, CMD_UNSTAGE, ["u"], "unstage the hunk under the cursor", "u", "unstage hunk"));
-    table.push(Binding(SCOPE_DIFF, CMD_VISUAL, ["v"], "start a visual range of lines (j/k extend it, v or Escape cancels)", "v", "lines"));
+    table.push(Binding(SCOPE_DIFF, CMD_STAGE, ["s"], "stage the hunk under the cursor", "", ""));
+    table.push(Binding(SCOPE_DIFF, CMD_UNSTAGE, ["u"], "unstage the hunk under the cursor", "", ""));
+    table.push(Binding(SCOPE_DIFF, CMD_VISUAL, ["v"], "start a visual range of lines (j/k extend it, v or Escape cancels)", "", ""));
     table.push(Binding(SCOPE_DIFF, CMD_LINES, ["space", "enter"], "stage the selected lines (unstage them in the staged view); the line under the cursor with no range, the whole hunk on its header", "", ""));
     table.push(Binding(SCOPE_DIFF, CMD_DISCARD, ["x"], "discard the selected lines from the working tree (asks first)", "", ""));
-    table.push(Binding(SCOPE_DIFF, CMD_BACK, ["q", "escape", "backspace"], "cancel the visual range, else back to the outline", "q/esc/backspace", "back"));
-    table.push(Binding(SCOPE_DIFF, CMD_SPLIT, ["D", "|"], "side-by-side or unified diff (the choice is kept in diff.view; side by side needs 60 columns, auto picks it from 120)", "D", "split"));
+    table.push(Binding(SCOPE_DIFF, CMD_BACK, ["q", "escape", "backspace"], "cancel the visual range, else back to the outline", "", ""));
+    table.push(Binding(SCOPE_DIFF, CMD_SPLIT, ["D", "|"], "side-by-side or unified diff (the choice is kept in diff.view; side by side needs 60 columns, auto picks it from 120)", "", ""));
     table.push(Binding(SCOPE_DIFF, CMD_LEFT, ["h", "left"], "side by side: put the cursor on the old side (what s, u and space act on in a changed row)", "", ""));
     table.push(Binding(SCOPE_DIFF, CMD_RIGHT, ["l", "right"], "side by side: put the cursor on the new side (the default)", "", ""));
     table.push(Binding(SCOPE_DIFF, CMD_WIDEN, ["e"], "side by side: show more unchanged lines around the hunks (3, 10, 30, 100, all)", "", ""));
@@ -909,12 +960,16 @@ pub List<Binding> key_table() {
     table.push(Binding(SCOPE_DIFF, CMD_WRAP, ["w"], "side by side: wrap long lines, or scroll both sides together", "", ""));
     table.push(Binding(SCOPE_DIFF, CMD_SCROLL_LEFT, ["<"], "side by side, no wrap: scroll both sides left", "", ""));
     table.push(Binding(SCOPE_DIFF, CMD_SCROLL_RIGHT, [">"], "side by side, no wrap: scroll both sides right", "", ""));
-    table.push(Binding(SCOPE_DIFF, CMD_BLAME, ["B"], "blame this file", "B", "blame"));
-    table.push(Binding(SCOPE_DIFF, CMD_HISTORY, ["H"], "history of this file", "H", "history"));
+    table.push(Binding(SCOPE_DIFF, CMD_BLAME, ["B"], "blame this file", "", ""));
+    table.push(Binding(SCOPE_DIFF, CMD_HISTORY, ["H"], "history of this file", "", ""));
     // In every view.
-    table.push(Binding(SCOPE_GLOBAL, CMD_LOG, ["@"], "the command log: one line per write operation", "@", "log"));
-    table.push(Binding(SCOPE_GLOBAL, CMD_HELP, ["?"], "this key help", "?", "help"));
-    table.push(Binding(SCOPE_GLOBAL, CMD_OVERVIEW, ["i"], "the overview: branch, upstream, stashes, changes, operation -- and Enter opens the picker or list for the one you are on", "i", "info"));
+    table.push(Binding(SCOPE_GLOBAL, CMD_MODE_NEXT, ["tab"], "the next mode (Status, Commit, History, Branches, Stash; wraps)", "", ""));
+    table.push(Binding(SCOPE_GLOBAL, CMD_MODE_PREV, ["back-tab"], "the previous mode", "", ""));
+    table.push(Binding(SCOPE_GLOBAL, CMD_MODE_GOTO, ["1", "2", "3", "4", "5"], "jump to a mode by its number: 1 Status, 2 Commit, 3 History, 4 Branches, 5 Stash", "", ""));
+    table.push(Binding(SCOPE_GLOBAL, CMD_PALETTE, [":"], "the command palette: every action of every mode, filtered as you type (also Ctrl-P)", "", ""));
+    table.push(Binding(SCOPE_GLOBAL, CMD_LOG, ["@"], "the command log: one line per write operation", "", ""));
+    table.push(Binding(SCOPE_GLOBAL, CMD_HELP, ["?"], "this key help", "", ""));
+    table.push(Binding(SCOPE_GLOBAL, CMD_OVERVIEW, ["i"], "the overview: branch, upstream, stashes, changes, operation -- and Enter opens the picker or list for the one you are on", "", ""));
     table.push(Binding(SCOPE_GLOBAL, CMD_SYNTAX, ["C"], "syntax colours on or off (also in the blame, commit, stash and resolve views)", "", ""));
     // The overview overlay (`i`).
     table.push(Binding(SCOPE_OVERVIEW, CMD_DOWN, ["j", "down", "tab", "l", "right"], "next line", "j/k", "move"));
@@ -922,10 +977,10 @@ pub List<Binding> key_table() {
     table.push(Binding(SCOPE_OVERVIEW, CMD_OPEN, ["enter"], "open it: the branch picker, the upstream's remote branches, the stash list, the changed section, the menu of the operation under way", "enter", "open"));
     table.push(Binding(SCOPE_OVERVIEW, CMD_CLOSE, ["escape", "q", "i"], "close", "esc", "close"));
     // The commit overlay.
-    table.push(Binding(SCOPE_COMMIT, CMD_EDIT, ["e"], "edit the message in $EDITOR", "e", "edit"));
-    table.push(Binding(SCOPE_COMMIT, CMD_FINISH, ["f"], "finish: write the commit", "f", "finish"));
-    table.push(Binding(SCOPE_COMMIT, CMD_AMEND, ["A"], "amend HEAD: its message prefilled, its parents and author kept", "A", "amend"));
-    table.push(Binding(SCOPE_COMMIT, CMD_ABORT, ["a", "escape"], "abort", "a", "abort"));
+    table.push(Binding(SCOPE_COMMIT, CMD_EDIT, ["e"], "edit the message in $EDITOR", "", ""));
+    table.push(Binding(SCOPE_COMMIT, CMD_FINISH, ["f"], "finish: write the commit", "", ""));
+    table.push(Binding(SCOPE_COMMIT, CMD_AMEND, ["A"], "amend HEAD: its message prefilled, its parents and author kept", "", ""));
+    table.push(Binding(SCOPE_COMMIT, CMD_ABORT, ["a"], "discard the draft message and the amend", "", ""));
     // The branch overlay.
     table.push(Binding(SCOPE_BRANCH, CMD_CHECKOUT, ["c"], "check out the branch under the cursor", "c", "checkout"));
     table.push(Binding(SCOPE_BRANCH, CMD_PICK_BRANCH, ["/"], "check out a branch picked by typing part of its name", "/", "pick"));

@@ -1,0 +1,179 @@
+// The modes: mgit's five full-screen views, and the pure facts about them --
+// their ids and names, the order Tab cycles them, which outline sections each
+// one shows, and how the tab bar on the top row is laid out for a width.
+//
+// Nothing here knows about keys or the repository. The key table that says
+// what each mode offers is `GIT_ui_keymap`; the state that remembers the
+// current mode is `GIT_ui_core.Core.mode`. This module sits below both so that
+// `Core` can filter its outline by mode without an import cycle.
+//
+//   1 Status    review and stage: untracked, unstaged, staged, hunk diffs
+//   2 Commit    the message, amend, what the commit will contain
+//   3 History   the log, a commit's files, cherry-pick, revert, rebase, undo
+//   4 Branches  local branches: switch, new, merge, rebase, push, pull, tags
+//   5 Stash     the stash list: push, pop, apply, drop, with a diff preview
+
+import tui.core.TUI_text;
+import tui.widgets.TUI_outline;
+
+pub const str STATUS = "status";
+pub const str COMMIT = "commit";
+pub const str HISTORY = "history";
+pub const str BRANCHES = "branches";
+pub const str STASH = "stash";
+
+/// Every mode, in tab order.
+pub List<str> ids() {
+    return [STATUS, COMMIT, HISTORY, BRANCHES, STASH];
+}
+
+/// The name the tab bar, the help and the palette use.
+pub str title(str id) {
+    if (id == STATUS) {
+        return "Status";
+    }
+    if (id == COMMIT) {
+        return "Commit";
+    }
+    if (id == HISTORY) {
+        return "History";
+    }
+    if (id == BRANCHES) {
+        return "Branches";
+    }
+    if (id == STASH) {
+        return "Stash";
+    }
+    return id;
+}
+
+/// 0-based position in tab order; 0 for an unknown id.
+pub int index_of(str id) {
+    List<str> all = ids();
+    for (int index in 0 .. all.size()) {
+        if (all[index] == id) {
+            return index;
+        }
+    }
+    return 0;
+}
+
+/// The mode Tab goes to from `id`: wraps from the last to the first.
+pub str next(str id) {
+    List<str> all = ids();
+    return all[(index_of(id) + 1) % all.size()];
+}
+
+/// The mode Shift-Tab goes to from `id`.
+pub str previous(str id) {
+    List<str> all = ids();
+    return all[(index_of(id) + all.size() - 1) % all.size()];
+}
+
+/// The mode a digit key `1`..`5` jumps to, "" for any other key name.
+pub str for_digit(str key) {
+    List<str> all = ids();
+    for (int index in 0 .. all.size()) {
+        if (key == (index + 1).to_str()) {
+            return all[index];
+        }
+    }
+    return "";
+}
+
+/// Whether the outline's root `id` belongs to `mode`. The conflict banners
+/// (they are leaves, not sections) show everywhere: a merge or a rebase in
+/// progress is news in every mode.
+pub bool is_root_of(str mode, str id) {
+    if (id == "untracked" || id == "unstaged" || id == "staged" || id == "unmerged") {
+        return mode == STATUS;
+    }
+    if (id == "commits") {
+        return mode == HISTORY;
+    }
+    if (id == "branches") {
+        return mode == BRANCHES;
+    }
+    if (id == "stashes") {
+        return mode == STASH;
+    }
+    return true;
+}
+
+/// `roots` cut down to what `mode` shows. The Commit mode has no outline of
+/// its own (it draws a panel), so it keeps only the banners.
+pub List<TUI_outline.Node> roots_for(str mode, List<TUI_outline.Node> roots) {
+    List<TUI_outline.Node> out = [];
+    for (TUI_outline.Node node in roots) {
+        if (is_root_of(mode, node.id)) {
+            out.push(node);
+        }
+    }
+    if (mode == STASH) {
+        bool has_section = false;
+        for (TUI_outline.Node node in out) {
+            if (node.id == "stashes") {
+                has_section = true;
+            }
+        }
+        if (!has_section) {
+            out.push(TUI_outline.Node.section("stashes", "Stashes (0)", []));
+        }
+    }
+    return out;
+}
+
+/// One cell of the tab bar: where it starts, how wide it is, what it says.
+pub type TabCell {
+    pub str mode;
+    pub int x;
+    pub int width;
+    pub str text;
+}
+
+/// The tab bar for `width` columns, with the current tab picked out. The
+/// widest form that fits wins: every tab named ("1 Status  2 Commit ..."),
+/// else the current tab named and the rest as digits, else the digits alone.
+/// `x` is relative to the bar's left edge; a click maps through it.
+pub List<TabCell> tab_layout(str current, int width) {
+    List<TabCell> best = cells(current, true);
+    if (span_of(best) <= width) {
+        return best;
+    }
+    return cells(current, false);
+}
+
+List<TabCell> cells(str current, bool is_all_named) {
+    List<TabCell> out = [];
+    int x = 0;
+    List<str> all = ids();
+    for (int index in 0 .. all.size()) {
+        str label = (index + 1).to_str();
+        if (is_all_named || all[index] == current) {
+            label = label + " " + title(all[index]);
+        }
+        str text = " " + label + " ";
+        out.push(TabCell(all[index], x, TUI_text.width(text), text));
+        x = x + TUI_text.width(text);
+    }
+    return out;
+}
+
+/// The columns from the first cell's left edge to the last cell's right edge.
+pub int span_of(List<TabCell> list) {
+    if (list.size() == 0) {
+        return 0;
+    }
+    TabCell last = list[list.size() - 1];
+    return last.x + last.width;
+}
+
+/// The mode whose tab covers column `x` (relative to the bar), "" for a gap.
+pub str mode_at(List<TabCell> list, int x) {
+    for (TabCell cell in list) {
+        if (x >= cell.x && x < cell.x + cell.width) {
+            return cell.mode;
+        }
+    }
+    return "";
+}

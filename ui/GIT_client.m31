@@ -85,6 +85,11 @@ import ui.GIT_ui_core;
 import ui.GIT_ui_diff;
 import ui.GIT_ui_filelog;
 import ui.GIT_ui_help;
+import ui.GIT_ui_keymap;
+import ui.GIT_ui_modes;
+import ui.GIT_ui_modeview;
+import ui.GIT_ui_picker;
+import ui.GIT_ui_scrub;
 import ui.GIT_ui_highlight;
 import ui.GIT_ui_lines;
 import ui.GIT_ui_log;
@@ -107,8 +112,8 @@ import os;
 import term;
 import tui.app.TUI_app;
 import tui.core.TUI_buffer;
-import tui.widgets.TUI_footer;
 import tui.core.TUI_geometry;
+import tui.core.TUI_mouse;
 import tui.widgets.TUI_outline;
 import tui.core.TUI_style;
 import tui.core.TUI_text;
@@ -212,8 +217,13 @@ pub void State.launch_editor() {
 pub void State.settle() {
     if (is_overlay_done) {
         is_overlay_done = false;
-        pop_overlay();
+        if (has_overlay()) {
+            pop_overlay();
+        } else if (ui_mode == GIT_ui_modes.COMMIT) {
+            go_mode(GIT_ui_modes.STATUS);
+        }
     }
+    settle_palette();
     settle_merge_picks();
     settle_rebase_picks();
     match (take_pick(GIT_ui_core.PICK_CHECKOUT)) {
@@ -239,38 +249,71 @@ pub void State.settle() {
     }
 }
 
-/// The footer: the keys of whatever is on top, from the key table.
-List<TUI_widget.Span> State.footer_spans(TUI_style.Theme theme) {
-    List<TUI_widget.Span> out = [];
-    out.push(TUI_widget.Span(" "));
-    for (GIT_ui_core.Hint hint in active_hints()) {
-        out.push(TUI_widget.Span(hint.keys, style: theme.accent));
-        out.push(TUI_widget.Span(" " + hint.label + "  "));
+/// The hint row's text for `width` columns: the top overlay's own keys when
+/// there is one, else the current mode's, in the order of the key table's
+/// priorities, with a final "? more".
+List<GIT_ui_core.Hint> State.hint_row(int width) {
+    if (has_overlay()) {
+        return GIT_ui_keymap.fit(active_hints(), width, false);
     }
-    return out;
+    return GIT_ui_keymap.hint_row(ui_mode, current_view(), current_flow(), width);
 }
 
-/// The frame: the primary document -- either the outline (and, toggled on,
-/// the jump list beside it), or, once `d` has been pressed, the hunk-level
-/// diff view in its place -- then the two-row footer `TUI_footer.split`
-/// reserves -- a status line and the key legend -- and, on top of
-/// everything, every open overlay, bottom of the stack first. See
-/// `docs/design.md`'s locked layout: one primary document, one optional
-/// jump-list panel, a persistent footer, and overlays drawn over all of it
-/// rather than replacing any of it. The diff view is not an overlay: it
-/// REPLACES the document the way `tui's `browse.m31``'s preview pane
-/// changes with the selection, which is why the jump list (synced to the
-/// outline's own entries) is not shown alongside it.
+/// What is under way and how to deal with it, for the message row when nothing
+/// else is being said, in every mode: "REBASING (2 left): r to continue, skip
+/// or abort". "" when nothing is under way.
+str State.flow_banner() {
+    if (is_rebasing) {
+        return sequence_word + " (" + sequence_left.to_str() + " left): r to continue, skip, abort or edit the todo; commit, branch, merge and pull wait";
+    }
+    if (is_sequencing) {
+        return sequence_word + " (" + sequence_left.to_str() + " left): A or V to continue, skip or abort; commit, branch, merge and pull wait";
+    }
+    if (is_merging) {
+        return "MERGING: resolve the conflicts (Enter on an unmerged path), then commit; m to abort";
+    }
+    return "";
+}
+
+/// "diff" while a hunk diff has replaced the document, else "doc".
+pub str State.current_view() {
+    if (is_diff_open) {
+        return GIT_ui_keymap.VIEW_DIFF;
+    }
+    return GIT_ui_keymap.VIEW_DOC;
+}
+
+/// "", "merge", "sequence" or "rebase": what is under way, for the table.
+pub str State.current_flow() {
+    return GIT_ui_keymap.flow_of(is_merging, is_sequencing, is_rebasing);
+}
+
+/// The frame, top to bottom: the tab bar, the statusline, the mode's body,
+/// the message row and the hint row on the last row of the terminal. There is
+/// no border: every row but the body is one line, and the body gets what is
+/// left (nothing, if the terminal is too small to show it). Overlays are drawn
+/// over the body, bottom of the stack first.
+///
+/// The body is one of: the outline (Status, History, Branches, Stash, with the
+/// jump list beside it when toggled on), the hunk diff in its place (Status
+/// and History, after `d` or Enter on a file), or the Commit panel.
 pub void State.draw(TUI_buffer.Buffer buffer, TUI_geometry.Rect area) {
     TUI_style.Theme theme = TUI_style.Theme.plain;
-    TUI_widget.Block frame = TUI_widget.Block(title: "", borders: TUI_widget.Borders.Rounded);
-    frame.render(buffer, area);
-    draw_statusline(buffer, area);
-    TUI_geometry.Rect body = frame.inner(area);
-    List<TUI_geometry.Rect> bands = TUI_footer.split(body, 2);
-    TUI_geometry.Rect main = bands[0];
-    TUI_geometry.Rect footer_area = bands[1];
-    if (is_diff_open) {
+    List<TUI_geometry.Rect> bands = TUI_geometry.rows(area, [TUI_geometry.Constraint.Length(1), TUI_geometry.Constraint.Length(1), TUI_geometry.Constraint.Fill(1), TUI_geometry.Constraint.Length(1), TUI_geometry.Constraint.Length(1)]);
+    TUI_geometry.Rect tab_row = bands[0];
+    TUI_geometry.Rect facts_row = bands[1];
+    TUI_geometry.Rect main = bands[2];
+    TUI_geometry.Rect message_row = bands[3];
+    TUI_geometry.Rect hint_area = bands[4];
+    body_x = main.x;
+    body_y = main.y;
+    body_w = main.width;
+    body_h = main.height;
+    GIT_ui_modeview.draw_tabs(core(), buffer, tab_row);
+    draw_statusline(buffer, facts_row);
+    if (ui_mode == GIT_ui_modes.COMMIT && !is_diff_open) {
+        GIT_ui_modeview.draw_commit_panel(core(), buffer, main);
+    } else if (is_diff_open) {
         draw_lines(buffer, main);
     } else {
         TUI_geometry.Rect outline_area = main;
@@ -284,34 +327,41 @@ pub void State.draw(TUI_buffer.Buffer buffer, TUI_geometry.Rect area) {
         } else {
             outline.render(buffer, outline_area);
         }
+        body_w = outline_area.width;
     }
-    TUI_widget.Line status_row = TUI_widget.Line([TUI_widget.Span(" " + status_line(), style: theme.dim)]);
-    status_row.render(buffer, TUI_geometry.Rect(footer_area.x, footer_area.y, footer_area.width, 1));
-    TUI_footer.Footer(footer_spans(theme)).render(buffer, TUI_geometry.Rect(footer_area.x, footer_area.y + 1, footer_area.width, 1));
+    if (!message_row.is_empty()) {
+        str said = status_line();
+        if (said != "") {
+            buffer.set_str(message_row.x, message_row.y, TUI_text.truncate(" " + said, message_row.width), theme.dim, max: message_row.width);
+        } else if (flow_banner() != "") {
+            buffer.set_str(message_row.x, message_row.y, TUI_text.truncate(" " + flow_banner(), message_row.width), TUI_style.Style(foreground: TUI_style.Colour.Indexed(1), attrs: TUI_style.BOLD), max: message_row.width);
+        }
+    }
+    GIT_ui_modeview.draw_hints(buffer, hint_area, hint_row(hint_area.width));
     for (GIT_ui_core.Overlay overlay in overlays) {
-        overlay.render(buffer, body);
+        overlay.render(buffer, main);
     }
+    GIT_ui_scrub.scrub(buffer);
 }
 
-/// The statusline, on the frame's top border: the branch (bold), what it
+/// The statusline, on the row under the tab bar: the branch (bold), what it
 /// tracks, the operation under way (red), the stash count, the change counts
 /// and the repository's name, from `facts` -- see `GIT_ui_statusline` for what
-/// goes when the line is narrow. It costs no row of the body.
-void State.draw_statusline(TUI_buffer.Buffer buffer, TUI_geometry.Rect area) {
-    int room = area.width - 6;
-    if (room < 4 || area.height < 1) {
+/// goes when the line is narrow.
+void State.draw_statusline(TUI_buffer.Buffer buffer, TUI_geometry.Rect row) {
+    int room = row.width - 2;
+    if (room < 4 || row.height < 1) {
         return;
     }
     List<GIT_ui_statusline.Segment> kept = GIT_ui_statusline.fit(GIT_ui_statusline.segments(facts), room);
-    int x = area.x + 2;
-    buffer.set_str(x, area.y, " ", TUI_style.Style(), max: 1);
-    x = x + 1;
+    int x = row.x + 1;
+    int right = row.x + row.width - 1;
     for (int index in 0 .. kept.size()) {
         if (index > 0) {
-            buffer.set_str(x, area.y, GIT_ui_statusline.SEPARATOR, TUI_style.Style(attrs: TUI_style.DIM), max: area.x + area.width - 3 - x);
+            buffer.set_str(x, row.y, GIT_ui_statusline.SEPARATOR, TUI_style.Style(attrs: TUI_style.DIM), max: right - x);
             x = x + TUI_text.width(GIT_ui_statusline.SEPARATOR);
         }
-        str text = TUI_text.truncate(kept[index].text, area.x + area.width - 3 - x);
+        str text = TUI_text.truncate(kept[index].text, right - x);
         TUI_style.Style style = TUI_style.Style();
         if (kept[index].id == "branch") {
             style = TUI_style.Style(attrs: TUI_style.BOLD);
@@ -320,21 +370,37 @@ void State.draw_statusline(TUI_buffer.Buffer buffer, TUI_geometry.Rect area) {
         } else if (kept[index].id == "repo") {
             style = TUI_style.Style(attrs: TUI_style.DIM);
         }
-        buffer.set_str(x, area.y, text, style, max: area.x + area.width - 3 - x);
+        buffer.set_str(x, row.y, text, style, max: right - x);
         x = x + TUI_text.width(text);
     }
-    buffer.set_str(x, area.y, " ", TUI_style.Style(), max: 1);
 }
 
-/// One decoded key. Only keys are dispatched; the mouse, a paste and an
-/// unknown sequence are ignored.
+/// One decoded event. A key goes to `handle_key` (Ctrl-P is the one key read
+/// with its modifier: it opens the command palette); a mouse report is the
+/// tab bar's, the outline's or the diff's; a paste and an unknown sequence are
+/// ignored.
 pub TUI_app.Action State.handle(term.Event event) {
     match (event) {
         case Key(term.Key key): {
+            if (key.has_modifiers(term.CTRL) && key.code.to_str() == "p" && !has_overlay()) {
+                return open_palette();
+            }
             return handle_key(key.code);
         }
         case Mouse(term.Mouse mouse): {
-            if (is_diff_open && !has_overlay() && GIT_ui_sbs.handle_mouse(core(), mouse)) {
+            if (has_overlay()) {
+                return TUI_app.Action.Continue;
+            }
+            if (did_click_tab(mouse)) {
+                return TUI_app.Action.Redraw;
+            }
+            if (is_diff_open) {
+                if (GIT_ui_sbs.handle_mouse(core(), mouse)) {
+                    return TUI_app.Action.Redraw;
+                }
+                return TUI_app.Action.Continue;
+            }
+            if (ui_mode != GIT_ui_modes.COMMIT && did_use_outline_mouse(mouse)) {
                 return TUI_app.Action.Redraw;
             }
             return TUI_app.Action.Continue;
@@ -348,9 +414,170 @@ pub TUI_app.Action State.handle(term.Event event) {
     }
 }
 
+/// A left press on the tab bar switches to that tab's mode.
+bool State.did_click_tab(term.Mouse mouse) {
+    match (mouse.kind) {
+        case Down(int button): {
+            if (button != 0 || mouse.row - 1 != tab_y) {
+                return false;
+            }
+            str target = GIT_ui_modes.mode_at(GIT_ui_modes.tab_layout(ui_mode, tab_w), mouse.col - 1 - tab_x);
+            if (target == "") {
+                return false;
+            }
+            message = "";
+            go_mode(target);
+            return true;
+        }
+        case ScrollUp: {
+            return false;
+        }
+        case ScrollDown: {
+            return false;
+        }
+        case ScrollLeft: {
+            return false;
+        }
+        case ScrollRight: {
+            return false;
+        }
+        case Drag(int button): {
+            return false;
+        }
+        case Up(int button): {
+            return false;
+        }
+        case Moved: {
+            return false;
+        }
+    }
+}
+
+/// The wheel moves the outline's cursor and a press selects a row, as the
+/// widget does it; true when something changed.
+bool State.did_use_outline_mouse(term.Mouse mouse) {
+    TUI_geometry.Rect area = TUI_geometry.Rect(body_x, body_y, body_w, body_h);
+    int x = mouse.col - 1;
+    int y = mouse.row - 1;
+    TUI_mouse.Response response = TUI_mouse.Response.Ignored;
+    match (mouse.kind) {
+        case ScrollUp: {
+            response = outline.handle_mouse(TUI_mouse.Gesture(TUI_mouse.Kind.ScrollUp, x, y), area);
+        }
+        case ScrollDown: {
+            response = outline.handle_mouse(TUI_mouse.Gesture(TUI_mouse.Kind.ScrollDown, x, y), area);
+        }
+        case Down(int button): {
+            if (button == 0) {
+                response = outline.handle_mouse(TUI_mouse.Gesture(TUI_mouse.Kind.Press, x, y, button: button), area);
+            }
+        }
+        case ScrollLeft: {
+        }
+        case ScrollRight: {
+        }
+        case Drag(int button): {
+        }
+        case Up(int button): {
+        }
+        case Moved: {
+        }
+    }
+    match (response) {
+        case Ignored: {
+            return false;
+        }
+        case Changed: {
+            jump.sync_from(outline);
+            jump.follow(outline);
+            return true;
+        }
+        case Activated: {
+            jump.sync_from(outline);
+            jump.follow(outline);
+            return true;
+        }
+    }
+}
+
+// --- the modes ------------------------------------------------------------------
+
+/// Switch to `target`. The cursor each mode had is remembered by row id and
+/// restored; an open diff is closed (it belongs to the mode it was opened in).
+/// Nothing is re-read from the repository: only the outline is cut again.
+pub void State.go_mode(str target) {
+    if (target == ui_mode || target == "") {
+        return;
+    }
+    if (is_diff_open) {
+        close_diff();
+    }
+    enter_mode(target);
+}
+
+/// Tab and Shift-Tab: the next or previous mode, wrapping.
+void State.cycle_mode(bool is_forward) {
+    message = "";
+    if (is_forward) {
+        go_mode(GIT_ui_modes.next(ui_mode));
+    } else {
+        go_mode(GIT_ui_modes.previous(ui_mode));
+    }
+}
+
+/// `:` or Ctrl-P: the command palette, a picker over every action of every
+/// mode (`GIT_ui_keymap.palette_items`). What it picks is run by
+/// `settle_palette`.
+TUI_app.Action State.open_palette() {
+    List<str> items = [];
+    for (GIT_ui_keymap.PaletteItem item in GIT_ui_keymap.palette_items()) {
+        items.push(item.text);
+    }
+    GIT_ui_picker.open(core(), GIT_ui_core.PICK_PALETTE, "commands", items);
+    return TUI_app.Action.Redraw;
+}
+
+/// Run what the palette picked: switch to the action's mode (and out of a
+/// diff, if the action is the document's), then do it as its own key would.
+void State.settle_palette() {
+    match (take_pick(GIT_ui_core.PICK_PALETTE)) {
+        case Some(str text): {
+            for (GIT_ui_keymap.PaletteItem item in GIT_ui_keymap.palette_items()) {
+                if (item.text == text) {
+                    run_entry(item.entry, item.arg);
+                    return;
+                }
+            }
+        }
+        case None: {
+        }
+    }
+}
+
+/// Run the action an entry names, from the palette.
+void State.run_entry(GIT_ui_keymap.Entry entry, str arg) {
+    if (!entry.is_in(ui_mode)) {
+        go_mode(entry.home());
+    }
+    if (entry.view == GIT_ui_keymap.VIEW_DOC && is_diff_open) {
+        close_diff();
+    }
+    if (entry.view == GIT_ui_keymap.VIEW_DIFF && !is_diff_open) {
+        message = entry.label + ": open a diff first (d on a file)";
+        return;
+    }
+    if (entry.scope == GIT_ui_core.SCOPE_GLOBAL) {
+        run_global_command(entry.cmd, arg);
+        return;
+    }
+    run_in_mode(entry.scope, entry.cmd, arg);
+}
+
 /// A key goes to the overlay on top of the stack if there is one -- it takes
-/// every key, bound or not -- and otherwise through the key table: the view's
-/// own scope (outline or diff), then the keys that work in every view.
+/// every key, bound or not -- and otherwise through the key table, offered
+/// by the current mode: the mode's own scope (and the outline's), then the
+/// keys that work everywhere. A key the table binds but this mode does not
+/// offer says where it went instead of silently doing nothing.
 pub TUI_app.Action State.handle_key(term.Code code) {
     if (!is_diff_open) {
         visual_anchor = -1;
@@ -364,35 +591,121 @@ pub TUI_app.Action State.handle_key(term.Code code) {
         }
         return action;
     }
-    str scope = GIT_ui_core.SCOPE_OUTLINE;
-    if (is_diff_open) {
-        scope = GIT_ui_core.SCOPE_DIFF;
-    }
     str name = code.to_str();
+    str view = current_view();
     TUI_app.Action action = TUI_app.Action.Continue;
-    match (GIT_ui_core.lookup(scope, code)) {
-        case Some(str cmd): {
-            if (is_diff_open) {
-                action = run_diff_command(cmd);
-            } else {
-                action = run_outline_command(cmd, name);
+    bool is_handled = false;
+    for (str scope in GIT_ui_keymap.scopes_for(ui_mode, view)) {
+        if (is_handled) {
+            break;
+        }
+        match (GIT_ui_core.lookup(scope, code)) {
+            case Some(str cmd): {
+                is_handled = true;
+                match (GIT_ui_keymap.find(ui_mode, view, scope, cmd, current_flow())) {
+                    case Some(GIT_ui_keymap.Entry entry): {
+                        action = run_in_mode(scope, cmd, name);
+                    }
+                    case None: {
+                        say_moved(view, scope, cmd, name);
+                        action = TUI_app.Action.Redraw;
+                    }
+                }
+            }
+            case None: {
             }
         }
-        case None: {
-            match (GIT_ui_core.lookup(GIT_ui_core.SCOPE_GLOBAL, code)) {
-                case Some(str cmd): {
-                    action = run_global_command(cmd);
-                }
-                case None: {
-                }
+    }
+    if (!is_handled) {
+        match (GIT_ui_core.lookup(GIT_ui_core.SCOPE_GLOBAL, code)) {
+            case Some(str cmd): {
+                action = run_global_command(cmd, name);
+            }
+            case None: {
             }
         }
     }
     settle();
+    if (is_editor_wanted && ui_mode == GIT_ui_modes.COMMIT) {
+        return TUI_app.Action.Quit;
+    }
     return action;
 }
 
-TUI_app.Action State.run_global_command(str cmd) {
+/// A bound key this mode does not offer: name the mode that does. The first
+/// time in a session it is a full sentence; after that, the short form.
+void State.say_moved(str view, str scope, str cmd, str name) {
+    match (GIT_ui_keymap.moved_to(ui_mode, view, scope, cmd)) {
+        case Some(GIT_ui_keymap.Entry entry): {
+            // Something is under way and this action waits for it: say that
+            // rather than where the key went.
+            if ((entry.when == "idle" || entry.when == "noseq") && is_blocked_by_sequence(entry.label)) {
+                return;
+            }
+            str home = GIT_ui_modes.title(entry.home());
+            if (notified.contains(name)) {
+                message = name + ": " + home + " (" + (GIT_ui_modes.index_of(entry.home()) + 1).to_str() + ")";
+            } else {
+                notified.set(name, true);
+                message = name + " moved to " + home + " (" + (GIT_ui_modes.index_of(entry.home()) + 1).to_str() + "): " + entry.label + ". Tab or " + (GIT_ui_modes.index_of(entry.home()) + 1).to_str() + " goes there; : lists every command";
+            }
+        }
+        case None: {
+        }
+    }
+}
+
+/// Dispatch one command of `scope` to the code that does it.
+TUI_app.Action State.run_in_mode(str scope, str cmd, str name) {
+    if (scope == GIT_ui_core.SCOPE_DIFF) {
+        return run_diff_command(cmd);
+    }
+    if (scope == GIT_ui_core.SCOPE_COMMIT) {
+        return run_commit_command(cmd);
+    }
+    return run_outline_command(cmd, name);
+}
+
+/// The Commit mode's keys: the old commit overlay's `e`, `f`, `A` and `a`.
+TUI_app.Action State.run_commit_command(str cmd) {
+    if (cmd != GIT_ui_core.CMD_ABORT && is_blocked_by_sequence("commit")) {
+        return TUI_app.Action.Redraw;
+    }
+    if (cmd == GIT_ui_core.CMD_EDIT) {
+        edit_message();
+        if (is_editor_wanted) {
+            return TUI_app.Action.Quit;
+        }
+    }
+    if (cmd == GIT_ui_core.CMD_FINISH) {
+        finish_commit();
+    }
+    if (cmd == GIT_ui_core.CMD_AMEND) {
+        start_amend();
+    }
+    if (cmd == GIT_ui_core.CMD_ABORT) {
+        confirm_abort();
+    }
+    return TUI_app.Action.Redraw;
+}
+
+TUI_app.Action State.run_global_command(str cmd, str name) {
+    if (cmd == GIT_ui_core.CMD_MODE_NEXT) {
+        cycle_mode(true);
+        return TUI_app.Action.Redraw;
+    }
+    if (cmd == GIT_ui_core.CMD_MODE_PREV) {
+        cycle_mode(false);
+        return TUI_app.Action.Redraw;
+    }
+    if (cmd == GIT_ui_core.CMD_MODE_GOTO) {
+        message = "";
+        go_mode(GIT_ui_modes.for_digit(name));
+        return TUI_app.Action.Redraw;
+    }
+    if (cmd == GIT_ui_core.CMD_PALETTE) {
+        return open_palette();
+    }
     if (cmd == GIT_ui_core.CMD_LOG) {
         GIT_ui_log.open(core());
         return TUI_app.Action.Redraw;
@@ -510,6 +823,13 @@ TUI_app.Action State.run_outline_command(str cmd, str name) {
     if (cmd == GIT_ui_core.CMD_QUIT) {
         return TUI_app.Action.Quit;
     }
+    if (cmd == GIT_ui_core.CMD_LEAVE) {
+        if (ui_mode == GIT_ui_modes.STATUS) {
+            return TUI_app.Action.Quit;
+        }
+        go_mode(GIT_ui_modes.STATUS);
+        return TUI_app.Action.Redraw;
+    }
     if (cmd == GIT_ui_core.CMD_DOWN) {
         if (name == "down") {
             move_cursor(1);
@@ -573,7 +893,9 @@ TUI_app.Action State.run_outline_command(str cmd, str name) {
         discard_current();
     }
     if (cmd == GIT_ui_core.CMD_COMMIT) {
-        open_commit();
+        if (begin_commit()) {
+            go_mode(GIT_ui_modes.COMMIT);
+        }
     }
     if (cmd == GIT_ui_core.CMD_BRANCH) {
         open_branch();
@@ -662,6 +984,12 @@ void State.handle_enter() {
             }
             if (row.node.id.starts_with(GIT_ui_merge_model.ROW_PREFIX)) {
                 open_resolve_current();
+                return;
+            }
+            if (row.node.id.starts_with("branch:")) {
+                if (!is_blocked_by_sequence("branch")) {
+                    checkout_current();
+                }
                 return;
             }
             if (row.node.id.starts_with("stash:")) {

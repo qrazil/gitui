@@ -201,6 +201,8 @@ void go_to_changes(GIT_ui_remote.RemoteLayer host) {
         host.say("the working tree is clean");
         return;
     }
+    // The change lists are Status's; go there first (nothing is re-read).
+    host.enter_mode("status");
     host.collapsed.set(target, false);
     match (GIT_ui_sections.find_node(host.outline.roots, target)) {
         case Some(TUI_outline.Node node): {

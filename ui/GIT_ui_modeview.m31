@@ -1,0 +1,135 @@
+// Drawing for the mode frame: the tab bar on the top row, the hint row on the
+// last row, and the Commit mode's panel. Free functions over the shared
+// `Core`, so `GIT_client.State.draw` stays the one place that lays the screen
+// out and this module the one place that knows how those pieces look.
+//
+// Every string is cut to its row with `TUI_text` (display columns, not bytes
+// or code points), and every `set_str` is given a `max`, so nothing here can
+// write past the last column: a wide character, a long branch name or a
+// narrow terminal shortens a row, it never spills into the next.
+
+import io;
+import ui.GIT_ui_core;
+import ui.GIT_ui_keymap;
+import ui.GIT_ui_model;
+import ui.GIT_ui_modes;
+import core.GIT_status;
+import tui.core.TUI_buffer;
+import tui.core.TUI_geometry;
+import tui.core.TUI_style;
+import tui.core.TUI_text;
+
+/// The tab bar: " 1 Status  2 Commit  3 History  4 Branches  5 Stash ", the
+/// current tab in reverse video, the others plain. Records where it drew in
+/// `Core` so a click on it can be mapped back to a mode.
+pub void draw_tabs(GIT_ui_core.Core core, TUI_buffer.Buffer buffer, TUI_geometry.Rect row) {
+    core.tab_x = row.x;
+    core.tab_y = row.y;
+    core.tab_w = 0;
+    if (row.is_empty()) {
+        return;
+    }
+    List<GIT_ui_modes.TabCell> cells = GIT_ui_modes.tab_layout(core.ui_mode, row.width);
+    core.tab_w = row.width;
+    for (GIT_ui_modes.TabCell cell in cells) {
+        TUI_style.Style style = TUI_style.Style(attrs: TUI_style.DIM);
+        if (cell.mode == core.ui_mode) {
+            style = TUI_style.Style(attrs: TUI_style.REVERSE | TUI_style.BOLD);
+        }
+        buffer.set_str(row.x + cell.x, row.y, cell.text, style, max: row.width - cell.x);
+    }
+}
+
+/// The hint row: dim, one line, left-aligned. `hints` has already been cut to
+/// the width by `GIT_ui_keymap.fit`; the keys are bold, the labels dim.
+pub void draw_hints(TUI_buffer.Buffer buffer, TUI_geometry.Rect row, List<GIT_ui_core.Hint> hints) {
+    if (row.is_empty()) {
+        return;
+    }
+    int right = row.x + row.width;
+    int x = row.x + 1;
+    for (int index in 0 .. hints.size()) {
+        if (x >= right) {
+            return;
+        }
+        GIT_ui_core.Hint hint = hints[index];
+        x = x + buffer.set_str(x, row.y, hint.keys, TUI_style.Style(attrs: TUI_style.BOLD | TUI_style.DIM), max: right - x);
+        x = x + buffer.set_str(x, row.y, " " + hint.label, TUI_style.Style(attrs: TUI_style.DIM), max: right - x);
+        x = x + 2;
+    }
+}
+
+/// The Commit mode's body: what the commit will say and contain. The message
+/// is edited in `$EDITOR` (`e`), so what is shown is the first line of the
+/// draft on disk, if there is one.
+pub void draw_commit_panel(GIT_ui_core.Core core, TUI_buffer.Buffer buffer, TUI_geometry.Rect area) {
+    if (area.is_empty()) {
+        return;
+    }
+    int y = area.y;
+    int bottom = area.y + area.height;
+    str heading = "New commit";
+    if (core.is_amending) {
+        heading = "Amend HEAD (its message, parents and author are kept)";
+    }
+    if (core.is_merging) {
+        heading = "Merge commit";
+    }
+    put(buffer, area, y, " " + heading, TUI_style.Style(attrs: TUI_style.BOLD));
+    y = y + 1;
+    if (core.is_sequencing) {
+        if (y < bottom) {
+            put(buffer, area, y, " blocked while " + core.sequence_word + ": finish it first (A, V or r)", TUI_style.Style(foreground: TUI_style.Colour.Indexed(1), attrs: TUI_style.BOLD));
+        }
+        y = y + 1;
+    }
+    if (y < bottom) {
+        put(buffer, area, y, " Message  " + draft_line(core), TUI_style.Style());
+    }
+    y = y + 2;
+    int staged = core.last_status.staged.size();
+    if (y < bottom) {
+        put(buffer, area, y, " Staged changes (" + staged.to_str() + ")", TUI_style.Style(attrs: TUI_style.BOLD));
+    }
+    y = y + 1;
+    if (staged == 0) {
+        if (y < bottom) {
+            put(buffer, area, y, "   nothing is staged: press 1 for Status, then s on a file", TUI_style.Style(attrs: TUI_style.DIM));
+        }
+        return;
+    }
+    int shown = 0;
+    for (GIT_status.Delta delta in core.last_status.staged) {
+        if (y >= bottom) {
+            return;
+        }
+        if (y == bottom - 1 && shown + 1 < staged) {
+            put(buffer, area, y, "   ... and " + (staged - shown).to_str() + " more", TUI_style.Style(attrs: TUI_style.DIM));
+            return;
+        }
+        str path_text = delta.path.utf8().or("<non-utf8 path>");
+        put(buffer, area, y, "   " + GIT_ui_model.mark_str(GIT_ui_model.change_mark(delta.kind)) + "  " + path_text, TUI_style.Style());
+        y = y + 1;
+        shown = shown + 1;
+    }
+}
+
+void put(TUI_buffer.Buffer buffer, TUI_geometry.Rect area, int y, str text, TUI_style.Style style) {
+    buffer.set_str(area.x, y, TUI_text.truncate(text, area.width), style, max: area.width);
+}
+
+/// The draft's first non-comment line, or what to press to start one.
+str draft_line(GIT_ui_core.Core core) {
+    match (io.read(core.commit_message_path)) {
+        case Ok(str raw): {
+            str stripped = GIT_ui_model.strip_comment_lines(raw);
+            if (stripped == "") {
+                return "(empty: e to write one)";
+            }
+            return stripped.split("\n")[0];
+        }
+        case Err(_): {
+            return "(none yet: e to write one)";
+        }
+    }
+}
