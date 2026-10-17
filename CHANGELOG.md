@@ -5,6 +5,8 @@ Each release's changes in one place (the details are in `README.md` and
 
 ## 0.25.0
 
+0.24.0 (the Oro command line) was never tagged: its macOS CLI test depended on the repository it ran in. Its content ships here.
+
 - **mgit is five modes, not one screen of every key** (`docs/MGIT-MODES.md`):
   1 Status, 2 Commit, 3 History, 4 Branches, 5 Stash. `Tab` / `Shift-Tab` cycle
   them (a click on the tab bar and `1`-`5` jump), the last row lists only the keys
@@ -50,7 +52,7 @@ Each release's changes in one place (the details are in `README.md` and
 - **Transition: git-style arguments still work in 0.24.0**, rewritten into the new
   grammar with a warning on stderr (`1git: git-style arguments are deprecated; use
   '1git -log --max 5' (see 1git --help)`); a line with an option 1git dropped runs as
-  git would. The shim is deleted in 0.25.0.
+  git would. The shim is deleted in 0.26.0.
 - mgit: `mgit [PATH] [--mouse on|off] [--help|--version|--completions SHELL]`;
   `--mouse` overrides `M31GIT_MOUSE` and `mgit.mouse`. Exit status 1 when there is no
   repository or no terminal, 2 for a bad command line.

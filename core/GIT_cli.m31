@@ -654,7 +654,7 @@ pub int start(List<str> argv) {
             }
             case Err(str reason): {
                 if (!is_quiet) {
-                    io.eprint(PROG + ": git-style arguments are deprecated, and this line has no equivalent in the new command line (" + reason + "); running it as git would, for this release only");
+                    io.eprint(PROG + ": git-style arguments are deprecated, and this line has no equivalent in the new command line (" + reason + "); running it as git would, until 0.26.0");
                 }
                 return run_legacy(argv);
             }

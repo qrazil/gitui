@@ -53,7 +53,7 @@ def fail(msg):
 
 
 def run_t_cli(lines):
-    out = subprocess.run([t_cli], input="\n".join(lines) + "\n", capture_output=True, text=True).stdout
+    out = subprocess.run([t_cli], input="\n".join(lines) + "\n", capture_output=True, text=True, cwd=norepo).stdout
     return out.split("\n")
 
 
