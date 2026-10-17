@@ -65,7 +65,7 @@ def fail(msg):
 
 
 def run_t_cli(lines):
-    out = subprocess.run([t_cli], input="\n".join(lines) + "\n", capture_output=True, text=True, cwd=norepo).stdout
+    out = subprocess.run([t_cli], input="\n".join(lines) + "\n", capture_output=True, text=True, cwd=norepo, env=dict(os.environ, PWD=norepo)).stdout
     return out.split("\n")
 
 
@@ -111,7 +111,7 @@ def migrate(git_line):
     if words and words[0] == "git":
         words = words[1:]
     data = b"".join(w.encode() + b"\0" for w in words)
-    proc = subprocess.run([one_git, "-migrate", "--nul"], input=data, capture_output=True, cwd=fixture)
+    proc = subprocess.run([one_git, "-migrate", "--nul"], input=data, capture_output=True, cwd=fixture, env=dict(os.environ, PWD=fixture))
     if proc.returncode != 0:
         return None, "ERROR: " + proc.stderr.decode().strip()
     return " ".join(shlex.quote(w) for w in [x.decode() for x in proc.stdout.split(b"\0")[:-1]]), ""
