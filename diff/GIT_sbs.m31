@@ -224,6 +224,31 @@ pub Glyphs glyphs(str text, int tab) {
     return out;
 }
 
+/// `text` as it is drawn, in one string: tabs expanded to multiples of `tab`,
+/// control characters shown as their U+2400 symbols. For text that goes to a
+/// widget which does not do that itself (the unified diff view): a raw tab or
+/// escape reaching the terminal would move the cursor under the layout.
+pub str printable(str text, int tab) {
+    if (is_plain(text)) {
+        return text;
+    }
+    return glyphs(text, tab).syms.join("");
+}
+
+/// `text` with every control character shown as its symbol and nothing
+/// expanded: for names (a file or a branch may be called anything). One column
+/// per control character, so a tab in a name is one visible cell.
+pub str visible(str text) {
+    if (is_plain(text)) {
+        return text;
+    }
+    List<str> out = [];
+    for (str cluster in unicode.graphemes(text)) {
+        out.push(safe(cluster));
+    }
+    return out.join("");
+}
+
 /// Columns `text` takes once drawn (tabs expanded, controls made visible).
 pub int display_width(str text, int tab) {
     Glyphs g = glyphs(text, tab);

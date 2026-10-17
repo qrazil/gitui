@@ -7,6 +7,7 @@
 
 import fs;
 import diff.GIT_hunks;
+import diff.GIT_sbs;
 import core.GIT_index;
 import core.GIT_object;
 import diff.GIT_patch;
@@ -128,6 +129,15 @@ pub void DiffLayer.open_diff(str title, bytes old, bytes new) {
         }
         case Hunks(List<TUI_diff_view.Hunk> hunks): {
             is_diff_binary = false;
+            // Tabs expanded and control characters made visible, as the
+            // side-by-side view does: a raw tab or escape in a line would reach
+            // the terminal and move the cursor under the layout.
+            for (int hunk_index in 0 .. hunks.size()) {
+                hunks[hunk_index].header = GIT_sbs.printable(hunks[hunk_index].header, GIT_sbs.TAB_WIDTH);
+                for (int line_index in 0 .. hunks[hunk_index].lines.size()) {
+                    hunks[hunk_index].lines[line_index].text = GIT_sbs.printable(hunks[hunk_index].lines[line_index].text, GIT_sbs.TAB_WIDTH);
+                }
+            }
             diff_view = TUI_diff_view.DiffView(hunks);
         }
     }

@@ -20,6 +20,7 @@ import os;
 import core.GIT_status;
 import text;
 import diff.GIT_hunks;
+import diff.GIT_sbs;
 import core.GIT_refs;
 import tui.widgets.TUI_diff_view;
 import tui.widgets.TUI_outline;
@@ -176,7 +177,7 @@ pub str mark_str(int mark) {
 pub List<PathRow> rows_from_deltas(List<GIT_status.Delta> deltas) {
     List<PathRow> out = [];
     for (GIT_status.Delta delta in deltas) {
-        str path_text = delta.path.utf8().or("<non-utf8 path>");
+        str path_text = GIT_sbs.visible(delta.path.utf8().or("<non-utf8 path>"));
         out.push(PathRow(path_text, delta.path, change_mark(delta.kind)));
     }
     out.sort();
@@ -187,7 +188,7 @@ pub List<PathRow> rows_from_deltas(List<GIT_status.Delta> deltas) {
 pub List<PathRow> rows_from_untracked(List<bytes> paths) {
     List<PathRow> out = [];
     for (bytes path in paths) {
-        out.push(PathRow(path.utf8().or("<non-utf8 path>"), path, 0));
+        out.push(PathRow(GIT_sbs.visible(path.utf8().or("<non-utf8 path>")), path, 0));
     }
     out.sort();
     return out;
@@ -201,7 +202,7 @@ pub str first_line(bytes message) {
     if (newline_index >= 0) {
         line = message.substr(0, newline_index);
     }
-    return line.utf8().or("<non-utf8 message>");
+    return GIT_sbs.visible(line.utf8().or("<non-utf8 message>"));
 }
 
 /// Is `id` expanded, given what the caller has recorded about it and what it
@@ -419,14 +420,14 @@ pub List<TUI_outline.Node> commit_node(GIT_log.Entry entry, List<CommitFileDiff>
     str id = "commit:" + entry.id;
     str label = entry.id.substr(0, 7) + "  " + first_line(entry.commit.message);
     List<TUI_outline.Node> body = [];
-    str author = entry.commit.author.name.utf8().or("<non-utf8>") + " <" + entry.commit.author.email.utf8().or("<non-utf8>") + ">";
+    str author = GIT_sbs.visible(entry.commit.author.name.utf8().or("<non-utf8>") + " <" + entry.commit.author.email.utf8().or("<non-utf8>") + ">");
     body.push(TUI_outline.Node.leaf(id + ":author", "Author: " + author));
     body.push(TUI_outline.Node.leaf(id + ":date", "Date:   " + date.iso(entry.commit.author.when)));
     str message = entry.commit.message.utf8().or("<non-utf8 message>");
     int line_index = 0;
     for (str line in text.lines(message)) {
         int wrapped_index = 0;
-        for (str wrapped in TUI_text.wrap(line, COMMIT_BODY_WRAP_COLUMNS)) {
+        for (str wrapped in TUI_text.wrap(GIT_sbs.visible(line), COMMIT_BODY_WRAP_COLUMNS)) {
             body.push(TUI_outline.Node.leaf(id + ":m" + line_index.to_str() + ":" + wrapped_index.to_str(), "  " + wrapped));
             wrapped_index = wrapped_index + 1;
         }
@@ -436,7 +437,7 @@ pub List<TUI_outline.Node> commit_node(GIT_log.Entry entry, List<CommitFileDiff>
     int file_index = 0;
     for (CommitFileDiff change in changes) {
         str file_id = id + ":file:" + file_index.to_str();
-        str path_text = change.path.utf8().or("<non-utf8 path>");
+        str path_text = GIT_sbs.visible(change.path.utf8().or("<non-utf8 path>"));
         str stat = "+" + change.insertions.to_str() + " -" + change.deletions.to_str();
         if (change.is_binary) {
             stat = "(binary)";
@@ -527,7 +528,7 @@ pub TUI_outline.Outline build_outline(GIT_status.Status status, List<GIT_log.Ent
         if (branch_row.track != "") {
             track = " " + branch_row.track;
         }
-        branch_children.push(TUI_outline.Node.leaf("branch:" + branch_row.branch.name, mark + branch_row.branch.name + track + "  " + branch_row.branch.id.substr(0, 7) + "  " + branch_row.subject));
+        branch_children.push(TUI_outline.Node.leaf("branch:" + branch_row.branch.name, mark + GIT_sbs.visible(branch_row.branch.name) + track + "  " + branch_row.branch.id.substr(0, 7) + "  " + GIT_sbs.visible(branch_row.subject)));
     }
     roots.push(TUI_outline.Node.section("branches", "Branches (" + branch_children.size().to_str() + ")", branch_children, is_expanded: is_expanded_for(collapsed, "branches", true)));
     // Stashes, newest first; Enter on one opens the stash list at it (`GIT_ui_stash`).
@@ -535,7 +536,7 @@ pub TUI_outline.Outline build_outline(GIT_status.Status status, List<GIT_log.Ent
     // any keeps the outline it always had (`z` still opens the menu).
     List<TUI_outline.Node> stash_children = [];
     for (int index in 0 .. stashes.size()) {
-        stash_children.push(TUI_outline.Node.leaf("stash:" + index.to_str(), stashes[index]));
+        stash_children.push(TUI_outline.Node.leaf("stash:" + index.to_str(), GIT_sbs.visible(stashes[index])));
     }
     if (stash_children.size() > 0) {
         roots.push(TUI_outline.Node.section("stashes", "Stashes (" + stash_children.size().to_str() + ")", stash_children, is_expanded: is_expanded_for(collapsed, "stashes", true)));

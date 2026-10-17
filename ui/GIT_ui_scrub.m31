@@ -1,0 +1,74 @@
+// The last line of defence against text that would move the terminal's cursor.
+//
+// `TUI_buffer` keeps a zero-width character (a combining mark, a joiner -- and
+// a control character, which `unicode.width` also calls zero) inside the cell
+// before it, and the diff writer sends that cell's symbol to the terminal as
+// it is. So a tab, a carriage return or an ESC in a file name, a commit
+// message or a line of a diff reaches the terminal raw: the tab jumps to its
+// next stop, the CR to column 0, the ESC starts whatever sequence follows, and
+// every cell written after it lands somewhere the program did not mean. The
+// borders and the neighbouring rows get corrupted, and since a later update
+// only repaints the cells it thinks changed, the damage stays.
+//
+// The sources that know their text (`GIT_sbs.visible`, `GIT_sbs.printable`)
+// already show a control character as its U+2400 symbol; this is for
+// everything they do not cover. `scrub` runs once over the finished frame,
+// before it is diffed, and drops every control character it finds inside a
+// cell. Only multi-byte cells are looked at (a plain ASCII cell is one byte
+// and cannot hold one that `Buffer.set_str` let through).
+
+import tui.core.TUI_buffer;
+
+/// Whether `symbol` holds a control character: C0 (below 0x20), DEL, or a C1
+/// (U+0080 .. U+009F, which UTF-8 spells 0xC2 0x80 .. 0xC2 0x9F).
+pub bool has_control(str symbol) {
+    int length = symbol.size();
+    for (int i in 0 .. length) {
+        int byte_value = symbol.byte_at(i);
+        if (byte_value < 32 || byte_value == 127) {
+            return true;
+        }
+        if (byte_value == 0xC2 && i + 1 < length && symbol.byte_at(i + 1) >= 0x80 && symbol.byte_at(i + 1) < 0xA0) {
+            return true;
+        }
+    }
+    return false;
+}
+
+/// `symbol` without its control characters.
+pub str without_control(str symbol) {
+    List<int> kept = [];
+    for (int point in symbol.chars()) {
+        if (point < 32 || point == 127 || (point >= 0x80 && point < 0xA0)) {
+            continue;
+        }
+        kept.push(point);
+    }
+    return str.from_chars(kept);
+}
+
+/// Clean every cell of `buffer` in place. A cell left with nothing becomes a
+/// space.
+pub void scrub(TUI_buffer.Buffer buffer) {
+    TUI_buffer.Buffer area = buffer;
+    for (int y in area.area().y .. area.area().bottom()) {
+        for (int x in area.area().x .. area.area().right()) {
+            str symbol = buffer.symbol_at(x, y);
+            if (symbol.size() < 1) {
+                continue;
+            }
+            if (symbol.size() == 1 && symbol.byte_at(0) >= 32 && symbol.byte_at(0) != 127) {
+                continue;
+            }
+            if (!has_control(symbol)) {
+                continue;
+            }
+            TUI_buffer.Cell cell = buffer.get(x, y);
+            str clean = without_control(symbol);
+            if (clean == "") {
+                clean = " ";
+            }
+            buffer.set(x, y, TUI_buffer.Cell(clean, style: cell.style, width: cell.width));
+        }
+    }
+}
