@@ -62,7 +62,7 @@ fi
 
 tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT
 
-"$LANGC" --emit-c "$src" -o "$tmp/out.c" || exit 1
+"$LANGC" -emit-c "$src" --out "$tmp/out.c" || exit 1
 # RT_REACTOR_C/RT_CTX_ASM (from runtime/arch.sh above) are paths relative to
 # M31_ROOT, not to this script's own directory -- prefix them before use.
 "$CC" -O2 -pthread -I "$M31_ROOT/runtime" -o "$out" "$tmp/out.c" \

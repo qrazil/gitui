@@ -30,7 +30,7 @@ build() {
         git) [ -n "${CLI_1GIT:-}" ] && { cp "$CLI_1GIT" "$WORK/git"; return 0; } ;;
         t_cli) [ -n "${CLI_T_CLI:-}" ] && { cp "$CLI_T_CLI" "$WORK/t_cli"; return 0; } ;;
     esac
-    if ! "$LANGC" --emit-c "$src" -o "$WORK/$name.c" 2>"$WORK/$name.diag"; then
+    if ! "$LANGC" -emit-c "$src" --out "$WORK/$name.c" 2>"$WORK/$name.diag"; then
         bad "compile $name" "$(grep -v '^m31c: warning' "$WORK/$name.diag" | head -5)"
         return 1
     fi

@@ -552,6 +552,9 @@ Result<sshclient.Session, Error> open_session(Target target) {
                     case Exec(sshexec.Error why): {
                         return Result<sshclient.Session, Error>.Err(Error.Exec(why.to_str()));
                     }
+                    case Configured(str message): {
+                        return Result<sshclient.Session, Error>.Err(Error.Connect(message));
+                    }
                 }
             }
         }

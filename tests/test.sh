@@ -77,7 +77,7 @@ build() {
     local name=$1
     local src="tests/$name.m31"
     [ -f "$src" ] || src="$name.m31"
-    if ! "$LANGC" --emit-c "$src" -o "$WORK/$name.c" 2>"$WORK/$name.diag"; then
+    if ! "$LANGC" -emit-c "$src" --out "$WORK/$name.c" 2>"$WORK/$name.diag"; then
         bad "compile $name" "$(head -5 "$WORK/$name.diag")"
         return 1
     fi
@@ -95,10 +95,10 @@ build() {
 # `m31c fmt --check -r .` walks the whole tree, skipping `.m31-deps`, `.git`
 # and `target`.
 
-if out=$("$LANGC" fmt --check -r . 2>&1); then
+if out=$("$LANGC" -fmt --check --recursive . 2>&1); then
     note "source is formatted"
 else
-    bad "source is not formatted (run: m31c fmt -r .)" "$out"
+    bad "source is not formatted (run: m31c -fmt --recursive .)" "$out"
 fi
 
 # --- SHA-1 --------------------------------------------------------------------

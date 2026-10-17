@@ -27,7 +27,7 @@ build() {
     local name=$1
     local src="tests/$name.m31"
     [ -f "$src" ] || src="$name.m31"
-    if ! "$LANGC" --emit-c "$src" -o "$WORK/$name.c" 2>"$WORK/$name.diag"; then
+    if ! "$LANGC" -emit-c "$src" --out "$WORK/$name.c" 2>"$WORK/$name.diag"; then
         bad "compile $name" "$(grep -v '^warning' "$WORK/$name.diag" | head -5)"
         return 1
     fi
