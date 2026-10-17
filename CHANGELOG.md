@@ -22,6 +22,7 @@ Each release's changes in one place (the details are in `README.md` and
   no longer does).
 - The screen has no border any more: the tab bar is the first row, the hint row the
   last. The statusline moved under the tab bar.
+- Repository discovery honours `GIT_CEILING_DIRECTORIES`, as git does; the CLI test sets it so a `.git` above the temp directory (a macOS runner had one) cannot change what `checkout main` means.
 - **Rendering fixes.** A tab, carriage return or escape in a diffed file, a file
   name, a branch name or a commit message reached the terminal raw and moved the
   cursor under the layout, leaving stale cells behind; text is now shown with tabs

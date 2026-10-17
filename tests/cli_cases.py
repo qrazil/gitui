@@ -15,6 +15,7 @@ as the line it is listed under: the order words are typed in does not matter.
 Prints one `FAIL ...` line per mismatch and `cases: N lines, M git spellings,
 K options covered` at the end; the exit status is the number of failures.
 """
+import os
 import re
 import shlex
 import shutil
@@ -44,6 +45,8 @@ for raw in open(path, encoding="utf-8"):
 
 fails = 0
 norepo = tempfile.mkdtemp(prefix="cli-cases.")  # outside any repository: revisions and paths are told apart by shape only
+# a runner may keep a .git somewhere above the temp directory: stop the search there
+os.environ["GIT_CEILING_DIRECTORIES"] = os.path.dirname(os.path.realpath(norepo))
 
 
 def fail(msg):

@@ -2396,6 +2396,7 @@ pub str resolve_dir(str base, str dir) {
 // The repository root above `start` (absolute), or "".
 pub str find_root(str start) {
     str current = start;
+    List<str> ceilings = os.env("GIT_CEILING_DIRECTORIES").or("").split(":");
     for (int i in 0 .. 256) {
         str inner = fs.join(current, ".git");
         if (fs.is_directory(inner) || fs.is_file(inner)) {
@@ -2411,6 +2412,10 @@ pub str find_root(str start) {
                 current = parts.join("/");
                 if (current == "") {
                     current = "/";
+                }
+                // git never looks in a ceiling directory or above it
+                if (ceilings.contains(current)) {
+                    return "";
                 }
             }
             case None: {
