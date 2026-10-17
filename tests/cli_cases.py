@@ -49,6 +49,15 @@ norepo = tempfile.mkdtemp(prefix="cli-cases.")  # outside any repository: revisi
 os.environ["GIT_CEILING_DIRECTORIES"] = os.path.dirname(os.path.realpath(norepo))
 
 
+# -migrate tells a branch from a file by looking: a repository of its own, with the branches the table names,
+# so the answer does not depend on what lies above the temp directory
+fixture = os.path.join(norepo, "fixture")
+os.makedirs(fixture)
+git_env = dict(os.environ, GIT_AUTHOR_NAME="t", GIT_AUTHOR_EMAIL="t@x", GIT_COMMITTER_NAME="t", GIT_COMMITTER_EMAIL="t@x", GIT_CONFIG_GLOBAL=os.devnull, GIT_CONFIG_SYSTEM=os.devnull)
+for argv in (["init", "-q"], ["checkout", "-q", "-b", "main"], ["commit", "-q", "--allow-empty", "-m", "x"], ["branch", "other"]):
+    subprocess.run(["git"] + argv, cwd=fixture, env=git_env, check=True, capture_output=True)
+
+
 def fail(msg):
     global fails
     fails += 1
@@ -102,7 +111,7 @@ def migrate(git_line):
     if words and words[0] == "git":
         words = words[1:]
     data = b"".join(w.encode() + b"\0" for w in words)
-    proc = subprocess.run([one_git, "-migrate", "--nul"], input=data, capture_output=True, cwd=norepo)
+    proc = subprocess.run([one_git, "-migrate", "--nul"], input=data, capture_output=True, cwd=fixture)
     if proc.returncode != 0:
         return None, "ERROR: " + proc.stderr.decode().strip()
     return " ".join(shlex.quote(w) for w in [x.decode() for x in proc.stdout.split(b"\0")[:-1]]), ""
