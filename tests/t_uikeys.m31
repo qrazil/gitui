@@ -79,7 +79,7 @@ counter.check("key table: @ and ? are everywhere keys", GIT_ui_core.lookup(GIT_u
 counter.check("key table: A and V open the cherry-pick and revert menus", GIT_ui_core.lookup(GIT_ui_core.SCOPE_OUTLINE, term.Code.Char('A')).or("") == GIT_ui_core.CMD_PICK && GIT_ui_core.lookup(GIT_ui_core.SCOPE_OUTLINE, term.Code.Char('V')).or("") == GIT_ui_core.CMD_REVERT, "A/V");
 counter.check("key table: the pick menu has -x and the revert menu has not", GIT_ui_core.lookup(GIT_ui_core.SCOPE_PICK, term.Code.Char('x')).or("") == GIT_ui_core.CMD_PICK_ORIGIN && !GIT_ui_core.lookup(GIT_ui_core.SCOPE_REVERT, term.Code.Char('x')).is_some(), "x");
 counter.check("key table: the sequence menu continues, skips, aborts and quits", GIT_ui_core.lookup(GIT_ui_core.SCOPE_SEQUENCE, term.Code.Char('c')).or("") == GIT_ui_core.CMD_SEQUENCE_CONTINUE && GIT_ui_core.lookup(GIT_ui_core.SCOPE_SEQUENCE, term.Code.Char('s')).or("") == GIT_ui_core.CMD_SEQUENCE_SKIP && GIT_ui_core.lookup(GIT_ui_core.SCOPE_SEQUENCE, term.Code.Char('a')).or("") == GIT_ui_core.CMD_ABORT && GIT_ui_core.lookup(GIT_ui_core.SCOPE_SEQUENCE, term.Code.Char('q')).or("") == GIT_ui_core.CMD_SEQUENCE_QUIT, "c/s/a/q");
-counter.check("key table: Escape and Enter resolve by name", GIT_ui_core.lookup(GIT_ui_core.SCOPE_OUTLINE, term.Code.Escape).or("") == GIT_ui_core.CMD_QUIT && GIT_ui_core.lookup(GIT_ui_core.SCOPE_OUTLINE, term.Code.Enter).or("") == GIT_ui_core.CMD_TOGGLE, "esc/enter");
+counter.check("key table: Escape and Enter resolve by name", GIT_ui_core.lookup(GIT_ui_core.SCOPE_OUTLINE, term.Code.Escape).or("") == GIT_ui_core.CMD_LEAVE && GIT_ui_core.lookup(GIT_ui_core.SCOPE_OUTLINE, term.Code.Enter).or("") == GIT_ui_core.CMD_TOGGLE, "esc/enter");
 // The footer and the help are two views of the same rows.
 bool is_footer_in_table = true;
 for (str scope in GIT_ui_core.all_scopes()) {
@@ -102,7 +102,7 @@ for (str scope in GIT_ui_core.all_scopes()) {
     }
 }
 counter.check("footer: hints_for(scope) is exactly the table rows that carry footer text", is_footer_in_table, "mismatch");
-List<str> help_lines = GIT_ui_help.lines();
+List<str> help_lines = GIT_ui_help.reference_lines();
 bool is_help_complete = true;
 str missing = "";
 for (str scope in GIT_ui_core.all_scopes()) {
@@ -134,17 +134,9 @@ counter.check("help: every scope has a heading and every binding a line, from th
 // --- the active footer ----------------------------------------------------------
 
 GIT_ui_core.Core core = GIT_ui_core.Core("", "");
-List<GIT_ui_core.Hint> base_hints = core.active_hints();
-counter.check("footer: with no overlay the everywhere keys come first, then the outline's", base_hints.size() > 2 && base_hints[0].keys == "@" && base_hints[1].keys == "?", "first=" + base_hints[0].keys);
-core.is_diff_open = true;
-bool is_stage_hunk = false;
-for (GIT_ui_core.Hint hint in core.active_hints()) {
-    if (hint.label == "stage hunk") {
-        is_stage_hunk = true;
-    }
-}
-counter.check("footer: in the diff view it offers 'stage hunk'", is_stage_hunk, "no stage hunk");
-core.is_diff_open = false;
+counter.check("footer: with no overlay the core has no hints of its own (the mode's row is the key map's)", core.active_hints().size() == 0, "hints");
+List<str> mode_help = GIT_ui_help.lines(core);
+counter.check("help: the first lines are the current mode's", mode_help[0] == "Status mode" && mode_help.size() > 20, mode_help[0]);
 
 // --- the overlay stack ----------------------------------------------------------
 
@@ -210,7 +202,7 @@ counter.check("search: a capital makes it exact", !GIT_ui_search.is_match("fix t
 counter.check("search: has_capital", GIT_ui_search.has_capital("abC") && !GIT_ui_search.has_capital("abc1-"), "has_capital");
 counter.check("key table: [ ] move between sections, { } between siblings", GIT_ui_core.lookup(GIT_ui_core.SCOPE_OUTLINE, term.Code.Char('[')).or("") == GIT_ui_core.CMD_SECTION_PREVIOUS && GIT_ui_core.lookup(GIT_ui_core.SCOPE_OUTLINE, term.Code.Char(']')).or("") == GIT_ui_core.CMD_SECTION_NEXT && GIT_ui_core.lookup(GIT_ui_core.SCOPE_OUTLINE, term.Code.Char('{')).or("") == GIT_ui_core.CMD_SIBLING_PREVIOUS && GIT_ui_core.lookup(GIT_ui_core.SCOPE_OUTLINE, term.Code.Char('}')).or("") == GIT_ui_core.CMD_SIBLING_NEXT, "[ ] { }");
 counter.check("key table: the same four keys move between hunks and files in the diff view", GIT_ui_core.lookup(GIT_ui_core.SCOPE_DIFF, term.Code.Char('[')).or("") == GIT_ui_core.CMD_SECTION_PREVIOUS && GIT_ui_core.lookup(GIT_ui_core.SCOPE_DIFF, term.Code.Char(']')).or("") == GIT_ui_core.CMD_SECTION_NEXT && GIT_ui_core.lookup(GIT_ui_core.SCOPE_DIFF, term.Code.Char('{')).or("") == GIT_ui_core.CMD_SIBLING_PREVIOUS && GIT_ui_core.lookup(GIT_ui_core.SCOPE_DIFF, term.Code.Char('}')).or("") == GIT_ui_core.CMD_SIBLING_NEXT, "diff [ ] { }");
-counter.check("key table: Tab folds, - folds all, + and = unfold all, in both views", GIT_ui_core.lookup(GIT_ui_core.SCOPE_OUTLINE, term.Code.Tab).or("") == GIT_ui_core.CMD_FOLD && GIT_ui_core.lookup(GIT_ui_core.SCOPE_OUTLINE, term.Code.Char('-')).or("") == GIT_ui_core.CMD_FOLD_ALL && GIT_ui_core.lookup(GIT_ui_core.SCOPE_OUTLINE, term.Code.Char('+')).or("") == GIT_ui_core.CMD_UNFOLD_ALL && GIT_ui_core.lookup(GIT_ui_core.SCOPE_OUTLINE, term.Code.Char('=')).or("") == GIT_ui_core.CMD_UNFOLD_ALL && GIT_ui_core.lookup(GIT_ui_core.SCOPE_DIFF, term.Code.Tab).or("") == GIT_ui_core.CMD_FOLD && GIT_ui_core.lookup(GIT_ui_core.SCOPE_DIFF, term.Code.Char('-')).or("") == GIT_ui_core.CMD_FOLD_ALL, "tab - + =");
+counter.check("key table: Space folds (f in the diff), - folds all, + and = unfold all, in both views; Tab is the mode key", GIT_ui_core.lookup(GIT_ui_core.SCOPE_OUTLINE, term.Code.Char(' ')).or("") == GIT_ui_core.CMD_FOLD && GIT_ui_core.lookup(GIT_ui_core.SCOPE_GLOBAL, term.Code.Tab).or("") == GIT_ui_core.CMD_MODE_NEXT && GIT_ui_core.lookup(GIT_ui_core.SCOPE_OUTLINE, term.Code.Char('-')).or("") == GIT_ui_core.CMD_FOLD_ALL && GIT_ui_core.lookup(GIT_ui_core.SCOPE_OUTLINE, term.Code.Char('+')).or("") == GIT_ui_core.CMD_UNFOLD_ALL && GIT_ui_core.lookup(GIT_ui_core.SCOPE_OUTLINE, term.Code.Char('=')).or("") == GIT_ui_core.CMD_UNFOLD_ALL && GIT_ui_core.lookup(GIT_ui_core.SCOPE_DIFF, term.Code.Char('f')).or("") == GIT_ui_core.CMD_FOLD && GIT_ui_core.lookup(GIT_ui_core.SCOPE_DIFF, term.Code.Char('-')).or("") == GIT_ui_core.CMD_FOLD_ALL, "tab - + =");
 counter.check("key table: i is the overview, everywhere", GIT_ui_core.lookup(GIT_ui_core.SCOPE_GLOBAL, term.Code.Char('i')).or("") == GIT_ui_core.CMD_OVERVIEW && GIT_ui_core.lookup(GIT_ui_core.SCOPE_OVERVIEW, term.Code.Enter).or("") == GIT_ui_core.CMD_OPEN, "i");
 print("");
 print(counter.checks.to_str() + " checks, " + counter.failed.to_str() + " failed");

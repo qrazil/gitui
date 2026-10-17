@@ -219,7 +219,7 @@ def main():
     write(os.path.join(fx, "lines.txt"), new)
     s = Session(binpath, fx)
     s.send("/lines.txt\rd")
-    check("lines: the footer advertises v", "v lines" in s.text(), s.text())
+    check("lines: the hint row advertises v", "v select lines" in s.text(), s.text())
     s.send("v")
     check("visual: v shows a selection message", "visual: 0 changed line(s) selected" in s.text(), s.text())
     check("visual: the title says [visual]", "[visual]" in s.text(), s.text())

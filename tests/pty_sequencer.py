@@ -109,20 +109,23 @@ def twin(fx, root, name):
 
 
 def cursor_to(s, needle):
-    """Select the outline row containing `needle`."""
+    """Select the outline row containing `needle`: the rows start on screen
+    line 2, under the tab bar and the statusline."""
     for _ in range(14):
         s.send("k")
     lines = s.text().split("\n")
-    first = 2 if len(lines) > 1 and ("CHERRY-PICKING" in lines[1] or "REVERTING" in lines[1]) else 1
     for i, ln in enumerate(lines):
-        if needle in ln and ln.startswith("│"):
-            for _ in range(i - first):
+        if i >= 2 and needle in ln:
+            for _ in range(i - 2):
                 s.send("j")
             return True
     return False
 
 
 def pick_branch(s, verb_key, key, branch):
+    """The verb on the tip of a branch: branch rows are in the Branches mode
+    (4). A conflict's Unmerged paths are Status's (1): the caller goes there."""
+    s.send("4")
     cursor_to(s, branch + "  ")
     s.send(verb_key)
     s.send(key)
@@ -152,12 +155,14 @@ def main():
     check("menu: A on a branch row opens the cherry-pick menu for that branch", "cherry-pick clean" in t and "cherry-pick -x" in t and "-n: apply to the index" in t and "a merge commit against its first parent" in t, t)
     s.send("\x1b")
     check("menu: Escape closes it", "cherry-pick clean" not in s.text(), s.text())
+    s.send("1")
+    s.send("3")
     cursor_to(s, "m1")
     s.send("V")
     t = s.text()
     check("menu: V on a commit row opens the revert menu with no -x", "revert " in t and "revert -n" in t and "-x" not in t, t)
     s.send("\x1b")
-    cursor_to(s, "Untracked")
+    cursor_to(s, "Commits")
     s.send("A")
     s.send("p")
     check("menu: p with no commit under the cursor says so and changes nothing", "put the cursor on a commit" in s.text() and out(fx, "rev-parse", "HEAD") == out(fx, "rev-parse", "main"), s.text())
@@ -211,9 +216,11 @@ def main():
     before = out(fx, "rev-parse", "HEAD")
     s = P.Session(binpath, fx)
     pick_branch(s, "A", "p", "side")
+    said = s.text()
+    s.send("1")  # the Unmerged paths are Status's
     t = s.text()
     check("conflict: the outline shows the CHERRY-PICKING banner and the Unmerged paths section", "CHERRY-PICKING (1 conflict)" in t and "Unmerged paths (1)" in t and "UU  f" in t, t)
-    check("conflict: the status line says where it stopped", "stopped on" in t and "conflict" in t, t)
+    check("conflict: the status line says where it stopped", "stopped on" in said and "conflict" in said, said)
     check(
         "conflict: git agrees (UU f, three stages, CHERRY_PICK_HEAD, MERGE_MSG with its Conflicts block, no sequencer dir)",
         out(fx, "status", "--short") == "UU f" and len(out(fx, "ls-files", "-u").split("\n")) == 3 and has(fx, "CHERRY_PICK_HEAD") and "# Conflicts:" in read(fx, ".git/MERGE_MSG") and not has(fx, "sequencer"),
@@ -222,12 +229,17 @@ def main():
     check("conflict: the file holds the markers git would write", "<<<<<<< HEAD\nOURS\n=======\nTHEIRS\n>>>>>>> " in read(fx, "f"), read(fx, "f"))
     s.send("g")
     check("conflict: the banner is still there after a refresh", "CHERRY-PICKING" in s.text(), s.text())
-    for key, word in (("c", "commit"), ("b", "branch"), ("m", "merge"), ("F", "pull"), ("Z", "undo")):
+    for key, mode, word in (("c", "1", "commit"), ("b", "4", "branch"), ("m", "4", "merge"), ("F", "4", "pull"), ("Z", "3", "undo")):
+        s.send(mode)
         s.send(key)
         t = s.text()
         check("blocked: %s is refused while CHERRY-PICKING" % key, word + " is blocked while CHERRY-PICKING" in t, t)
         if "blocked" not in t:
             s.send("\x1b")
+    # from a mode that does not offer them the refusal still says why
+    s.send("1")
+    s.send("b")
+    check("blocked: b from Status says the branch menu is blocked, not just that it moved", "is blocked while CHERRY-PICKING" in s.text(), s.text())
     check("blocked: nothing moved", out(fx, "rev-parse", "HEAD") == before, "")
     cursor_to(s, "UU  f")
     s.send("\r")
@@ -274,6 +286,7 @@ def main():
     todo_ref = read(ref, ".git/sequencer/todo")
     git(ref, "cherry-pick", "--skip")
     s = P.Session(binpath, fx)
+    s.send("3")
     s.send("A")
     s.send("r")
     check("range: r asks for it on the bottom row", "cherry-pick (A..B" in s.text(), s.text())
@@ -325,6 +338,7 @@ def main():
     git(ref, "revert", "--no-edit", "HEAD")
     keep = twin(fx, root, "revert_n")
     s = P.Session(binpath, fx)
+    s.send("3")
     cursor_to(s, "m2")
     s.send("V")
     s.send("p")
@@ -338,6 +352,7 @@ def main():
     git(ref, "revert", "-n", "HEAD")
     before = out(keep, "rev-parse", "HEAD")
     s = P.Session(binpath, keep)
+    s.send("3")
     cursor_to(s, "m2")
     s.send("V")
     s.send("n")
@@ -368,6 +383,7 @@ def main():
     fx = build(root, "interop2")
     before = out(fx, "rev-parse", "HEAD")
     s = P.Session(binpath, fx)
+    s.send("3")
     s.send("A")
     s.send("r")
     s.send("t0..side")

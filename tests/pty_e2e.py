@@ -574,12 +574,11 @@ def main():
     want_numstat, _, _ = git(fx9, "diff", "--numstat", "HEAD~1", "HEAD")
     want_a_diff, _, _ = git(fx9, "diff", "--no-color", "HEAD~1", "HEAD", "--", "a.txt")
 
-    # rows: untracked section(0), unstaged section(0), staged section(0),
-    # commits section(1) -- row0 untracked, row1 unstaged, row2 staged,
-    # row3 commits section (already expanded), row4 "second" (collapsed).
+    # The History mode (3) shows only the commits: row0 the commits section
+    # (already expanded), row1 "second" (collapsed), the most recent commit.
     s9 = Session(binpath, fx9)
-    s9.send("jjj")  # row3: commits section
-    s9.send("j")  # row4: "second", the most recent commit
+    s9.send("3")
+    s9.send("j")  # row1: "second", the most recent commit
     # Unfolding a commit is also what first computes its file list (lazily,
     # cached per commit -- GIT_client.m31's `did_compute_commit_changes`), and its
     # "Files changed" subsection opens with it by default, so one Enter shows
@@ -827,10 +826,10 @@ def main():
     s11 = Session(binpath, fx11)
     s11.send("c")
     out = s11.send("A")
-    if b"amend HEAD" in out and b"amending " in out:
-        ok("amend: c then A turns the commit overlay into an amend, naming HEAD")
+    if b"Amend HEAD" in out and b"amending " in out:
+        ok("amend: c then A turns the Commit mode into an amend, naming HEAD")
     else:
-        fail("amend: c then A turns the commit overlay into an amend", repr(out))
+        fail("amend: c then A turns the Commit mode into an amend", repr(out))
     out = s11.send("f")
     s11.quit()
     after, _, _ = git(fx11, "rev-parse", "HEAD")
@@ -861,11 +860,11 @@ def main():
     git(fx12, "commit", "-q", "-m", "second", env=GIT_ENV)
     git(fx12, "checkout", "-q", "main")
 
-    # rows: untracked(0) unstaged(1) staged(2) commits(3) its commit(4, collapsed)
-    # branches(5) feature(6) main(7) -- branches sort by name.
+    # The Branches mode (4) shows only the branches: row0 the section, row1
+    # feature, row2 main -- branches sort by name.
     s12 = Session(binpath, fx12)
-    out = s12.send("jjjjj")  # row5: the Branches section
-    out += s12.send("j")  # row6: feature (screen updates are diffs, so gather both)
+    out = s12.send("4")
+    out += s12.send("j")  # row1: feature (screen updates are diffs, so gather both)
     if b"Branches (2)" in out and b"feature" in out and b"second" in out:
         ok("branches: the outline shows a Branches section listing feature and its tip subject")
     else:
@@ -894,6 +893,7 @@ def main():
     with open(os.path.join(fx12, "a.txt"), "w") as f:
         f.write("dirty\n")
     s12 = Session(binpath, fx12)
+    s12.send("4")
     s12.send("j" * 40)  # the cursor stops on the last row: main, the last branch
     out = s12.send("b")
     out += s12.send("c")
@@ -954,6 +954,7 @@ def main():
         git(fx_push, "remote", "add", "origin", "http://127.0.0.1:%d/cgi-bin/git-http-backend/repo.git" % ps_port)
 
         sp = Session(binpath, fx_push)
+        sp.send("4")  # push and pull live in the Branches mode
         out = sp.send("P")
         if b"push" in out and b"fast-forward" in out:
             ok("push: P opens the push which-key overlay")
@@ -990,6 +991,7 @@ def main():
         git(fx_push, "add", "-A", env=GIT_ENV)
         git(fx_push, "commit", "-q", "-m", "second", env=GIT_ENV)
         sp2 = Session(binpath, fx_push)
+        sp2.send("4")
         sp2.send("P")
         sp2.send("p")
         time.sleep(1.0)
@@ -1019,6 +1021,7 @@ def main():
         other_commit("up1.txt", "from upstream\n")
         old_head, _, _ = git(pl_client, "rev-parse", "HEAD")
         sl = Session(binpath, pl_client)
+        sl.send("4")
         out = sl.send("F")
         if b"pull" in out and b"fast-forward" in out:
             ok("pull: F opens the pull which-key overlay")
@@ -1075,6 +1078,7 @@ def main():
         local_head, _, _ = git(pl_client, "rev-parse", "HEAD")
         other_commit("up2.txt", "more upstream\n")
         sl2 = Session(binpath, pl_client)
+        sl2.send("4")
         sl2.send("F")
         sl2.send("p")
         time.sleep(1.5)
@@ -1178,20 +1182,20 @@ def main():
     fx22 = make_fixture(root, "key-help")
     commit_file(fx22, "a.txt", "one\n", "first")
     s22 = Session(binpath, fx22)
-    check("key help: the footer advertises '?' and '@'", "? help" in s22.text() and "@ log" in s22.text(), s22.text())
+    check("key help: the hint row advertises '?' (more) and Tab (mode)", "? more" in s22.text().splitlines()[-1] and "Tab mode" in s22.text().splitlines()[-1], s22.text())
     s22.send("?")
     text = s22.text()
     check(
         "key help: ? lists the bindings, generated from the key table",
-        "keys" in text and "outline" in text and "stage everything" in text,
+        "keys: Status" in text and "Status mode" in text and "stage" in text,
         text,
     )
-    check("key help: the footer shows the overlay's own keys while it is open", "scroll" in text.splitlines()[-2] and "close" in text.splitlines()[-2], text)
+    check("key help: the footer shows the overlay's own keys while it is open", "scroll" in text.splitlines()[-1] and "close" in text.splitlines()[-1], text)
     s22.send("j")
     s22.send("j")
     s22.send("k")
     s22.send("\x1b")
-    check("key help: Escape closes it", "stage everything" not in s22.text(), s22.text())
+    check("key help: Escape closes it", "Status mode" not in s22.text(), s22.text())
     rc = s22.quit()
     check("key help: after Escape, q quits the client", rc == 0, "rc=%r" % rc)
     s22b = Session(binpath, fx22)
@@ -1207,6 +1211,7 @@ def main():
     commit_file(fx23, "b.txt", "2\n", "Needle two")
     commit_file(fx23, "c.txt", "3\n", "other thing")
     s23 = Session(binpath, fx23)
+    s23.send("3")  # the commits are in History
 
     s23.send("/")
     check("search: / opens a prompt on the bottom row of the body", "/_" in s23.text(), s23.text())
@@ -1237,6 +1242,7 @@ def main():
     check("search: backspace erases typed characters", "/two: match 1 of 1" in s23.text(), s23.text())
     s23.quit()
     s23b = Session(binpath, fx23)
+    s23b.send("3")
     s23b.send("/")
     s23b.send("zzz")
     s23b.send("\x1b")
@@ -1260,8 +1266,12 @@ def main():
     with open(os.path.join(fx24, "via_lower_r.txt"), "w") as f:
         f.write("x\n")
     s24.send("r")
-    check("refresh: r opens the rebase menu, not a refresh", "autosquash" in s24.text(), s24.text())
+    check("refresh: r is not a refresh and, in Status, says the rebase moved to History", "r moved to History (3)" in s24.text(), s24.text())
+    s24.send("3")
+    s24.send("r")
+    check("refresh: r in History opens the rebase menu", "autosquash" in s24.text(), s24.text())
     s24.send("\x1b")
+    s24.send("1")
     s24.send("g")
     check("refresh: g then picks it up", "via_lower_r.txt" in s24.text(), s24.text())
     s24.quit()
@@ -1273,6 +1283,7 @@ def main():
     git(fx25, "branch", "feature/logout")
     git(fx25, "checkout", "-q", "feature/login")
     s25 = Session(binpath, fx25)
+    s25.send("4")
     s25.send("b")
     s25.send("/")
     text = s25.text()

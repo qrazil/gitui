@@ -121,7 +121,7 @@ def open_diff(session):
 
 def block(text):
     """The inside of the diff view's frame: the rows between its title and its
-    bottom border, with the two frames' edges taken off."""
+    bottom border, with its edges taken off."""
     rows = text.split("\n")
     out = []
     inside = False
@@ -132,7 +132,7 @@ def block(text):
         if inside and "└" in row:
             break
         if inside:
-            out.append(row[2:-2].rstrip())
+            out.append(row[1:-1].rstrip())
     return "\n".join(out) + "\n"
 
 
@@ -319,7 +319,7 @@ def main():
     git(fx, "add", "-A", env=GIT_ENV)
     git(fx, "commit", "-q", "-m", "second", env=GIT_ENV)
     s = Sess(binpath, fx, 30, 160)
-    for key in "jjjj":
+    for key in "3j":  # History, the first commit row
         s.send(key)
     s.send("\r")
     for key in "jjjjj":
@@ -341,6 +341,7 @@ def main():
     fx = make_repo(root, "stash")
     git(fx, "stash", "push", "-q", env=GIT_ENV)
     s = Sess(binpath, fx, 30, 160)
+    s.send("5")
     s.send("z")
     s.send("l")
     text = s.text()
@@ -354,11 +355,11 @@ def main():
     fx = make_repo(root, "fold")
     s = Sess(binpath, fx, 30, 160)
     open_diff(s)
-    s.send("\t")
+    s.send("f")
     text = s.text()
-    check("Tab folds the hunk under the cursor, saying how many lines it hides", "@@ -1,6 +1,6 @@" in text and "(7 lines)" in text and not same_row(s, " 1  line 1") and same_row(s, "12  line 12"), text)
-    s.send("\t")
-    check("Tab again unfolds it", same_row(s, " 1  line 1"), s.text())
+    check("f folds the hunk under the cursor, saying how many lines it hides", "@@ -1,6 +1,6 @@" in text and "(7 lines)" in text and not same_row(s, " 1  line 1") and same_row(s, "12  line 12"), text)
+    s.send("f")
+    check("f again unfolds it", same_row(s, " 1  line 1"), s.text())
     s.send("-")
     text = s.text()
     check("- folds every hunk", "@@ -26,5 +25,5 @@" in text and not same_row(s, "26  line 26") and not same_row(s, "12  line 12"), text)

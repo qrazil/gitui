@@ -66,8 +66,8 @@ def wait_for(session, predicate, timeout=4.0):
 
 
 def top(s):
-    """The statusline: the frame's top border row."""
-    return s.text().split("\n")[0]
+    """The statusline: the row under the tab bar."""
+    return s.text().split("\n")[1]
 
 
 def has_row(text, content):
@@ -165,24 +165,30 @@ def main():
     check("{ from a header goes to the previous row at that level", "▾ Untracked files (2)" in s.text() or "▸ Untracked files (2)" in s.text(), s.text())
     s.quit()
 
-    # Tab, - and +
+    # Space, - and + (Tab is the mode key now)
     git(fx, "config", "--unset-all", "mgit.collapsed")
     s = SizedSession(binpath, fx, 80)
     s.send("j")  # new.txt
-    s.send("\t")
+    s.send(" ")
     t = s.text()
-    check("Tab on a leaf folds its section and lands on it", "▸ Untracked files (2)" in t and "new.txt" not in t, t)
-    s.send("\t")
-    check("Tab on the section unfolds it again", "▾ Untracked files (2)" in s.text() and "new.txt" in s.text(), s.text())
+    check("Space on a leaf folds its section and lands on it", "▸ Untracked files (2)" in t and "new.txt" not in t, t)
+    s.send(" ")
+    check("Space on the section unfolds it again", "▾ Untracked files (2)" in s.text() and "new.txt" in s.text(), s.text())
     s.send("-")
     t = s.text()
-    check("- folds every section", all(("▸ " + h) in t for h in ["Untracked files (2)", "Unstaged changes (1)", "Staged changes (1)", "Commits (2)", "Branches (1)"]) and "a.txt" not in t and "new.txt" not in t, t)
+    check("- folds every section of the mode", all(("▸ " + h) in t for h in ["Untracked files (2)", "Unstaged changes (1)", "Staged changes (1)"]) and "a.txt" not in t and "new.txt" not in t, t)
     s.send("+")
     t = s.text()
-    check("+ unfolds them all", all(("▾ " + h) in t for h in ["Untracked files (2)", "Unstaged changes (1)", "Staged changes (1)", "Commits (2)", "Branches (1)"]) and "new.txt" in t, t)
-    check("+ leaves a commit folded (Enter opens it)", "▸ " in row_with(s, "second") and "Files changed" not in s.text(), s.text())
+    check("+ unfolds them all", all(("▾ " + h) in t for h in ["Untracked files (2)", "Unstaged changes (1)", "Staged changes (1)"]) and "new.txt" in t, t)
+    s.send("3")
+    s.send("-")
+    s.send("+")
+    t = s.text()
+    check("History: - and + fold and unfold its section", "▾ Commits (2)" in t, t)
     s.send("=")
     check("= is + too", "unfolded 0 rows" in s.text(), s.text())
+    s.send("4")
+    check("Branches shows its section", "▾ Branches (1)" in s.text(), s.text())
     s.quit()
 
     # persisted folds
@@ -190,10 +196,10 @@ def main():
     check("folds: nothing is kept when all are open", got == "", got)
     git(fx, "config", "--unset-all", "mgit.collapsed")
     s = SizedSession(binpath, fx, 80)
-    s.send("\t")  # on the Untracked header: fold it
+    s.send(" ")  # on the Untracked header: fold it
     s.send("]")
     s.send("]")
-    s.send("\t")  # Staged
+    s.send(" ")  # Staged
     s.quit()
     got, _, _ = git(fx, "config", "--get", "mgit.collapsed")
     check("folds: the folded sections are kept in mgit.collapsed", got == "staged,untracked", got)
@@ -232,11 +238,11 @@ def main():
     s.send("[")
     s.send("[")
     check("diff: [ at the first hunk says so", "already at the first hunk" in s.text(), s.text())
-    s.send("\t")
+    s.send("f")
     t = s.text()
-    check("diff: Tab folds the hunk under the cursor", "(7 lines)" in t and not has_row(t, "+CHANGED 3") and has_row(t, "+CHANGED 30"), t)
-    s.send("\t")
-    check("diff: Tab again unfolds it", has_row(s.text(), "+CHANGED 3") and "lines)" not in s.text(), s.text())
+    check("diff: f folds the hunk under the cursor", "(7 lines)" in t and not has_row(t, "+CHANGED 3") and has_row(t, "+CHANGED 30"), t)
+    s.send("f")
+    check("diff: f again unfolds it", has_row(s.text(), "+CHANGED 3") and "lines)" not in s.text(), s.text())
     s.send("-")
     t = s.text()
     check("diff: - folds every hunk", t.count("lines)") == 2 and "CHANGED" not in t, t)
@@ -272,7 +278,8 @@ def main():
     git(fx3, "add", "-A")
     git(fx3, "commit", "-q", "-m", "two files", env=GIT_ENV)
     s = SizedSession(binpath, fx3, 80)
-    s.send("jjjj")  # untracked, unstaged, staged, commits -> the first commit row
+    s.send("3")  # History
+    s.send("j")  # the first commit row
     s.send("\r")  # unfold the commit; its Files changed section is open
     check("commit files: the commit lists its files", "x.txt" in s.text() and "y.txt" in s.text(), s.text())
     s.send("/")
@@ -314,19 +321,19 @@ def main():
         f.write("u\n")
     s = SizedSession(binpath, track, 80)
     line = top(s)
-    check("statusline: it is the frame's top row", line.startswith("╭") and "main" in line, line)
+    check("statusline: it is the row under the tab bar", "Status" in s.text().split("\n")[0] and "main" in line and not line.startswith("╭"), line)
     check("statusline: branch and upstream", "main" in line and "→ origin/main" in line, line)
     check("statusline: ahead 2, behind 1", "↑2 ↓1" in line, line)
     check("statusline: one stash", "stash 1" in line, line)
     check("statusline: counts (1 unstaged, 2 untracked)", "~1 ?2" in line, line)
-    check("statusline: the repository's name", line.rstrip("─╮ ").endswith("track"), line)
+    check("statusline: the repository's name", line.rstrip().endswith("track"), line)
     check("statusline: git agrees about ahead/behind", git(track, "rev-list", "--left-right", "--count", "HEAD...@{u}")[0] == "2\t1", "")
     # the auto-refresh
     git(track, "add", "l1.txt")
-    seen = wait_for(s, lambda t: "+1 ?2" in t.split("\n")[0], 4.0)
+    seen = wait_for(s, lambda t: "+1 ?2" in t.split("\n")[1], 4.0)
     check("statusline: an external git add updates it without a key", seen, top(s))
     git(track, "stash", "push", "-q", "-u", env=GIT_ENV)
-    seen = wait_for(s, lambda t: "stash 2" in t.split("\n")[0] and "clean" in t.split("\n")[0], 4.0)
+    seen = wait_for(s, lambda t: "stash 2" in t.split("\n")[1] and "clean" in t.split("\n")[1], 4.0)
     check("statusline: a stash from outside shows (and a clean tree says clean)", seen, top(s))
     s.quit()
 
@@ -369,7 +376,7 @@ def main():
     line = top(s)
     check("statusline narrow: the branch is kept", " main" in line, line)
     check("statusline narrow: the repository name and the stash count go first", "track" not in line and "stash" not in line, line)
-    check("statusline narrow: still one line inside the border", line.startswith("╭") and line.endswith("╮") and len(line) == 44, repr(line))
+    check("statusline narrow: still one line, no wider than the terminal", len(line) <= 44 and "\n" not in line, repr(line))
     s.quit()
     s = SizedSession(binpath, track, 20)
     line = top(s)
@@ -405,14 +412,14 @@ def main():
     s.send("\r")
     t = s.text()
     check("overview: Enter on Changes closes it and lands on the Unstaged section", "overview" not in t and "Untracked files (2)" in t, t)
-    s.send("\t")
-    check("overview: ... the cursor is on that section (Tab folds Unstaged)", "\u25b8 Unstaged changes (1)" in s.text(), s.text())
+    s.send(" ")
+    check("overview: ... the cursor is on that section (Space folds Unstaged)", "\u25b8 Unstaged changes (1)" in s.text(), s.text())
     s.send("i")
     s.send("jjjj")
     s.send("\r")
     check("overview: Operation with none under way is not openable", "nothing to open for op" in s.text() and "overview" in s.text(), s.text())
     s.send("\x1b")
-    check("overview: Escape closes it", "overview" not in s.text().split("\n")[3], s.text())
+    check("overview: Escape closes it", "overview" not in s.text().split("\n")[4], s.text())
     rc = s.quit()
     check("overview: the client exits cleanly", rc == 0, "rc=%r" % rc)
 
@@ -420,7 +427,7 @@ def main():
     s = SizedSession(binpath, track, 100, rows=60)
     s.send("?")
     t = s.text()
-    check("help: the section keys are listed", "previous section header" in t and "next section header" in t and "fold every section" in t, t)
+    check("help: the section keys are listed", "previous section" in t and "next section" in t and "fold all" in t, t)
     s.send("\x1b")
     s.quit()
     return failures

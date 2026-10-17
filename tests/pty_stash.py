@@ -132,7 +132,7 @@ def stash_two(fx):
 def case_push(binpath, root, name, keys, git_args, typed=""):
     ours, theirs = pair(root, name)
     s = Session(binpath, ours, env=ENV)
-    s.send(keys)
+    s.send("5" + keys)  # the stash keys live in the Stash mode (5)
     if typed:
         s.send(typed + "\r")
     shown = s.text()
@@ -164,7 +164,7 @@ def main():
         def run_case(binpath, root):
             ours, theirs = pair(root, name, lambda fx: (stash_two(fx), dirty(fx)))
             s = Session(binpath, ours, env=ENV)
-            s.send(keys)
+            s.send("5" + keys)
             shown = s.text()
             s.quit()
             run(theirs, "stash", *git_args)
@@ -203,6 +203,7 @@ def main():
     # --- the screens ----------------------------------------------------------------
     ours, _ = pair(root, "screens", stash_two)
     s = Session(binpath, ours, env=ENV)
+    s.send("5")
     t = s.text()
     check("outline: a Stashes section with the count", "Stashes (2)" in t, t)
     s.send("/stash@{0}\r")
@@ -242,7 +243,7 @@ def main():
     write(ours + "/a.txt", b"local edit\n")
     write(theirs + "/a.txt", b"local edit\n")
     s = Session(binpath, ours, env=ENV)
-    s.send("za")
+    s.send("5za")
     t = s.text()
     s.quit()
     r = run(theirs, "stash", "apply", "-q")
@@ -257,10 +258,13 @@ def main():
 
     ours, theirs = pair(root, "mergepop", moved_on)
     s = Session(binpath, ours, env=ENV)
-    s.send("zp")
+    s.send("5zp")
     t = s.text()
     check("pop: conflicts are reported and the stash is kept", "stopped on conflicts in a.txt" in t and "stash@{0} is kept" in t, t)
-    check("pop: the outline lists the unmerged path", "a.txt" in t and "Stashes (1)" in t, t)
+    check("pop: the Stash mode lists what is left", "Stashes (1)" in t, t)
+    s.send("1")
+    t = s.text()
+    check("pop: the Status outline lists the unmerged path", "Unmerged paths (1)" in t and "a.txt" in t, t)
     s.quit()
     r = run(theirs, "stash", "pop", "-q")
     check("pop: git conflicts too", r.returncode != 0)
@@ -269,7 +273,7 @@ def main():
     # nothing to stash
     ours, _ = pair(root, "nothing", lambda fx: (run(fx, "stash", "push", "-q", "-u")))
     s = Session(binpath, ours, env=ENV)
-    s.send("zz")
+    s.send("5zz")
     check("push: nothing to save is said, not done", "no local changes to save" in s.text(), s.text())
     s.send("@")
     check("log: the refused push is not logged", "stash push" not in s.text(), s.text())
@@ -281,7 +285,7 @@ def main():
     # the command log
     ours, _ = pair(root, "logged")
     s = Session(binpath, ours, env=ENV)
-    s.send("zuzp")
+    s.send("5zuzp")
     s.send("@")
     t = s.text()
     check("log: push and pop each leave a line", "stash push -u" in t and "stash pop stash@{0}" in t, t)

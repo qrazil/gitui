@@ -402,6 +402,7 @@ source tests/test_stash.sh
 # --- the overlay stack, key table and picker: unit-level ----------------------
 
 source tests/test_uikeys.sh
+source tests/test_modes.sh
 
 # --- branch listing and checkout, against real git as the oracle ----------
 

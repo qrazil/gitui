@@ -91,22 +91,28 @@ def fixture(root, name, base_files, side_files, main_files, diff3=False):
 
 def cursor_to(s, needle):
     """Select the outline row containing `needle`: go to the top, then down
-    to that row's screen line (the first row is on line 1, under the border)."""
+    to that row's screen line (the first row is on line 2, under the tab bar
+    and the statusline)."""
     for _ in range(14):
         s.send("k")
     for i, ln in enumerate(s.text().split("\n")):
-        if needle in ln and ln.startswith("\u2502"):
-            for _ in range(i - 1):
+        if i >= 2 and needle in ln:
+            for _ in range(i - 2):
                 s.send("j")
             return True
     return False
 
 
-def open_merge_picker(s, key, branch):
+def open_merge_picker(s, key, branch, status=True):
+    """Merge from the Branches mode (4), then back to Status (1), where the
+    conflicts are listed (`status=False` stays, so the message line survives)."""
+    s.send("4")
     s.send("m")
     s.send(key)
     s.send(branch)
     s.send("\r")
+    if status:
+        s.send("1")
 
 
 def editor_script(path, body):
@@ -167,6 +173,7 @@ def main():
     # --- a clean merge from the menu: m n (no-ff), then m f (fast-forward) -------
     fx = fixture(root, "clean", {"f": BASE, "g": "g\n"}, {"g": "g side\n"}, {"f": "A\nb\nc\nd\ne\nf\ng\nh\n"})
     s = P.Session(binpath, fx)
+    s.send("4")
     s.send("m")
     t = s.text()
     check("menu: m opens the merge menu with its keys", "merge a branch you pick" in t and "abort the merge" in t, t)
@@ -215,7 +222,7 @@ def main():
     fx = fixture(root, "ffonly", {"f": BASE}, {"f": "A\nb\nc\nd\ne\nf\ng\nh\n"}, {"f": BASE + "i\n"})
     s = P.Session(binpath, fx)
     before, _, _ = git(fx, "rev-parse", "HEAD")
-    open_merge_picker(s, "o", "side")
+    open_merge_picker(s, "o", "side", status=False)
     after, _, _ = git(fx, "rev-parse", "HEAD")
     check("menu: m o refuses a merge that is not a fast-forward and changes nothing", before == after and "refused" in s.text() and git(fx, "status", "--short")[0] == "", s.text())
     s.quit()
@@ -369,6 +376,7 @@ def main():
         "status=%r rl=%r" % (status, rl),
     )
     check("abort: the banner and section are gone", "MERGING" not in s.text() and "Unmerged" not in s.text(), s.text())
+    s.send("4")
     s.send("m")
     s.send("c")
     check("continue: m c with no merge says so", "no merge in progress" in s.text(), s.text())
@@ -490,6 +498,7 @@ def main():
             local_tip, _, _ = git(cl, "rev-parse", "HEAD")
             upstream_tip, _, _ = git(seed, "rev-parse", "HEAD")
             s = P.Session(binpath, cl)
+            s.send("4")
             s.send("F")
             s.send("p")
             time.sleep(1.5)

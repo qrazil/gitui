@@ -132,6 +132,7 @@ def run(binpath, root, bare, seed, url):
     git(seed, "push", "-q", bare, "main", env=GIT_ENV)
     want = server_head()
     s = Session(binpath, client, env=env)
+    s.send("4")  # fetch, pull and push live in the Branches mode
     s.send("F")
     check("fetch: the pull menu offers f", "fetch" in s.text(), s.text())
     raw = act(s, "f", "press Enter")
@@ -195,6 +196,7 @@ def run(binpath, root, bare, seed, url):
     env_bad = dict(env)
     env_bad["MGIT_TEST_PW"] = "wrong-" + SECRET
     s = Session(binpath, client, env=env_bad)
+    s.send("4")  # fetch, pull and push live in the Branches mode
     s.send("F")
     raw = act(s, "f", "press Enter")
     check("bad password: terminal handed over", b"running 'fetch'" in raw, repr(raw[-300:]))

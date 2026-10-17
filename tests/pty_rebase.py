@@ -150,25 +150,30 @@ def ed_env(path):
 
 
 def cursor_to(s, needle):
-    """Select the outline row containing `needle`."""
+    """Select the outline row containing `needle`: the rows start on screen
+    line 2, under the tab bar and the statusline."""
     for _ in range(14):
         s.send("k")
     lines = s.text().split("\n")
-    first = 1
     for i, ln in enumerate(lines):
-        if needle in ln and ln.startswith("│"):
-            for _ in range(i - first):
+        if i >= 2 and needle in ln:
+            for _ in range(i - 2):
                 s.send("j")
             return True
     return False
 
 
-def pick(s, key, branch):
-    """`r <key>`, then the picker: type the name and choose it."""
+def pick(s, key, branch, status=False):
+    """`r <key>` in the History mode (3), then the picker: type the name and
+    choose it. `status` goes back to Status (1) afterwards, where a conflict's
+    Unmerged paths are listed."""
+    s.send("3")
     s.send("r")
     s.send(key)
     s.send(branch)
     s.send("\r")
+    if status:
+        s.send("1")
 
 
 def same(fx, other, what, rev="HEAD", full=False):
@@ -194,6 +199,7 @@ def main():
     # --- the menu and its toggles ----------------------------------------------------
     fx = build(root, "menu")
     s = P.Session(binpath, fx)
+    s.send("3")
     s.send("r")
     t = s.text()
     check(
@@ -293,6 +299,7 @@ def main():
     todo_script(seq, "lines[0] = 'drop' + lines[0][4:]")
     git_rebase(other, "-i", "feature~1^", GIT_SEQUENCE_EDITOR=seq)
     s = P.Session(binpath, fx)
+    s.send("3")
     cursor_to(s, "cb")
     s.send("r")
     s.send("h")
@@ -311,6 +318,7 @@ def main():
     git(other, "branch", "mid", "feature~1")
     git_rebase(other, "--onto", "main", "mid")
     s = P.Session(binpath, fx)
+    s.send("3")
     s.send("r")
     s.send("o")
     s.send("main")
@@ -334,13 +342,15 @@ def main():
     git_rebase(other, "--continue")
     s = P.Session(binpath, fx)
     pick(s, "r", "main")
+    said = s.text()
+    s.send("1")  # the Unmerged paths are Status's
     t = s.text()
     status = out(fx, "status", "--short")
     check("conflict: the outline shows the REBASING banner and the Unmerged paths section", "REBASING 2/3" in t and "Unmerged paths (1)" in t and "UU  f" in t, t)
     check("conflict: git agrees (UU f, REBASE_HEAD, rebase-merge state)", status == "UU f" and has(fx, "REBASE_HEAD") and has(fx, "rebase-merge"), status)
-    check("conflict: the status line says where it stopped", "rebase stopped on" in t and "conflict" in t, t)
+    check("conflict: the status line says where it stopped", "rebase stopped on" in said and "conflict" in said, said)
     s.send("A")
-    check("conflict: cherry-pick is blocked while REBASING", "REBASING 2/3 is under way" in s.text(), s.text())
+    check("conflict: cherry-pick is blocked while REBASING", "cherry-pick is blocked while REBASING 2/3" in s.text(), s.text())
     s.send("m")
     check("conflict: so is a merge", "merge is blocked while REBASING" in s.text(), s.text())
     cursor_to(s, "UU  f")
@@ -500,6 +510,7 @@ def main():
     other = twin(fx, root, "autosquash_git")
     git_rebase(other, "-i", "--autosquash", "main")
     s = P.Session(binpath, fx)
+    s.send("3")
     s.send("r")
     s.send("s")
     s.send("i")
@@ -526,6 +537,7 @@ def main():
     write(other, "k", "k dirty\n")
     git_rebase(other, "--autostash", "main")
     s = P.Session(binpath, fx)
+    s.send("3")
     s.send("r")
     s.send("a")
     s.send("r")
@@ -565,7 +577,7 @@ def main():
     git(other, "add", "f")
     git_rebase(other, "--continue")
     s = P.Session(binpath, fx)
-    pick(s, "r", "main")
+    pick(s, "r", "main", status=True)
     cursor_to(s, "UU  f")
     s.send("\r")
     s.send("a")
@@ -609,6 +621,7 @@ def main():
             git_rebase(oracle, "origin/main")
 
             s = P.Session(binpath, cl)
+            s.send("4")
             s.send("F")
             s.send("p")
             time.sleep(1.5)
@@ -626,6 +639,7 @@ def main():
 
             subprocess.run(["git", "-C", cfg, "config", "pull.rebase", "true"], check=True)
             s = P.Session(binpath, cfg)
+            s.send("4")
             s.send("F")
             s.send("p")
             time.sleep(1.5)
@@ -636,6 +650,7 @@ def main():
             s.quit()
 
             s = P.Session(binpath, ask)
+            s.send("4")
             s.send("F")
             s.send("p")
             time.sleep(1.5)

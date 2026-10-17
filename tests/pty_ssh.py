@@ -65,6 +65,7 @@ def main():
 
     # --- pull from a host that is not in known_hosts: the confirm overlay ------
     s = Session(binpath, client)
+    s.send("4")  # fetch, pull and push live in the Branches mode
     s.send("F")
     s.send("p")
     if wait_for(s, "not known"):
@@ -178,6 +179,7 @@ def main():
     head_before, _, _ = git(client, "rev-parse", "HEAD")
     kh_before = open(known_hosts).read()
     s2 = Session(binpath, client)
+    s2.send("4")
     s2.send("F")
     s2.send("p")
     wait_for(s2, "REFUSED")

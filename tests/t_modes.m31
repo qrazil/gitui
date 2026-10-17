@@ -1,0 +1,396 @@
+// Unit tests for the modes: `GIT_ui_modes` (tab order, tab bar, which outline
+// sections a mode shows) and `GIT_ui_keymap` (the one table the hint row, the
+// `?` help and the command palette are generated from). No repository, no
+// terminal; the screen half is `pty_modes.py`.
+//
+//   ./t_modes
+//
+// Prints one `<case> ok` or `<case> FAIL ...` line per check, like
+// `t_uikeys.m31`.
+
+import ui.GIT_ui_core;
+import ui.GIT_ui_keymap;
+import ui.GIT_ui_modes;
+import tui.core.TUI_text;
+import tui.widgets.TUI_outline;
+
+type Counter {
+    int checks = 0;
+    int failed = 0;
+}
+
+void Counter.check(str name, bool is_ok, str detail) {
+    checks = checks + 1;
+    if (is_ok) {
+        print(name + " ok");
+    } else {
+        failed = failed + 1;
+        print(name + " FAIL " + detail);
+    }
+}
+
+Counter counter = Counter();
+
+str home_of(Option<GIT_ui_keymap.Entry> found) {
+    match (found) {
+        case Some(GIT_ui_keymap.Entry entry): {
+            return entry.home();
+        }
+        case None: {
+            return "";
+        }
+    }
+}
+
+List<str> flows() {
+    return [GIT_ui_keymap.FLOW_NONE, GIT_ui_keymap.FLOW_MERGE, GIT_ui_keymap.FLOW_SEQUENCE, GIT_ui_keymap.FLOW_REBASE];
+}
+
+List<str> views() {
+    return [GIT_ui_keymap.VIEW_DOC, GIT_ui_keymap.VIEW_DIFF];
+}
+
+// --- the modes --------------------------------------------------------------------
+
+List<str> ids = GIT_ui_modes.ids();
+counter.check("modes: five, in tab order", ids.join(",") == "status,commit,history,branches,stash", ids.join(","));
+counter.check("modes: Tab wraps from the last to the first", GIT_ui_modes.next("stash") == "status" && GIT_ui_modes.next("status") == "commit", GIT_ui_modes.next("stash"));
+counter.check("modes: Shift-Tab wraps from the first to the last", GIT_ui_modes.previous("status") == "stash" && GIT_ui_modes.previous("history") == "commit", GIT_ui_modes.previous("status"));
+counter.check("modes: digits 1-5 pick a mode, nothing else does", GIT_ui_modes.for_digit("1") == "status" && GIT_ui_modes.for_digit("5") == "stash" && GIT_ui_modes.for_digit("6") == "" && GIT_ui_modes.for_digit("x") == "", "digits");
+bool is_cycle = true;
+str at = "status";
+for (int step in 0 .. 5) {
+    at = GIT_ui_modes.next(at);
+}
+if (at != "status") {
+    is_cycle = false;
+}
+for (int step in 0 .. 5) {
+    at = GIT_ui_modes.previous(at);
+}
+counter.check("modes: five Tabs come back to where they started, and five Shift-Tabs too", is_cycle && at == "status", at);
+// the tab bar, by width
+List<GIT_ui_modes.TabCell> full = GIT_ui_modes.tab_layout("history", 80);
+counter.check("tab bar: at 80 columns every tab is named", full.size() == 5 && full[0].text == " 1 Status " && full[3].text == " 4 Branches " && GIT_ui_modes.span_of(full) <= 80, "span=" + GIT_ui_modes.span_of(full).to_str());
+List<GIT_ui_modes.TabCell> small = GIT_ui_modes.tab_layout("history", 40);
+counter.check("tab bar: at 40 columns only the current tab keeps its name", small.size() == 5 && small[2].text == " 3 History " && small[0].text == " 1 " && GIT_ui_modes.span_of(small) <= 40, "span=" + GIT_ui_modes.span_of(small).to_str());
+bool is_fit = true;
+for (int width in 24 .. 140) {
+    for (str mode in ids) {
+        if (GIT_ui_modes.span_of(GIT_ui_modes.tab_layout(mode, width)) > width) {
+            is_fit = false;
+        }
+    }
+}
+counter.check("tab bar: never wider than the terminal from 24 columns up, whichever tab is current", is_fit, "too wide");
+counter.check("tab bar: a click maps to the tab under it", GIT_ui_modes.mode_at(full, 2) == "status" && GIT_ui_modes.mode_at(full, full[1].x) == "commit" && GIT_ui_modes.mode_at(full, full[4].x + 1) == "stash" && GIT_ui_modes.mode_at(full, 70) == "", GIT_ui_modes.mode_at(full, 2));
+// which outline sections a mode shows
+List<TUI_outline.Node> roots = [];
+List<str> section_ids = ["untracked", "unstaged", "staged", "commits", "branches", "stashes"];
+for (str id in section_ids) {
+    roots.push(TUI_outline.Node.section(id, id, []));
+}
+roots.push(TUI_outline.Node.leaf("merge-banner", "MERGING"));
+List<str> kept_status = [];
+for (TUI_outline.Node node in GIT_ui_modes.roots_for("status", roots)) {
+    kept_status.push(node.id);
+}
+counter.check("sections: Status shows the three change lists and the banner", kept_status.join(",") == "untracked,unstaged,staged,merge-banner", kept_status.join(","));
+List<str> kept_history = [];
+for (TUI_outline.Node node in GIT_ui_modes.roots_for("history", roots)) {
+    kept_history.push(node.id);
+}
+counter.check("sections: History shows the commits and the banner", kept_history.join(",") == "commits,merge-banner", kept_history.join(","));
+List<str> kept_commit = [];
+for (TUI_outline.Node node in GIT_ui_modes.roots_for("commit", roots)) {
+    kept_commit.push(node.id);
+}
+counter.check("sections: Commit has no outline, only the banner", kept_commit.join(",") == "merge-banner", kept_commit.join(","));
+List<TUI_outline.Node> stash_only = GIT_ui_modes.roots_for("stash", [TUI_outline.Node.section("untracked", "u", [])]);
+counter.check("sections: Stash always has its section, even with no stash", stash_only.size() == 1 && stash_only[0].id == "stashes", "size=" + stash_only.size().to_str());
+
+// --- the table ----------------------------------------------------------------------
+
+List<GIT_ui_keymap.Entry> table = GIT_ui_keymap.entries();
+bool is_bound = true;
+str unbound = "";
+for (GIT_ui_keymap.Entry entry in table) {
+    if (entry.keys().size() == 0) {
+        is_bound = false;
+        unbound = entry.scope + ":" + entry.cmd;
+    }
+}
+counter.check("keymap: every entry names a binding of the key table", is_bound, unbound);
+// No key means two things in one mode, view and flow.
+bool is_clear = true;
+str clash = "";
+for (str mode in ids) {
+    for (str view in views()) {
+        for (str flow in flows()) {
+            List<str> seen_keys = [];
+            List<str> seen_what = [];
+            for (GIT_ui_keymap.Entry entry in table) {
+                if (!entry.is_in(mode) || !entry.is_in_view(view) || !entry.is_when(flow)) {
+                    continue;
+                }
+                for (str key in entry.keys()) {
+                    str what = entry.scope + ":" + entry.cmd;
+                    int found = -1;
+                    for (int index in 0 .. seen_keys.size()) {
+                        if (seen_keys[index] == key) {
+                            found = index;
+                        }
+                    }
+                    if (found >= 0 && seen_what[found] != what) {
+                        is_clear = false;
+                        clash = mode + "/" + view + "/" + flow + ": " + key + " is " + seen_what[found] + " and " + what;
+                    }
+                    if (found < 0) {
+                        seen_keys.push(key);
+                        seen_what.push(what);
+                    }
+                }
+            }
+        }
+    }
+}
+counter.check("keymap: no duplicate keys within a mode, view and flow state", is_clear, clash);
+// Nothing is lost: every binding of the base scopes is offered by some mode.
+bool is_complete = true;
+str lost = "";
+List<str> base_scopes = [GIT_ui_core.SCOPE_OUTLINE, GIT_ui_core.SCOPE_DIFF, GIT_ui_core.SCOPE_GLOBAL, GIT_ui_core.SCOPE_COMMIT];
+for (str scope in base_scopes) {
+    for (GIT_ui_core.Binding binding in GIT_ui_core.bindings_in(scope)) {
+        bool is_offered = false;
+        for (GIT_ui_keymap.Entry entry in table) {
+            if (entry.scope == scope && entry.cmd == binding.cmd) {
+                is_offered = true;
+            }
+        }
+        if (!is_offered) {
+            is_complete = false;
+            lost = scope + ":" + binding.cmd;
+        }
+    }
+}
+counter.check("keymap: every binding of the outline, diff, global and commit scopes is offered by a mode", is_complete, lost);
+// The palette lists every action, once, with its key.
+List<GIT_ui_keymap.PaletteItem> palette = GIT_ui_keymap.palette_items();
+bool is_reachable = true;
+str unreachable = "";
+for (GIT_ui_keymap.Entry entry in table) {
+    if (entry.group == "Move") {
+        continue;
+    }
+    bool is_listed = false;
+    for (GIT_ui_keymap.PaletteItem item in palette) {
+        if (item.entry.home() == entry.home() && item.entry.view == entry.view && item.entry.scope == entry.scope && item.entry.cmd == entry.cmd) {
+            is_listed = true;
+        }
+    }
+    if (!is_listed) {
+        is_reachable = false;
+        unreachable = entry.scope + ":" + entry.cmd + " in " + entry.modes;
+    }
+}
+counter.check("palette: every action of every mode is reachable from it", is_reachable, unreachable);
+bool is_keyed = true;
+List<str> texts = [];
+bool is_unique_text = true;
+for (GIT_ui_keymap.PaletteItem item in palette) {
+    if (!item.text.contains("[")) {
+        is_keyed = false;
+    }
+    if (texts.contains(item.text)) {
+        is_unique_text = false;
+    }
+    texts.push(item.text);
+}
+counter.check("palette: every row shows its key", is_keyed, "no key");
+counter.check("palette: no two rows read alike (a pick is looked up by its text)", is_unique_text, "duplicate");
+int goto_rows = 0;
+for (GIT_ui_keymap.PaletteItem item in palette) {
+    if (item.entry.cmd == GIT_ui_core.CMD_MODE_GOTO && item.arg != "") {
+        goto_rows = goto_rows + 1;
+    }
+}
+counter.check("palette: one 'Go to' row per mode", goto_rows == 5, goto_rows.to_str());
+bool is_staging_in_status = false;
+for (GIT_ui_keymap.PaletteItem item in palette) {
+    if (item.text == "Status: stage   [s]") {
+        is_staging_in_status = true;
+    }
+}
+counter.check("palette: reads 'Status: stage   [s]'", is_staging_in_status, palette[0].text);
+
+// --- the hint row -----------------------------------------------------------------
+
+int most_hints = 0;
+bool is_short_enough = true;
+str too_many = "";
+for (str mode in ids) {
+    for (str view in views()) {
+        for (str flow in flows()) {
+            List<GIT_ui_keymap.Entry> hints = GIT_ui_keymap.hint_entries(mode, view, flow);
+            if (hints.size() > most_hints) {
+                most_hints = hints.size();
+            }
+            if (hints.size() > GIT_ui_keymap.HINT_MAX) {
+                is_short_enough = false;
+                too_many = mode + "/" + view + "/" + flow + " has " + hints.size().to_str();
+            }
+        }
+    }
+}
+counter.check("hints: no mode offers more than " + GIT_ui_keymap.HINT_MAX.to_str + " hints (at most " + most_hints.to_str() + ")", is_short_enough, too_many);
+bool is_sorted = true;
+for (str mode in ids) {
+    List<GIT_ui_keymap.Entry> hints = GIT_ui_keymap.hint_entries(mode, "doc", "");
+    for (int index in 1 .. hints.size()) {
+        if (hints[index].priority < hints[index - 1].priority) {
+            is_sorted = false;
+        }
+    }
+}
+counter.check("hints: most likely first (priority order)", is_sorted, "order");
+List<GIT_ui_core.Hint> status_row = GIT_ui_keymap.hint_row("status", "doc", "", 80);
+counter.check("hints: Status at 80 columns starts with stage, unstage, diff and ends with ? more", status_row[0].keys == "s" && status_row[1].keys == "u" && status_row[2].keys == "d" && status_row[status_row.size() - 1].keys == "?" && GIT_ui_keymap.row_width(status_row) <= 80, "row=" + status_row.size().to_str());
+List<GIT_ui_core.Hint> status_narrow = GIT_ui_keymap.hint_row("status", "doc", "", 30);
+counter.check("hints: at 30 columns the low-priority hints go first, ? more stays", status_narrow.size() < status_row.size() && status_narrow[0].keys == "s" && status_narrow[status_narrow.size() - 1].keys == "?" && GIT_ui_keymap.row_width(status_narrow) <= 30, "width=" + GIT_ui_keymap.row_width(status_narrow).to_str());
+bool is_always_fitting = true;
+str overflow = "";
+for (str mode in ids) {
+    for (str view in views()) {
+        for (str flow in flows()) {
+            for (int width in 8 .. 140) {
+                List<GIT_ui_core.Hint> row = GIT_ui_keymap.hint_row(mode, view, flow, width);
+                if (GIT_ui_keymap.row_width(row) > width) {
+                    is_always_fitting = false;
+                    overflow = mode + "/" + view + "/" + flow + " at " + width.to_str() + " is " + GIT_ui_keymap.row_width(row).to_str();
+                }
+                if (row[row.size() - 1].keys != "?") {
+                    is_always_fitting = false;
+                    overflow = "no marker " + mode + " at " + width.to_str();
+                }
+            }
+        }
+    }
+}
+counter.check("hints: every mode, view and flow fits every width from 8 to 139 and keeps the marker", is_always_fitting, overflow);
+// Wide characters count two columns: the cut is by display width, not by length.
+List<GIT_ui_core.Hint> wide = [GIT_ui_core.Hint("x", "\u{65E5}\u{672C}\u{8A9E}\u{30E9}\u{30D9}\u{30EB}"), GIT_ui_core.Hint("y", "\u{65E5}\u{672C}\u{8A9E}"), GIT_ui_core.Hint("z", "zed")];
+counter.check("hints: a wide label is 2 columns a character", GIT_ui_keymap.hint_width(wide[0]) == 1 + 1 + 12 && GIT_ui_keymap.hint_width(wide[1]) == 1 + 1 + 6, GIT_ui_keymap.hint_width(wide[0]).to_str());
+bool is_wide_fitting = true;
+str wide_overflow = "";
+for (int width in 8 .. 60) {
+    List<GIT_ui_core.Hint> row = GIT_ui_keymap.fit(wide, width, true);
+    if (GIT_ui_keymap.row_width(row) > width) {
+        is_wide_fitting = false;
+        wide_overflow = "width " + width.to_str() + " -> " + GIT_ui_keymap.row_width(row).to_str();
+    }
+}
+counter.check("hints: wide labels never overflow the width", is_wide_fitting, wide_overflow);
+List<GIT_ui_core.Hint> wide_cut = GIT_ui_keymap.fit(wide, 23, true);
+counter.check("hints: at 23 columns the 14-column first label fits, the second does not", wide_cut.size() == 2 && wide_cut[0].keys == "x" && wide_cut[1].keys == "?", "size=" + wide_cut.size().to_str());
+counter.check("hints: at 22 columns not even the first does", GIT_ui_keymap.fit(wide, 22, true).size() == 1, "size");
+List<GIT_ui_core.Hint> no_more = GIT_ui_keymap.fit(wide, 80, false);
+counter.check("hints: an overlay's row has no ? more", no_more.size() == 3 && no_more[2].keys == "z", "size=" + no_more.size().to_str());
+
+// --- the state dimension ----------------------------------------------------------------
+
+List<str> busy = [GIT_ui_keymap.FLOW_MERGE, GIT_ui_keymap.FLOW_SEQUENCE, GIT_ui_keymap.FLOW_REBASE];
+for (str flow in busy) {
+    bool is_first = true;
+    for (str mode in ids) {
+        List<GIT_ui_keymap.Entry> hints = GIT_ui_keymap.hint_entries(mode, "doc", flow);
+        if (hints.size() == 0 || hints[0].group != "Flow") {
+            is_first = false;
+        }
+    }
+    counter.check("flow " + flow + ": the way out of it is the first hint of every mode", is_first, flow);
+}
+bool is_commit_hidden = true;
+for (GIT_ui_keymap.Entry entry in GIT_ui_keymap.hint_entries("status", "doc", GIT_ui_keymap.FLOW_REBASE)) {
+    if (entry.cmd == GIT_ui_core.CMD_COMMIT) {
+        is_commit_hidden = false;
+    }
+}
+counter.check("flow rebase: Status does not advertise commit", is_commit_hidden, "commit shown");
+bool is_commit_for_merge = false;
+for (GIT_ui_keymap.Entry entry in GIT_ui_keymap.hint_entries("status", "doc", GIT_ui_keymap.FLOW_MERGE)) {
+    if (entry.cmd == GIT_ui_core.CMD_COMMIT) {
+        is_commit_for_merge = true;
+    }
+}
+counter.check("flow merge: Status still offers commit (it finishes the merge)", is_commit_for_merge, "commit hidden");
+counter.check("flow: a rebase beats sequence beats merge", GIT_ui_keymap.flow_of(true, true, true) == "rebase" && GIT_ui_keymap.flow_of(true, true, false) == "sequence" && GIT_ui_keymap.flow_of(true, false, false) == "merge" && GIT_ui_keymap.flow_of(false, false, false) == "", "flow_of");
+
+// --- moved keys -----------------------------------------------------------------------
+
+str moved = home_of(GIT_ui_keymap.moved_to("status", "doc", GIT_ui_core.SCOPE_OUTLINE, GIT_ui_core.CMD_PICK));
+counter.check("moved: A (cherry-pick) is History's when pressed in Status", moved == "history", moved);
+counter.check("moved: j in the Commit panel is not worth a notice (it is in most modes)", !GIT_ui_keymap.moved_to("commit", "doc", GIT_ui_core.SCOPE_OUTLINE, GIT_ui_core.CMD_DOWN).is_some(), "notice");
+counter.check("moved: s in History points at Status", home_of(GIT_ui_keymap.moved_to("history", "doc", GIT_ui_core.SCOPE_OUTLINE, GIT_ui_core.CMD_STAGE)) == "status", "s");
+
+// --- the help, from the same table -------------------------------------------------------
+
+bool is_help_generated = true;
+str missing_label = "";
+for (str mode in ids) {
+    for (str view in views()) {
+        List<str> help = GIT_ui_keymap.help_lines(mode, view, "");
+        for (GIT_ui_keymap.Entry entry in table) {
+            if (entry.is_in(mode) && entry.is_in_view(view) && entry.is_when("")) {
+                bool is_present = false;
+                for (str line in help) {
+                    if (line.ends_with(entry.label) && line.contains(entry.all_keys())) {
+                        is_present = true;
+                    }
+                }
+                if (!is_present) {
+                    is_help_generated = false;
+                    missing_label = mode + "/" + view + ": " + entry.label;
+                }
+            }
+        }
+    }
+}
+counter.check("help: every entry of a mode is a line of that mode's help", is_help_generated, missing_label);
+List<str> history_help = GIT_ui_keymap.help_lines("history", "doc", "");
+bool is_scoped = true;
+for (str line in history_help) {
+    if (line.contains("stage hunk") || line.contains("write message")) {
+        is_scoped = false;
+    }
+}
+counter.check("help: History's help does not list Status's or Commit's keys", is_scoped && history_help[0] == "History mode", history_help[0]);
+counter.check("help: a diff or a flow says so in the heading", GIT_ui_keymap.help_lines("status", "diff", "")[0] == "Status mode, diff view" && GIT_ui_keymap.help_lines("history", "doc", "rebase")[0] == "History mode (rebase under way)", GIT_ui_keymap.help_lines("status", "diff", "")[0]);
+// For the record (docs/MGIT-MODES.md quotes these): the action keys each mode
+// answers (not movement, folding, search or the everywhere keys, which every
+// outline mode shares) and what the hint row shows, against what the old
+// all-in-one screen answered at its top level.
+List<str> shared_groups = ["Move", "View", "Search", "Modes", "Everywhere", "Side by side", "Flow"];
+List<str> movement = [GIT_ui_core.CMD_DOWN, GIT_ui_core.CMD_UP, GIT_ui_core.CMD_LEFT, GIT_ui_core.CMD_RIGHT, GIT_ui_core.CMD_SECTION_PREVIOUS, GIT_ui_core.CMD_SECTION_NEXT, GIT_ui_core.CMD_SIBLING_PREVIOUS, GIT_ui_core.CMD_SIBLING_NEXT, GIT_ui_core.CMD_FOLD, GIT_ui_core.CMD_FOLD_ALL, GIT_ui_core.CMD_UNFOLD_ALL, GIT_ui_core.CMD_SEARCH, GIT_ui_core.CMD_NEXT, GIT_ui_core.CMD_PREVIOUS, GIT_ui_core.CMD_JUMP, GIT_ui_core.CMD_FOCUS, GIT_ui_core.CMD_REFRESH, GIT_ui_core.CMD_QUIT, GIT_ui_core.CMD_LEAVE];
+int old_actions = 0;
+for (GIT_ui_core.Binding binding in GIT_ui_core.bindings_in(GIT_ui_core.SCOPE_OUTLINE)) {
+    if (!movement.contains(binding.cmd)) {
+        old_actions = old_actions + binding.keys.size();
+    }
+}
+print("info: action keys at the top level of the old screen: " + old_actions.to_str());
+for (str mode in ids) {
+    for (str view in views()) {
+        List<str> action_keys = [];
+        for (GIT_ui_keymap.Entry entry in table) {
+            if (entry.is_in(mode) && entry.is_in_view(view) && !shared_groups.contains(entry.group)) {
+                for (str key in entry.keys()) {
+                    if (!action_keys.contains(key)) {
+                        action_keys.push(key);
+                    }
+                }
+            }
+        }
+        print("info: " + mode + "/" + view + ": " + action_keys.size().to_str() + " action keys, " + GIT_ui_keymap.hint_entries(mode, view, "").size().to_str() + " in the hint row");
+    }
+}
+print(counter.checks.to_str() + " checks, " + counter.failed.to_str() + " failed");

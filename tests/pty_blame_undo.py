@@ -141,6 +141,7 @@ def run(ctx):
     c2, _, _ = git(fx, "rev-parse", "HEAD~1")
     c3, _, _ = git(fx, "rev-parse", "HEAD")
     s = Session(binpath, fx)
+    s.send("3")  # undo lives in the History mode
     s.send("Z")
     t = s.text()
     check("undo: Z shows what would be undone and the note about the worktree", "undo: commit: c3" in t and "not undoable" in t, t)
@@ -188,6 +189,7 @@ def run(ctx):
     git(fx, "tag", "-a", "-m", "release one", "rel1", "HEAD~1", env=GIT_ENV)
     head, _, _ = git(fx, "rev-parse", "HEAD")
     s = Session(binpath, fx)
+    s.send("4")  # tags live in the Branches mode
     s.send("T")
     t = s.text()
     check("tags: T lists existing tags, annotated ones with their message", "old" in t and "rel1" in t and "release one" in t, t)
@@ -251,7 +253,9 @@ def run(ctx):
     s = Session(binpath, fx)
     t = s.text()
     check("ahead/behind: git says " + want, want == "[ahead 2, behind 1]", want)
-    check("ahead/behind: the statusline shows it", "origin/main \u21912 \u21931" in t.split("\n")[0], t)
+    check("ahead/behind: the statusline shows it", "origin/main \u21912 \u21931" in t.split("\n")[1], t)
+    s.send("4")
+    t = s.text()
     branch_row = [row for row in t.split("\n") if "* main" in row]
     check("ahead/behind: the Branches row shows it", branch_row and "[ahead 2, behind 1]" in branch_row[0], t)
     s.send("b")
@@ -268,34 +272,38 @@ def run(ctx):
     s = Session(binpath, fx)
     idle = s.drain(2.6)
     check("auto-refresh: an idle second writes nothing to the terminal (no flicker)", idle == b"", repr(idle[:80]))
-    s.send("jjjj")  # Untracked, Unstaged, Staged, Commits -> first commit row
+    s.send("3")  # History: the commits
+    s.send("j")  # the first commit row
     with open(os.path.join(fx, "a.txt"), "a") as f:
         f.write("edited elsewhere\n")
     with open(os.path.join(fx, "new.txt"), "w") as f:
         f.write("n\n")
-    seen = wait_for(s, lambda t: "Unstaged changes (1)" in t and "Untracked files (1)" in t, 4.0)
+    # the statusline counts changes in every mode: ~ unstaged, ? untracked, + staged
+    seen = wait_for(s, lambda t: "~1" in t.split("\n")[1] and "?1" in t.split("\n")[1], 4.0)
     check("auto-refresh: an external edit and a new file appear without a key press", seen, s.text())
     s.send("\r")
     check("auto-refresh: the cursor stayed on the commit row (Enter unfolds it)", "Files changed" in s.text(), s.text())
     s.send("\r")
     git(fx, "add", "a.txt")
-    seen = wait_for(s, lambda t: "Staged changes (1)" in t and "Unstaged changes (0)" in t, 4.0)
+    seen = wait_for(s, lambda t: "+1" in t.split("\n")[1] and "~1" not in t.split("\n")[1], 4.0)
     check("auto-refresh: an external git add moves the file to Staged", seen, s.text())
     git(fx, "checkout", "-q", "-b", "other")
-    seen = wait_for(s, lambda t: " other " in t.split("\n")[0], 4.0)
+    seen = wait_for(s, lambda t: " other " in t.split("\n")[1], 4.0)
     check("auto-refresh: an external branch switch updates the statusline", seen, s.text())
     os.remove(os.path.join(fx, "new.txt"))
-    seen = wait_for(s, lambda t: "Untracked files (0)" in t, 4.0)
+    seen = wait_for(s, lambda t: "?1" not in t.split("\n")[1], 4.0)
     check("auto-refresh: an external delete disappears", seen, s.text())
     # while an overlay is open the outline is left alone, and catches up after
     s.send("?")
     with open(os.path.join(fx, "late.txt"), "w") as f:
         f.write("l\n")
     s.drain(2.4)
-    check("auto-refresh: not while an overlay is open", "late.txt" not in s.text(), s.text())
+    check("auto-refresh: not while an overlay is open", "?1" not in s.text().split("\n")[1], s.text())
     s.send("\x1b")
-    seen = wait_for(s, lambda t: "late.txt" in t, 4.0)
+    seen = wait_for(s, lambda t: "?1" in t.split("\n")[1], 4.0)
     check("auto-refresh: it catches up once the overlay closes", seen, s.text())
+    s.send("1")
+    check("auto-refresh: and Status lists the file", "late.txt" in s.text(), s.text())
     rc = s.quit()
     check("auto-refresh: the client exits cleanly", rc == 0, "rc=%r" % rc)
 
@@ -330,6 +338,7 @@ def run(ctx):
     commit(fx, "a.txt", "1\n2\n", "on feat", BASE + 10)
     git(fx, "remote", "add", "origin", "http://127.0.0.1:%d/cgi-bin/git-http-backend/repo.git" % port)
     s = Session(binpath, fx)
+    s.send("4")
     s.send("P")
     check("push -u: the push menu offers u", "set origin/<branch> as the upstream" in s.text(), s.text())
     s.send("u")
