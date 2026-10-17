@@ -15,7 +15,7 @@ why would anyone use our 1git over git?" So:
 - the **command line is not git's**: it is Oro's args grammar, designed for 1git
   (`CLI.md`). `git log --oneline -n 5` is `1git -log --oneline --max 5`
   (`MIGRATING-FROM-GIT.md`). git's own spelling still works in 0.24.0 behind a
-  deprecation warning (the transition shim) and is removed in 0.26.0.
+  deprecation warning (the transition shim) and is removed in 0.27.0.
 
 Everything below describes behaviour. Where it quotes options, they are **git's
 spelling of the same thing**: translate with `1git -migrate 'git ...'` or the
@@ -594,7 +594,7 @@ Deliberate departures, and gaps:
   ~40 s at `-O0`, a 21 MB repository 7 s at `-O2`). This is an m31 library
   limit, not worked around.
 - `init` writes no templates (no sample hooks, `info/exclude`, `description`).
-- The advertised user agent is `1git/0.25.0`.
+- The advertised user agent is `1git/0.26.0`.
 
 ## Case-insensitive and Unicode-normalizing volumes (0.19.0, 0.19.1)
 

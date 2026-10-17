@@ -71,7 +71,7 @@ pub type Job {
 
 pub const str PROG = "1git";
 
-/// `0.25.0`, from the one place the version is written down.
+/// `0.26.0`, from the one place the version is written down.
 pub str version_line() {
     return GIT_transport.AGENT.substr(5, GIT_transport.AGENT.size);
 }
@@ -654,7 +654,7 @@ pub int start(List<str> argv) {
             }
             case Err(str reason): {
                 if (!is_quiet) {
-                    io.eprint(PROG + ": git-style arguments are deprecated, and this line has no equivalent in the new command line (" + reason + "); running it as git would, until 0.26.0");
+                    io.eprint(PROG + ": git-style arguments are deprecated, and this line has no equivalent in the new command line (" + reason + "); running it as git would, until 0.27.0");
                 }
                 return run_legacy(argv);
             }

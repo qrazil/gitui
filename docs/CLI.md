@@ -189,7 +189,7 @@ $ 1git log --oneline -n 5
 The line is rewritten into the new grammar by the same table the parser is
 made from (`core/GIT_clitable.m31`) and runs the new way, with the new exit
 status. A line with an option 1git no longer has runs as git would, with git's
-exit status, and a warning that says so. The shim is deleted in 0.26.0.
+exit status, and a warning that says so. The shim is deleted in 0.27.0.
 `1git -migrate 'git log --oneline -n 5'` prints the new line without running
 anything; with `--nul` it reads git's words from standard input and writes
 ours, which is how the oracle scripts call 1git (`scripts/lib_cli.sh`).
