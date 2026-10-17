@@ -206,6 +206,14 @@ same-named branch on `origin` over smart HTTP, fast-forward only (see
 from `origin` (see "Pull" below). Merge and rebase are described under "Merge"
 and "Rebase" below.
 
+Since 0.26.0 the same modes also delete and rename a branch (Branches: `D`, `X`
+for a forced delete after a question, `e`), reset the current branch to a commit
+(History: `G`, a soft / mixed / hard menu, hard asking first) and check a commit
+out with a detached HEAD (History: `o`), and the Commit mode can add a
+`Signed-off-by:` trailer (`s`, off unless `mgit.signoff` is true). Each is
+compared with the real git command in `tests/pty_modes.py`; see
+`docs/MGIT-MODES.md`.
+
 Discarding and amending, both checked against the real git command each
 stands in for (`test_discard_amend.sh`): `x` on a path row asks first
 (`y` discards; any other key keeps it), then restores an unstaged file from

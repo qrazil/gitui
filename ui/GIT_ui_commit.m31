@@ -71,6 +71,23 @@ pub void CommitLayer.edit_message() {
     message = "launching editor...";
 }
 
+/// The `Signed-off-by:` line for the committer: `user.name` and `user.email`
+/// (or the `GIT_COMMITTER_*` variables, as git reads them).
+pub str CommitLayer.signoff_text() {
+    GIT_object.Ident who = GIT_ui_model.committer_ident(gitdir);
+    return GIT_ui_model.signoff_line(who.name.utf8().or(""), who.email.utf8().or(""));
+}
+
+/// `s` in the Commit mode: sign-off on or off for the commits made from here.
+pub void CommitLayer.toggle_signoff() {
+    is_signoff = !is_signoff;
+    if (is_signoff) {
+        message = "sign-off on: " + signoff_text() + " will be added";
+    } else {
+        message = "sign-off off";
+    }
+}
+
 /// `a` in the Commit mode: throw the draft away -- after asking, naming what
 /// goes (the draft's first line, and the amend), when there is anything to lose.
 pub void CommitLayer.confirm_abort() {
@@ -222,6 +239,9 @@ pub void CommitLayer.finish_commit() {
         is_overlay_done = true;
         is_amending = false;
         return;
+    }
+    if (is_signoff) {
+        commit_message = GIT_ui_model.with_signoff(commit_message, signoff_text());
     }
     GIT_index.Index index = GIT_ui_model.read_index(gitdir);
     if (is_merge) {

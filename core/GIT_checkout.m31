@@ -1001,6 +1001,146 @@ pub Result<Summary, Error> reset_hard(str gitdir, str worktree, str commit) {
     return Result<Summary, Error>.Ok(done);
 }
 
+/// How far `reset` goes, as git's `--soft`, `--mixed` and `--hard`.
+pub enum ResetMode {
+    /// Only the branch (or detached HEAD) moves.
+    Soft;
+    /// The index becomes the commit's tree as well; the files are not touched.
+    Mixed;
+    /// The files become the commit's tree too: tracked changes are discarded.
+    Hard;
+}
+
+/// The word git uses for the mode: `soft`, `mixed`, `hard`.
+pub str ResetMode.word() {
+    match (this) {
+        case Soft: {
+            return "soft";
+        }
+        case Mixed: {
+            return "mixed";
+        }
+        case Hard: {
+            return "hard";
+        }
+    }
+}
+
+/// The index half of `git reset --mixed <commit>`: every stage-0 entry is
+/// made the commit's (an entry that already equals it is kept, with its stat
+/// cache), entries of paths the commit lacks go, conflict stages go; no file
+/// is read or written. Untracked files and the work tree are never touched.
+pub Result<bool, Error> reset_index(str gitdir, str commit) {
+    Map<str, TreeEntry> target = tree_of_commit(gitdir, commit)?;
+    GIT_index.Index index = load_index(gitdir)?;
+    Map<str, GIT_index.Entry> kept = {};
+    for (GIT_index.Entry entry in index.entries) {
+        match (entry.path.utf8()) {
+            case Some(str path): {
+                if (entry.stage == 0) {
+                    kept.set(path, entry);
+                }
+            }
+            case None: {
+            }
+        }
+    }
+    List<GIT_index.Entry> entries = [];
+    List<str> paths = [];
+    for (str path in target.keys()) {
+        paths.push(path);
+    }
+    paths.sort();
+    for (str path in paths) {
+        TreeEntry want = target.get(path).or(TreeEntry(0, ""));
+        if (is_in_index(kept, path, want)) {
+            entries.push(get_entry(kept, path));
+        } else {
+            entries.push(GIT_index.Entry(0, 0, 0, 0, 0, 0, want.mode, 0, 0, 0, want.id, 0, false, path.to_bytes()));
+        }
+    }
+    // Entries whose path is not UTF-8 are not in the comparison; keep them.
+    for (GIT_index.Entry entry in index.entries) {
+        if (entry.stage == 0 && entry.path.utf8().is_none()) {
+            entries.push(entry);
+        }
+    }
+    match (GIT_index.write(gitdir, GIT_index.Index(entries))) {
+        case Ok: {
+            return Result<bool, Error>.Ok(true);
+        }
+        case Err(GIT_index.Error error): {
+            return Result<bool, Error>.Err(Error.Index(error));
+        }
+    }
+}
+
+/// `git reset --soft|--mixed|--hard <commit>` for the whole work tree: the
+/// index and files as `mode` says (see `ResetMode`), `ORIG_HEAD` set to where
+/// HEAD was, then the branch HEAD is on (HEAD itself when detached) moved to
+/// `commit` with git's reflog line `reset: moving to <commit>` (`commit` is
+/// written as given, as git writes the argument it was handed; a reset to
+/// where HEAD already is leaves only HEAD's log saying so). Nothing is
+/// written when the commit cannot be read or, for `Hard`, when an untracked
+/// file stands in the way. What it will not do is decided by the caller: a
+/// merge, rebase, cherry-pick or revert under way is the caller's to refuse.
+pub Result<Summary, Error> reset(str gitdir, str worktree, str commit, ResetMode mode) {
+    Summary done = Summary(0, 0);
+    match (mode) {
+        case Soft: {
+            tree_of_commit(gitdir, commit)?;
+        }
+        case Mixed: {
+            reset_index(gitdir, commit)?;
+        }
+        case Hard: {
+            done = reset_files(gitdir, worktree, commit)?;
+        }
+    }
+    str ref_name = "HEAD";
+    str old_id = "";
+    match (GIT_refs.head(gitdir)) {
+        case Ok(GIT_refs.Head head): {
+            match (head) {
+                case Born(str name, str id): {
+                    ref_name = name;
+                    old_id = id;
+                }
+                case Unborn(str name): {
+                    ref_name = name;
+                }
+                case Detached(str id): {
+                    old_id = id;
+                }
+            }
+        }
+        case Err(GIT_refs.Error error): {
+            return Result<Summary, Error>.Err(Error.Refs(error));
+        }
+    }
+    if (old_id != "") {
+        match (GIT_refs.update(gitdir, "ORIG_HEAD", old_id, Option<str>.None, reflog_message: "updating ORIG_HEAD")) {
+            case Ok: {
+            }
+            case Err(_): {
+            }
+        }
+    }
+    str message = "reset: moving to " + commit;
+    if (old_id == commit) {
+        log_head_move(gitdir, old_id, commit, message);
+        return Result<Summary, Error>.Ok(done);
+    }
+    match (GIT_refs.update(gitdir, ref_name, commit, Option<str>.None, reflog_message: message)) {
+        case Ok: {
+        }
+        case Err(GIT_refs.Error error): {
+            return Result<Summary, Error>.Err(Error.Refs(error));
+        }
+    }
+    return Result<Summary, Error>.Ok(done);
+}
+
 // The index of `gitdir`, empty when there is no file yet.
 Result<GIT_index.Index, Error> load_index(str gitdir) {
     match (GIT_index.read(gitdir)) {

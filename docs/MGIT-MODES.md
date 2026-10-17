@@ -44,9 +44,9 @@ is the most the bottom row ever shows at once.
 | mode | body | action keys | hint row |
 |---|---|---|---|
 | **1 Status** | untracked, unstaged and staged files; the hunk diff when you open one | 10 (8 in the diff) | 8 |
-| **2 Commit** | what the commit will say and contain; amend | 4 | 7 |
-| **3 History** | the log, a commit's files, file history | 7 | 8 |
-| **4 Branches** | local branches, tags, merge, rebase, push and pull | 9 | 8 |
+| **2 Commit** | what the commit will say and contain; amend; sign-off | 5 | 8 |
+| **3 History** | the log, a commit's files, file history; reset and check out a commit | 10 | 8 |
+| **4 Branches** | local branches, tags, delete, rename, merge, rebase, push and pull | 12 | 8 |
 | **5 Stash** | the stash list, push, pop, apply, drop | 2 (plus the stash menu's own) | 6 |
 
 Before, the one screen answered 57 keys at its top level (the outline's and the
@@ -93,11 +93,38 @@ merge commit, then the first line of the draft message and the staged files.
 | `f` | make the commit from the message already on disk |
 | `A` | amend HEAD: its message is prefilled, its parents and author are kept |
 | `a` | discard the draft (and the amend), after asking and naming what goes: `discard the draft message "fix the parser"?` (`y` discards, any other key keeps it) |
+| `s` | sign-off on or off: add a `Signed-off-by:` trailer to the commit (below) |
 
 After a commit the client returns to Status. `c` in Status is the same as
 pressing `2`, plus a refusal while a cherry-pick, revert or rebase is under way.
-(Sign-off is not offered: the library has no `--signoff`, and this release does
-not add one.)
+
+#### Sign-off
+
+`s` is a switch, not a one-off action, because the message is written in
+`$EDITOR` and the commit is made when the editor closes: the switch says what
+will happen to the message then. It does what `git commit -s` does, and nothing
+more:
+
+* **Off by default**, so no commit is ever signed by surprise. The panel says
+  `Sign-off  off (s adds a Signed-off-by trailer)`; switched on it shows the
+  exact line that will be added, `Sign-off  ON: Signed-off-by: Name <email>`,
+  and the hint row has `s sign-off` in either state.
+* **Who**: the committer identity, which is what git uses: `GIT_COMMITTER_NAME`
+  and `_EMAIL`, else `user.name` and `user.email`.
+* **Where**: after the message's last trailer block when it ends in one
+  (`Reviewed-by:`, another `Signed-off-by:`, `Co-authored-by:`), otherwise after
+  a blank line. The subject line alone is never taken for a trailer block.
+* **Never twice**: when the same `Signed-off-by:` line is already the last line
+  or anywhere in the last trailer block, nothing is added. Someone else's
+  sign-off does not count: yours is added after it.
+* It applies to every commit made while it is on, amends and merge commits
+  included, and stays on for the session (`s` again turns it off).
+* **`mgit.signoff`**: `git config mgit.signoff true` makes it start on (any git
+  boolean; absent or off is the default). Only the starting state is
+  configurable; the key still switches it.
+
+The draft file is never changed: the trailer is added to the message that is
+committed, so what `e` shows is what you wrote.
 
 ### 3 History: the log
 
@@ -110,11 +137,37 @@ changed); `Enter` on one of its files opens that commit's diff of the file.
 | `A` / `V` | cherry-pick / revert the commit under the cursor (menu: now, `-x`, `-n`, keep empty, a range, merge parent) |
 | `r` | the rebase menu: onto a branch, interactively, `h` from the commit under the cursor, `--onto`, autosquash, autostash |
 | `Z` | undo the last HEAD move from the reflog (shows it, asks first); `r` redo |
+| `G` | reset the current branch to the commit under the cursor: a menu of `s` soft, `m` mixed, `h` hard (below) |
+| `o` | check the commit out with a detached HEAD (`git checkout --detach`) |
 | `B` / `H` | blame / history of a commit's file |
 | the movement, fold and search keys of Status | |
 
 The diff of a commit's file has the same read-only keys as Status's diff
 (side-by-side, folds, hunks, files); stage and discard are Status's.
+
+`G` and `o` act on the commit under the cursor (or on the commit a file row
+belongs to). Neither is in the hint row, which is full; `?` and the palette list
+them. Both wait while a merge, cherry-pick, revert or rebase is under way and
+say why (`reset is blocked while CHERRY-PICKING (A or V: continue, skip or abort)`).
+
+* **Reset** is `git reset --soft|--mixed|--hard <commit>`: the branch HEAD is on
+  (or HEAD itself when it is detached) moves to the commit, `ORIG_HEAD` is set
+  to where it was, and the reflog says `reset: moving to <commit>`. *Soft* moves
+  nothing else. *Mixed* also makes the index the commit's tree; the files keep
+  their changes. *Hard* also makes the files the commit's tree. Untracked files
+  stay in all three. Soft and mixed run at once; **hard asks first**, and the
+  question names what it throws away: `Discards the uncommitted changes to 2
+  tracked files: a.txt, s.txt, for good. Moves main off 1 commit (Z undoes the
+  move). Untracked files stay.` `y` does it, any other key changes nothing.
+  `Z` brings the branch back after a reset; it cannot bring back file changes.
+* **Check out** (`o`) is `git checkout --detach <commit>`: HEAD is left on the
+  commit, no branch moves, and the status line shows `detached @ 1a2b3c4`
+  afterwards. It refuses, changing nothing, where git refuses: a file the
+  checkout would change has local changes (`check out refused: local changes to
+  a file the switch would overwrite -- commit, stage elsewhere, or discard them
+  first (HEAD did not move)`), or an untracked file is in the way. Changes to
+  files the two commits do not differ in are carried along, as git carries them.
+  `b` then `c` / Enter in Branches gets you back on a branch.
 
 ### 4 Branches: branches, tags and the remote
 
@@ -130,11 +183,29 @@ Local branches, the current one starred, with ahead and behind.
 | `F` | the pull menu: pull, fetch, pull on the terminal with git's rules, pull with rebase |
 | `P` | the push menu: push, push and set the upstream, push on the terminal |
 | `T` | tags: list, create (lightweight or annotated), delete |
+| `D` | delete the branch under the cursor if it is merged, as `git branch -d` does; otherwise refused, saying into what it is not merged |
+| `X` | force-delete it (`git branch -D`), after a question that says whether it is merged and how to get it back (`git branch NAME <old tip>`) |
+| `e` | rename it (`git branch -m`): a prompt starting from the current name |
 
-Not in this release: deleting a branch and renaming one. The library has no
-branch delete or rename, and the language-only rule for the standard library
-forbids working around that; they are listed as open decisions in the report
-that came with this change.
+The three are in the help (`?`) and the palette, not the hint row, which is
+already full. What they refuse, and why:
+
+* **The branch you are on** is never deleted (`cannot delete main: it is the
+  branch you are on`), nor is one checked out in another work tree. Switch away first.
+* **`D`** keeps a branch whose tip is not reachable from its upstream (when it
+  has one that exists) or from HEAD: `cannot delete wip: not fully merged into
+  HEAD (main)`. Nothing is changed. `X` is the way to throw it away.
+* Deleting removes the ref (loose and packed), the directories it leaves
+  empty, the branch's reflog and its `branch.<name>.*` configuration, as git does.
+* **`e`** checks the name with git's `check-ref-format` rules (no space, `~ ^ :
+  ? * [ \`, no `..` or `@{`, no leading `-` or `.`, no trailing `/`, `.` or
+  `.lock`, or `HEAD`; a lone `@` is fine, as for git) and says so when it fails. A name that already
+  exists is not replaced unless you confirm (`git branch -M`): the question
+  names the branch that would go; a name that is a checked-out branch is
+  refused outright. The reflog and configuration move with the branch, and
+  renaming the current branch moves HEAD with it.
+* All of them wait while a merge, cherry-pick, revert or rebase is under way
+  (`delete branch is blocked while MERGING (m c continues, m a aborts)`).
 
 ### 5 Stash: the stash list
 
@@ -223,6 +294,12 @@ Three tables, one source:
 * `GIT_ui_modes` holds the pure facts: the order of the modes, which outline
   sections a mode shows, the tab bar for a width.
 
+The library side of the four ref actions is in `core/`: `GIT_branches.delete_branch`,
+`rename_branch` (with `is_valid_branch_name`, `merge_state`, `is_checked_out`),
+`GIT_checkout.reset` (`ResetMode` soft, mixed, hard) and `checkout` with an empty
+target ref for the detached case; the command line's `-branch --delete` and
+`--rename` run on the same functions. The UI half is `ui/GIT_ui_actions.m31`.
+
 A keypress with no overlay open goes: scopes for the mode (`GIT_ui_keymap.scopes_for`)
 -> key table lookup -> `GIT_ui_keymap.find` for the mode, view and state ->
 `State.run_in_mode`. No entry means "moved to" (or a flow refusal); an entry
@@ -260,7 +337,11 @@ corrupted cells before this release and are fixed here:
 * Nothing is written past a row's width: every `set_str` has a `max`, and every
   string is cut with `TUI_text` (display columns, not bytes).
 
-`tests/pty_modes.py` is the check: at 80x24, 120x40 and 40x12 it tours every
+`tests/pty_modes.py` is the check (and, for the four ref actions and the
+sign-off, a comparison with the local `git`: each runs beside an identical twin
+repository that git itself changes, and refs, reflogs, index, files and
+configuration are compared; where git refuses mgit must refuse and change
+nothing): at 80x24, 120x40 and 40x12 it tours every
 mode (plus unified and side-by-side diffs, a commit's files, the stash list,
 help and the palette) over a repository of wide, emoji, combining-mark, tabbed
 and very long names, and after each step asserts that the tab bar and hint row

@@ -1465,23 +1465,6 @@ str format_ref(GIT_gitstore.Store store, GIT_gitcommon.Ctx ctx, str full, str id
     return out;
 }
 
-// Remove `full` and the directories above it that are left empty.
-void remove_ref_dirs(str gitdir, str full) {
-    str common = GIT_repository.common(gitdir);
-    str boundary = fs.join(common, "refs");
-    str dir = GIT_gitwrite.dirname(fs.join(common, full));
-    while (dir != "" && dir != boundary && dir.starts_with(boundary + "/")) {
-        match (fs.rmdir(dir)) {
-            case Ok(_): {
-            }
-            case Err(_): {
-                return;
-            }
-        }
-        dir = GIT_gitwrite.dirname(dir);
-    }
-}
-
 int branch_delete(GIT_gitcommon.Ctx ctx, GIT_gitstore.Store store, GIT_gitwrite.HeadInfo head, List<str> names, bool is_force, bool is_remote, bool is_quiet) {
     if (names.size() == 0) {
         return GIT_gitcommon.fatal("branch name required");
@@ -1555,7 +1538,7 @@ int branch_delete(GIT_gitcommon.Ctx ctx, GIT_gitstore.Store store, GIT_gitwrite.
                 continue;
             }
         }
-        remove_ref_dirs(ctx.gitdir, full);
+        GIT_branches.remove_ref_dirs(ctx.gitdir, full);
         match (GIT_reflog.delete_log(ctx.gitdir, full)) {
             case Ok(_): {
             }
@@ -1563,7 +1546,7 @@ int branch_delete(GIT_gitcommon.Ctx ctx, GIT_gitstore.Store store, GIT_gitwrite.
             }
         }
         if (!is_remote) {
-            drop_branch_config(ctx.gitdir, name);
+            GIT_branches.drop_branch_config(ctx.gitdir, name);
         }
         if (!is_quiet) {
             str shown = store.unique_abbrev(id, GIT_gitcommon.default_abbrev(ctx));
@@ -1575,35 +1558,6 @@ int branch_delete(GIT_gitcommon.Ctx ctx, GIT_gitstore.Store store, GIT_gitwrite.
         }
     }
     return rc;
-}
-
-void drop_branch_config(str gitdir, str name) {
-    GIT_config.Config config = GIT_config.effective(gitdir);
-    for (str key in config.keys_of("branch", name)) {
-        match (GIT_config.unset(gitdir, "branch", name, key)) {
-            case Ok(_): {
-            }
-            case Err(_): {
-            }
-        }
-    }
-}
-
-void copy_branch_config(str gitdir, str from, str to, bool is_move) {
-    GIT_config.Config config = GIT_config.effective(gitdir);
-    for (str key in config.keys_of("branch", from)) {
-        for (str value in config.get_all("branch", from, key)) {
-            match (GIT_config.add(gitdir, "branch", to, key, value)) {
-                case Ok(_): {
-                }
-                case Err(_): {
-                }
-            }
-        }
-    }
-    if (is_move) {
-        drop_branch_config(gitdir, from);
-    }
 }
 
 int branch_move(GIT_gitcommon.Ctx ctx, GIT_gitwrite.HeadInfo head, List<str> words, bool is_copy, bool is_force) {
@@ -1667,82 +1621,13 @@ int branch_move(GIT_gitcommon.Ctx ctx, GIT_gitwrite.HeadInfo head, List<str> wor
             return GIT_gitcommon.fatal("no branch named '" + old_name + "'");
         }
     }
-    // the log travels with the branch
-    str old_log = "";
-    match (io.read(GIT_reflog.log_path(ctx.gitdir, old_full))) {
-        case Ok(str body): {
-            old_log = body;
-        }
-        case Err(_): {
-        }
-    }
-    str message = "Branch: " + verb + "d " + old_full + " to " + new_full;
-    if (is_copy) {
-        message = "Branch: copied " + old_full + " to " + new_full;
-    } else {
-        message = "Branch: renamed " + old_full + " to " + new_full;
-    }
-    if (!is_copy) {
-        // HEAD's own log records the old branch going away
-        if (is_current) {
-            GIT_gitwrite.log_only(ctx.gitdir, "HEAD", id, GIT_gitwrite.zero_id(ctx.gitdir), message);
-        }
-        match (GIT_branches.delete_ref(ctx.gitdir, old_full)) {
-            case Ok(_): {
-            }
-            case Err(_): {
-            }
-        }
-        remove_ref_dirs(ctx.gitdir, old_full);
-        match (GIT_reflog.delete_log(ctx.gitdir, old_full)) {
-            case Ok(_): {
-            }
-            case Err(_): {
-            }
-        }
-    }
-    // the new ref, its log (old lines, then this one)
-    match (GIT_refs.update(ctx.gitdir, new_full, id, Option<str>.None)) {
+    match (GIT_branches.relocate(ctx.gitdir, old_name, new_name, id, is_current, is_copy)) {
         case Ok(_): {
         }
-        case Err(GIT_refs.Error error): {
-            return GIT_gitcommon.fatal("could not write the branch: " + error.to_str());
+        case Err(GIT_branches.Error error): {
+            return GIT_gitcommon.fatal("could not " + verb + " the branch: " + error.to_str());
         }
     }
-    // update() logged "update"; replace the log by the carried one + the move
-    str new_log_path = GIT_reflog.log_path(ctx.gitdir, new_full);
-    match (GIT_reflog.delete_log(ctx.gitdir, new_full)) {
-        case Ok(_): {
-        }
-        case Err(_): {
-        }
-    }
-    if (old_log != "" || GIT_reflog.should_log(ctx.gitdir, new_full)) {
-        match (GIT_repository.ensure_dir(GIT_gitwrite.dirname(new_log_path))) {
-            case Ok(_): {
-            }
-            case Err(_): {
-            }
-        }
-        match (io.write(new_log_path, old_log)) {
-            case Ok(_): {
-            }
-            case Err(_): {
-            }
-        }
-        GIT_gitwrite.log_only(ctx.gitdir, new_full, id, id, message);
-    }
-    if (is_current && !is_copy) {
-        match (GIT_refs.update_symbolic(ctx.gitdir, "HEAD", new_full)) {
-            case Ok(_): {
-            }
-            case Err(GIT_refs.Error error): {
-                return GIT_gitcommon.fatal("unable to update HEAD: " + error.to_str());
-            }
-        }
-        GIT_gitwrite.log_only(ctx.gitdir, "HEAD", GIT_gitwrite.zero_id(ctx.gitdir), id, message);
-    }
-    copy_branch_config(ctx.gitdir, old_name, new_name, !is_copy);
     return 0;
 }
 
@@ -1913,7 +1798,7 @@ pub int run_tag(str start, List<str> overrides, List<str> argv) {
                     continue;
                 }
             }
-            remove_ref_dirs(ctx.gitdir, full);
+            GIT_branches.remove_ref_dirs(ctx.gitdir, full);
             GIT_gitwrite.say("Deleted tag '" + name + "' (was " + store.unique_abbrev(id, GIT_gitcommon.default_abbrev(ctx)) + ")");
         }
         return rc;

@@ -8,8 +8,10 @@
 // Prints one `<case> ok` or `<case> FAIL ...` line per check, like
 // `t_uikeys.m31`.
 
+import core.GIT_branches;
 import ui.GIT_ui_core;
 import ui.GIT_ui_keymap;
+import ui.GIT_ui_model;
 import ui.GIT_ui_modes;
 import tui.core.TUI_text;
 import tui.widgets.TUI_outline;
@@ -365,6 +367,86 @@ for (str line in history_help) {
 }
 counter.check("help: History's help does not list Status's or Commit's keys", is_scoped && history_help[0] == "History mode", history_help[0]);
 counter.check("help: a diff or a flow says so in the heading", GIT_ui_keymap.help_lines("status", "diff", "")[0] == "Status mode, diff view" && GIT_ui_keymap.help_lines("history", "doc", "rebase")[0] == "History mode (rebase under way)", GIT_ui_keymap.help_lines("status", "diff", "")[0]);
+// --- the ref actions: delete, rename, reset, check out, sign-off ----------------------------
+
+// Where each new action lives, with which key, and that it waits for a quiet repository.
+List<List<str>> actions = [[GIT_ui_core.CMD_BRANCH_DELETE, "branches", "D"], [GIT_ui_core.CMD_BRANCH_FORCE_DELETE, "branches", "X"], [GIT_ui_core.CMD_BRANCH_RENAME, "branches", "e"], [GIT_ui_core.CMD_RESET, "history", "G"], [GIT_ui_core.CMD_DETACH, "history", "o"]];
+for (List<str> action in actions) {
+    Option<GIT_ui_keymap.Entry> found = GIT_ui_keymap.find(action[1], "doc", GIT_ui_core.SCOPE_OUTLINE, action[0], "");
+    bool is_here = false;
+    bool is_idle_only = false;
+    bool is_key = false;
+    match (found) {
+        case Some(GIT_ui_keymap.Entry entry): {
+            is_here = entry.home() == action[1];
+            is_idle_only = entry.when == "idle";
+            is_key = entry.shown_keys() == action[2];
+        }
+        case None: {
+        }
+    }
+    counter.check("actions: " + action[0] + " is " + action[2] + " in " + action[1] + ", idle only", is_here && is_key && is_idle_only, action[0]);
+    bool is_flow_refused = !GIT_ui_keymap.find("status", "doc", GIT_ui_core.SCOPE_OUTLINE, action[0], "").is_some();
+    counter.check("actions: " + action[0] + " is not offered by Status (it says where it went)", is_flow_refused && home_of(GIT_ui_keymap.moved_to("status", "doc", GIT_ui_core.SCOPE_OUTLINE, action[0])) == action[1], action[0]);
+}
+bool is_palette_listing = false;
+bool is_reset_listed = false;
+for (GIT_ui_keymap.PaletteItem item in palette) {
+    if (item.text == "Branches: force-delete the branch (asks first)   [X]") {
+        is_palette_listing = true;
+    }
+    if (item.text == "History: reset the branch to the commit (soft, mixed, hard)   [G]") {
+        is_reset_listed = true;
+    }
+}
+counter.check("actions: the palette lists force-delete and reset with their keys", is_palette_listing && is_reset_listed, "palette");
+bool is_menu_keyed = false;
+List<str> menu_cmds = [];
+for (GIT_ui_core.Binding binding in GIT_ui_core.bindings_in(GIT_ui_core.SCOPE_RESET)) {
+    menu_cmds.push(binding.keys.join("/") + "=" + binding.cmd);
+}
+is_menu_keyed = menu_cmds.join(",") == "s=" + GIT_ui_core.CMD_RESET_SOFT + ",m=" + GIT_ui_core.CMD_RESET_MIXED + ",h=" + GIT_ui_core.CMD_RESET_HARD + ",escape=" + GIT_ui_core.CMD_CLOSE;
+counter.check("actions: the reset menu is s soft, m mixed, h hard", is_menu_keyed, "menu");
+bool is_help_scoped = GIT_ui_core.all_scopes().contains(GIT_ui_core.SCOPE_RESET) && GIT_ui_core.scope_title(GIT_ui_core.SCOPE_RESET) != GIT_ui_core.SCOPE_RESET;
+counter.check("actions: the reset menu is in the help's list of menus", is_help_scoped, "help");
+// The Commit mode: sign-off is in the hint row, and the row is not over the limit.
+List<GIT_ui_keymap.Entry> commit_hints = GIT_ui_keymap.hint_entries("commit", "doc", "");
+bool is_signoff_hinted = false;
+for (GIT_ui_keymap.Entry entry in commit_hints) {
+    if (entry.cmd == GIT_ui_core.CMD_SIGNOFF && entry.shown_keys() == "s") {
+        is_signoff_hinted = true;
+    }
+}
+counter.check("sign-off: s is in the Commit mode's hint row (" + commit_hints.size().to_str() + " hints)", is_signoff_hinted && commit_hints.size() <= GIT_ui_keymap.HINT_MAX, "hints");
+counter.check("sign-off: Status's s is still stage", home_of(GIT_ui_keymap.find("status", "doc", GIT_ui_core.SCOPE_OUTLINE, GIT_ui_core.CMD_STAGE, "")) == "status", "s");
+// The trailer: after a blank line, or into an existing trailer block; never twice.
+str sob = GIT_ui_model.signoff_line("Ann Dev", "ann@example.com");
+counter.check("sign-off: the line is Signed-off-by: Name <email>", sob == "Signed-off-by: Ann Dev <ann@example.com>", sob);
+counter.check("sign-off: a subject alone gets a blank line, then the trailer", GIT_ui_model.with_signoff("fix it", sob) == "fix it\n\n" + sob, GIT_ui_model.with_signoff("fix it", sob));
+counter.check("sign-off: a body paragraph that is not all trailers gets a blank line", GIT_ui_model.with_signoff("fix it\n\nit was broken\nbecause: of this", sob) == "fix it\n\nit was broken\nbecause: of this\n\n" + sob, GIT_ui_model.with_signoff("fix it\n\nit was broken\nbecause: of this", sob));
+counter.check("sign-off: it joins the message's own trailer block", GIT_ui_model.with_signoff("fix it\n\nReviewed-by: Bo <bo@example.com>", sob) == "fix it\n\nReviewed-by: Bo <bo@example.com>\n" + sob, GIT_ui_model.with_signoff("fix it\n\nReviewed-by: Bo <bo@example.com>", sob));
+counter.check("sign-off: the same line already last is not added again", GIT_ui_model.with_signoff("fix it\n\n" + sob, sob) == "fix it\n\n" + sob, "dup last");
+counter.check("sign-off: the same line earlier in the block is not added again", GIT_ui_model.with_signoff("fix it\n\n" + sob + "\nReviewed-by: Bo <bo@example.com>", sob) == "fix it\n\n" + sob + "\nReviewed-by: Bo <bo@example.com>", "dup block");
+counter.check("sign-off: someone else's sign-off does not stop ours", GIT_ui_model.with_signoff("fix it\n\nSigned-off-by: Bo <bo@example.com>", sob) == "fix it\n\nSigned-off-by: Bo <bo@example.com>\n" + sob, "other");
+counter.check("sign-off: a subject that looks like a trailer is still the subject", GIT_ui_model.with_signoff("fix: it", sob) == "fix: it\n\n" + sob, GIT_ui_model.with_signoff("fix: it", sob));
+// Branch names, as `git check-ref-format --branch` has them (pty_modes.py compares these with the real git).
+List<str> good_names = ["main", "feature/x", "a-b_c", "v1.2", "caf\u{E9}", "x@y", "@", "a/b/c", "\u{65E5}\u{672C}"];
+List<str> bad_names = ["", "HEAD", "-x", "a b", "a..b", "a//b", "/a", "a/", "a.", ".a", "a/.b", "a.lock", "a/b.lock/c", "a~1", "a^", "a:b", "a?", "a*", "a[", "a\\b", "a@{b"];
+bool is_names_right = true;
+str wrong_name = "";
+for (str name in good_names) {
+    if (!GIT_branches.is_valid_branch_name(name)) {
+        is_names_right = false;
+        wrong_name = "should be valid: " + name;
+    }
+}
+for (str name in bad_names) {
+    if (GIT_branches.is_valid_branch_name(name)) {
+        is_names_right = false;
+        wrong_name = "should be refused: " + name;
+    }
+}
+counter.check("branch names: " + good_names.size().to_str() + " valid and " + bad_names.size().to_str() + " invalid names are told apart as git does", is_names_right, wrong_name);
 // For the record (docs/MGIT-MODES.md quotes these): the action keys each mode
 // answers (not movement, folding, search or the everywhere keys, which every
 // outline mode shares) and what the hint row shows, against what the old

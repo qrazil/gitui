@@ -78,6 +78,7 @@
 // edit it externally and press `f`.
 
 import diff.GIT_sequencer;
+import ui.GIT_ui_actions;
 import ui.GIT_ui_blame;
 import ui.GIT_ui_branch;
 import ui.GIT_ui_commit;
@@ -135,6 +136,7 @@ pub static State State.open(str gitdir, str worktree) {
     state.set_editor_paths();
     state.set_syntax(GIT_ui_highlight.is_enabled(gitdir), GIT_ui_highlight.is_dark_terminal());
     state.load_folds();
+    state.load_signoff();
     return state;
 }
 
@@ -682,6 +684,10 @@ TUI_app.Action State.run_in_mode(str scope, str cmd, str name) {
 
 /// The Commit mode's keys: the old commit overlay's `e`, `f`, `A` and `a`.
 TUI_app.Action State.run_commit_command(str cmd) {
+    if (cmd == GIT_ui_core.CMD_SIGNOFF) {
+        toggle_signoff();
+        return TUI_app.Action.Redraw;
+    }
     if (cmd != GIT_ui_core.CMD_ABORT && is_blocked_by_sequence("commit")) {
         return TUI_app.Action.Redraw;
     }
@@ -964,6 +970,21 @@ TUI_app.Action State.run_outline_command(str cmd, str name) {
     }
     if (cmd == GIT_ui_core.CMD_TAGS) {
         GIT_ui_tags.open(core());
+    }
+    if (cmd == GIT_ui_core.CMD_BRANCH_DELETE) {
+        GIT_ui_actions.delete_branch(core(), false);
+    }
+    if (cmd == GIT_ui_core.CMD_BRANCH_FORCE_DELETE) {
+        GIT_ui_actions.delete_branch(core(), true);
+    }
+    if (cmd == GIT_ui_core.CMD_BRANCH_RENAME) {
+        GIT_ui_actions.rename_branch(core());
+    }
+    if (cmd == GIT_ui_core.CMD_RESET) {
+        GIT_ui_actions.open_reset(core());
+    }
+    if (cmd == GIT_ui_core.CMD_DETACH) {
+        GIT_ui_actions.detach(core());
     }
     return TUI_app.Action.Redraw;
 }

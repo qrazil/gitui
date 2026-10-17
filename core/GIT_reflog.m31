@@ -497,7 +497,7 @@ pub Result<bool, Error> delete(str gitdir, str ref, int count, bool should_rewri
 }
 
 /// Remove the whole log of `ref` (a deleted branch's), and any directories
-/// that leaves empty under `logs/`. No log is not an error.
+/// that leaves empty under `logs/` (but `logs/refs/heads` and its like stay). No log is not an error.
 pub Result<bool, Error> delete_log(str gitdir, str ref) {
     if (!is_safe_ref(ref)) {
         return Result<bool, Error>.Err(Error.BadValue);
@@ -515,6 +515,13 @@ pub Result<bool, Error> delete_log(str gitdir, str ref) {
     }
     str root = parent_of(log_path(gitdir, "refs/heads/x"));
     root = parent_of(parent_of(root));
+    // git keeps the first two components (`logs/refs/heads`) whatever is left in it.
+    List<str> parts = ref.split("/");
+    if (parts.size() > 2 && parts[0] == "refs") {
+        root = fs.join(root, parts[0] + "/" + parts[1]);
+    } else if (parts[0] == "refs") {
+        root = fs.join(root, "refs");
+    }
     str directory = parent_of(path);
     while (directory.size() > root.size() && directory.starts_with(root)) {
         match (fs.rmdir(directory)) {

@@ -13,6 +13,7 @@ import ui.GIT_ui_core;
 import ui.GIT_ui_keymap;
 import ui.GIT_ui_model;
 import ui.GIT_ui_modes;
+import core.GIT_object;
 import core.GIT_status;
 import tui.core.TUI_buffer;
 import tui.core.TUI_geometry;
@@ -86,6 +87,10 @@ pub void draw_commit_panel(GIT_ui_core.Core core, TUI_buffer.Buffer buffer, TUI_
     if (y < bottom) {
         put(buffer, area, y, " Message  " + draft_line(core), TUI_style.Style());
     }
+    y = y + 1;
+    if (y < bottom) {
+        put(buffer, area, y, " Sign-off  " + signoff_line(core), TUI_style.Style());
+    }
     y = y + 2;
     int staged = core.last_status.staged.size();
     if (y < bottom) {
@@ -116,6 +121,16 @@ pub void draw_commit_panel(GIT_ui_core.Core core, TUI_buffer.Buffer buffer, TUI_
 
 void put(TUI_buffer.Buffer buffer, TUI_geometry.Rect area, int y, str text, TUI_style.Style style) {
     buffer.set_str(area.x, y, TUI_text.truncate(text, area.width), style, max: area.width);
+}
+
+/// What the sign-off toggle says: on, with the exact line that will be added,
+/// or off, with the key.
+str signoff_line(GIT_ui_core.Core core) {
+    if (!core.is_signoff) {
+        return "off (s adds a Signed-off-by trailer)";
+    }
+    GIT_object.Ident who = GIT_ui_model.committer_ident(core.gitdir);
+    return "ON: " + GIT_ui_model.signoff_line(who.name.utf8().or(""), who.email.utf8().or("")) + " (s turns it off)";
 }
 
 /// The draft's first non-comment line, or what to press to start one.

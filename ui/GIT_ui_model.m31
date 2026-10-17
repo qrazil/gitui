@@ -562,6 +562,63 @@ pub str strip_comment_lines(str raw) {
     return keep.join("\n").trim();
 }
 
+/// The line `git commit -s` adds: `Signed-off-by: Name <email>`.
+pub str signoff_line(str name, str email) {
+    return "Signed-off-by: " + name + " <" + email + ">";
+}
+
+// "Key: value", a continuation line, or a cherry-pick's own note: a line that
+// can belong to a trailer block (git's `find_trailer_start`, without the
+// "25% of the lines" leniency).
+bool is_trailer_line(str line) {
+    if (line.starts_with(" ") || line.starts_with("\t") || line.starts_with("(cherry picked from commit ")) {
+        return true;
+    }
+    int at = 0;
+    while (at < line.size()) {
+        int c = line.byte_at(at);
+        bool is_token = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '-';
+        if (!is_token) {
+            break;
+        }
+        at = at + 1;
+    }
+    return at > 0 && at < line.size() && line.byte_at(at) == ':';
+}
+
+/// `message` (already stripped: no comment lines, no trailing newline) with
+/// the sign-off `sob` added the way `git commit -s` adds it: after the
+/// message's last trailer block when it ends in one (the subject alone is
+/// never a trailer block), else after a blank line; and not again when the
+/// same line is already in that block or is the last line.
+pub str with_signoff(str message, str sob) {
+    List<str> lines = message.split("\n");
+    if (lines.size() > 0 && lines[lines.size() - 1] == sob) {
+        return message;
+    }
+    int start = lines.size();
+    while (start > 0 && lines[start - 1].trim() != "") {
+        start = start - 1;
+    }
+    bool has_footer = start > 0 && start < lines.size();
+    if (has_footer) {
+        for (int index in start .. lines.size()) {
+            if (!is_trailer_line(lines[index])) {
+                has_footer = false;
+            }
+        }
+    }
+    if (has_footer) {
+        for (int index in start .. lines.size()) {
+            if (lines[index] == sob) {
+                return message;
+            }
+        }
+        return message + "\n" + sob;
+    }
+    return message + "\n\n" + sob;
+}
+
 /// The template written at `COMMIT_EDITMSG` for a person (or a script driving
 /// one) to edit -- git's own comment lines, minus the fuller status summary
 /// real git includes, which needs nothing this client cannot already show in

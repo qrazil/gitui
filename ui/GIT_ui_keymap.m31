@@ -214,7 +214,8 @@ pub List<Entry> entries() {
     table.push(row("commit", VIEW_DOC, scope_commit, GIT_ui_core.CMD_EDIT, "write message", "Commit", 1, when: "noseq"));
     table.push(row("commit", VIEW_DOC, scope_commit, GIT_ui_core.CMD_FINISH, "commit staged", "Commit", 2, when: "noseq"));
     table.push(row("commit", VIEW_DOC, scope_commit, GIT_ui_core.CMD_AMEND, "amend HEAD", "Commit", 3, when: "noseq"));
-    table.push(row("commit", VIEW_DOC, scope_commit, GIT_ui_core.CMD_ABORT, "discard draft", "Commit", 4));
+    table.push(row("commit", VIEW_DOC, scope_commit, GIT_ui_core.CMD_SIGNOFF, "sign-off", "Commit", 4));
+    table.push(row("commit", VIEW_DOC, scope_commit, GIT_ui_core.CMD_ABORT, "discard draft", "Commit", 5));
     // --- History -----------------------------------------------------------------
     table.push(row("history", VIEW_DOC, scope_outline, GIT_ui_core.CMD_TOGGLE, "open", "History", 1));
     table.push(row("history", VIEW_DOC, scope_outline, GIT_ui_core.CMD_PICK, "cherry-pick", "History", 2, when: "idle"));
@@ -224,6 +225,10 @@ pub List<Entry> entries() {
     table.push(row("branches", VIEW_DOC, scope_outline, GIT_ui_core.CMD_REVERT, "revert the branch tip", "Branch", 0, when: "idle"));
     table.push(row("history,branches", VIEW_DOC, scope_outline, GIT_ui_core.CMD_REBASE, "rebase", "History", 4, when: "idle"));
     table.push(row("history", VIEW_DOC, scope_outline, GIT_ui_core.CMD_UNDO, "undo HEAD move", "History", 5, when: "idle"));
+    // Moving HEAD to the commit under the cursor. Not in the hint row (it is
+    // already full): `?` and the palette list them.
+    table.push(row("history", VIEW_DOC, scope_outline, GIT_ui_core.CMD_RESET, "reset the branch to the commit (soft, mixed, hard)", "History", 0, when: "idle"));
+    table.push(row("history", VIEW_DOC, scope_outline, GIT_ui_core.CMD_DETACH, "check out the commit (detached HEAD)", "History", 0, when: "idle"));
     // --- Branches ----------------------------------------------------------------
     table.push(row("branches", VIEW_DOC, scope_outline, GIT_ui_core.CMD_TOGGLE, "switch to the branch", "Branch", 1, when: "idle"));
     table.push(row("branches", VIEW_DOC, scope_outline, GIT_ui_core.CMD_BRANCH, "branch menu", "Branch", 2, when: "idle"));
@@ -231,6 +236,9 @@ pub List<Entry> entries() {
     table.push(row("branches", VIEW_DOC, scope_outline, GIT_ui_core.CMD_PULL, "pull", "Sync", 6, when: "idle"));
     table.push(row("branches", VIEW_DOC, scope_outline, GIT_ui_core.CMD_PUSH, "push", "Sync", 7));
     table.push(row("branches", VIEW_DOC, scope_outline, GIT_ui_core.CMD_TAGS, "tags", "Branch", 0));
+    table.push(row("branches", VIEW_DOC, scope_outline, GIT_ui_core.CMD_BRANCH_DELETE, "delete the branch (refused when unmerged)", "Branch", 0, when: "idle"));
+    table.push(row("branches", VIEW_DOC, scope_outline, GIT_ui_core.CMD_BRANCH_FORCE_DELETE, "force-delete the branch (asks first)", "Branch", 0, when: "idle"));
+    table.push(row("branches", VIEW_DOC, scope_outline, GIT_ui_core.CMD_BRANCH_RENAME, "rename the branch", "Branch", 0, when: "idle"));
     // --- Stash -------------------------------------------------------------------
     table.push(row("stash", VIEW_DOC, scope_outline, GIT_ui_core.CMD_STASH, "stash menu", "Stash", 1));
     table.push(row("stash", VIEW_DOC, scope_outline, GIT_ui_core.CMD_TOGGLE, "list with diff", "Stash", 2));

@@ -3,6 +3,48 @@
 Each release's changes in one place (the details are in `README.md` and
 `docs/GIT-COMPAT.md`).
 
+## 0.26.0
+
+- **mgit: delete and rename a branch** (Branches mode, `docs/MGIT-MODES.md`). `D`
+  deletes the branch under the cursor when it is merged (`git branch -d`: merged
+  into its upstream when it has one, else into HEAD) and otherwise refuses, saying
+  into what it is not merged; `X` force-deletes it (`-D`) after a question that says
+  whether it is merged and how to get it back; `e` renames it (`-m`) from a prompt
+  that starts with the current name, checks the name by `git check-ref-format`'s
+  rules, and replaces an existing branch (`-M`) only after a question. The branch
+  you are on, or one checked out in another work tree, is never deleted or
+  replaced. Deleting removes the ref (loose and packed), the empty directories, the
+  reflog and `branch.<name>.*`; renaming carries the reflog and the configuration
+  and moves HEAD with the current branch.
+- **mgit: reset and check out a commit** (History mode). `G` resets the current
+  branch (or the detached HEAD) to the commit under the cursor: a menu of soft,
+  mixed and hard; a hard reset asks first, naming the tracked files whose changes it
+  discards and the commits the branch leaves. `o` checks the commit out with a
+  detached HEAD (`git checkout --detach`), refusing, and changing nothing, where git
+  refuses (local changes to a file the checkout would change, an untracked file in
+  the way); the status line shows `detached @ <id>`. All four wait while a merge,
+  cherry-pick, revert or rebase is under way and say why.
+- **mgit: sign-off** (Commit mode). `s` switches a `Signed-off-by: Name <email>`
+  trailer on or off for the commits made from the Commit mode: off by default,
+  shown in the panel (with the exact line) and in the hint row, from the committer
+  identity (`user.name` and `user.email`), placed as `git commit -s` places it and
+  never added twice. `git config mgit.signoff true` makes it start on.
+- Library: `GIT_branches.delete_branch`, `rename_branch`, `merge_state`,
+  `is_checked_out` and `is_valid_branch_name`, and `GIT_checkout.reset` (soft,
+  mixed, hard; `ORIG_HEAD` and git's `reset: moving to` reflog line), so a client
+  does not have to run the command line to get git's behaviour. `1git -branch
+  --delete` and `--rename` run on them. Deleting the last branch of a directory, or
+  the last branch log, no longer removes `refs/heads` or `logs/refs/heads` (git keeps
+  them).
+- Tests: `tests/pty_modes.py` runs each of the actions beside an identical twin
+  repository that the real `git` changes with the matching command, and compares
+  refs, reflogs, index, files and configuration; where git refuses, mgit must too.
+  `tests/t_modes.m31` checks the table (keys, hint row, palette), the trailer rules
+  and the branch-name rules.
+- The git-style argument shim of 0.24.0 is **not** removed in this release: it is
+  planned for 0.27.0.
+- Version 0.26.0.
+
 ## 0.25.0
 
 0.24.0 (the Oro command line) was never tagged: its macOS CLI test depended on the repository it ran in. Its content ships here.
@@ -53,7 +95,7 @@ Each release's changes in one place (the details are in `README.md` and
 - **Transition: git-style arguments still work in 0.24.0**, rewritten into the new
   grammar with a warning on stderr (`1git: git-style arguments are deprecated; use
   '1git -log --max 5' (see 1git --help)`); a line with an option 1git dropped runs as
-  git would. The shim is deleted in 0.26.0.
+  git would. The shim is deleted in 0.27.0.
 - mgit: `mgit [PATH] [--mouse on|off] [--help|--version|--completions SHELL]`;
   `--mouse` overrides `M31GIT_MOUSE` and `mgit.mouse`. Exit status 1 when there is no
   repository or no terminal, 2 for a bad command line.

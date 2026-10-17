@@ -61,6 +61,11 @@ pub enum Error {
     EmptyMessage;
     /// A file could not be written.
     Io;
+    /// A branch is checked out (in this work tree or another), so it cannot
+    /// be deleted or replaced.
+    Current;
+    /// A branch holds commits that are on neither its upstream nor HEAD.
+    NotMerged;
 }
 
 pub str Error.to_str() {
@@ -88,6 +93,12 @@ pub str Error.to_str() {
         }
         case Io: {
             return "a file could not be written";
+        }
+        case Current: {
+            return "the branch is checked out";
+        }
+        case NotMerged: {
+            return "the branch is not fully merged";
         }
     }
 }
@@ -587,4 +598,433 @@ pub Result<bool, Error> delete_ref(str gitdir, str full) {
         }
     }
     return Result<bool, Error>.Ok(true);
+}
+
+// --- local branches: delete and rename -----------------------------------------
+//
+// `git branch -d` / `-D` and `git branch -m`, as the library's own operations
+// (the command line's `-branch --delete` and `--rename` use them too), so a
+// client does not have to print to a terminal to get git's behaviour:
+//
+//   * a branch checked out in this work tree, the main one or a linked one,
+//     is never deleted and never replaced (`Error.Current`);
+//   * `delete_branch` without force refuses unless the tip is reachable from
+//     the branch's upstream (when it has one that still exists) or else from
+//     HEAD, as git does (`Error.NotMerged`); `merge_state` says against what;
+//   * deleting removes the ref (loose and packed), the directories it leaves
+//     empty, the branch's reflog and its `branch.<name>.*` configuration;
+//   * `rename_branch` moves the ref, its reflog (with git's `Branch: renamed
+//     refs/heads/a to refs/heads/b` line, also on HEAD's log when the branch
+//     is the current one), the `branch.<name>.*` configuration and HEAD's
+//     symbolic target; a name git refuses is `Error.BadName`, an existing
+//     one `Error.Exists` unless `is_force`.
+
+/// Would `git check-ref-format --branch` accept `name`? No component starts
+/// with `.` or ends with `.lock`; no `..`, `@{`, `//`, control character,
+/// space, `~ ^ : ? * [ \`; not empty, `@`, `HEAD`, or starting with `-` or `/`,
+/// or ending with `/` or `.`.
+pub bool is_valid_branch_name(str name) {
+    if (name == "" || name == "HEAD" || name.starts_with("-") || name.starts_with("/") || name.ends_with("/") || name.ends_with(".")) {
+        return false;
+    }
+    if (name.contains("..") || name.contains("//") || name.contains("@{")) {
+        return false;
+    }
+    for (int i in 0 .. name.size()) {
+        int byte_value = name.byte_at(i);
+        if (byte_value <= 32 || byte_value == 127 || byte_value == '~' || byte_value == '^' || byte_value == ':' || byte_value == '?' || byte_value == '*' || byte_value == '[' || byte_value == '\\') {
+            return false;
+        }
+    }
+    for (str part in name.split("/")) {
+        if (part.starts_with(".") || part.ends_with(".lock")) {
+            return false;
+        }
+    }
+    return true;
+}
+
+/// Whether the full ref `full` (`refs/heads/main`) is the target of the HEAD
+/// of this work tree, the main one or any linked one.
+pub bool is_checked_out(str gitdir, str full) {
+    str common = GIT_repository.common(gitdir);
+    List<str> dirs = [gitdir, common];
+    str base = fs.join(common, "worktrees");
+    match (fs.listdir(base)) {
+        case Ok(List<str> names): {
+            for (str name in names) {
+                dirs.push(fs.join(base, name));
+            }
+        }
+        case Err(_): {
+        }
+    }
+    for (str dir in dirs) {
+        match (io.read(fs.join(dir, "HEAD"))) {
+            case Ok(str raw): {
+                if (raw.trim() == "ref: " + full) {
+                    return true;
+                }
+            }
+            case Err(_): {
+            }
+        }
+    }
+    return false;
+}
+
+/// What a branch is checked against before a safe delete: `into` names it
+/// ("origin/main", or "HEAD (main)"), `is_merged` whether the branch's tip is
+/// reachable from it.
+pub type MergeState {
+    pub bool is_merged;
+    pub str into;
+}
+
+/// `git branch -d`'s test: merged into the branch's upstream when it has one
+/// that exists, else into HEAD. A HEAD with no commit has nothing to be
+/// merged into.
+pub Result<MergeState, Error> merge_state(str gitdir, str name) {
+    str id = "";
+    match (GIT_refs.resolve(gitdir, "refs/heads/" + name)) {
+        case Ok(str found): {
+            id = found;
+        }
+        case Err(_): {
+            return Result<MergeState, Error>.Err(Error.NotFound);
+        }
+    }
+    str into = "";
+    str label = "HEAD";
+    match (GIT_refs.head(gitdir)) {
+        case Ok(GIT_refs.Head head): {
+            match (head) {
+                case Born(str ref, str head_id): {
+                    into = head_id;
+                    label = "HEAD (" + short_name(ref) + ")";
+                }
+                case Detached(str head_id): {
+                    into = head_id;
+                    label = "HEAD (detached)";
+                }
+                case Unborn(_): {
+                    label = "HEAD (no commits yet)";
+                }
+            }
+        }
+        case Err(_): {
+        }
+    }
+    match (tracking(gitdir, name)) {
+        case Some(Tracking found): {
+            if (!found.is_gone) {
+                match (GIT_refs.resolve(gitdir, found.tracking_ref)) {
+                    case Ok(str up_id): {
+                        into = up_id;
+                        label = found.upstream;
+                    }
+                    case Err(_): {
+                    }
+                }
+            }
+        }
+        case None: {
+        }
+    }
+    if (into == "") {
+        return Result<MergeState, Error>.Ok(MergeState(false, label));
+    }
+    if (id == into) {
+        return Result<MergeState, Error>.Ok(MergeState(true, label));
+    }
+    GIT_graph.Graph graph = GIT_graph.open(gitdir);
+    match (graph.is_ancestor(id, into)) {
+        case Ok(bool answer): {
+            return Result<MergeState, Error>.Ok(MergeState(answer, label));
+        }
+        case Err(_): {
+            return Result<MergeState, Error>.Ok(MergeState(false, label));
+        }
+    }
+}
+
+str short_name(str ref) {
+    if (ref.starts_with("refs/heads/")) {
+        return ref.substr(11, ref.size());
+    }
+    return ref;
+}
+
+/// `git branch -d NAME` (`-D` with `is_force`). The tip it had is answered, to
+/// say "was 1a2b3c4" and for undoing it.
+pub Result<str, Error> delete_branch(str gitdir, str name, bool is_force) {
+    str full = "refs/heads/" + name;
+    if (!GIT_refs.has_ref(gitdir, full)) {
+        return Result<str, Error>.Err(Error.NotFound);
+    }
+    if (is_checked_out(gitdir, full)) {
+        return Result<str, Error>.Err(Error.Current);
+    }
+    str id = "";
+    match (GIT_refs.resolve(gitdir, full)) {
+        case Ok(str found): {
+            id = found;
+        }
+        case Err(GIT_refs.Error error): {
+            return Result<str, Error>.Err(Error.Refs(error));
+        }
+    }
+    if (!is_force) {
+        MergeState state = merge_state(gitdir, name)?;
+        if (!state.is_merged) {
+            return Result<str, Error>.Err(Error.NotMerged);
+        }
+    }
+    delete_ref(gitdir, full)?;
+    remove_ref_dirs(gitdir, full);
+    match (GIT_reflog.delete_log(gitdir, full)) {
+        case Ok(_): {
+        }
+        case Err(_): {
+        }
+    }
+    drop_branch_config(gitdir, name);
+    return Result<str, Error>.Ok(id);
+}
+
+/// Is there a branch that cannot coexist with `full` -- one named like a
+/// directory above it (`a` when making `a/b`) or below it (`a/b` when making `a`)?
+bool has_ref_conflict(str gitdir, str full) {
+    List<str> parts = full.split("/");
+    for (int count in 3 .. parts.size()) {
+        if (GIT_refs.has_ref(gitdir, parts.slice(0, count).join("/"))) {
+            return true;
+        }
+    }
+    match (GIT_refs.all(gitdir)) {
+        case Ok(List<GIT_refs.Ref> refs): {
+            for (GIT_refs.Ref entry in refs) {
+                if (entry.name.starts_with(full + "/")) {
+                    return true;
+                }
+            }
+        }
+        case Err(_): {
+        }
+    }
+    return false;
+}
+
+/// `git branch -m OLD NEW` (`-M` with `is_force`). Renaming to the same name
+/// is not an error and changes nothing.
+pub Result<bool, Error> rename_branch(str gitdir, str old_name, str new_name, bool is_force) {
+    str old_full = "refs/heads/" + old_name;
+    str new_full = "refs/heads/" + new_name;
+    bool is_current = false;
+    match (io.read(fs.join(gitdir, "HEAD"))) {
+        case Ok(str raw): {
+            if (raw.trim() == "ref: " + old_full) {
+                is_current = true;
+            }
+        }
+        case Err(_): {
+        }
+    }
+    bool is_old_there = GIT_refs.has_ref(gitdir, old_full);
+    if (!is_old_there && !is_current) {
+        return Result<bool, Error>.Err(Error.NotFound);
+    }
+    if (!is_valid_branch_name(new_name)) {
+        return Result<bool, Error>.Err(Error.BadName);
+    }
+    if (old_name == new_name) {
+        return Result<bool, Error>.Ok(true);
+    }
+    if (GIT_refs.has_ref(gitdir, new_full)) {
+        if (!is_force) {
+            return Result<bool, Error>.Err(Error.Exists);
+        }
+        if (is_checked_out(gitdir, new_full)) {
+            return Result<bool, Error>.Err(Error.Current);
+        }
+    } else if (has_ref_conflict(gitdir, new_full)) {
+        return Result<bool, Error>.Err(Error.Exists);
+    }
+    if (!is_old_there) {
+        // The current branch has no commit yet: only HEAD's target changes.
+        match (GIT_refs.update_symbolic(gitdir, "HEAD", new_full)) {
+            case Ok(_): {
+                return Result<bool, Error>.Ok(true);
+            }
+            case Err(GIT_refs.Error error): {
+                return Result<bool, Error>.Err(Error.Refs(error));
+            }
+        }
+    }
+    str id = "";
+    match (GIT_refs.resolve(gitdir, old_full)) {
+        case Ok(str found): {
+            id = found;
+        }
+        case Err(GIT_refs.Error error): {
+            return Result<bool, Error>.Err(Error.Refs(error));
+        }
+    }
+    return relocate(gitdir, old_name, new_name, id, is_current, false);
+}
+
+/// The reflog line of `ref` alone, when git would keep a log for it.
+void log_only(str gitdir, str ref, str old, str new, str message) {
+    if (!GIT_reflog.should_log(gitdir, ref)) {
+        return;
+    }
+    match (GIT_reflog.append(gitdir, ref, old, new, GIT_reflog.default_ident(gitdir), message)) {
+        case Ok(_): {
+        }
+        case Err(_): {
+        }
+    }
+}
+
+str parent_dir(str path) {
+    int cut = path.size();
+    while (cut > 0 && path.byte_at(cut - 1) != '/') {
+        cut = cut - 1;
+    }
+    if (cut <= 1) {
+        return "";
+    }
+    return path.substr(0, cut - 1);
+}
+
+/// Make `new_name` the branch `old_name` was -- the file work of `branch -m`
+/// (`is_copy` false: the old name goes away) and `branch -c` (it stays): the
+/// ref at `id`, the reflog carried over with one more line, HEAD's target and
+/// log when the branch is the current one, the `branch.<name>.*` section.
+pub Result<bool, Error> relocate(str gitdir, str old_name, str new_name, str id, bool is_current, bool is_copy) {
+    str old_full = "refs/heads/" + old_name;
+    str new_full = "refs/heads/" + new_name;
+    str zero = GIT_reflog.zero(gitdir);
+    str old_log = "";
+    match (io.read(GIT_reflog.log_path(gitdir, old_full))) {
+        case Ok(str body): {
+            old_log = body;
+        }
+        case Err(_): {
+        }
+    }
+    str message = "Branch: renamed " + old_full + " to " + new_full;
+    if (is_copy) {
+        message = "Branch: copied " + old_full + " to " + new_full;
+    }
+    if (!is_copy) {
+        // HEAD's own log records the old branch going away.
+        if (is_current) {
+            log_only(gitdir, "HEAD", id, zero, message);
+        }
+        delete_ref(gitdir, old_full)?;
+        remove_ref_dirs(gitdir, old_full);
+        match (GIT_reflog.delete_log(gitdir, old_full)) {
+            case Ok(_): {
+            }
+            case Err(_): {
+            }
+        }
+    }
+    match (GIT_refs.update(gitdir, new_full, id, Option<str>.None)) {
+        case Ok(_): {
+        }
+        case Err(GIT_refs.Error error): {
+            return Result<bool, Error>.Err(Error.Refs(error));
+        }
+    }
+    // `update` logged "update"; the carried log, then this line, replace it.
+    str new_log_path = GIT_reflog.log_path(gitdir, new_full);
+    match (GIT_reflog.delete_log(gitdir, new_full)) {
+        case Ok(_): {
+        }
+        case Err(_): {
+        }
+    }
+    if (old_log != "" || GIT_reflog.should_log(gitdir, new_full)) {
+        match (GIT_repository.ensure_dir(parent_dir(new_log_path))) {
+            case Ok(_): {
+            }
+            case Err(_): {
+            }
+        }
+        match (io.write(new_log_path, old_log)) {
+            case Ok(_): {
+            }
+            case Err(_): {
+            }
+        }
+        log_only(gitdir, new_full, id, id, message);
+    }
+    if (is_current && !is_copy) {
+        match (GIT_refs.update_symbolic(gitdir, "HEAD", new_full)) {
+            case Ok(_): {
+            }
+            case Err(GIT_refs.Error error): {
+                return Result<bool, Error>.Err(Error.Refs(error));
+            }
+        }
+        log_only(gitdir, "HEAD", zero, id, message);
+    }
+    copy_branch_config(gitdir, old_name, new_name, !is_copy);
+    return Result<bool, Error>.Ok(true);
+}
+
+/// Remove the directories above `full` that are left empty -- up to, never
+/// including, `refs/heads` (or `refs/tags`, `refs/remotes`: the first two
+/// components stay, as git keeps them).
+pub void remove_ref_dirs(str gitdir, str full) {
+    str common = GIT_repository.common(gitdir);
+    List<str> parts = full.split("/");
+    str boundary = fs.join(common, "refs");
+    if (parts.size() > 2) {
+        boundary = fs.join(common, parts[0] + "/" + parts[1]);
+    }
+    str dir = parent_dir(fs.join(common, full));
+    while (dir != "" && dir != boundary && dir.starts_with(boundary + "/")) {
+        match (fs.rmdir(dir)) {
+            case Ok(_): {
+            }
+            case Err(_): {
+                return;
+            }
+        }
+        dir = parent_dir(dir);
+    }
+}
+
+/// Drop every `branch.<name>.*` key.
+pub void drop_branch_config(str gitdir, str name) {
+    GIT_config.Config config = GIT_config.effective(gitdir);
+    for (str key in config.keys_of("branch", name)) {
+        match (GIT_config.unset(gitdir, "branch", name, key)) {
+            case Ok(_): {
+            }
+            case Err(_): {
+            }
+        }
+    }
+}
+
+/// Copy the `branch.<from>.*` keys to `branch.<to>`; with `is_move` drop the old ones.
+pub void copy_branch_config(str gitdir, str from, str to, bool is_move) {
+    GIT_config.Config config = GIT_config.effective(gitdir);
+    for (str key in config.keys_of("branch", from)) {
+        for (str value in config.get_all("branch", from, key)) {
+            match (GIT_config.add(gitdir, "branch", to, key, value)) {
+                case Ok(_): {
+                }
+                case Err(_): {
+                }
+            }
+        }
+    }
+    if (is_move) {
+        drop_branch_config(gitdir, from);
+    }
 }

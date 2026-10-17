@@ -104,6 +104,7 @@ pub const str SCOPE_REBASE_BUSY = "rebase-busy";
 pub const str SCOPE_REBASE_TODO = "rebase-todo";
 pub const str SCOPE_PULL_ASK = "pull-ask";
 pub const str SCOPE_OVERVIEW = "overview";
+pub const str SCOPE_RESET = "reset";
 pub const str CMD_QUIT = "quit";
 /// Esc at the base: leave to the Status mode, or quit from it.
 pub const str CMD_LEAVE = "leave";
@@ -233,6 +234,15 @@ pub const str CMD_PULL_LIBRARY = "pull-library";
 pub const str CMD_PULL_REBASE = "pull-rebase";
 pub const str CMD_PUSH_LIBRARY = "push-library";
 pub const str CMD_REMOTE_BRANCH = "remote-branch";
+pub const str CMD_BRANCH_DELETE = "branch-delete";
+pub const str CMD_BRANCH_FORCE_DELETE = "branch-force-delete";
+pub const str CMD_BRANCH_RENAME = "branch-rename";
+pub const str CMD_RESET = "reset";
+pub const str CMD_RESET_SOFT = "reset-soft";
+pub const str CMD_RESET_MIXED = "reset-mixed";
+pub const str CMD_RESET_HARD = "reset-hard";
+pub const str CMD_DETACH = "detach";
+pub const str CMD_SIGNOFF = "signoff";
 /// What `pick_purpose` says a finished remote-ref picker was for.
 pub const str PICK_REMOTE_REF = "remote-ref";
 /// The command palette's picker.
@@ -312,6 +322,9 @@ pub type Core {
     /// parents and author instead of HEAD-as-parent and a fresh author.
     /// Reset whenever the overlay is opened fresh or aborted.
     pub bool is_amending = false;
+    /// The Commit mode's sign-off toggle (`s`): add a `Signed-off-by:` trailer
+    /// when the commit is made. Starts from `mgit.signoff`, off without it.
+    pub bool is_signoff = false;
     /// Where `n` (new branch) asks for the name: a file `$EDITOR` is launched
     /// on, exactly like `commit_message_path`, since there is no text-input
     /// widget to type into -- see `new_branch`.
@@ -639,6 +652,18 @@ pub str Core.repo_name() {
     return "";
 }
 
+/// Read `mgit.signoff` (a git boolean) as the Commit mode's starting sign-off
+/// setting; off when it is absent or not a boolean.
+pub void Core.load_signoff() {
+    match (GIT_config.effective(gitdir).get_bool("mgit", "", "signoff")) {
+        case Some(bool is_on): {
+            is_signoff = is_on;
+        }
+        case None: {
+        }
+    }
+}
+
 /// Read `mgit.collapsed` (a comma-separated list of root section ids) into
 /// `collapsed`, so the sections folded in an earlier run start folded. Call
 /// before the first `reload`.
@@ -928,6 +953,11 @@ pub List<Binding> key_table() {
     table.push(Binding(SCOPE_OUTLINE, CMD_HISTORY, ["H"], "history of the file under the cursor (git log -- path)", "", ""));
     table.push(Binding(SCOPE_OUTLINE, CMD_UNDO, ["Z"], "undo the last HEAD move from the reflog (asks first; redo from there)", "", ""));
     table.push(Binding(SCOPE_OUTLINE, CMD_TAGS, ["T"], "tags: list, create (lightweight or annotated), delete", "", ""));
+    table.push(Binding(SCOPE_OUTLINE, CMD_BRANCH_DELETE, ["D"], "delete the branch under the cursor, if it is merged (git branch -d); never the branch you are on", "", ""));
+    table.push(Binding(SCOPE_OUTLINE, CMD_BRANCH_FORCE_DELETE, ["X"], "delete the branch under the cursor even if it is not merged (git branch -D); asks first", "", ""));
+    table.push(Binding(SCOPE_OUTLINE, CMD_BRANCH_RENAME, ["e"], "rename the branch under the cursor (git branch -m); asks before replacing a branch that exists", "", ""));
+    table.push(Binding(SCOPE_OUTLINE, CMD_RESET, ["G"], "reset the current branch to the commit under the cursor: soft, mixed or hard (a hard reset asks first)", "", ""));
+    table.push(Binding(SCOPE_OUTLINE, CMD_DETACH, ["o"], "check out the commit under the cursor with a detached HEAD (git checkout --detach)", "", ""));
     table.push(Binding(SCOPE_OUTLINE, CMD_JUMP, ["J"], "show or hide the jump list", "", ""));
     table.push(Binding(SCOPE_OUTLINE, CMD_FOCUS, ["w"], "give the jump list the keys, or take them back", "", ""));
     table.push(Binding(SCOPE_OUTLINE, CMD_SEARCH, ["/"], "search the outline and the log (smart-case: lower case ignores case)", "", ""));
@@ -985,7 +1015,12 @@ pub List<Binding> key_table() {
     table.push(Binding(SCOPE_COMMIT, CMD_FINISH, ["f"], "finish: write the commit", "", ""));
     table.push(Binding(SCOPE_COMMIT, CMD_AMEND, ["A"], "amend HEAD: its message prefilled, its parents and author kept", "", ""));
     table.push(Binding(SCOPE_COMMIT, CMD_ABORT, ["a"], "discard the draft message and the amend", "", ""));
+    table.push(Binding(SCOPE_COMMIT, CMD_SIGNOFF, ["s"], "sign-off on or off: add a Signed-off-by trailer (user.name and user.email) to the commit message", "", ""));
     // The branch overlay.
+    table.push(Binding(SCOPE_RESET, CMD_RESET_SOFT, ["s"], "soft: move the branch only; the index and the files keep everything", "s", "soft"));
+    table.push(Binding(SCOPE_RESET, CMD_RESET_MIXED, ["m"], "mixed: move the branch and reset the index; the files keep their changes", "m", "mixed"));
+    table.push(Binding(SCOPE_RESET, CMD_RESET_HARD, ["h"], "hard: move the branch, reset the index and the files; tracked changes are lost (asks first)", "h", "hard"));
+    table.push(Binding(SCOPE_RESET, CMD_CLOSE, ["escape"], "close", "esc", "close"));
     table.push(Binding(SCOPE_BRANCH, CMD_CHECKOUT, ["c"], "check out the branch under the cursor", "c", "checkout"));
     table.push(Binding(SCOPE_BRANCH, CMD_PICK_BRANCH, ["/"], "check out a branch picked by typing part of its name", "/", "pick"));
     table.push(Binding(SCOPE_BRANCH, CMD_NEW_BRANCH, ["n"], "new branch from HEAD: name it in $EDITOR, then switch to it", "n", "new"));
@@ -1245,7 +1280,7 @@ pub str scope_title(str scope) {
         return "merge menu (m)";
     }
     if (scope == SCOPE_MERGE_ASK) {
-        return "yes / no question (merge, abort a cherry-pick or revert)";
+        return "yes / no question (abort a merge, cherry-pick or revert; force-delete a branch; replace a branch; hard reset)";
     }
     if (scope == SCOPE_PICK) {
         return "cherry-pick menu (A)";
@@ -1301,12 +1336,15 @@ pub str scope_title(str scope) {
     if (scope == SCOPE_OVERVIEW) {
         return "overview (i)";
     }
+    if (scope == SCOPE_RESET) {
+        return "reset menu (History, G)";
+    }
     return scope;
 }
 
 /// Every scope, in the order the help overlay lists them.
 pub List<str> all_scopes() {
-    return [SCOPE_OUTLINE, SCOPE_DIFF, SCOPE_GLOBAL, SCOPE_COMMIT, SCOPE_BRANCH, SCOPE_PUSH, SCOPE_PULL, SCOPE_CONFIRM, SCOPE_LOG, SCOPE_HELP, SCOPE_SEARCH, SCOPE_PICKER, SCOPE_MERGE, SCOPE_MERGE_ASK, SCOPE_RESOLVE, SCOPE_STASH, SCOPE_STASH_LIST, SCOPE_STASH_PROMPT, SCOPE_BLAME, SCOPE_FILELOG, SCOPE_SHOW, SCOPE_UNDO, SCOPE_TAGS, SCOPE_PROMPT, SCOPE_PICK, SCOPE_REVERT, SCOPE_SEQUENCE, SCOPE_REBASE, SCOPE_REBASE_BUSY, SCOPE_REBASE_TODO, SCOPE_PULL_ASK, SCOPE_OVERVIEW];
+    return [SCOPE_OUTLINE, SCOPE_DIFF, SCOPE_GLOBAL, SCOPE_COMMIT, SCOPE_BRANCH, SCOPE_PUSH, SCOPE_PULL, SCOPE_CONFIRM, SCOPE_LOG, SCOPE_HELP, SCOPE_SEARCH, SCOPE_PICKER, SCOPE_MERGE, SCOPE_MERGE_ASK, SCOPE_RESOLVE, SCOPE_STASH, SCOPE_STASH_LIST, SCOPE_STASH_PROMPT, SCOPE_BLAME, SCOPE_FILELOG, SCOPE_SHOW, SCOPE_UNDO, SCOPE_TAGS, SCOPE_PROMPT, SCOPE_PICK, SCOPE_REVERT, SCOPE_SEQUENCE, SCOPE_REBASE, SCOPE_REBASE_BUSY, SCOPE_REBASE_TODO, SCOPE_PULL_ASK, SCOPE_OVERVIEW, SCOPE_RESET];
 }
 
 // --- the overlay stack and the command log -------------------------------------

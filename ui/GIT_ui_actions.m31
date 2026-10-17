@@ -1,0 +1,592 @@
+// Four actions that move or remove refs, each with the refusals git makes and
+// a question where something would be lost:
+//
+//   Branches   D   delete the branch under the cursor if it is merged (`git
+//                  branch -d`), saying why when it is not
+//              X   force-delete it (`-D`), after a yes / no question
+//              e   rename it (`-m`): a prompt with the name to edit; a name
+//                  that exists is replaced (`-M`) only after a question
+//   History    G   reset the current branch to the commit under the cursor:
+//                  a menu of soft, mixed and hard; hard asks first, naming
+//                  what it throws away
+//              o   check the commit out with a detached HEAD
+//
+// The work is the library's (`GIT_branches.delete_branch`, `rename_branch`,
+// `GIT_checkout.reset`, `checkout`); this module asks, refuses with a reason
+// in the message row, and logs what it did in the `@` command log. The
+// current branch is never deleted, and while a merge, cherry-pick, revert or
+// rebase is under way none of these runs (the flow's own keys come first).
+
+import core.GIT_branches;
+import core.GIT_checkout;
+import core.GIT_graph;
+import core.GIT_refs;
+import core.GIT_status;
+import ui.GIT_ui_core;
+import ui.GIT_ui_model;
+import ui.GIT_ui_panel;
+import ui.GIT_ui_prompt;
+import term;
+import tui.app.TUI_app;
+import tui.core.TUI_buffer;
+import tui.core.TUI_geometry;
+import tui.core.TUI_text;
+import tui.widgets.TUI_menu;
+import tui.widgets.TUI_outline;
+
+// --- what the cursor is on, and whether anything may run --------------------------
+
+/// Refuse, with the reason in the message row, while a merge, cherry-pick,
+/// revert or rebase is under way: `what` would move HEAD or remove a ref under it.
+pub bool is_blocked(GIT_ui_core.Core core, str what) {
+    if (core.is_blocked_by_sequence(what)) {
+        return true;
+    }
+    if (core.is_merging) {
+        core.say(what + " is blocked while MERGING (m c continues, m a aborts)");
+        return true;
+    }
+    return false;
+}
+
+/// The branch name on a Branches row, "" elsewhere.
+pub str branch_under_cursor(GIT_ui_core.Core core) {
+    match (core.outline.current()) {
+        case Some(TUI_outline.Row row): {
+            if (row.node.id.starts_with("branch:")) {
+                return row.node.id.substr(7, row.node.id.size());
+            }
+        }
+        case None: {
+        }
+    }
+    return "";
+}
+
+/// The commit of a History row: a commit's own row or any row inside it (a
+/// file of its changes), "" elsewhere.
+pub str commit_under_cursor(GIT_ui_core.Core core) {
+    match (core.outline.current()) {
+        case Some(TUI_outline.Row row): {
+            str id = GIT_ui_model.commit_in_row(row.node.id);
+            if (id.size() == 40 || id.size() == 64) {
+                return id;
+            }
+        }
+        case None: {
+        }
+    }
+    return "";
+}
+
+/// The branch HEAD is on, "" when it is detached or unborn.
+str current_branch(GIT_ui_core.Core core) {
+    if (core.facts.head_kind == "branch") {
+        return core.facts.branch;
+    }
+    return "";
+}
+
+/// `<short id> <subject>` of a commit, for naming it in a question.
+str commit_text(GIT_ui_core.Core core, str id) {
+    str subject = core.tip_subject(id);
+    if (subject == "") {
+        return GIT_ui_core.short_id(id);
+    }
+    return GIT_ui_core.short_id(id) + " \"" + subject + "\"";
+}
+
+/// `text` broken at spaces into lines of at most `width` columns.
+List<str> wrap(str text, int width) {
+    List<str> out = [];
+    str line = "";
+    for (str word in text.split(" ")) {
+        if (line == "") {
+            line = word;
+        } else if (TUI_text.width(line + " " + word) <= width) {
+            line = line + " " + word;
+        } else {
+            out.push(line);
+            line = word;
+        }
+    }
+    if (line != "") {
+        out.push(line);
+    }
+    return out;
+}
+
+// --- delete a branch --------------------------------------------------------------
+
+/// `D` (safe) and `X` (forced, after a question): delete the branch under the cursor.
+pub void delete_branch(GIT_ui_core.Core core, bool is_force) {
+    str what = "delete branch";
+    if (is_force) {
+        what = "force-delete branch";
+    }
+    if (is_blocked(core, what)) {
+        return;
+    }
+    str name = branch_under_cursor(core);
+    if (name == "") {
+        core.say(what + ": put the cursor on a branch first");
+        return;
+    }
+    if (name == current_branch(core)) {
+        core.say("cannot delete " + name + ": it is the branch you are on; switch first");
+        return;
+    }
+    if (!is_force) {
+        run_delete(core, name, false);
+        return;
+    }
+    if (GIT_branches.is_checked_out(core.gitdir, "refs/heads/" + name)) {
+        core.say("cannot delete " + name + ": it is checked out in another work tree");
+        return;
+    }
+    str tip = "";
+    match (GIT_refs.resolve(core.gitdir, "refs/heads/" + name)) {
+        case Ok(str id): {
+            tip = id;
+        }
+        case Err: {
+            core.say("no such branch: " + name);
+            return;
+        }
+    }
+    str state_text = "";
+    match (GIT_branches.merge_state(core.gitdir, name)) {
+        case Ok(GIT_branches.MergeState state): {
+            if (state.is_merged) {
+                state_text = "It is merged into " + state.into + ", so no commit is lost.";
+            } else {
+                state_text = "It is NOT merged into " + state.into + ": its commits that are on no other branch are lost.";
+            }
+        }
+        case Err: {
+        }
+    }
+    core.push_overlay(Ask(core, "force-delete " + name, "Delete branch " + name + ", at " + commit_text(core, tip) + ". " + state_text + " To get it back: git branch " + name + " " + GIT_ui_core.short_id(tip), "delete", name, "", "delete it"));
+}
+
+void run_delete(GIT_ui_core.Core core, str name, bool is_force) {
+    match (GIT_branches.delete_branch(core.gitdir, name, is_force)) {
+        case Ok(str id): {
+            str flag = "-d";
+            if (is_force) {
+                flag = "-D";
+            }
+            core.log_command("branch " + flag + " " + name);
+            core.say("deleted branch " + name + " (was " + GIT_ui_core.short_id(id) + ")");
+            core.reload();
+        }
+        case Err(GIT_branches.Error error): {
+            match (error) {
+                case NotMerged: {
+                    str into = "HEAD";
+                    match (GIT_branches.merge_state(core.gitdir, name)) {
+                        case Ok(GIT_branches.MergeState state): {
+                            into = state.into;
+                        }
+                        case Err: {
+                        }
+                    }
+                    core.say("cannot delete " + name + ": not fully merged into " + into + "; X forces it");
+                }
+                case Current: {
+                    core.say("cannot delete " + name + ": it is checked out");
+                }
+                case NotFound: {
+                    core.say("no such branch: " + name);
+                }
+                case Config(_): {
+                    core.say("delete branch refused: " + error.to_str());
+                }
+                case Refs(_): {
+                    core.say("delete branch refused: " + error.to_str());
+                }
+                case Object(_): {
+                    core.say("delete branch refused: " + error.to_str());
+                }
+                case BadName: {
+                    core.say("delete branch refused: " + error.to_str());
+                }
+                case Exists: {
+                    core.say("delete branch refused: " + error.to_str());
+                }
+                case EmptyMessage: {
+                    core.say("delete branch refused: " + error.to_str());
+                }
+                case Io: {
+                    core.say("delete branch refused: " + error.to_str());
+                }
+            }
+        }
+    }
+}
+
+// --- rename a branch --------------------------------------------------------------
+
+/// What the rename prompt hands its answer to.
+type Rename {
+    GIT_ui_core.Core host;
+    str old;
+}
+
+/// The prompt's answer (`GIT_ui_prompt.Receiver`).
+pub void Rename.received(str purpose, str text) {
+    str name = text.trim();
+    if (name == "" || name == old) {
+        host.say("rename cancelled: the name is " + describe_same(name));
+        return;
+    }
+    if (!GIT_branches.is_valid_branch_name(name)) {
+        host.say("rename refused: '" + name + "' is not a valid branch name (see git check-ref-format)");
+        return;
+    }
+    if (GIT_refs.has_ref(host.gitdir, "refs/heads/" + name)) {
+        if (GIT_branches.is_checked_out(host.gitdir, "refs/heads/" + name)) {
+            host.say("rename refused: " + name + " exists and is checked out");
+            return;
+        }
+        str tip = "";
+        match (GIT_refs.resolve(host.gitdir, "refs/heads/" + name)) {
+            case Ok(str id): {
+                tip = id;
+            }
+            case Err: {
+            }
+        }
+        host.push_overlay(Ask(host, "replace " + name, "A branch named " + name + " exists, at " + commit_text(host, tip) + ". Renaming " + old + " to it deletes that branch. To get it back: git branch " + name + " " + GIT_ui_core.short_id(tip), "replace", old, name, "replace it"));
+        return;
+    }
+    run_rename(host, old, name, false);
+}
+
+/// `e`: ask for the new name of the branch under the cursor, starting from its
+/// own name.
+pub void rename_branch(GIT_ui_core.Core core) {
+    if (is_blocked(core, "rename branch")) {
+        return;
+    }
+    str name = branch_under_cursor(core);
+    if (name == "") {
+        core.say("rename branch: put the cursor on a branch first");
+        return;
+    }
+    GIT_ui_prompt.open_with(core, Rename(core, name), "rename", "rename " + name + " to", name);
+}
+
+str describe_same(str name) {
+    if (name == "") {
+        return "empty";
+    }
+    return "unchanged";
+}
+
+void run_rename(GIT_ui_core.Core core, str old, str name, bool is_force) {
+    match (GIT_branches.rename_branch(core.gitdir, old, name, is_force)) {
+        case Ok: {
+            str flag = "-m";
+            if (is_force) {
+                flag = "-M";
+            }
+            core.log_command("branch " + flag + " " + old + " " + name);
+            core.say("renamed branch " + old + " to " + name);
+            core.reload();
+        }
+        case Err(GIT_branches.Error error): {
+            match (error) {
+                case Exists: {
+                    core.say("rename refused: a branch named " + name + " exists, or one that cannot coexist with it (a and a/b)");
+                }
+                case BadName: {
+                    core.say("rename refused: '" + name + "' is not a valid branch name");
+                }
+                case Current: {
+                    core.say("rename refused: " + name + " is checked out");
+                }
+                case NotFound: {
+                    core.say("rename refused: no such branch: " + old);
+                }
+                case Config(_): {
+                    core.say("rename refused: " + error.to_str());
+                }
+                case Refs(_): {
+                    core.say("rename refused: " + error.to_str());
+                }
+                case Object(_): {
+                    core.say("rename refused: " + error.to_str());
+                }
+                case NotMerged: {
+                    core.say("rename refused: " + error.to_str());
+                }
+                case EmptyMessage: {
+                    core.say("rename refused: " + error.to_str());
+                }
+                case Io: {
+                    core.say("rename refused: " + error.to_str());
+                }
+            }
+        }
+    }
+}
+
+// --- reset ------------------------------------------------------------------------
+
+/// `G`: the reset menu for the commit under the cursor.
+pub void open_reset(GIT_ui_core.Core core) {
+    if (is_blocked(core, "reset")) {
+        return;
+    }
+    str commit = commit_under_cursor(core);
+    if (commit == "") {
+        core.say("reset: put the cursor on a commit first");
+        return;
+    }
+    if (core.facts.head_kind == "unborn") {
+        core.say("reset: nothing to reset, there are no commits yet");
+        return;
+    }
+    core.push_overlay(ResetMenu(core, commit));
+}
+
+/// What the current branch (or detached HEAD) is called, for sentences.
+str head_name(GIT_ui_core.Core core) {
+    str name = current_branch(core);
+    if (name == "") {
+        return "the detached HEAD";
+    }
+    return name;
+}
+
+void run_reset(GIT_ui_core.Core core, str commit, GIT_checkout.ResetMode mode) {
+    match (GIT_checkout.reset(core.gitdir, core.worktree, commit, mode)) {
+        case Ok(GIT_checkout.Summary summary): {
+            core.log_command("reset --" + mode.word() + " " + GIT_ui_core.short_id(commit));
+            core.say("reset " + head_name(core) + " to " + commit_text(core, commit) + " (" + mode.word() + ")");
+            core.reload();
+        }
+        case Err(GIT_checkout.Error error): {
+            core.say("reset refused: " + error.to_str() + " (nothing was changed)");
+        }
+    }
+}
+
+// What a hard reset to `commit` throws away, in words: the tracked files with
+// changes, and the commits the branch leaves behind.
+str hard_reset_loss(GIT_ui_core.Core core, str commit) {
+    List<str> paths = [];
+    for (GIT_status.Delta delta in core.last_status.staged) {
+        str path = delta.path.utf8().or("<non-utf8 path>");
+        if (!paths.contains(path)) {
+            paths.push(path);
+        }
+    }
+    for (GIT_status.Delta delta in core.last_status.unstaged) {
+        str path = delta.path.utf8().or("<non-utf8 path>");
+        if (!paths.contains(path)) {
+            paths.push(path);
+        }
+    }
+    str files = "No uncommitted change to a tracked file is lost.";
+    if (paths.size() > 0) {
+        List<str> shown = [];
+        for (int index in 0 .. paths.size()) {
+            if (index < 3) {
+                shown.push(paths[index]);
+            }
+        }
+        str more = "";
+        if (paths.size() > 3) {
+            more = " and " + (paths.size() - 3).to_str() + " more";
+        }
+        str noun = " tracked files";
+        if (paths.size() == 1) {
+            noun = " tracked file";
+        }
+        files = "Discards the uncommitted changes to " + paths.size().to_str() + noun + ": " + shown.join(", ") + more + ", for good.";
+    }
+    str commits = "";
+    match (GIT_refs.head(core.gitdir)) {
+        case Ok(GIT_refs.Head head): {
+            str head_id = "";
+            match (head) {
+                case Born(_, str id): {
+                    head_id = id;
+                }
+                case Detached(str id): {
+                    head_id = id;
+                }
+                case Unborn(_): {
+                }
+            }
+            if (head_id != "" && head_id != commit) {
+                match (GIT_graph.rev_list(core.gitdir, [head_id], [commit])) {
+                    case Ok(List<str> left): {
+                        if (left.size() > 0) {
+                            str word = " commits";
+                            if (left.size() == 1) {
+                                word = " commit";
+                            }
+                            commits = " Moves " + head_name(core) + " off " + left.size().to_str() + word + " (Z undoes the move).";
+                        }
+                    }
+                    case Err: {
+                    }
+                }
+            }
+        }
+        case Err: {
+        }
+    }
+    return files + commits + " Untracked files stay.";
+}
+
+type ResetMenu {
+    GIT_ui_core.Core host;
+    str commit;
+}
+
+pub TUI_app.Action ResetMenu.handle_key(term.Code code) {
+    match (GIT_ui_core.lookup(GIT_ui_core.SCOPE_RESET, code)) {
+        case Some(str cmd): {
+            host.pop_overlay();
+            if (cmd == GIT_ui_core.CMD_RESET_SOFT) {
+                run_reset(host, commit, GIT_checkout.ResetMode.Soft);
+            }
+            if (cmd == GIT_ui_core.CMD_RESET_MIXED) {
+                run_reset(host, commit, GIT_checkout.ResetMode.Mixed);
+            }
+            if (cmd == GIT_ui_core.CMD_RESET_HARD) {
+                host.push_overlay(Ask(host, "hard reset " + head_name(host) + " to " + GIT_ui_core.short_id(commit), "Hard reset " + head_name(host) + " to " + commit_text(host, commit) + ". " + hard_reset_loss(host, commit), "reset-hard", commit, "", "reset hard"));
+            }
+            return TUI_app.Action.Redraw;
+        }
+        case None: {
+        }
+    }
+    return TUI_app.Action.Continue;
+}
+
+pub void ResetMenu.render(TUI_buffer.Buffer buffer, TUI_geometry.Rect area) {
+    TUI_menu.WhichKey which_key = TUI_menu.WhichKey("reset " + head_name(host) + " to " + commit_text(host, commit), [TUI_menu.Item("s", "soft: move the branch only"), TUI_menu.Item("m", "mixed: and reset the index; files keep their changes"), TUI_menu.Item("h", "hard: and reset the files (asks first)"), TUI_menu.Item("Esc", "cancel")]);
+    which_key.render(buffer, area);
+}
+
+pub List<GIT_ui_core.Hint> ResetMenu.hints() {
+    return GIT_ui_core.hints_for(GIT_ui_core.SCOPE_RESET);
+}
+
+// --- check a commit out, detached ---------------------------------------------------
+
+/// `o`: check the commit under the cursor out, detached. Refused, writing
+/// nothing, where git refuses: a file the checkout would change has local
+/// changes, or an untracked file is in the way.
+pub void detach(GIT_ui_core.Core core) {
+    if (is_blocked(core, "check out")) {
+        return;
+    }
+    str commit = commit_under_cursor(core);
+    if (commit == "") {
+        core.say("check out: put the cursor on a commit first");
+        return;
+    }
+    match (GIT_checkout.checkout(core.gitdir, core.worktree, commit, "")) {
+        case Ok(GIT_checkout.Summary summary): {
+            core.log_command("checkout --detach " + GIT_ui_core.short_id(commit));
+            core.say("HEAD is now detached at " + commit_text(core, commit) + " (" + summary.written.to_str() + " written, " + summary.removed.to_str() + " removed)");
+            core.reload();
+        }
+        case Err(GIT_checkout.Error error): {
+            match (error) {
+                case Dirty: {
+                    core.say("check out refused: a file it would change has local changes (HEAD stays)");
+                }
+                case UntrackedCollision: {
+                    core.say("check out refused: an untracked file is in the way (HEAD stays)");
+                }
+                case Submodule: {
+                    core.say("check out refused: " + error.to_str());
+                }
+                case NotACommit: {
+                    core.say("check out refused: " + error.to_str());
+                }
+                case Io: {
+                    core.say("check out refused: " + error.to_str());
+                }
+                case Object(_): {
+                    core.say("check out refused: " + error.to_str());
+                }
+                case Index(_): {
+                    core.say("check out refused: " + error.to_str());
+                }
+                case Refs(_): {
+                    core.say("check out refused: " + error.to_str());
+                }
+                case Status(_): {
+                    core.say("check out refused: " + error.to_str());
+                }
+                case BranchExists: {
+                    core.say("check out refused: " + error.to_str());
+                }
+                case BadName: {
+                    core.say("check out refused: " + error.to_str());
+                }
+            }
+        }
+    }
+}
+
+// --- a question ---------------------------------------------------------------------
+
+/// A yes / no question over the body: `y` does `action`, any other key says no.
+type Ask {
+    GIT_ui_core.Core host;
+    str title;
+    str body;
+    str action;
+    str first;
+    str second;
+    str verb;
+}
+
+pub TUI_app.Action Ask.handle_key(term.Code code) {
+    host.pop_overlay();
+    match (GIT_ui_core.lookup(GIT_ui_core.SCOPE_MERGE_ASK, code)) {
+        case Some(str cmd): {
+            if (cmd == GIT_ui_core.CMD_YES) {
+                if (action == "delete") {
+                    run_delete(host, first, true);
+                }
+                if (action == "replace") {
+                    run_rename(host, first, second, true);
+                }
+                if (action == "reset-hard") {
+                    run_reset(host, first, GIT_checkout.ResetMode.Hard);
+                }
+                return TUI_app.Action.Redraw;
+            }
+        }
+        case None: {
+        }
+    }
+    host.say("cancelled: nothing was changed");
+    return TUI_app.Action.Redraw;
+}
+
+pub void Ask.render(TUI_buffer.Buffer buffer, TUI_geometry.Rect area) {
+    TUI_geometry.Rect inner = GIT_ui_panel.frame(buffer, area, title + "?");
+    if (inner.is_empty()) {
+        return;
+    }
+    List<str> lines = wrap(body, inner.width);
+    lines.push("");
+    lines.push("y: yes, " + verb);
+    lines.push("any other key: no, change nothing");
+    GIT_ui_panel.draw_lines(buffer, inner, lines, 0, -1);
+}
+
+pub List<GIT_ui_core.Hint> Ask.hints() {
+    return GIT_ui_core.hints_for(GIT_ui_core.SCOPE_MERGE_ASK);
+}

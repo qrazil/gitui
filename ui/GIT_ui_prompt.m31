@@ -72,3 +72,8 @@ pub List<GIT_ui_core.Hint> PromptOverlay.hints() {
 pub void open(GIT_ui_core.Core core, Receiver receiver, str purpose, str label) {
     core.push_overlay(PromptOverlay(core, receiver, purpose, label));
 }
+
+/// The same, with `initial` already typed (to be edited: a name to change).
+pub void open_with(GIT_ui_core.Core core, Receiver receiver, str purpose, str label, str initial) {
+    core.push_overlay(PromptOverlay(core, receiver, purpose, label, input: initial));
+}

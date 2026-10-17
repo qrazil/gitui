@@ -25,6 +25,15 @@ What it checks, at 80x24, 120x40 and a tiny 40x12:
     status line and leads the hint row, and an action the flow forbids is
     refused with its reason.
 
+  * the ref actions -- delete, force-delete and rename a branch (Branches), reset
+    and detached checkout of a commit (History), the Commit mode's sign-off --
+    do what the local git does: each runs next to an identical twin repository
+    that the real `git` changes with the matching command, and the refs, reflogs,
+    index, work tree and configuration of the two are compared. Where git
+    refuses (the current branch, an unmerged branch, a dirty file in the way),
+    mgit must refuse too, and change nothing. Only git's behaviour is compared,
+    never its wording, so the checks hold across git versions.
+
 The fixture is built to hurt a renderer: wide (CJK) and emoji names, combining
 marks, tabs in names and in file contents, a name far wider than the terminal,
 and a branch, a commit and a stash with such names.
@@ -148,10 +157,18 @@ class Term:
         return out
 
     def send(self, keys, wait=0.15):
-        try:
-            os.write(self.master, keys.encode())
-        except OSError:
-            pass
+        # Never block on the pty: write only while it accepts bytes.
+        data = keys.encode()
+        deadline = time.time() + 5
+        while data and time.time() < deadline:
+            _, writable, _ = select.select([], [self.master], [], 0.5)
+            if not writable:
+                continue
+            try:
+                n = os.write(self.master, data[:256])
+            except OSError:
+                break
+            data = data[n:]
         time.sleep(wait)
         return self.drain()
 
@@ -685,6 +702,608 @@ def behaviour(binpath, root):
     git(fx, "cherry-pick", "--abort")
 
 
+# --- the ref actions, against the local git ---------------------------------------------------------
+
+
+def snapshot(fx):
+    """Everything an action can change in a repository, as plain data, so two
+    repositories can be compared: refs (loose and packed), HEAD, ORIG_HEAD, the
+    index, the status, the work tree's files, the local configuration, every
+    reflog (old id, new id, message -- not who or when) and the directories
+    under refs/heads and logs (git prunes the ones a deleted branch leaves empty)."""
+    gd = os.path.join(fx, ".git")
+    snap = {}
+    snap["refs"] = must(fx, "for-each-ref", "--format=%(refname) %(objectname)")
+    head, rc = git(fx, "symbolic-ref", "-q", "HEAD")
+    snap["head"] = head if rc == 0 else "detached " + must(fx, "rev-parse", "HEAD")
+    orig, rc = git(fx, "rev-parse", "-q", "--verify", "ORIG_HEAD")
+    snap["orig_head"] = orig if rc == 0 else ""
+    snap["index"] = must(fx, "ls-files", "-s")
+    snap["status"] = must(fx, "status", "--porcelain=v1", "-uall")
+    files = {}
+    for dirpath, dirnames, filenames in os.walk(fx):
+        dirnames[:] = [d for d in dirnames if d != ".git"]
+        for name in filenames:
+            full = os.path.join(dirpath, name)
+            with open(full, "rb") as f:
+                files[os.path.relpath(full, fx)] = f.read()
+    snap["files"] = files
+    snap["config"] = sorted(must(fx, "config", "--local", "--list").split("\n"))
+    logs = {}
+    logroot = os.path.join(gd, "logs")
+    for dirpath, dirnames, filenames in os.walk(logroot):
+        for name in filenames:
+            full = os.path.join(dirpath, name)
+            entries = []
+            with open(full, encoding="utf-8", errors="replace") as f:
+                for line in f.read().split("\n"):
+                    if not line:
+                        continue
+                    left, _, message = line.partition("\t")
+                    ids = left.split(" ")
+                    entries.append((ids[0], ids[1], message))
+            logs[os.path.relpath(full, logroot)] = entries
+    snap["logs"] = logs
+    logdirs = []
+    for dirpath, dirnames, filenames in os.walk(logroot):
+        logdirs.append(os.path.relpath(dirpath, logroot))
+    snap["logdirs"] = sorted(logdirs)
+    heads = []
+    for dirpath, dirnames, filenames in os.walk(os.path.join(gd, "refs", "heads")):
+        heads.append(os.path.relpath(dirpath, gd))
+    snap["refdirs"] = sorted(heads)
+    packed = os.path.join(gd, "packed-refs")
+    snap["packed"] = open(packed).read() if os.path.exists(packed) else ""
+    return snap
+
+
+def differences(a, b):
+    """What differs between two snapshots, readable."""
+    out = []
+    for key in sorted(set(a) | set(b)):
+        if a.get(key) != b.get(key):
+            if isinstance(a.get(key), dict) and isinstance(b.get(key), dict):
+                for sub in sorted(set(a[key]) | set(b[key])):
+                    if a[key].get(sub) != b[key].get(sub):
+                        out.append("%s[%s]: %r vs %r" % (key, sub, a[key].get(sub), b[key].get(sub)))
+            else:
+                out.append("%s: %r vs %r" % (key, a.get(key), b.get(key)))
+    return "; ".join(out)[:600]
+
+
+def twin_pair(root, name, builder):
+    """The same repository twice, `name` for mgit and `name-git` for the real
+    git, built identically (fixed dates, so object ids agree)."""
+    one = builder(root, name)
+    two = builder(root, name + "-git")
+    check("%s: the twin repositories start identical" % name, differences(snapshot(one), snapshot(two)) == "", differences(snapshot(one), snapshot(two)))
+    return one, two
+
+
+def commit_file(fx, name, text, subject):
+    write(os.path.join(fx, name), text)
+    must(fx, "add", name)
+    must(fx, "commit", "-q", "-m", subject)
+
+
+def build_branches(root, name):
+    """main with two commits; branches that are merged (one in a directory, one
+    with upstream configuration), one that is not; refs partly packed."""
+    fx = os.path.join(root, name)
+    os.makedirs(fx)
+    must(fx, "init", "-q", "-b", "main")
+    must(fx, "config", "gc.auto", "0")
+    commit_file(fx, "a.txt", "one\n", "c-one")
+    must(fx, "branch", "old-b")
+    must(fx, "branch", "dir/sub-b")
+    commit_file(fx, "a.txt", "two\n", "c-two")
+    must(fx, "branch", "trk-b")
+    must(fx, "config", "branch.trk-b.remote", "origin")
+    must(fx, "config", "branch.trk-b.merge", "refs/heads/trk-b")
+    must(fx, "checkout", "-q", "-b", "wip-b")
+    commit_file(fx, "w.txt", "wip\n", "w-side")
+    must(fx, "checkout", "-q", "main")
+    must(fx, "pack-refs", "--all")
+    must(fx, "branch", "loose-b")
+    return fx
+
+
+def flat(text):
+    """Screen text with the panel's border and line breaks flattened, for
+    sentences that wrap inside an overlay."""
+    return " ".join("".join(" " if c in "│╭╮╰╯─▸▾" else c for c in text).split())
+
+
+def goto_branch(t, name):
+    """Branches mode with the cursor on the row of branch `name`."""
+    t.send("4")
+    t.send("/" + name + "\r")
+
+
+def branch_actions(binpath, root):
+    fx, twin = twin_pair(root, "refs", build_branches)
+    t = Term(binpath, fx, 24, 80)
+    try:
+        # the keys are in help and palette, not crowding the hint row
+        t.send("4")
+        t.send("?")
+        text = t.text()
+        check("Branches help lists delete, force-delete and rename", "delete the branch" in text and "force-delete the branch" in text and "rename the branch" in text, text)
+        t.send("\x1b")
+        check("they are not in the hint row (it is full)", "D delete" not in t.lines()[23], t.lines()[23])
+        t.send(":")
+        t.send("rename the branch")
+        check("the palette finds rename", "Branches: rename the branch   [e]" in t.text(), t.text())
+        t.send("\x1b")
+
+        # the current branch is never deleted, by either key
+        before = snapshot(fx)
+        goto_branch(t, "main")
+        t.send("D")
+        check("D on the current branch is refused, saying why", "cannot delete main" in t.text() and "branch you are on" in t.text(), t.text())
+        t.send("X")
+        check("X on the current branch is refused before it asks", "cannot delete main" in t.text() and "force-delete main" not in t.text(), t.text())
+        _, rc = git(twin, "branch", "-D", "main")
+        check("git also refuses to delete the current branch", rc != 0, "rc=%r" % rc)
+        check("refusing the current branch changes nothing", differences(before, snapshot(fx)) == "", differences(before, snapshot(fx)))
+
+        # an unmerged branch: refused with the reason, nothing changed; git agrees
+        goto_branch(t, "wip-b")
+        t.send("D")
+        check("D on an unmerged branch is refused: not fully merged", "cannot delete wip-b" in t.text() and "not fully merged" in t.text(), t.text())
+        _, rc = git(twin, "branch", "-d", "wip-b")
+        check("git -d refuses it too", rc != 0, "rc=%r" % rc)
+        check("the refused delete changed nothing", differences(before, snapshot(fx)) == "", differences(before, snapshot(fx)))
+
+        # merged branches go the way `git branch -d` removes them: a packed one, one in a directory, one with configuration, a loose one
+        for name in ("old-b", "dir/sub-b", "trk-b", "loose-b"):
+            goto_branch(t, name)
+            t.send("D")
+            check("D deletes the merged branch %s" % name, "deleted branch %s" % name in t.text(), t.text())
+            must(twin, "branch", "-d", name)
+            d = differences(snapshot(fx), snapshot(twin))
+            check("deleting %s leaves the repository as git branch -d does" % name, d == "", d)
+        check("the deleted branches' reflogs are gone, as are the config section and the empty directory", "logs/refs/heads/trk-b" not in "".join(snapshot(fx)["logs"]) and not any(c.startswith("branch.trk-b.") for c in snapshot(fx)["config"]) and not os.path.exists(os.path.join(fx, ".git", "refs", "heads", "dir")), repr(snapshot(fx)["refdirs"]))
+        check("the outline no longer lists a deleted branch", "old-b" not in t.text(), t.text())
+
+        # force: a question first, naming what is lost; any other key says no
+        goto_branch(t, "wip-b")
+        t.send("X")
+        text = flat(t.text())
+        check("X asks first, saying the branch is not merged and how to get it back", "force-delete wip-b?" in text and "NOT merged" in text and "git branch wip-b" in text and "y: yes" in text, text)
+        t.send("n")
+        check("any other key than y keeps the branch", "cancelled" in t.text() and "wip-b" in t.text(), t.text())
+        check("a declined force-delete changed nothing", differences(snapshot(fx), snapshot(twin)) == "", differences(snapshot(fx), snapshot(twin)))
+        t.send("X")
+        t.send("y")
+        check("y force-deletes", "deleted branch wip-b" in t.text(), t.text())
+        must(twin, "branch", "-D", "wip-b")
+        d = differences(snapshot(fx), snapshot(twin))
+        check("a forced delete leaves the repository as git branch -D does", d == "", d)
+        rc = t.quit()
+        check("quits cleanly after the branch actions", rc == 0, "rc=%r" % rc)
+    finally:
+        t.kill()
+
+    # a branch checked out in a linked work tree is not deleted either
+    fx = os.path.join(root, "linked")
+    os.makedirs(fx)
+    must(fx, "init", "-q", "-b", "main")
+    commit_file(fx, "a.txt", "one\n", "c-one")
+    must(fx, "branch", "elsewhere-b")
+    linked = os.path.join(root, "linked-tree")
+    must(fx, "worktree", "add", "-q", linked, "elsewhere-b")
+    _, git_rc = git(fx, "branch", "-d", "elsewhere-b")
+    t = Term(binpath, fx, 24, 80)
+    try:
+        goto_branch(t, "elsewhere-b")
+        t.send("D")
+        check("a branch checked out in another work tree is refused, as git refuses", git_rc != 0 and "cannot delete elsewhere-b" in t.text() and "elsewhere-b" in t.text(), "git rc=%r; %s" % (git_rc, t.text()))
+        check("and it is still there", git(fx, "rev-parse", "-q", "--verify", "refs/heads/elsewhere-b")[1] == 0, "gone")
+        t.quit()
+    finally:
+        t.kill()
+
+
+def rename_actions(binpath, root):
+    fx, twin = twin_pair(root, "rename", build_branches)
+    t = Term(binpath, fx, 24, 80)
+
+    def rename(old, new):
+        goto_branch(t, old)
+        t.send("e")
+        # the prompt starts from the old name: erase it, type the new one
+        t.send("\x7f" * len(old))
+        t.send(new)
+        t.send("\r")
+
+    try:
+        goto_branch(t, "trk-b")
+        t.send("e")
+        check("e prompts with the branch's name to edit", "rename trk-b to: trk-b" in t.text(), t.text())
+        t.send("\x1b")
+        check("Esc leaves everything as it was", differences(snapshot(fx), snapshot(twin)) == "", differences(snapshot(fx), snapshot(twin)))
+
+        # a plain rename, a rename with configuration and a log, a rename into a directory
+        for old, new in (("trk-b", "renamed-b"), ("old-b", "area/old-b"), ("loose-b", "loose-c")):
+            rename(old, new)
+            check("e renames %s to %s" % (old, new), "renamed branch %s to %s" % (old, new) in t.text(), t.text())
+            must(twin, "branch", "-m", old, new)
+            d = differences(snapshot(fx), snapshot(twin))
+            check("renaming %s leaves the repository as git branch -m does (refs, reflogs, config)" % old, d == "", d)
+
+        # the current branch: HEAD follows, HEAD's own log says so, the status line shows it
+        rename("main", "trunk")
+        check("renaming the current branch works and the status line follows", "renamed branch main to trunk" in t.text() and "trunk" in t.lines()[1], t.text())
+        must(twin, "branch", "-m", "main", "trunk")
+        d = differences(snapshot(fx), snapshot(twin))
+        check("renaming the current branch matches git branch -m (HEAD, both logs)", d == "", d)
+
+        # a name that exists: refused unless forced -- the question names what is replaced
+        before = snapshot(fx)
+        rename("wip-b", "loose-c")
+        text = flat(t.text())
+        check("a name that exists asks before replacing it", "replace loose-c?" in text and "exists" in text and "git branch loose-c" in text, text)
+        t.send("n")
+        check("declining changes nothing", differences(before, snapshot(fx)) == "", differences(before, snapshot(fx)))
+        _, rc = git(twin, "branch", "-m", "wip-b", "loose-c")
+        check("git refuses to rename onto an existing branch without --force", rc != 0, "rc=%r" % rc)
+        rename("wip-b", "loose-c")
+        t.send("y")
+        check("y replaces it", "renamed branch wip-b to loose-c" in t.text(), t.text())
+        must(twin, "branch", "-M", "wip-b", "loose-c")
+        d = differences(snapshot(fx), snapshot(twin))
+        check("a forced rename matches git branch -M", d == "", d)
+
+        # onto the checked-out branch: refused even when forced
+        before = snapshot(fx)
+        rename("dir/sub-b", "trunk")
+        check("a name that is the checked-out branch is refused", "exists and is checked out" in t.text() and "replace trunk?" not in t.text(), t.text())
+        _, rc = git(twin, "branch", "-M", "dir/sub-b", "trunk")
+        check("git refuses that too", rc != 0, "rc=%r" % rc)
+        check("and nothing changed", differences(before, snapshot(fx)) == "", differences(before, snapshot(fx)))
+        # an empty name and the unchanged name do nothing
+        rename("dir/sub-b", "")
+        check("an empty name cancels", "rename cancelled" in t.text() and differences(before, snapshot(fx)) == "", t.text())
+        goto_branch(t, "dir/sub-b")
+        t.send("e")
+        t.send("\r")
+        check("the unchanged name cancels", "rename cancelled" in t.text() and differences(before, snapshot(fx)) == "", t.text())
+        t.quit()
+    finally:
+        t.kill()
+
+    # names: whatever the local git accepts as a branch name, mgit accepts; whatever it refuses, mgit refuses
+    names = [
+        "ok/slash", "café-ü", "x@y", "@", "v1.2", "日本語", "a-b_c", "UPPER",
+        "a b", "a..b", "-x", "x.lock", "x/", ".x", "a/.b", "x~1", "a^b", "a:b", "a?b", "a*b", "a[b", "a\\b", "a@{b", "a//b", "/a", "a.", "HEAD", "a/b.lock/c",
+    ]
+    fx = os.path.join(root, "names")
+    os.makedirs(fx)
+    must(fx, "init", "-q", "-b", "main")
+    commit_file(fx, "a.txt", "one\n", "c-one")
+    must(fx, "branch", "probe")
+    oracle = os.path.join(root, "names-oracle")
+    os.makedirs(oracle)
+    must(oracle, "init", "-q", "-b", "main")
+    commit_file(oracle, "a.txt", "one\n", "c-one")
+    t = Term(binpath, fx, 24, 80)
+    wrong = []
+    try:
+        current = "probe"
+        for name in names:
+            # git's answer, from a branch of the same name in a scratch repository
+            must(oracle, "branch", "-f", "scratch", "main")
+            _, git_rc = git(oracle, "branch", "-m", "--", "scratch", name)
+            is_ok = git_rc == 0
+            if is_ok:
+                must(oracle, "branch", "-m", "--", name, "scratch")
+            goto_branch(t, current)
+            t.send("e")
+            t.send("\x7f" * len(current))
+            t.send(name)
+            t.send("\r")
+            exists = git(fx, "rev-parse", "-q", "--verify", "refs/heads/" + name)[1] == 0
+            if exists != is_ok:
+                wrong.append("%r: git %s, mgit %s" % (name, "accepts" if is_ok else "refuses", "accepted" if exists else "refused"))
+            if exists:
+                current = name
+            elif "not a valid branch name" not in t.text() and name not in ("",):
+                wrong.append("%r: refused without saying why: %s" % (name, t.lines()[22]))
+        check("%d branch names are accepted or refused exactly as git branch -m does" % len(names), not wrong, "; ".join(wrong))
+        t.quit()
+    finally:
+        t.kill()
+
+
+def build_history(root, name):
+    """main with four commits: alpha-1 (a.txt v1), beta-2 (b.txt), gamma-3 (a.txt v2), delta-4 (c.txt)."""
+    fx = os.path.join(root, name)
+    os.makedirs(fx)
+    must(fx, "init", "-q", "-b", "main")
+    must(fx, "config", "gc.auto", "0")
+    commit_file(fx, "a.txt", "v1\n", "alpha-1")
+    commit_file(fx, "b.txt", "bee\n", "beta-2")
+    write(os.path.join(fx, "a.txt"), "v2\n")
+    must(fx, "commit", "-q", "-a", "-m", "gamma-3")
+    commit_file(fx, "c.txt", "sea\n", "delta-4")
+    return fx
+
+
+def make_dirty(fx):
+    """Unstaged changes to a tracked file, a staged new file, an untracked file."""
+    write(os.path.join(fx, "a.txt"), "v2 edited\n")
+    write(os.path.join(fx, "s.txt"), "staged\n")
+    must(fx, "add", "s.txt")
+    write(os.path.join(fx, "u.txt"), "untracked\n")
+
+
+def goto_commit(t, subject):
+    t.send("3")
+    t.send("/" + subject + "\r")
+
+
+def reset_actions(binpath, root):
+    # each mode against the real git, with a dirty tree so the three differ
+    for mode, key in (("soft", "s"), ("mixed", "m"), ("hard", "h")):
+        name = "reset-" + mode
+
+        def build(r, n):
+            fx = build_history(r, n)
+            make_dirty(fx)
+            return fx
+
+        fx, twin = twin_pair(root, name, build)
+        t = Term(binpath, fx, 24, 80)
+        try:
+            goto_commit(t, "gamma-3")
+            t.send("G")
+            text = t.text()
+            check("G opens the reset menu for the commit under the cursor (%s)" % mode, "soft" in text and "mixed" in text and "hard" in text and "gamma-3" in text, text)
+            before = snapshot(fx)
+            if mode == "hard":
+                t.send("h")
+                text = flat(t.text())
+                check("a hard reset asks first, naming what it discards", "a.txt" in text and "s.txt" in text and "2 tracked files" in text and "1 commit" in text and "Untracked files stay" in text and "y: yes" in text, text)
+                t.send("x")
+                check("any other key than y cancels a hard reset", "cancelled" in t.text() and differences(before, snapshot(fx)) == "", t.text())
+                goto_commit(t, "gamma-3")
+                t.send("G")
+                t.send("h")
+                t.send("y")
+            else:
+                t.send(key)
+            check("reset --%s moved the branch" % mode, "reset main to" in t.text() and "(%s)" % mode in t.text(), t.text())
+            must(twin, "reset", "--" + mode, must(twin, "rev-parse", "HEAD~1"))
+            d = differences(snapshot(fx), snapshot(twin))
+            check("reset --%s leaves HEAD, ORIG_HEAD, index, work tree, status and reflogs as git reset --%s does" % (mode, mode), d == "", d)
+            check("reset --%s: the untracked file is kept" % mode, os.path.exists(os.path.join(fx, "u.txt")), "gone")
+            t.quit()
+        finally:
+            t.kill()
+
+    # reset on a detached HEAD moves HEAD itself
+    fx, twin = twin_pair(root, "reset-detached", build_history)
+    t = Term(binpath, fx, 24, 80)
+    try:
+        goto_commit(t, "gamma-3")
+        t.send("o")
+        check("o detaches at the commit", "HEAD is now detached at" in t.text(), t.text())
+        goto_commit(t, "beta-2")
+        t.send("G")
+        check("the menu names the detached HEAD", "detached HEAD" in t.text(), t.text())
+        t.send("m")
+        must(twin, "checkout", "-q", "--detach", must(twin, "rev-parse", "HEAD~1"))
+        must(twin, "reset", "--mixed", must(twin, "rev-parse", "HEAD~1"))
+        d = differences(snapshot(fx), snapshot(twin))
+        check("reset on a detached HEAD matches git", d == "", d)
+        t.quit()
+    finally:
+        t.kill()
+
+    # while a merge or a cherry-pick is under way, none of the four ref actions runs
+    fx = os.path.join(root, "reset-flows")
+    os.makedirs(fx)
+    must(fx, "init", "-q", "-b", "main")
+    must(fx, "config", "gc.auto", "0")
+    commit_file(fx, "f.txt", "base\n", "c-base")
+    must(fx, "checkout", "-q", "-b", "other")
+    commit_file(fx, "f.txt", "other\n", "c-other")
+    must(fx, "checkout", "-q", "main")
+    commit_file(fx, "f.txt", "main\n", "c-main")
+    must(fx, "branch", "spare")
+    git(fx, "merge", "other")
+    t = Term(binpath, fx, 24, 80)
+    try:
+        before = snapshot(fx)
+        goto_commit(t, "c-base")
+        t.send("G")
+        check("reset is refused while MERGING, with the reason", "reset is blocked while MERGING" in t.text(), t.text())
+        t.send("o")
+        check("check out is refused while MERGING", "check out is blocked while MERGING" in t.text(), t.text())
+        t.send("4")
+        t.send("/spare\r")
+        t.send("D")
+        check("delete branch is refused while MERGING", "delete branch is blocked while MERGING" in t.text(), t.text())
+        t.send("e")
+        check("rename branch is refused while MERGING", "rename branch is blocked while MERGING" in t.text() and "rename spare to" not in t.text(), t.text())
+        check("nothing changed", differences(before, snapshot(fx)) == "", differences(before, snapshot(fx)))
+        t.quit()
+    finally:
+        t.kill()
+    git(fx, "merge", "--abort")
+    must(fx, "checkout", "-q", "other")
+    picked = must(fx, "rev-parse", "main")
+    git(fx, "cherry-pick", picked)
+    t = Term(binpath, fx, 24, 80)
+    try:
+        before = snapshot(fx)
+        goto_commit(t, "c-base")
+        t.send("G")
+        check("reset is refused while CHERRY-PICKING, with the reason", "reset is blocked while CHERRY-PICKING" in t.text(), t.text())
+        t.send("o")
+        check("check out is refused while CHERRY-PICKING", "check out is blocked while CHERRY-PICKING" in t.text(), t.text())
+        t.send("4")
+        t.send("/spare\r")
+        t.send("X")
+        check("force-delete is refused while CHERRY-PICKING", "blocked while CHERRY-PICKING" in t.text() and "force-delete spare?" not in t.text(), t.text())
+        check("nothing changed", differences(before, snapshot(fx)) == "", differences(before, snapshot(fx)))
+        t.quit()
+    finally:
+        t.kill()
+    git(fx, "cherry-pick", "--abort")
+
+
+def detach_actions(binpath, root):
+    fx, twin = twin_pair(root, "detach", build_history)
+    t = Term(binpath, fx, 24, 80)
+    try:
+        goto_commit(t, "beta-2")
+        t.send("o")
+        target = must(twin, "rev-parse", "HEAD~2")
+        check("o says HEAD is detached", "HEAD is now detached at" in t.text(), t.text())
+        check("the status line shows the detached HEAD afterwards", "detached @ %s" % must(fx, "rev-parse", "--short=7", "HEAD") in t.lines()[1], t.lines()[1])
+        must(twin, "checkout", "-q", "--detach", target)
+        d = differences(snapshot(fx), snapshot(twin))
+        check("o leaves HEAD, index, work tree and the HEAD reflog as git checkout --detach does", d == "", d)
+        check("HEAD really is detached (no branch)", git(fx, "symbolic-ref", "-q", "HEAD")[1] != 0, "on a branch")
+        check("the branch stayed where it was", must(fx, "rev-parse", "main") == must(twin, "rev-parse", "main"), "main moved")
+        t.quit()
+    finally:
+        t.kill()
+
+    # a file the checkout would change has local changes: refused, by both
+    fx, twin = twin_pair(root, "detach-dirty", build_history)
+    for repo in (fx, twin):
+        write(os.path.join(repo, "a.txt"), "v3 local\n")
+    t = Term(binpath, fx, 24, 80)
+    try:
+        before = snapshot(fx)
+        goto_commit(t, "alpha-1")
+        t.send("o")
+        check("o refuses when a file it would change has local changes, saying so", "check out refused" in t.text() and "local changes" in t.text() and "HEAD stays" in t.text(), t.text())
+        _, rc = git(twin, "checkout", "--detach", must(twin, "rev-parse", "HEAD~3"))
+        check("git checkout --detach refuses it too", rc != 0, "rc=%r" % rc)
+        check("a refused check out changes nothing (HEAD, index, files, logs)", differences(before, snapshot(fx)) == "" and differences(snapshot(fx), snapshot(twin)) == "", differences(snapshot(fx), snapshot(twin)))
+        check("the status line still shows the branch", "main" in t.lines()[1] and "detached" not in t.lines()[1], t.lines()[1])
+        t.quit()
+    finally:
+        t.kill()
+
+    # a change to a file the commits do not differ in is carried over, as git carries it
+    fx, twin = twin_pair(root, "detach-carry", build_history)
+    for repo in (fx, twin):
+        write(os.path.join(repo, "b.txt"), "bee edited\n")
+        write(os.path.join(repo, "n.txt"), "untracked\n")
+    t = Term(binpath, fx, 24, 80)
+    try:
+        goto_commit(t, "beta-2")
+        t.send("o")
+        check("o carries a change to a file the commits do not differ in, as git does", "HEAD is now detached at" in t.text(), t.text())
+        must(twin, "checkout", "-q", "--detach", must(twin, "rev-parse", "HEAD~2"))
+        d = differences(snapshot(fx), snapshot(twin))
+        check("and the result equals git's", d == "", d)
+        t.quit()
+    finally:
+        t.kill()
+
+
+def signoff_actions(binpath, root):
+    editor = os.path.join(root, "signoff-editor.sh")
+    with open(editor, "w") as f:
+        f.write("#!/bin/sh\ncp \"$MGIT_TEST_MESSAGE\" \"$1\"\nexit 0\n")
+    os.chmod(editor, 0o755)
+    cases = [
+        ("a subject only", "just a subject\n"),
+        ("a body", "subject line\n\nA body paragraph that\nruns over two lines.\n"),
+        ("a trailer block", "subject line\n\nbody text\n\nReviewed-by: Bo <bo@example.com>\n"),
+        ("the sign-off already there", "subject line\n\nbody text\n\nSigned-off-by: Client <client@example.com>\n"),
+        ("another person's sign-off", "subject line\n\nbody text\n\nSigned-off-by: Bo <bo@example.com>\n"),
+        ("a subject that looks like a trailer", "fix: the parser\n"),
+    ]
+    for index, (what, message) in enumerate(cases):
+        name = "signoff-%d" % index
+        fx = build_simple(root, name)
+        twin = build_simple(root, name + "-git")
+        msgfile = os.path.join(root, name + ".msg")
+        with open(msgfile, "w") as f:
+            f.write(message)
+        env = dict(CLIENT_ENV)
+        env["EDITOR"] = editor
+        env["MGIT_TEST_MESSAGE"] = msgfile
+        t = Term(binpath, fx, 24, 80, env=env)
+        try:
+            t.send("c")
+            text = t.text()
+            check("sign-off (%s): the Commit mode starts with sign-off off" % what, "Sign-off  off" in text and "s sign-off" in t.lines()[23], text + "|" + t.lines()[23])
+            t.send("s")
+            text = t.text()
+            check("sign-off (%s): s turns it on and the panel shows the exact line" % what, "Sign-off  ON: Signed-off-by: Client <client@example.com>" in text and "sign-off on" in text, text)
+            t.send("e")
+            time.sleep(0.4)
+            t.drain()
+        finally:
+            t.kill()
+        tenv = dict(CLIENT_ENV)
+        r = subprocess.run(["git", "-C", twin, "commit", "-q", "-s", "-F", msgfile], capture_output=True, text=True, env=tenv)
+        ours = git(fx, "log", "-1", "--format=%B")[0]
+        theirs = git(twin, "log", "-1", "--format=%B")[0]
+        check("sign-off (%s): the commit message equals git commit -s" % what, r.returncode == 0 and ours == theirs and ours.count("Signed-off-by: Client <client@example.com>") == 1, "mgit=%r git=%r" % (ours, theirs))
+
+    # off means off
+    fx = build_simple(root, "signoff-off")
+    msgfile = os.path.join(root, "signoff-off.msg")
+    with open(msgfile, "w") as f:
+        f.write("no trailer wanted\n")
+    env = dict(CLIENT_ENV)
+    env["EDITOR"] = editor
+    env["MGIT_TEST_MESSAGE"] = msgfile
+    t = Term(binpath, fx, 24, 80, env=env)
+    try:
+        t.send("c")
+        t.send("e")
+        time.sleep(0.4)
+        t.drain()
+    finally:
+        t.kill()
+    check("sign-off off (the default): no trailer is added", "Signed-off-by" not in git(fx, "log", "-1", "--format=%B")[0], git(fx, "log", "-1", "--format=%B")[0])
+
+    # the toggle works both ways, and mgit.signoff makes it start on
+    fx = build_simple(root, "signoff-config")
+    must(fx, "config", "mgit.signoff", "true")
+    must(fx, "config", "user.name", "Config Name")
+    must(fx, "config", "user.email", "config@example.com")
+    env = dict(CLIENT_ENV)
+    for k in ("GIT_AUTHOR_NAME", "GIT_COMMITTER_NAME", "GIT_AUTHOR_EMAIL", "GIT_COMMITTER_EMAIL"):
+        env.pop(k, None)
+    env["EDITOR"] = editor
+    msgfile = os.path.join(root, "signoff-config.msg")
+    with open(msgfile, "w") as f:
+        f.write("configured\n")
+    env["MGIT_TEST_MESSAGE"] = msgfile
+    t = Term(binpath, fx, 24, 80, env=env)
+    try:
+        t.send("c")
+        check("mgit.signoff = true starts with sign-off on, naming user.name and user.email", "Sign-off  ON: Signed-off-by: Config Name <config@example.com>" in t.text(), t.text())
+        t.send("s")
+        check("s turns it off again", "Sign-off  off" in t.text() and "sign-off off" in t.text(), t.text())
+        t.send("s")
+        t.send("e")
+        time.sleep(0.4)
+        t.drain()
+    finally:
+        t.kill()
+    check("the configured sign-off uses user.name and user.email", git(fx, "log", "-1", "--format=%B")[0] == "configured\n\nSigned-off-by: Config Name <config@example.com>", git(fx, "log", "-1", "--format=%B")[0])
+
+
+def actions(binpath, root):
+    branch_actions(binpath, root)
+    rename_actions(binpath, root)
+    reset_actions(binpath, root)
+    detach_actions(binpath, root)
+    signoff_actions(binpath, root)
+
+
 def main():
     if len(sys.argv) != 3:
         print("usage: pty_modes.py <mgit-binary> <scratch-dir>", file=sys.stderr)
@@ -694,6 +1313,9 @@ def main():
     if os.path.exists(root):
         shutil.rmtree(root)
     os.makedirs(root)
+    # /tmp is a symlink on macOS: work in the real path, so a repository's
+    # location is the same to git, to the client and to this script.
+    root = os.path.realpath(root)
     # Hermetic: no user or system git configuration reaches the fixtures or the client.
     home = os.path.join(root, "home")
     os.makedirs(home)
@@ -702,13 +1324,17 @@ def main():
         env["XDG_CONFIG_HOME"] = os.path.join(home, ".config")
         env["GIT_CONFIG_NOSYSTEM"] = "1"
         env["GIT_CONFIG_GLOBAL"] = os.devnull
+        # Nothing above the scratch directory is ever searched for a repository.
+        env["GIT_CEILING_DIRECTORIES"] = root
     only = os.environ.get("MODES_ONLY", "")
-    if only != "behaviour":
+    if only in ("", "tour"):
         fx = build_hostile(root)
         for rows, cols, repaints in ((24, 80, True), (40, 120, True), (12, 40, True)):
             tour(binpath, fx, rows, cols, root, repaints)
-    if only != "tour":
+    if only in ("", "behaviour"):
         behaviour(binpath, root)
+    if only in ("", "actions"):
+        actions(binpath, root)
     print("%d checks, %d failed" % (checks, failures))
     return failures
 
